@@ -1,0 +1,1115 @@
+#pragma once
+/***************************************************************************************************
+ * This file is part of a project developed by Ariya Consulting and Eymeric O'Neill.
+ *
+ * Copyright (C) [year] Ariya Consulting
+ * Author/Creator: Eymeric O'Neill
+ * Contact: +33 6 52 83 83 31
+ * Email: eymeric.oneill@gmail.com
+ *
+ * This program is free software: you can redistribute it and/or modify it under the terms of the
+ * GNU General Public License as published by the Free Software Foundation, either version 3 of
+ * the License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with this program.
+ * If not, see <https://www.gnu.org/licenses/>.
+ *
+ ***************************************************************************************************/
+
+#include <iostream>
+#include <string>
+#include <memory>
+#include <stdexcept>
+#include <typeinfo>
+#include <vector>
+#include <cctype>
+#include <limits>
+#include <cstring>
+#include <cmath>
+#include "SwString.h"
+#include "SwJsonValue.h"
+#include "SwJsonObject.h"
+#include "SwJsonArray.h"
+#include "SwJsonDocument.h"
+#include "SwMetaType.h"
+#include "Sw.h"
+#include <map>
+#include <functional>
+
+
+
+class SwAny {
+
+protected:
+    static bool registerAllTypeOnce() {
+        static bool oneCheck = registerAllType();
+        return oneCheck;
+    }
+
+    static bool registerAllType() {
+        std::cerr << "********************CALL ONCE NOT TWICE********************" << std::endl;
+        registerMetaType<SwString>();
+        registerMetaType<SwJsonValue>();
+        registerMetaType<SwJsonObject>();
+        registerMetaType<SwJsonArray>();
+        registerMetaType<SwJsonDocument>();
+        registerMetaType<std::vector<std::string>>();
+        registerMetaType<DrawTextFormats>();
+        registerMetaType<WindowFlags>();
+        registerMetaType<EntryTypes>();
+
+        SwAny::registerConversion<const char*, SwString>([](const char* cstr) {
+            return SwString(cstr);
+        });
+
+        // std::string -> SwString
+        SwAny::registerConversion<std::string, SwString>([](const std::string& s) {
+            return SwString(s);
+        });
+
+        // Conversions depuis SwString vers std::string
+        SwAny::registerConversion<SwString, std::string>([](const SwString& s) {
+            return s.toStdString();
+        });
+
+        // Conversion depuis SwString vers const char*
+        // On utilise un buffer thread_local pour assurer la validité du pointeur c_str.
+        SwAny::registerConversion<SwString, const char*>([](const SwString& s) {
+            thread_local static std::string buffer;
+            buffer = s.toStdString();
+            return buffer.c_str();
+        });
+
+        // Conversion depuis SwString vers std::vector<uint8_t> (byte array)
+        SwAny::registerConversion<SwString, std::vector<uint8_t>>([](const SwString& s) {
+            const std::string& strVal = s.toStdString();
+            return std::vector<uint8_t>(strVal.begin(), strVal.end());
+        });
+
+        // Conversion depuis SwString vers int
+        // Nécessite que le contenu du SwString soit convertible (par ex. "123")
+        SwAny::registerConversion<SwString, int>([](const SwString& s) {
+            return s.toInt();
+        });
+
+        SwAny::registerConversion<int, SwString>([](int i) {
+            return SwString::number(i);
+        });
+
+        // Conversion depuis SwString vers float
+        SwAny::registerConversion<SwString, float>([](const SwString& s) {
+            return s.toFloat();
+        });
+        SwAny::registerConversion<float, SwString>([](float v) {
+            std::ostringstream oss;
+            oss.precision(10);
+            oss << v;
+            return SwString(oss.str());
+        });
+        // Conversion depuis SwString vers double
+        SwAny::registerConversion<SwString, double>([](const SwString& s) {
+            return static_cast<double>(s.toFloat());
+        });
+        SwAny::registerConversion<double, SwString>([](double v) {
+            std::ostringstream oss;
+            oss.precision(15);        // précision raisonnable
+            oss << v;
+            return SwString(oss.str());
+        });
+        SwAny::registerConversion<SwString, bool>([](const SwString& s) {
+            return ((s == "true")? true : false);
+        });
+        SwAny::registerConversion<bool, SwString>([](bool b) {
+            return ((b)?"true":"false");
+        });
+
+        // SwString  -> std::vector<std::string>
+        // Format attendu: "a,b,c" (les espaces autour sont trim)
+        SwAny::registerConversion<SwString, std::vector<std::string>>([](const SwString& s) {
+            std::vector<std::string> out;
+            auto parts = s.split(',');                 // "a,b,c" -> ["a","b","c"]
+            for (int i = 0; i < parts.size(); ++i) {
+                out.emplace_back(parts[i].trimmed().toStdString());
+            }
+            return out;
+        });
+
+        // std::vector<std::string> -> SwString
+        // Produit: "a,b,c" (pas d’échappement; simple join)
+        SwAny::registerConversion<std::vector<std::string>, SwString>([](const std::vector<std::string>& v) {
+            SwString res;
+            for (size_t i = 0; i < v.size(); ++i) {
+                if (i) res.append(",");
+                res.append(v[i]);
+            }
+            return res;
+        });
+
+
+
+
+
+        SwAny::registerMetaType<std::vector<long>>();
+        // SwString -> std::vector<long>   // ex: "1, 2, 3"
+        SwAny::registerConversion<SwString, std::vector<long>>([](const SwString& s) {
+            std::vector<long> out;
+            auto parts = s.split(',');
+            for (int i = 0; i < parts.size(); ++i) {
+                auto tok = parts[i].trimmed().toStdString();
+                if (tok.empty()) continue;
+                try {
+                    out.push_back(std::stol(tok));
+                } catch (...) {
+                    // Error conversion
+                }
+            }
+            return out;
+        });
+        // std::vector<long> -> SwString   // produit "1,2,3"
+        SwAny::registerConversion<std::vector<long>, SwString>([](const std::vector<long>& v) {
+            SwString res;
+            for (size_t i = 0; i < v.size(); ++i) {
+                if (i) res.append(",");
+                res.append(std::to_string(v[i]));
+            }
+            return res;
+        });
+
+        return true;
+    }
+
+    static void ensureRegistryInitialized() {
+        static bool initialized = registerAllTypeOnce();
+        (void)initialized;
+    }
+
+private:
+    // Union pour stocker plusieurs types
+    union Storage {
+        void* dynamic;
+        bool b;
+        int i;
+        float f;
+        double d;
+        std::string str;
+        std::vector<uint8_t> byteArray;
+
+        // Constructeur et destructeur de l'union
+        Storage() : dynamic(nullptr) {}
+        ~Storage() {}
+    } storage;
+
+public:
+    // Constructeurs pour les types de base et complexes
+    SwAny(bool value) { ensureRegistryInitialized(); store(value); }
+    SwAny(int value) { ensureRegistryInitialized(); store(value); }
+    SwAny(float value) { ensureRegistryInitialized(); store(value); }
+    SwAny(double value) { ensureRegistryInitialized(); store(value); }
+    SwAny(const std::string& value) { ensureRegistryInitialized(); store(value); }
+    SwAny(const char* value) { ensureRegistryInitialized(); store(std::string(value)); }
+    SwAny(const std::vector<uint8_t>& value) { ensureRegistryInitialized(); store(value); }
+    SwAny(const SwString& value) { ensureRegistryInitialized(); store(value); }
+    SwAny(const SwByteArray& value) { ensureRegistryInitialized(); store(value); }
+    SwAny(unsigned int value) { ensureRegistryInitialized(); store(static_cast<uint32_t>(value)); }
+
+    SwAny(const SwAny& other) {
+        ensureRegistryInitialized();
+        copyFrom(other);
+    }
+
+    SwAny() : typeNameStr("") {
+        ensureRegistryInitialized();
+    }
+
+    void setTypeName(const std::string& typeName){
+        typeNameStr = typeName;
+    }
+
+    // Opérateur d'assignation pour copier les valeurs
+    SwAny& operator=(const SwAny& other) {
+        if (this != &other) {
+            clear();
+            copyFrom(other);
+        }
+        return *this;
+    }
+
+    SwAny& operator=(const SwByteArray& bytes) {
+        store(bytes);
+        return *this;
+    }
+
+    SwAny& operator=(unsigned int value) {
+        store(static_cast<uint32_t>(value));
+        return *this;
+    }
+
+    // Destructeur
+    ~SwAny() { clear(); }
+
+
+    // Méthode statique pour enregistrer une conversion possible entre deux types
+    // On demande un lambda ou une fonction qui explique comment convertir From -> To.
+    template<typename From, typename To>
+    static void registerConversion(std::function<To(const From&)> converterFunc) {
+        auto fromName = std::string(typeid(From).name());
+        auto toName = std::string(typeid(To).name());
+
+        // Enregistrer dans la map qu'une conversion de fromName vers toName est possible
+        getConversionRules()[fromName].push_back(toName);
+
+        // Enregistrer la fonction de conversion dans une autre map
+        // Ici on encapsule converterFunc dans un lambda générique prenant un SwAny et retournant un SwAny
+        getConverters()[std::make_pair(fromName, toName)] = [converterFunc](const SwAny& any) -> SwAny {
+            // On sait que any stocke un From
+            From val = any.get<From>();
+            To convertedVal = converterFunc(val);
+            return SwAny::from(convertedVal);
+        };
+    }
+
+    // Version avec std::string
+    bool canConvert(const std::string& targetName) const {
+        // Vérification du type exact
+        if (typeNameStr == targetName) {
+            return true;
+        }
+        // Vérification des règles de conversion
+        auto& rules = getConversionRules();
+        auto it = rules.find(typeNameStr);
+        if (it != rules.end()) {
+            const auto& targets = it->second;
+            for (auto& possibleTarget : targets) {
+                if (possibleTarget == targetName) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    template<typename T>
+    static std::string getTypeName() {
+        return std::string(typeid(T).name());
+    }
+
+
+    // Version template qui appelle la version string
+    template<typename T>
+    bool canConvert() const {
+        auto targetName = getTypeName<T>();
+        return canConvert(targetName);
+    }
+
+
+    // Version avec std::string pour la conversion
+    SwAny convert(const std::string& targetName) const {
+        // Si le type actuel est déjà le bon
+        if (typeNameStr == targetName) {
+            return *this; // Pas besoin de convertir
+        }
+
+        // Vérifions si une règle de conversion existe
+        auto& converters = getConverters();
+        auto key = std::make_pair(typeNameStr, targetName);
+        auto it = converters.find(key);
+        if (it != converters.end()) {
+            // Appeler la fonction de conversion
+            return it->second(*this);
+        } else {
+            std::cerr << "No conversion rule registered from " << typeNameStr << " to " << targetName << std::endl;
+            return SwAny(); // Retourne un SwAny vide si impossible
+        }
+    }
+
+    // Version template qui appelle la version string
+    template<typename T>
+    SwAny convert() const {
+        auto targetName = std::string(typeid(T).name());
+        return convert(targetName);
+    }
+
+
+
+    // Instance : est-ce que *ce* SwAny est sérialisable ET désérialisable en string ?
+    bool isSerializable() const {
+        if (typeNameStr.empty()) return false;
+        return isSerializable(typeNameStr);
+    }
+
+    // Statique (par type T)
+    template<typename T>
+    static bool isSerializable() {
+        const std::string src = typeid(T).name();
+        return isSerializable(src);
+    }
+
+    // Statique (par nom de type tel que stocké: typeid(T).name())
+    static bool isSerializable(const std::string& src) {
+        
+        const std::string tSw    = typeid(SwString).name();
+        const std::string tStd   = typeid(std::string).name();
+        const std::string tBool  = typeid(bool).name();
+        const std::string tInt   = typeid(int).name();
+        const std::string tFloat = typeid(float).name();
+        const std::string tDouble= typeid(double).name();
+        const std::string tBytes = typeid(std::vector<uint8_t>).name();
+
+        if (src == tSw || src == tStd || src == tBool || src == tInt ||
+            src == tFloat || src == tDouble || src == tBytes)
+            return true;
+
+        const auto& rules = getConversionRules();
+
+        // 1) Vérifier qu'on peut faire src -> (SwString|std::string)
+        bool hasToString = false;
+        {
+            auto it = rules.find(src);
+            if (it != rules.end()) {
+                for (const auto& target : it->second) {
+                    if (target == tSw || target == tStd) { hasToString = true; break; }
+                }
+            }
+        }
+
+        if (!hasToString) return false;
+
+        // 2) Vérifier qu'on peut faire (SwString|std::string) -> src
+        bool hasFromString = false;
+        {
+            auto itSw  = rules.find(tSw);
+            if (itSw != rules.end()) {
+                for (const auto& target : itSw->second) {
+                    if (target == src) { hasFromString = true; break; }
+                }
+            }
+            if (!hasFromString) {
+                auto itStd = rules.find(tStd);
+                if (itStd != rules.end()) {
+                    for (const auto& target : itStd->second) {
+                        if (target == src) { hasFromString = true; break; }
+                    }
+                }
+            }
+        }
+
+        return hasToString && hasFromString;
+    }
+
+
+
+    // Enregistre d'un coup la sérialisation et désérialisation string pour T.
+    // toString : T -> SwString
+    // fromString : SwString -> T
+    template<typename T>
+    static void registerStringSerialization(std::function<SwString(const T&)> toString,
+                                    std::function<T(const SwString&)> fromString) {
+        // T <-> SwString
+        registerConversion<T, SwString>(toString);
+        registerConversion<SwString, T>(fromString);
+
+        // T <-> std::string (ponts pratiques)
+        registerConversion<T, std::string>([toString](const T& v) {
+            return toString(v).toStdString();
+        });
+        registerConversion<std::string, T>([fromString](const std::string& s) {
+            return fromString(SwString(s));
+        });
+    }
+
+    //Verifier si le metaType est dans le registery
+    bool isMyTypeRegistered() const {
+        return !typeNameStr.empty() && isMetaTypeRegistered(typeNameStr);
+    }
+
+
+    // Vérifie par type T
+    template<typename T>
+    static bool isMetaTypeRegistered() {
+        const std::string tname = typeid(T).name();
+        return isMetaTypeRegistered(tname);
+    }
+
+    // Vérifie par nom (tel que stocké: typeid(T).name())
+    static bool isMetaTypeRegistered(const std::string& typeName) {
+        // Un type est considéré comme "enregistré" s'il apparaît dans au moins
+        // une des maps installées par registerMetaType<T>().
+        const std::string tSw    = typeid(SwString).name();
+        const std::string tStd   = typeid(std::string).name();
+        const std::string tBool   = typeid(bool).name();
+        const std::string tInt   = typeid(int).name();
+        const std::string tFloat = typeid(float).name();
+        const std::string tDouble= typeid(double).name();
+        const std::string tBytes = typeid(std::vector<uint8_t>).name();
+
+        // Trivial pour TOUS les types natifs du Storage (on garantit leurs conversions ci-dessous)
+        if (typeName == tBool || typeName == tSw || typeName == tStd || typeName == tInt || 
+            typeName == tFloat || typeName == tDouble || typeName == tBytes)
+            return true;
+
+        const auto& mData  = getDynamicDataMap();
+        if (mData.find(typeName) != mData.end()) return true;
+
+        const auto& mClear = getDynamicClearMap();
+        if (mClear.find(typeName) != mClear.end()) return true;
+
+        const auto& mCopy  = getDynamicCopyFromMap();
+        if (mCopy.find(typeName) != mCopy.end()) return true;
+
+        const auto& mFrom  = getDynamicFromVoidPtrMap();
+        if (mFrom.find(typeName) != mFrom.end()) return true;
+
+        const auto& mMove  = getDynamicMoveFromMap();
+        if (mMove.find(typeName) != mMove.end()) return true;
+
+        return false;
+    }
+
+
+
+
+
+    
+    // Récupération du type sous forme de string
+    const std::string& typeName() const { return typeNameStr; }
+
+    template <typename T>
+    static void registerMetaType() {
+        auto typeName = typeid(T).name();
+
+        // Déplacement dynamique
+        getDynamicMoveFromMap()[typeName] = [](SwAny& self, SwAny&& other) {
+            if (self.storage.dynamic) {
+                delete static_cast<T*>(self.storage.dynamic); // Nettoyer si nécessaire
+            }
+            self.storage.dynamic = other.storage.dynamic; // Déplacer les données
+            other.storage.dynamic = nullptr;             // Vider l'ancien stockage
+            self.typeNameStr = std::move(other.typeNameStr);
+        };
+
+        // Clear dynamique
+        getDynamicClearMap()[typeName] = [](SwAny& self) {
+            delete static_cast<T*>(self.storage.dynamic);
+            self.storage.dynamic = nullptr;
+        };
+
+        // CopyFrom dynamique
+        getDynamicCopyFromMap()[typeName] = [](SwAny& self, const SwAny& other) {
+            self.storage.dynamic = new T(*static_cast<const T*>(other.storage.dynamic));
+            self.typeNameStr = other.typeNameStr;
+        };
+
+        // Data dynamique
+        getDynamicDataMap()[typeName] = [](const SwAny& self) -> void* {
+            return const_cast<void*>(reinterpret_cast<const void*>(self.storage.dynamic));
+        };
+
+        // FromVoidPtr dynamique
+        getDynamicFromVoidPtrMap()[typeName] = [typeName](void* ptr) -> SwAny {
+            SwAny any;
+            any.setTypeName(typeName);
+            T *temp = static_cast<T*>(ptr);
+            any.store(*temp);
+            return any;
+        };
+    }
+
+
+    // Créer une instance depuis un type
+    template <typename T>
+    static SwAny from(const T& value) {
+        SwAny any;
+        any.store(value);
+        return any;
+    }
+
+    template <typename T>
+    static SwAny fromValue(const T& value) {
+        return from(value);
+    }
+
+    static SwAny fromVoidPtr(void* ptr, const std::string& typeNameStr) {
+        if (ptr == nullptr || typeNameStr.empty()) {
+            std::cerr << "Error: Null pointer or empty type name provided to fromVoidPtr." << std::endl;
+            return SwAny(); // Retourner une instance vide si le pointeur ou le type est invalide
+        }
+        // Gestion des types natifs et standard
+        if (typeNameStr == typeid(int).name()) {
+            return SwAny(*static_cast<int*>(ptr));
+        } else if (typeNameStr == typeid(float).name()) {
+            return SwAny(*static_cast<float*>(ptr));
+        } else if (typeNameStr == typeid(double).name()) {
+            return SwAny(*static_cast<double*>(ptr));
+        } else if (typeNameStr == typeid(std::string).name()) {
+            return SwAny(*static_cast<std::string*>(ptr));
+        } else if (typeNameStr == typeid(std::vector<uint8_t>).name()) {
+            return SwAny(*static_cast<std::vector<uint8_t>*>(ptr));
+        }
+
+        // Gestion des types dynamiques
+        auto& dynamicMap = getDynamicFromVoidPtrMap();
+        auto it = dynamicMap.find(typeNameStr);
+        if (it != dynamicMap.end()) {
+            return it->second(ptr); // Appel de la fonction dynamique
+        }
+
+        // Si le type n'est pas trouvé, afficher un message clair
+        std::cerr << "Error: Type '" << typeNameStr << "' not found in dynamic type map.\n"
+                  << "Available types in the map:" << std::endl;
+
+        for (const auto& entry : dynamicMap) {
+            std::cerr << "  - " << entry.first << std::endl; // Afficher tous les types enregistrés
+        }
+
+        // Aucun type trouvé, retourner une instance vide
+        return SwAny();
+    }
+
+
+
+    // Récupérer la valeur avec cast explicite
+    template <typename T>
+    T get() const {
+        if (typeNameStr != typeid(T).name()) {
+            std::cerr << "Type mismatch: cannot cast " << typeNameStr
+                      << " to " << typeid(T).name() << "." << std::endl;
+            return T{}; // Retourne une valeur par défaut du type T
+        }
+        return *reinterpret_cast<T*>(data());
+    }
+
+
+    // Méthode pour obtenir un pointeur générique vers les données
+    void* data() const {
+        // Gestion des types natifs
+        if (typeNameStr == typeid(int).name()) {
+            return const_cast<void*>(static_cast<const void*>(&storage.i));
+        } else if (typeNameStr == typeid(float).name()) {
+            return const_cast<void*>(static_cast<const void*>(&storage.f));
+        } else if (typeNameStr == typeid(double).name()) {
+            return const_cast<void*>(static_cast<const void*>(&storage.d));
+        } else if (typeNameStr == typeid(std::string).name()) {
+            return const_cast<void*>(static_cast<const void*>(&storage.str));
+        } else if (typeNameStr == typeid(std::vector<uint8_t>).name()) {
+            return const_cast<void*>(static_cast<const void*>(&storage.byteArray));
+        }
+
+        // Gestion des types dynamiques
+        auto& dynamicDataMap = getDynamicDataMap();
+        auto it = dynamicDataMap.find(typeNameStr);
+        if (it != dynamicDataMap.end()) {
+            return it->second(*this); // Appel de la fonction pour récupérer les données dynamiques
+        }
+
+        // Aucun type trouvé, retourne nullptr
+        return nullptr;
+    }
+
+
+
+
+    std::string typeNameStr;  // Sauvegarde du nom du type
+
+    void copyFrom(const SwAny& other) {
+        // Copier le type du nom
+        typeNameStr = other.typeNameStr;
+
+        if (typeNameStr.empty()) {
+            return; // Aucun type à copier
+        }
+
+        // Gestion des types natifs
+        if (typeNameStr == typeid(bool).name()) {
+            store(other.storage.b);
+        } else if (typeNameStr == typeid(int).name()) {
+            store(other.storage.i);
+        } else if (typeNameStr == typeid(float).name()) {
+            store(other.storage.f);
+        } else if (typeNameStr == typeid(double).name()) {
+            store(other.storage.d);
+        } else if (typeNameStr == typeid(std::string).name()) {
+            store(other.storage.str);
+        } else if (typeNameStr == typeid(std::vector<uint8_t>).name()) {
+            store(other.storage.byteArray);
+        }
+        // Gestion des types dynamiques
+        else {
+            auto& dynamicCopyMap = getDynamicCopyFromMap();
+            auto it = dynamicCopyMap.find(typeNameStr);
+            if (it != dynamicCopyMap.end()) {
+                it->second(*this, other); // Appel de la fonction dynamique pour copier
+            }
+            // Copie générique des données dynamiques si aucune fonction n'est définie
+            else if (other.storage.dynamic) {
+                storage.dynamic = other.storage.dynamic; // Copie directe
+            }
+        }
+    }
+
+
+    // Méthode pour déplacer les données (move)
+    void moveFrom(SwAny&& other) {
+        // Déplacer le type du nom
+        typeNameStr = std::move(other.typeNameStr);
+
+        if (typeNameStr.empty()) {
+            other.clear();
+            return;
+        }
+
+        // Cas spécifiques pour les types natifs ou gérés explicitement
+        if (typeNameStr == typeid(int).name()) {
+            storage.i = other.storage.i;
+        } else if (typeNameStr == typeid(float).name()) {
+            storage.f = other.storage.f;
+        } else if (typeNameStr == typeid(double).name()) {
+            storage.d = other.storage.d;
+        } else if (typeNameStr == typeid(std::string).name()) {
+            new (&storage.str) std::string(std::move(other.storage.str));
+        } else if (typeNameStr == typeid(std::vector<uint8_t>).name()) {
+            new (&storage.byteArray) std::vector<uint8_t>(std::move(other.storage.byteArray));
+        }
+        // Gestion des types dynamiques enregistrés
+        else {
+            auto& dynamicMoveMap = getDynamicMoveFromMap();
+            auto it = dynamicMoveMap.find(typeNameStr);
+            if (it != dynamicMoveMap.end()) {
+                it->second(*this, std::move(other));
+            }
+            // Déplacement brut pour les types dynamiques non enregistrés
+            else if (other.storage.dynamic) {
+                storage.dynamic = other.storage.dynamic;
+                other.storage.dynamic = nullptr;
+            }
+        }
+
+        // Réinitialisation de l'objet source
+        other.clear();
+    }
+
+
+
+
+
+    // Méthodes pour stocker les données
+    template <typename T>
+    void store(const T& value) {
+        clear();
+        storage.dynamic = new T(value);
+        typeNameStr = typeid(T).name();
+    }
+    void store(void* ptr) { clear(); storage.dynamic = ptr; }
+    void store(bool val) { clear(); storage.b = val; typeNameStr = typeid(bool).name(); }
+    void store(int val) { clear(); storage.i = val; typeNameStr = typeid(int).name(); }
+    void store(float val) { clear(); storage.f = val; typeNameStr = typeid(float).name(); }
+    void store(double val) { clear(); storage.d = val; typeNameStr = typeid(double).name(); }
+    void store(const std::string& val) { clear(); new (&storage.str) std::string(val); typeNameStr = typeid(std::string).name(); }
+    void store(const std::vector<uint8_t>& val) { clear(); new (&storage.byteArray) std::vector<uint8_t>(val); typeNameStr = typeid(std::vector<uint8_t>).name(); }
+    void store(const SwString& val) { clear(); new (&storage.str) std::string(val.toStdString()); typeNameStr = typeid(SwString).name(); }
+    void store(const SwByteArray& val) { store(SwString(val)); }
+    void store(uint32_t val) { clear(); storage.dynamic = new uint32_t(val); typeNameStr = typeid(uint32_t).name(); }
+
+    // Libérer les ressources allouées
+    void clear() {
+        if (!typeNameStr.empty()) {
+            // Utilisation de _dynamicClear si une fonction correspondante existe pour ce type
+            auto& dynamicClearMap = getDynamicClearMap(); // Accès à la map _dynamicClear
+            auto it = dynamicClearMap.find(typeNameStr);
+            if (it != dynamicClearMap.end()) {
+                it->second(*this); // Appel de la fonction de destruction dynamique
+            } else if (typeNameStr == typeid(std::string).name()) {
+                storage.str.~basic_string();
+            } else if (typeNameStr == typeid(std::vector<uint8_t>).name()) {
+                storage.byteArray.~vector();
+            }
+        }
+
+        // Réinitialisation des données
+        storage.dynamic = nullptr;
+        typeNameStr.clear();
+    }
+
+
+
+
+
+    static std::map<std::string, std::function<void(SwAny&)>>& getDynamicClearMap() {
+        static std::map<std::string, std::function<void(SwAny&)>> _dynamicClear;
+        return _dynamicClear;
+    }
+
+    // Méthode pour accéder à _dynamicCopyFrom
+    static std::map<std::string, std::function<void(SwAny&, const SwAny&)>>& getDynamicCopyFromMap() {
+        static std::map<std::string, std::function<void(SwAny&, const SwAny&)>> _dynamicCopyFrom;
+        return _dynamicCopyFrom;
+    }
+
+    // Méthode pour accéder à _dynamicData
+    static std::map<std::string, std::function<void*(const SwAny&)>>& getDynamicDataMap() {
+        static std::map<std::string, std::function<void*(const SwAny&)>> _dynamicData;
+        return _dynamicData;
+    }
+
+    // Méthode pour accéder à _dynamicFromVoidPtr
+    static std::map<std::string, std::function<SwAny(void*)>>& getDynamicFromVoidPtrMap() {
+        static std::map<std::string, std::function<SwAny(void*)>> _dynamicFromVoidPtr;
+        return _dynamicFromVoidPtr;
+    }
+
+    // Méthode pour accéder à _dynamicMoveFrom
+    static std::map<std::string, std::function<void(SwAny&, SwAny&&)>>& getDynamicMoveFromMap() {
+        static std::map<std::string, std::function<void(SwAny&, SwAny&&)>> _dynamicMoveFrom;
+        return _dynamicMoveFrom;
+    }
+
+    // Map statique : nom du type source -> liste de noms de types cibles
+    static std::map<std::string, std::vector<std::string>>& getConversionRules() {
+        static std::map<std::string, std::vector<std::string>> conversionRules;
+        return conversionRules;
+    }
+
+    // Map statique pour stocker les fonctions de conversion
+    // Clé : (fromType, toType)
+    static std::map<std::pair<std::string, std::string>, std::function<SwAny(const SwAny&)>>& getConverters() {
+        static std::map<std::pair<std::string, std::string>, std::function<SwAny(const SwAny&)>> converters;
+        return converters;
+    }
+
+
+public:
+
+    bool toBool() const {
+        if (typeNameStr == typeid(bool).name()) {
+            return get<bool>();
+        } else if (typeNameStr == typeid(int).name()) {
+            return get<int>() != 0;
+        } else if (typeNameStr == typeid(unsigned int).name()) {
+            return get<unsigned int>() != 0;
+        } else if (typeNameStr == typeid(uint32_t).name()) {
+            return get<uint32_t>() != 0u;
+        } else if (typeNameStr == typeid(double).name()) {
+            return std::fabs(get<double>()) > std::numeric_limits<double>::epsilon();
+        } else if (typeNameStr == typeid(float).name()) {
+            return std::fabs(get<float>()) > std::numeric_limits<float>::epsilon();
+        } else if (typeNameStr == typeid(SwString).name()) {
+            SwString s = get<SwString>().trimmed().toLower();
+            return (s == "true" || s == "1" || s == "yes" || s == "on");
+        } else if (typeNameStr == typeid(std::string).name()) {
+            SwString s(get<std::string>());
+            s = s.trimmed().toLower();
+            return (s == "true" || s == "1" || s == "yes" || s == "on");
+        } else if (canConvert<bool>()) {
+            SwAny converted = convert<bool>();
+            return converted.get<bool>();
+        }
+        std::cerr << "Error: Not convertible to bool. Current type: " << typeNameStr << std::endl;
+        return false;
+    }
+
+    /**
+ * @brief Convertit la valeur stockée dans SwAny en un entier.
+ *
+ * Si le type interne n'est pas un entier mais peut être converti en entier
+ * (via une règle de conversion préalablement enregistrée), la conversion est tentée.
+ *
+ * @return int La valeur convertie si possible, sinon retourne 0 avec un message d'erreur dans std::cerr.
+ */
+    int toInt(bool *ok = nullptr) const {
+        if (typeNameStr == typeid(int).name()) {
+            if (ok) *ok = true;
+            return get<int>();
+        } else if (canConvert<int>()) {
+            SwAny converted = convert<int>();
+            if (ok) *ok = true;
+            return converted.get<int>();
+        } else {
+            std::cerr << "Error: Not convertible to int. Current type: " << typeNameStr << std::endl;
+            if (ok) *ok = false;
+            return 0;
+        }
+    }
+
+
+    /**
+ * @brief Convertit la valeur stockée dans SwAny en un float.
+ *
+ * Si le type interne n'est pas un float mais peut être converti en float,
+ * la conversion est tentée.
+ *
+ * @return float La valeur convertie si possible, sinon retourne 0.0f avec un message d'erreur dans std::cerr.
+ */
+    float toFloat() const {
+        if (typeNameStr == typeid(float).name()) {
+            return get<float>();
+        } else if (canConvert<float>()) {
+            SwAny converted = convert<float>();
+            return converted.get<float>();
+        } else {
+            std::cerr << "Error: Not convertible to float. Current type: " << typeNameStr << std::endl;
+            return 0.0f;
+        }
+    }
+
+    /**
+     * @brief Convertit la valeur stockée dans SwAny en un double.
+     *
+     * Si le type interne n'est pas un double mais peut être converti en double,
+     * la conversion est tentée.
+     *
+     * @return double La valeur convertie si possible, sinon retourne 0.0 avec un message d'erreur dans std::cerr.
+     */
+    double toDouble() const {
+        if (typeNameStr == typeid(double).name()) {
+            return get<double>();
+        } else if (typeNameStr == typeid(float).name()) {
+            return static_cast<double>(get<float>());
+        } else if (typeNameStr == typeid(bool).name()) {
+            return get<bool>() ? 1.0 : 0.0;
+        } else if (typeNameStr == typeid(int).name()) {
+            return static_cast<double>(get<int>());
+        } else if (typeNameStr == typeid(unsigned int).name()) {
+            return static_cast<double>(get<unsigned int>());
+        } else if (typeNameStr == typeid(uint32_t).name()) {
+            return static_cast<double>(get<uint32_t>());
+        } else if (typeNameStr == typeid(SwString).name()) {
+            bool ok=false;
+            double val = get<SwString>().toDouble(&ok);
+            if (ok) return val;
+        } else if (typeNameStr == typeid(std::string).name()) {
+            try {
+                return std::stod(get<std::string>());
+            } catch (...) {
+            }
+        } else if (canConvert<double>()) {
+            SwAny converted = convert<double>();
+            return converted.get<double>();
+        } else {
+            std::cerr << "Error: Not convertible to double. Current type: " << typeNameStr << std::endl;
+            return 0.0;
+        }
+    }
+
+    uint32_t toUInt() const {
+        if (typeNameStr == typeid(uint32_t).name()) {
+            return get<uint32_t>();
+        } else if (typeNameStr == typeid(unsigned int).name()) {
+            return static_cast<uint32_t>(get<unsigned int>());
+        } else if (typeNameStr == typeid(int).name()) {
+            const int v = get<int>();
+            return v < 0 ? 0u : static_cast<uint32_t>(v);
+        } else if (typeNameStr == typeid(double).name()) {
+            const double v = get<double>();
+            return v < 0.0 ? 0u : static_cast<uint32_t>(v);
+        } else if (typeNameStr == typeid(float).name()) {
+            const float v = get<float>();
+            return v < 0.f ? 0u : static_cast<uint32_t>(v);
+        } else if (typeNameStr == typeid(bool).name()) {
+            return get<bool>() ? 1u : 0u;
+        } else if (typeNameStr == typeid(SwString).name()) {
+            try {
+                return static_cast<uint32_t>(std::stoul(get<SwString>().toStdString(), nullptr, 0));
+            } catch (...) {
+            }
+        } else if (typeNameStr == typeid(std::string).name()) {
+            try {
+                return static_cast<uint32_t>(std::stoul(get<std::string>(), nullptr, 0));
+            } catch (...) {
+            }
+        } else if (canConvert<uint32_t>()) {
+            SwAny converted = convert<uint32_t>();
+            return converted.get<uint32_t>();
+        }
+        std::cerr << "Error: Not convertible to uint32_t. Current type: " << typeNameStr << std::endl;
+        return 0u;
+    }
+
+    /**
+     * @brief Convertit la valeur stockée dans SwAny en un tableau d'octets.
+     *
+     * Si le type interne n'est pas std::vector<uint8_t> mais peut être converti vers ce type,
+     * la conversion est tentée.
+     *
+     * @return std::vector<uint8_t> La valeur convertie si possible, sinon un tableau vide avec message d'erreur.
+     */
+    std::vector<uint8_t> toByteArray() const {
+        if (typeNameStr == typeid(std::vector<uint8_t>).name()) {
+            return get<std::vector<uint8_t>>();
+        } else if (canConvert<std::vector<uint8_t>>()) {
+            SwAny converted = convert<std::vector<uint8_t>>();
+            return converted.get<std::vector<uint8_t>>();
+        } else {
+            std::cerr << "Error: Not convertible to byte array. Current type: " << typeNameStr << std::endl;
+            return std::vector<uint8_t>();
+        }
+    }
+
+
+    /**
+     * @brief Convertit la valeur stockée dans SwAny en un SwString.
+     *
+     * Si le type interne n'est pas SwString mais peut être converti en SwString,
+     * la conversion est tentée.
+     *
+     * @return SwString La valeur convertie si possible, sinon une instance vide avec message d'erreur.
+     */
+    SwString toString() const {
+        if (typeNameStr == typeid(SwString).name()) {
+            return get<SwString>();
+        } else if (canConvert<SwString>()) {
+            SwAny converted = convert<SwString>();
+            return converted.get<SwString>();
+        } else {
+            std::cerr << "Error: Not convertible to SwString. Current type: " << typeNameStr << std::endl;
+            return SwString();
+        }
+    }
+
+    /**
+     * @brief Convertit la valeur stockée dans SwAny en un SwJsonValue.
+     *
+     * Si le type interne n'est pas SwJsonValue mais peut être converti en SwJsonValue,
+     * la conversion est tentée.
+     *
+     * @return SwJsonValue La valeur convertie si possible, sinon une instance vide avec message d'erreur.
+     */
+    SwJsonValue toJsonValue() const {
+        if (typeNameStr == typeid(SwJsonValue).name()) {
+            return get<SwJsonValue>();
+        } else if (canConvert<SwJsonValue>()) {
+            SwAny converted = convert<SwJsonValue>();
+            return converted.get<SwJsonValue>();
+        } else {
+            std::cerr << "Error: Not convertible to SwJsonValue. Current type: " << typeNameStr << std::endl;
+            return SwJsonValue();
+        }
+    }
+
+    /**
+     * @brief Convertit la valeur stockée dans SwAny en un SwJsonObject.
+     *
+     * Si le type interne n'est pas SwJsonObject mais peut être converti en SwJsonObject,
+     * la conversion est tentée.
+     *
+     * @return SwJsonObject La valeur convertie si possible, sinon une instance vide avec message d'erreur.
+     */
+    SwJsonObject toJsonObject() const {
+        if (typeNameStr == typeid(SwJsonObject).name()) {
+            return get<SwJsonObject>();
+        } else if (canConvert<SwJsonObject>()) {
+            SwAny converted = convert<SwJsonObject>();
+            return converted.get<SwJsonObject>();
+        } else {
+            std::cerr << "Error: Not convertible to SwJsonObject. Current type: " << typeNameStr << std::endl;
+            return SwJsonObject();
+        }
+    }
+
+    /**
+     * @brief Convertit la valeur stockée dans SwAny en un SwJsonArray.
+     *
+     * Si le type interne n'est pas SwJsonArray mais peut être converti en SwJsonArray,
+     * la conversion est tentée.
+     *
+     * @return SwJsonArray La valeur convertie si possible, sinon une instance vide avec message d'erreur.
+     */
+    SwJsonArray toJsonArray() const {
+        if (typeNameStr == typeid(SwJsonArray).name()) {
+            return get<SwJsonArray>();
+        } else if (canConvert<SwJsonArray>()) {
+            SwAny converted = convert<SwJsonArray>();
+            return converted.get<SwJsonArray>();
+        } else {
+            std::cerr << "Error: Not convertible to SwJsonArray. Current type: " << typeNameStr << std::endl;
+            return SwJsonArray();
+        }
+    }
+
+    SwMetaType::Type metaType() const { return SwMetaType::fromName(typeNameStr); }
+    int typeId() const { return static_cast<int>(metaType()); }
+
+
+};
+
+
+
+
+// -----------------------------------------------------------------------------
+// Comparaison SwAny == SwAny
+// -----------------------------------------------------------------------------
+inline bool operator==(const SwAny& lhs, const SwAny& rhs)
+{
+    const std::string& lt = lhs.typeName();
+    const std::string& rt = rhs.typeName();
+
+    // Deux "vides"
+    if (lt.empty() && rt.empty())
+        return true;
+
+    // Un seul vide
+    if (lt.empty() || rt.empty())
+        return false;
+
+    // Même type → on compare directement la valeur sous-jacente
+    if (lt == rt) {
+        if (lt == typeid(bool).name())
+            return lhs.get<bool>() == rhs.get<bool>();
+
+        if (lt == typeid(int).name())
+            return lhs.get<int>() == rhs.get<int>();
+
+        if (lt == typeid(unsigned int).name())
+            return lhs.get<unsigned int>() == rhs.get<unsigned int>();
+
+        if (lt == typeid(uint32_t).name())
+            return lhs.get<uint32_t>() == rhs.get<uint32_t>();
+
+        if (lt == typeid(float).name())
+            return lhs.get<float>() == rhs.get<float>();
+
+        if (lt == typeid(double).name())
+            return lhs.get<double>() == rhs.get<double>();
+
+        if (lt == typeid(SwString).name())
+            return lhs.get<SwString>() == rhs.get<SwString>();
+
+        if (lt == typeid(std::string).name())
+            return lhs.get<std::string>() == rhs.get<std::string>();
+
+        if (lt == typeid(std::vector<uint8_t>).name())
+            return lhs.get<std::vector<uint8_t>>() == rhs.get<std::vector<uint8_t>>();
+
+        // Types dynamiques (SwJsonValue, SwJsonObject, SwJsonArray, SwJsonDocument…)
+        // si leurs operator== sont définis, on peut les comparer pareil :
+        if (lt == typeid(SwJsonValue).name())
+            return lhs.get<SwJsonValue>() == rhs.get<SwJsonValue>();
+
+        if (lt == typeid(SwJsonObject).name())
+            return lhs.get<SwJsonObject>() == rhs.get<SwJsonObject>();
+
+        if (lt == typeid(SwJsonArray).name())
+            return lhs.get<SwJsonArray>() == rhs.get<SwJsonArray>();
+
+        if (lt == typeid(SwJsonDocument).name())
+            return lhs.get<SwJsonDocument>() == rhs.get<SwJsonDocument>();
+
+        // Sinon, pour ce type précis, on tombe plus bas sur la comparaison sérialisée.
+    }
+
+    // Types différents : si les deux sont sérialisables, on compare leurs représentations string
+    if (SwAny::isSerializable(lt) && SwAny::isSerializable(rt)) {
+        return lhs.toString() == rhs.toString();
+    }
+
+    // Pas de règle de comparaison raisonnable → considérés différents
+    return false;
+}
+
+inline bool operator!=(const SwAny& lhs, const SwAny& rhs)
+{
+    return !(lhs == rhs);
+}

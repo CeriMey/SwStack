@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src {{cspSource}} data:; style-src {{cspSource}} 'unsafe-inline'; script-src 'nonce-{{nonce}}';" />
+    <title>coreSw Dashboard</title>
+    <link rel="stylesheet" href="{{cssUri}}" />
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="header">
+        <div class="title">coreSw Dashboard</div>
+        <div id="bridgeState" class="pill">bridge: unknown</div>
+        <div class="spacer"></div>
+        <button id="btnRefresh" class="secondary">Refresh</button>
+        <button id="btnOpenBridge" class="secondary">Open Bridge</button>
+      </div>
+
+      <div class="card">
+        <div class="row">
+          <label class="muted">Domain</label>
+          <select id="selDomain"></select>
+          <label class="muted">Target</label>
+          <select id="selTarget"></select>
+          <button id="btnAttach" class="secondary">Attach</button>
+          <button id="btnKillTarget" class="danger">Kill target</button>
+          <button id="btnKillDomain" class="danger">Kill domain</button>
+        </div>
+        <div class="row muted" style="margin-top:8px">
+          <div id="targetMeta"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="tabs">
+          <button class="tabBtn active" data-tab="graph">Graph</button>
+          <button class="tabBtn" data-tab="config">Config</button>
+          <button class="tabBtn" data-tab="signals">Signals</button>
+          <button class="tabBtn" data-tab="rpc">RPC</button>
+          <button class="tabBtn" data-tab="raw">Raw</button>
+        </div>
+
+        <div id="tab-graph">
+          <div class="row">
+            <button id="btnReloadGraph" class="secondary">Reload graph</button>
+            <button id="btnResetLayout" class="secondary">Reset layout</button>
+            <button id="btnZoomOut" class="secondary">Zoom -</button>
+            <button id="btnZoomIn" class="secondary">Zoom +</button>
+            <button id="btnFitGraph" class="secondary">Fit</button>
+            <button id="btnResetView" class="secondary">Reset view</button>
+            <label class="muted">Namespace</label>
+            <select id="selGraphNs"></select>
+            <label class="muted"><input id="chkShowGraphSignals" type="checkbox" checked /> connections</label>
+            <label class="muted"><input id="chkShowGraphConfig" type="checkbox" checked /> config</label>
+          </div>
+          <div class="row muted" style="margin-top:6px">
+            Drag nodes to arrange the graph. Drag background to pan. Ctrl+wheel to zoom.
+          </div>
+          <div class="graphWrap" style="margin-top:12px">
+            <div class="graph" id="graph"></div>
+            <div class="graphInfo">
+              <div class="kv"><span>Nodes</span><strong id="graphNodes">0</strong></div>
+              <div class="kv"><span>Edges</span><strong id="graphEdges">0</strong></div>
+              <div class="kv"><span>Zoom</span><strong id="graphZoom">100%</strong></div>
+              <div class="muted" style="margin-top:8px">Selected</div>
+              <pre id="graphSelected" style="max-height:180px"></pre>
+              <div class="muted">Edges (filtered)</div>
+              <div id="graphEdgeList" class="list"></div>
+            </div>
+          </div>
+        </div>
+
+        <div id="tab-config" style="display:none">
+          <div class="row">
+            <button id="btnReloadConfig" class="secondary">Reload</button>
+            <button id="btnSendAllConfig">Send all</button>
+            <span id="cfgDirty" class="muted"></span>
+          </div>
+          <div id="configForm"></div>
+        </div>
+
+        <div id="tab-signals" style="display:none">
+          <div class="row">
+            <button id="btnReloadSignals" class="secondary">Reload</button>
+          </div>
+          <div id="signalsList"></div>
+        </div>
+
+        <div id="tab-rpc" style="display:none">
+          <div class="row">
+            <button id="btnReloadRpcs" class="secondary">Reload</button>
+          </div>
+          <div id="rpcList"></div>
+        </div>
+
+        <div id="tab-raw" style="display:none">
+          <div class="row">
+            <button id="btnRawApps" class="secondary">Apps</button>
+            <button id="btnRawDevices" class="secondary">Devices</button>
+            <button id="btnRawSignals" class="secondary">Signals</button>
+            <button id="btnRawRpcs" class="secondary">RPCs</button>
+            <button id="btnRawConnections" class="secondary">Connections</button>
+          </div>
+          <pre id="raw"></pre>
+        </div>
+      </div>
+    </div>
+
+    <script nonce="{{nonce}}" src="{{jsUri}}"></script>
+  </body>
+</html>

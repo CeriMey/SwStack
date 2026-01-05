@@ -1,0 +1,4 @@
+#pragma once
+
+#include "SwizioNodes/internal/AbstractNodeGeometry.hpp"
+

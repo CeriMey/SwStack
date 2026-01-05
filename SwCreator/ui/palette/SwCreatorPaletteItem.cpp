@@ -1,0 +1,303 @@
+#include "SwCreatorPaletteItem.h"
+
+#include "SwDragDrop.h"
+#include "SwPainter.h"
+#include "SwWidgetPlatformAdapter.h"
+#include "ui/SwCreatorSystemDragDrop.h"
+
+#include <algorithm>
+#include <cstdlib>
+
+SwCreatorPaletteItem::SwCreatorPaletteItem(const SwCreatorPaletteEntry& entry, SwWidget* parent)
+    : SwWidget(parent)
+    , m_entry(entry) {
+    setCursor(CursorType::Hand);
+    setFocusPolicy(FocusPolicyEnum::NoFocus);
+    resize(220, 32);
+    setStyleSheet("SwCreatorPaletteItem { background-color: rgba(0,0,0,0); border-width: 0px; }");
+}
+
+SwCreatorPaletteEntry SwCreatorPaletteItem::entry() const {
+    return m_entry;
+}
+
+void SwCreatorPaletteItem::setSelected(bool on) {
+    if (m_selected == on) {
+        return;
+    }
+    m_selected = on;
+    update();
+}
+
+bool SwCreatorPaletteItem::isSelected() const {
+    return m_selected;
+}
+
+void SwCreatorPaletteItem::paintEvent(PaintEvent* event) {
+    SwPainter* painter = event ? event->painter() : nullptr;
+    if (!painter) {
+        return;
+    }
+
+    const SwRect r = getRect();
+
+    SwColor text{15, 23, 42};
+
+    bool paintBg = false;
+    SwColor bg{255, 255, 255};
+
+    if (m_selected) {
+        bg = SwColor{219, 234, 254};
+        paintBg = true;
+    } else if (m_pressed) {
+        bg = SwColor{241, 245, 249};
+        paintBg = true;
+    } else if (m_hover) {
+        bg = SwColor{248, 250, 252};
+        paintBg = true;
+    }
+
+    if (paintBg) {
+        painter->fillRect(r, bg, bg, 0);
+    }
+
+    const int pad = 10;
+    const int iconSize = 16;
+    SwRect iconRect{r.x + pad, r.y + (r.height - iconSize) / 2, iconSize, iconSize};
+    drawIcon_(painter, iconRect, m_entry);
+
+    SwRect textRect = r;
+    textRect.x = iconRect.x + iconRect.width + 10;
+    textRect.width = std::max(0, r.width - (textRect.x - r.x) - pad);
+    painter->drawText(textRect,
+                      m_entry.displayName,
+                      DrawTextFormats(DrawTextFormat::Left | DrawTextFormat::VCenter | DrawTextFormat::SingleLine),
+                      text,
+                      getFont());
+}
+
+void SwCreatorPaletteItem::mousePressEvent(MouseEvent* event) {
+    if (!event) {
+        return;
+    }
+    if (!getEnable() || !isPointInside(event->x(), event->y())) {
+        SwWidget::mousePressEvent(event);
+        return;
+    }
+    m_pressed = true;
+    m_dragging = false;
+    m_pressX = event->x();
+    m_pressY = event->y();
+    update();
+    event->accept();
+}
+
+void SwCreatorPaletteItem::mouseReleaseEvent(MouseEvent* event) {
+    if (!event) {
+        return;
+    }
+
+    const bool wasPressed = m_pressed;
+    const bool wasDragging = m_dragging;
+    m_pressed = false;
+    m_dragging = false;
+    update();
+
+    if (wasDragging && getEnable()) {
+        SwDragDrop::instance().end();
+        dragDropped(m_entry, event->x(), event->y());
+        event->accept();
+        return;
+    }
+
+    if (wasPressed && getEnable() && isPointInside(event->x(), event->y())) {
+        clicked(m_entry);
+        event->accept();
+        return;
+    }
+
+    SwWidget::mouseReleaseEvent(event);
+}
+
+void SwCreatorPaletteItem::mouseMoveEvent(MouseEvent* event) {
+    SwWidget::mouseMoveEvent(event);
+    if (!event) {
+        return;
+    }
+    const bool inside = isPointInside(event->x(), event->y());
+    if (inside != m_hover) {
+        m_hover = inside;
+        update();
+    }
+
+    if (!m_pressed || !getEnable()) {
+        return;
+    }
+
+    const int dx = std::abs(event->x() - m_pressX);
+    const int dy = std::abs(event->y() - m_pressY);
+    const int threshold = 6;
+    if (!m_dragging && (dx + dy) >= threshold) {
+        m_dragging = true;
+        dragStarted(m_entry);
+
+        SwCreatorSystemDragDrop::Payload payload;
+        payload.className = m_entry.className;
+        payload.isLayout = m_entry.isLayout;
+        if (SwCreatorSystemDragDrop::startDrag(payload)) {
+            // System drag loop handled the operation (drop or cancel). We must reset our state
+            // because we may not receive a clean MouseRelease event afterward.
+            m_pressed = false;
+            m_dragging = false;
+            update();
+            event->accept();
+            return;
+        }
+
+        // Fallback: internal overlay-driven drag (non-Windows or OLE unavailable).
+        SwDragDrop::instance().begin(nativeWindowHandle(), m_entry.displayName, getFont(), event->x(), event->y(), true);
+    }
+    if (m_dragging) {
+        SwDragDrop::instance().updatePosition(event->x(), event->y());
+        dragMoved(m_entry, event->x(), event->y());
+        event->accept();
+    }
+}
+
+void SwCreatorPaletteItem::drawIcon_(SwPainter* painter, const SwRect& rect, const SwCreatorPaletteEntry& entry) {
+    if (!painter) {
+        return;
+    }
+
+    const SwColor stroke{71, 85, 105};
+    const SwColor fill{226, 232, 240};
+
+    painter->fillRoundedRect(rect, 4, fill, stroke, 1);
+
+    const std::string cls = entry.className.toStdString();
+    const int x = rect.x;
+    const int y = rect.y;
+    const int w = rect.width;
+    const int h = rect.height;
+
+    auto line = [&](int x1, int y1, int x2, int y2) { painter->drawLine(x1, y1, x2, y2, stroke, 2); };
+    auto box = [&](int bx, int by, int bw, int bh) { painter->drawRect(SwRect{bx, by, bw, bh}, stroke, 2); };
+
+    if (entry.isLayout) {
+        // Simple layout glyphs.
+        if (cls == "SwVerticalLayout") {
+            box(x + 3, y + 3, w - 6, h - 6);
+            line(x + 5, y + 7, x + w - 5, y + 7);
+            line(x + 5, y + h / 2, x + w - 5, y + h / 2);
+            return;
+        }
+        if (cls == "SwHorizontalLayout") {
+            box(x + 3, y + 3, w - 6, h - 6);
+            line(x + 7, y + 5, x + 7, y + h - 5);
+            line(x + w / 2, y + 5, x + w / 2, y + h - 5);
+            return;
+        }
+        if (cls == "SwGridLayout") {
+            box(x + 3, y + 3, w - 6, h - 6);
+            line(x + w / 2, y + 4, x + w / 2, y + h - 4);
+            line(x + 4, y + h / 2, x + w - 4, y + h / 2);
+            return;
+        }
+        if (cls == "SwFormLayout") {
+            box(x + 3, y + 3, w - 6, h - 6);
+            line(x + 6, y + 6, x + w - 6, y + 6);
+            line(x + 6, y + h / 2, x + w - 6, y + h / 2);
+            line(x + w / 2, y + 6, x + w / 2, y + h - 6);
+            return;
+        }
+    }
+
+    if (cls == "SwPushButton" || cls == "SwToolButton") {
+        painter->fillRoundedRect(SwRect{x + 3, y + 4, w - 6, h - 8}, 4, SwColor{241, 245, 249}, stroke, 2);
+        return;
+    }
+    if (cls == "SwLabel") {
+        line(x + 4, y + 6, x + w - 4, y + 6);
+        line(x + 4, y + 10, x + w - 8, y + 10);
+        return;
+    }
+    if (cls == "SwLineEdit") {
+        painter->fillRoundedRect(SwRect{x + 3, y + 5, w - 6, h - 10}, 3, SwColor{255, 255, 255}, stroke, 2);
+        line(x + 6, y + 8, x + 6, y + h - 8);
+        return;
+    }
+    if (cls == "SwCheckBox") {
+        box(x + 4, y + 4, w - 8, h - 8);
+        line(x + 5, y + h / 2, x + w / 2, y + h - 5);
+        line(x + w / 2, y + h - 5, x + w - 5, y + 5);
+        return;
+    }
+    if (cls == "SwRadioButton") {
+        painter->drawEllipse(SwRect{x + 4, y + 4, w - 8, h - 8}, stroke, 2);
+        painter->fillEllipse(SwRect{x + 7, y + 7, w - 14, h - 14}, stroke, stroke, 0);
+        return;
+    }
+    if (cls == "SwComboBox") {
+        painter->fillRoundedRect(SwRect{x + 3, y + 5, w - 6, h - 10}, 3, SwColor{255, 255, 255}, stroke, 2);
+        line(x + w - 7, y + 7, x + w - 4, y + 10);
+        line(x + w - 4, y + 10, x + w - 7, y + 13);
+        return;
+    }
+    if (cls == "SwProgressBar") {
+        box(x + 3, y + 6, w - 6, h - 12);
+        painter->fillRect(SwRect{x + 4, y + 7, (w - 8) / 2, h - 14}, SwColor{59, 130, 246}, SwColor{59, 130, 246}, 0);
+        return;
+    }
+    if (cls == "SwPlainTextEdit" || cls == "SwTextEdit") {
+        box(x + 3, y + 3, w - 6, h - 6);
+        line(x + 5, y + 6, x + w - 5, y + 6);
+        line(x + 5, y + 10, x + w - 9, y + 10);
+        return;
+    }
+    if (cls == "SwTabWidget") {
+        box(x + 3, y + 5, w - 6, h - 8);
+        box(x + 3, y + 3, w / 2, 5);
+        return;
+    }
+    if (cls == "SwGroupBox") {
+        box(x + 3, y + 4, w - 6, h - 7);
+        line(x + 5, y + 6, x + w / 2, y + 6);
+        return;
+    }
+    if (cls == "SwScrollArea") {
+        box(x + 3, y + 3, w - 6, h - 6);
+        line(x + w - 5, y + 4, x + w - 5, y + h - 4);
+        return;
+    }
+    if (cls == "SwSplitter") {
+        line(x + w / 2, y + 3, x + w / 2, y + h - 3);
+        line(x + w / 2 - 2, y + h / 2 - 2, x + w / 2 + 2, y + h / 2 - 2);
+        line(x + w / 2 - 2, y + h / 2 + 2, x + w / 2 + 2, y + h / 2 + 2);
+        return;
+    }
+    if (cls == "SwSlider") {
+        line(x + 4, y + h / 2, x + w - 4, y + h / 2);
+        painter->fillEllipse(SwRect{x + w / 2 - 3, y + h / 2 - 3, 6, 6}, stroke, stroke, 0);
+        return;
+    }
+    if (cls == "SwSpinBox" || cls == "SwDoubleSpinBox") {
+        box(x + 3, y + 4, w - 6, h - 8);
+        line(x + w - 6, y + 5, x + w - 6, y + h - 5);
+        line(x + w - 5, y + 7, x + w - 3, y + 9);
+        line(x + w - 3, y + 9, x + w - 5, y + 11);
+        return;
+    }
+    if (cls == "SwTableWidget" || cls == "SwTableView") {
+        box(x + 3, y + 3, w - 6, h - 6);
+        line(x + w / 2, y + 4, x + w / 2, y + h - 4);
+        line(x + 4, y + h / 2, x + w - 4, y + h / 2);
+        return;
+    }
+    if (cls == "SwTreeWidget" || cls == "SwTreeView") {
+        box(x + 3, y + 3, w - 6, h - 6);
+        line(x + 6, y + 6, x + 6, y + h - 6);
+        line(x + 6, y + 6, x + w - 6, y + 6);
+        line(x + 6, y + h / 2, x + w - 8, y + h / 2);
+        return;
+    }
+}

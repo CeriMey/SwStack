@@ -1,0 +1,338 @@
+{
+  "name": "sw-target-attach",
+  "displayName": "coreSw Control Center",
+  "description": "coreSw control center: scaffold projects/nodes, run/monitor launchers, debug/attach by PID, and use the SwBridge dashboard.",
+  "version": "0.0.13",
+  "publisher": "coresw-local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Debuggers",
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:coreSwTargets",
+    "onView:coreSwLaunchers",
+    "onView:coreSwProject",
+    "onCommand:coreSw.refreshTargets",
+    "onCommand:coreSw.refreshLaunchers",
+    "onCommand:coreSw.diagnostics",
+    "onCommand:coreSw.copyPid",
+    "onCommand:coreSw.attachToPid",
+    "onCommand:coreSw.openDashboard",
+    "onCommand:coreSw.startBridge",
+    "onCommand:coreSw.stopBridge",
+    "onCommand:coreSw.restartBridge",
+    "onCommand:coreSw.killPid",
+    "onCommand:coreSw.killTarget",
+    "onCommand:coreSw.killDomain",
+    "onCommand:coreSw.launchLauncher",
+    "onCommand:coreSw.stopLauncher",
+    "onCommand:coreSw.openLauncherFile",
+    "onCommand:sw.pickTargetPid"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "coreSw",
+          "title": "coreSw",
+          "icon": "resources/coreSw.svg"
+        }
+      ]
+    },
+    "views": {
+      "coreSw": [
+        {
+          "id": "coreSwProject",
+          "name": "Project",
+          "type": "webview"
+        },
+        {
+          "id": "coreSwLaunchers",
+          "name": "Run"
+        },
+        {
+          "id": "coreSwTargets",
+          "name": "Debug"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "coreSwLaunchers",
+        "contents": "### Run + Monitor\n- Launch/stop `SwLaunch` from discovered `*launch*.json` files.\n- Use the Project view to create launch files and node skeletons.\n\n[Refresh](command:coreSw.refreshLaunchers) · [Diagnostics](command:coreSw.diagnostics)"
+      },
+      {
+        "view": "coreSwTargets",
+        "contents": "### Debug\n- Targets come from `swapi` (domains -> nodes).\n- Click a target to open the Dashboard. Right-click for attach/kill.\n\n[Refresh](command:coreSw.refreshTargets) · [Open Dashboard](command:coreSw.openDashboard) · [Diagnostics](command:coreSw.diagnostics)"
+      }
+    ],
+    "commands": [
+      {
+        "command": "coreSw.refreshTargets",
+        "title": "coreSw: Refresh Targets"
+      },
+      {
+        "command": "coreSw.refreshLaunchers",
+        "title": "coreSw: Refresh Launchers"
+      },
+      {
+        "command": "coreSw.diagnostics",
+        "title": "coreSw: Diagnostics"
+      },
+      {
+        "command": "coreSw.openDashboard",
+        "title": "coreSw: Open Dashboard"
+      },
+      {
+        "command": "coreSw.startBridge",
+        "title": "coreSw: Start Bridge"
+      },
+      {
+        "command": "coreSw.stopBridge",
+        "title": "coreSw: Stop Bridge"
+      },
+      {
+        "command": "coreSw.restartBridge",
+        "title": "coreSw: Restart Bridge"
+      },
+      {
+        "command": "coreSw.copyPid",
+        "title": "coreSw: Copy PID"
+      },
+      {
+        "command": "coreSw.attachToPid",
+        "title": "coreSw: Attach Debugger"
+      },
+      {
+        "command": "coreSw.killPid",
+        "title": "coreSw: Kill PID"
+      },
+      {
+        "command": "coreSw.killTarget",
+        "title": "coreSw: Kill Target"
+      },
+      {
+        "command": "coreSw.killDomain",
+        "title": "coreSw: Kill Domain"
+      },
+      {
+        "command": "coreSw.launchLauncher",
+        "title": "coreSw: Launch (SwLaunch)"
+      },
+      {
+        "command": "coreSw.stopLauncher",
+        "title": "coreSw: Stop Launcher"
+      },
+      {
+        "command": "coreSw.openLauncherFile",
+        "title": "coreSw: Open Launcher JSON"
+      },
+      {
+        "command": "sw.pickTargetPid",
+        "title": "Sw: Pick Target PID (attach)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "coreSw.refreshTargets",
+          "when": "view == coreSwTargets && config.coreSw.autoRefreshMs == 0",
+          "group": "navigation"
+        },
+        {
+          "command": "coreSw.openDashboard",
+          "when": "view == coreSwTargets",
+          "group": "navigation"
+        },
+        {
+          "command": "coreSw.diagnostics",
+          "when": "view == coreSwTargets",
+          "group": "navigation"
+        },
+        {
+          "command": "coreSw.startBridge",
+          "when": "view == coreSwTargets",
+          "group": "navigation"
+        },
+        {
+          "command": "coreSw.restartBridge",
+          "when": "view == coreSwTargets",
+          "group": "navigation"
+        },
+        {
+          "command": "coreSw.stopBridge",
+          "when": "view == coreSwTargets",
+          "group": "navigation"
+        },
+        {
+          "command": "coreSw.refreshLaunchers",
+          "when": "view == coreSwLaunchers && config.coreSw.autoRefreshMs == 0",
+          "group": "navigation"
+        },
+        {
+          "command": "coreSw.launchLauncher",
+          "when": "view == coreSwLaunchers",
+          "group": "navigation"
+        },
+        {
+          "command": "coreSw.stopLauncher",
+          "when": "view == coreSwLaunchers",
+          "group": "navigation"
+        },
+        {
+          "command": "coreSw.openDashboard",
+          "when": "view == coreSwLaunchers",
+          "group": "navigation"
+        },
+        {
+          "command": "coreSw.diagnostics",
+          "when": "view == coreSwLaunchers",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "coreSw.copyPid",
+          "when": "view == coreSwTargets && viewItem == coreSwTarget",
+          "group": "inline"
+        },
+        {
+          "command": "coreSw.attachToPid",
+          "when": "view == coreSwTargets && viewItem == coreSwTarget",
+          "group": "inline"
+        },
+        {
+          "command": "coreSw.killTarget",
+          "when": "view == coreSwTargets && viewItem == coreSwTarget",
+          "group": "inline"
+        },
+        {
+          "command": "coreSw.killDomain",
+          "when": "view == coreSwTargets && viewItem == coreSwDomain",
+          "group": "inline"
+        },
+        {
+          "command": "coreSw.launchLauncher",
+          "when": "view == coreSwLaunchers && viewItem == coreSwLauncher",
+          "group": "inline"
+        },
+        {
+          "command": "coreSw.stopLauncher",
+          "when": "view == coreSwLaunchers && viewItem == coreSwLauncherRunning",
+          "group": "inline"
+        },
+        {
+          "command": "coreSw.openLauncherFile",
+          "when": "view == coreSwLaunchers && (viewItem == coreSwLauncher || viewItem == coreSwLauncherRunning)",
+          "group": "inline"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "coreSw",
+      "properties": {
+        "coreSw.swapiPath": {
+          "type": "string",
+          "default": "swapi",
+          "description": "Path to swapi executable (or just 'swapi' if on PATH). Supports ${workspaceFolder}. If left as 'swapi', also tries ${workspaceFolder}/bin/swapi(.exe)."
+        },
+        "coreSw.defaultDomain": {
+          "type": "string",
+          "default": "",
+          "description": "Default domain (sys) to use when listing targets. If empty, the command will prompt."
+        },
+        "coreSw.includeStaleNodes": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include stale (dead) nodes when listing targets."
+        },
+        "coreSw.swapiTimeoutMs": {
+          "type": "number",
+          "default": 4000,
+          "minimum": 100,
+          "description": "Timeout for swapi commands, in milliseconds."
+        },
+        "coreSw.autoRefreshMs": {
+          "type": "number",
+          "default": 1500,
+          "minimum": 0,
+          "description": "Auto-refresh interval for the coreSw tree views (ms). Set to 0 to disable."
+        },
+        "coreSw.debuggerType": {
+          "type": "string",
+          "default": "cppvsdbg",
+          "description": "Debugger type for attach (e.g. 'cppvsdbg' on Windows or 'cppdbg' on Linux)."
+        },
+        "coreSw.bridgeUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8088",
+          "description": "SwBridge base URL used by the Dashboard (e.g. http://127.0.0.1:8088)."
+        },
+        "coreSw.bridgeAutoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Auto-start SwBridge when needed (Dashboard / actions)."
+        },
+        "coreSw.swBridgePath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to SwBridge executable. If empty, tries ${workspaceFolder}/bin then common build outputs (Windows). Supports ${workspaceFolder}."
+        },
+        "coreSw.bridgePort": {
+          "type": "number",
+          "default": 8088,
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "Port used when auto-starting SwBridge."
+        },
+        "coreSw.bridgeTimeoutMs": {
+          "type": "number",
+          "default": 1500,
+          "minimum": 200,
+          "description": "HTTP timeout for SwBridge requests (ms)."
+        },
+        "coreSw.dashboardAutoRefreshMs": {
+          "type": "number",
+          "default": 1500,
+          "minimum": 0,
+          "description": "Auto-refresh interval inside the Dashboard webview (ms). Set to 0 to disable."
+        },
+        "coreSw.swLaunchPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to SwLaunch executable. If empty, tries ${workspaceFolder}/bin then common build outputs (Windows). Supports ${workspaceFolder}."
+        },
+        "coreSw.swBuildPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to SwBuild executable. If empty, tries ${workspaceFolder}/bin then common build outputs (Windows). Supports ${workspaceFolder}."
+        },
+        "coreSw.launcherSearchPatterns": {
+          "type": "array",
+          "default": [
+            "**/*.launch.json",
+            "**/*launch*.json",
+            "**/*launcher*.json",
+            "**/*.json"
+          ],
+          "description": "Glob patterns used to discover launcher JSON files in the workspace."
+        },
+        "coreSw.launcherSearchExclude": {
+          "type": "string",
+          "default": "**/{.git,node_modules,_packaging,dist}/**",
+          "description": "Glob exclude pattern used when searching for launcher JSON files."
+        },
+        "coreSw.launcherMaxResults": {
+          "type": "number",
+          "default": 1000,
+          "minimum": 10,
+          "description": "Max number of launcher JSON files to scan (per pattern)."
+        }
+      }
+    }
+  }
+}

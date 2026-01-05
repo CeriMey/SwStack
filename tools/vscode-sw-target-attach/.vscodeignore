@@ -1,0 +1,6 @@
+_packaging/**
+dist/**
+*.vsix
+build-vsix.ps1
+.gitignore
+

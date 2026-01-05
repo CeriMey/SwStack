@@ -1,0 +1,14 @@
+# Ignorer le dossier build
+build/
+build-*/
+install/
+log/
+bin/
+ProjectDev/
+
+# Secrets (Firebase, env files)
+*firebase-adminsdk-*.json
+*service-account*.json
+*.secrets.json
+.env
+.env.*

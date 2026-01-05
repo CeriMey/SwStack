@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SwCore TileServer · Viewer</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+    <style>
+        :root {
+            --bg: #0f1729;
+            --panel: rgba(12, 20, 36, 0.82);
+            --accent: #5ce1ff;
+            --text: #e5ecf5;
+            --muted: #9fb4d0;
+        }
+        * { box-sizing: border-box; }
+        html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); }
+        #map { width: 100%; height: 100%; }
+        .panel {
+            position: absolute;
+            z-index: 1000;
+            top: 14px;
+            left: 14px;
+            min-width: 270px;
+            background: var(--panel);
+            border: 1px solid rgba(92, 225, 255, 0.35);
+            border-radius: 10px;
+            padding: 12px 14px;
+            font-family: "Segoe UI", "Inter", system-ui, sans-serif;
+            box-shadow: 0 12px 30px rgba(0,0,0,0.35);
+            backdrop-filter: blur(7px);
+        }
+        .panel.collapsed { padding-bottom: 8px; }
+        .panel.collapsed #panel-body { display: none; }
+        .panel h1 {
+            margin: 0 0 8px 0;
+            font-size: 15px;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            color: var(--accent);
+        }
+        .panel-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .panel-header h1 { margin: 0; flex: 1; }
+        .toggle {
+            border: 1px solid rgba(255,255,255,0.25);
+            background: rgba(255,255,255,0.08);
+            color: var(--text);
+            border-radius: 50%;
+            width: 32px;
+            height: 32px;
+            font-size: 16px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .toggle::after { content: "↥"; }
+        .panel.collapsed .toggle::after { content: "↧"; }
+        .panel .line {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin: 4px 0;
+            font-size: 13px;
+        }
+        .panel .muted { color: var(--muted); }
+        .panel .hint {
+            margin-top: 8px;
+            font-size: 12px;
+            color: var(--muted);
+        }
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 6px;
+            display: inline-block;
+            background: #ffb347;
+        }
+        .status-ok { background: #4ade80; }
+        .status-warn { background: #f59e0b; }
+        .status-bad { background: #ef4444; }
+        .btn {
+            background: rgba(92, 225, 255, 0.12);
+            border: 1px solid rgba(92, 225, 255, 0.4);
+            color: var(--text);
+            padding: 8px 10px;
+            border-radius: 8px;
+            font-size: 13px;
+            cursor: pointer;
+            width: 100%;
+            margin-top: 8px;
+            transition: all 0.15s ease;
+        }
+        .btn:hover { background: rgba(92, 225, 255, 0.2); }
+        .btn:active { transform: translateY(1px); }
+        .maps {
+            margin-top: 8px;
+            border-top: 1px solid rgba(255,255,255,0.08);
+            padding-top: 8px;
+        }
+        .map-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 13px;
+            padding: 4px 0;
+            gap: 6px;
+        }
+        .danger {
+            border-color: rgba(255,99,99,0.4);
+            color: #ffc7c7;
+        }
+        .inline-input {
+            width: 100%;
+            margin: 4px 0;
+            padding: 6px 8px;
+            border: 1px solid rgba(255,255,255,0.15);
+            border-radius: 6px;
+            background: rgba(255,255,255,0.05);
+            color: var(--text);
+        }
+        select {
+            width: 100%;
+            padding: 6px 8px;
+            margin: 4px 0;
+            border: 1px solid rgba(255,255,255,0.15);
+            border-radius: 6px;
+            background: rgba(255,255,255,0.05);
+            color: var(--text);
+        }
+        .copy-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin-bottom: 4px;
+        }
+        .copy-label {
+            font-size: 12px;
+            color: var(--muted);
+            flex: 1;
+        }
+        .icon-btn {
+            border: 1px solid rgba(255,255,255,0.25);
+            background: rgba(255,255,255,0.08);
+            color: var(--text);
+            width: 34px;
+            height: 34px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        .icon-btn:hover { background: rgba(255,255,255,0.15); }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    <div class="panel" id="control-panel">
+        <div class="panel-header">
+            <h1>SwCore TileServer</h1>
+            <button class="toggle" id="panel-toggle" title="Réduire / étendre"></button>
+        </div>
+        <div id="panel-body">
+            <div class="copy-row">
+                <div class="copy-label">Copier le modèle d'URL</div>
+                <button class="icon-btn" id="copy-url" title="Copier l'URL des tuiles">📋</button>
+            </div>
+            <div class="line"><span class="muted">Centre</span><span id="pos">--</span></div>
+            <div class="line"><span class="muted">Zoom</span><span id="zoom">--</span></div>
+            <div class="line"><span class="muted">Tuiles</span><span id="tiles">0 chargées / 0 erreurs</span></div>
+            <div class="line"><span class="muted">Cache</span><span id="cache">--</span></div>
+            <div class="line"><span class="muted">Statut</span><span id="status"><span class="status-dot status-warn"></span>Prêt</span></div>
+            <button class="btn" id="prefetch">Précharger la vue (z, z+1)</button>
+            <button class="btn" id="clear-cache">Vider le cache navigateur</button>
+            <div class="maps">
+                <div class="line"><span class="muted">Maps custom</span><span id="maps-count">--</span></div>
+                <select id="map-select"></select>
+                <div id="maps-list"></div>
+                <div class="line"><span class="muted">Ajouter</span></div>
+                <input id="map-name" class="inline-input" placeholder="nom (ex: elevation2)" />
+                <input id="map-url" class="inline-input" placeholder="url (ex: https://tile.server/{z}/{x}/{y}.png ou %1/%2/%3)" />
+                <button class="btn" id="add-map">Enregistrer map</button>
+            </div>
+            <div class="hint">Glisser pour naviguer · Roulette pour zoomer · Cliquez sur la carte pour voir les coordonnées.</div>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+    <script>
+        const tileBase = "http://localhost:8085/map";
+        const statusEl = document.getElementById("status");
+        const posEl = document.getElementById("pos");
+        const zoomEl = document.getElementById("zoom");
+        const tilesEl = document.getElementById("tiles");
+        const cacheEl = document.getElementById("cache");
+        const prefetchBtn = document.getElementById("prefetch");
+        const clearBtn = document.getElementById("clear-cache");
+        const mapsListEl = document.getElementById("maps-list");
+        const mapsCountEl = document.getElementById("maps-count");
+        const addMapBtn = document.getElementById("add-map");
+        const mapNameInput = document.getElementById("map-name");
+        const mapUrlInput = document.getElementById("map-url");
+        const mapSelect = document.getElementById("map-select");
+        const copyBtn = document.getElementById("copy-url");
+        const panel = document.getElementById("control-panel");
+        const toggleBtn = document.getElementById("panel-toggle");
+
+        let loaded = 0;
+        let errors = 0;
+        const cacheName = "swcore-tile-cache-v1";
+        let maps = [];
+        let currentMap = "standard";
+        let templateUrl = "http://localhost:8085/map/{z}/{x}/{y}.png";
+
+        const buildTileUrl = (coords) => {
+            const { z, x, y } = coords;
+            if (!currentMap || currentMap === "standard") {
+                return `${tileBase}/${z}/${x}/${y}.png`;
+            }
+            return `${tileBase}/${encodeURIComponent(currentMap)}/${z}/${x}/${y}.png`;
+        };
+
+        const updateTemplateUrl = () => {
+            templateUrl = (!currentMap || currentMap === "standard")
+                ? "http://localhost:8085/map/{z}/{x}/{y}.png"
+                : `http://localhost:8085/map/${currentMap}/{z}/{x}/{y}.png`;
+        };
+
+        const copyText = async (text) => {
+            try {
+                await navigator.clipboard.writeText(text);
+                statusEl.innerHTML = '<span class="status-dot status-ok"></span>URL copiée';
+            } catch (err) {
+                statusEl.innerHTML = '<span class="status-dot status-bad"></span>Copie impossible';
+            }
+        };
+
+        toggleBtn.addEventListener("click", () => {
+            panel.classList.toggle("collapsed");
+        });
+
+        copyBtn.addEventListener("click", () => copyText(templateUrl));
+
+        async function openCache() {
+            return await caches.open(cacheName);
+        }
+
+        async function getCacheSize() {
+            const cache = await openCache();
+            const requests = await cache.keys();
+            let total = 0;
+            for (const req of requests) {
+                const res = await cache.match(req);
+                if (res) {
+                    const buf = await res.clone().arrayBuffer();
+                    total += buf.byteLength;
+                }
+            }
+            return { entries: requests.length, bytes: total };
+        }
+
+        function formatBytes(bytes) {
+            if (bytes < 1024) return `${bytes} o`;
+            if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} Ko`;
+            return `${(bytes / (1024 * 1024)).toFixed(1)} Mo`;
+        }
+
+        async function updateCacheInfo() {
+            const { entries, bytes } = await getCacheSize();
+            cacheEl.textContent = `${entries} tuiles / ${formatBytes(bytes)}`;
+        }
+
+        async function fetchTile(url) {
+            const cache = await openCache();
+            const cached = await cache.match(url);
+            if (cached) return cached.clone();
+            const res = await fetch(url, { cache: "no-store" });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            cache.put(url, res.clone());
+            return res;
+        }
+
+        const CachedTileLayer = L.GridLayer.extend({
+            createTile: function(coords, done) {
+                const tile = document.createElement("img");
+                tile.width = 256;
+                tile.height = 256;
+                tile.alt = `${coords.z}/${coords.x}/${coords.y}`;
+                const url = buildTileUrl(coords);
+                (async () => {
+                    try {
+                        const res = await fetchTile(url);
+                        const blob = await res.blob();
+                        const objUrl = URL.createObjectURL(blob);
+                        tile.src = objUrl;
+                        loaded += 1;
+                        statusEl.innerHTML = '<span class="status-dot status-ok"></span>OK';
+                        refreshInfo();
+                        updateCacheInfo();
+                        tile.onload = () => URL.revokeObjectURL(objUrl);
+                        done(null, tile);
+                    } catch (err) {
+                        errors += 1;
+                        statusEl.innerHTML = '<span class="status-dot status-bad"></span>Erreur tuile';
+                        console.warn("Tile error", coords, err);
+                        done(err, tile);
+                        refreshInfo();
+                    }
+                })();
+                return tile;
+            }
+        });
+
+        const map = L.map("map", {
+            center: [48.8566, 2.3522],
+            zoom: 5,
+            minZoom: 1,
+            maxZoom: 19,
+            worldCopyJump: true
+        });
+
+        const tiles = new CachedTileLayer({
+            tileSize: 256,
+            updateWhenIdle: true,
+            keepBuffer: 2
+        }).addTo(map);
+
+        const refreshInfo = () => {
+            const c = map.getCenter();
+            posEl.textContent = `${c.lat.toFixed(4)}, ${c.lng.toFixed(4)}`;
+            zoomEl.textContent = map.getZoom();
+            tilesEl.textContent = `${loaded} chargées / ${errors} erreurs`;
+        };
+
+        map.on("moveend", refreshInfo);
+        map.on("zoomend", refreshInfo);
+
+        map.on("click", (e) => {
+            posEl.textContent = `${e.latlng.lat.toFixed(5)}, ${e.latlng.lng.toFixed(5)} (clic)`;
+        });
+
+        async function prefetchView() {
+            const zList = [map.getZoom(), map.getZoom() + 1];
+            const b = map.getBounds();
+            const promises = [];
+            zList.forEach(z => {
+                const nw = map.project(b.getNorthWest(), z).divideBy(256).floor();
+                const se = map.project(b.getSouthEast(), z).divideBy(256).floor();
+                for (let x = nw.x; x <= se.x; x++) {
+                    for (let y = nw.y; y <= se.y; y++) {
+                        const url = buildTileUrl({ z, x, y });
+                        promises.push(fetchTile(url).catch(() => {}));
+                    }
+                }
+            });
+            statusEl.innerHTML = '<span class="status-dot status-warn"></span>Préchargement...';
+            await Promise.all(promises);
+            statusEl.innerHTML = '<span class="status-dot status-ok"></span>Préchargé';
+            await updateCacheInfo();
+        }
+
+        prefetchBtn.addEventListener("click", () => {
+            prefetchView().catch(console.error);
+        });
+
+        clearBtn.addEventListener("click", async () => {
+            await caches.delete(cacheName);
+            loaded = 0;
+            errors = 0;
+            await updateCacheInfo();
+            statusEl.innerHTML = '<span class="status-dot status-warn"></span>Cache vidé';
+            refreshInfo();
+        });
+
+        addMapBtn.addEventListener("click", async () => {
+            const name = mapNameInput.value.trim().toLowerCase();
+            const url = mapUrlInput.value.trim();
+            if (!name || !url) {
+                statusEl.innerHTML = '<span class="status-dot status-bad"></span>Nom ou URL manquant';
+                return;
+            }
+            try {
+                await fetch("/api/maps", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ name, url })
+                });
+                statusEl.innerHTML = '<span class="status-dot status-ok"></span>Map enregistrée';
+                mapNameInput.value = "";
+                mapUrlInput.value = "";
+                loadMaps();
+            } catch (e) {
+                statusEl.innerHTML = '<span class="status-dot status-bad"></span>Erreur ajout map';
+            }
+        });
+
+        async function deleteMap(name) {
+            try {
+                const normalized = name.trim().toLowerCase();
+                await fetch(`/api/maps/${encodeURIComponent(normalized)}`, { method: "DELETE" });
+                statusEl.innerHTML = '<span class="status-dot status-ok"></span>Map supprimée';
+                if (currentMap === normalized) {
+                    currentMap = "standard";
+                }
+                loadMaps();
+            } catch (e) {
+                statusEl.innerHTML = '<span class="status-dot status-bad"></span>Erreur suppression';
+            }
+        }
+
+        async function loadMaps() {
+            try {
+                const res = await fetch("/api/maps");
+                maps = await res.json();
+                mapsCountEl.textContent = `${maps.length} map(s)`;
+                mapsListEl.innerHTML = "";
+                mapSelect.innerHTML = "";
+                maps.forEach((m) => {
+                    const normalized = (m.name || "").toLowerCase();
+                    const opt = document.createElement("option");
+                    opt.value = normalized;
+                    opt.textContent = m.name || normalized;
+                    if (normalized === currentMap) opt.selected = true;
+                    mapSelect.appendChild(opt);
+                });
+                maps.forEach((m) => {
+                    const normalized = (m.name || "").toLowerCase();
+                    const div = document.createElement("div");
+                    div.className = "map-item";
+                    const displayName = m.name || normalized;
+                    const label = document.createElement("span");
+                    label.innerHTML = `<strong>${displayName}</strong>`;
+                    const actions = document.createElement("div");
+                    actions.style.display = "flex";
+                    actions.style.gap = "6px";
+                    const copyBtn = document.createElement("button");
+                    copyBtn.className = "icon-btn";
+                    copyBtn.textContent = "📋";
+                    copyBtn.title = "Copier l'URL de la map";
+                    copyBtn.onclick = () => copyText(m.url || "");
+                    const delBtn = document.createElement("button");
+                    delBtn.className = "btn danger";
+                    delBtn.style.width = "80px";
+                    delBtn.textContent = "Suppr";
+                    delBtn.onclick = () => deleteMap(normalized);
+                    actions.appendChild(copyBtn);
+                    actions.appendChild(delBtn);
+                    div.appendChild(label);
+                    div.appendChild(actions);
+                    mapsListEl.appendChild(div);
+                });
+                updateTemplateUrl();
+            } catch (e) {
+                mapsListEl.innerHTML = "<div class='map-item'>Erreur chargement maps</div>";
+            }
+        }
+
+        mapSelect.addEventListener("change", () => {
+            currentMap = (mapSelect.value || "standard").toLowerCase();
+            loaded = 0;
+            errors = 0;
+            updateTemplateUrl();
+            tiles.redraw();
+            statusEl.innerHTML = '<span class="status-dot status-ok"></span>Map changée';
+        });
+
+        refreshInfo();
+        updateCacheInfo();
+        loadMaps();
+    </script>
+</body>
+</html>
