@@ -1,4 +1,29 @@
 #pragma once
+
+/**
+ * @file src/core/gui/SwUiLoader.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwUiLoader in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the ui loader interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * This header mainly contributes module-level utilities, helper declarations, or namespaced types
+ * that are consumed by the surrounding subsystem.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -40,6 +65,7 @@
 #include "SwSpinBox.h"
 #include "SwSplitter.h"
 #include "SwStackedWidget.h"
+#include "SwSpacer.h"
 #include "SwTabWidget.h"
 #include "SwTableView.h"
 #include "SwTableWidget.h"
@@ -61,8 +87,25 @@ class UiFactory {
 public:
     using WidgetCtor = SwWidget* (*)(SwWidget* parent);
 
+    /**
+     * @brief Returns the current instance.
+     * @return The current instance.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static UiFactory& instance();
+    /**
+     * @brief Performs the `registerWidget` operation.
+     * @param className Value passed to the method.
+     * @param ctor Value passed to the method.
+     */
     void registerWidget(const SwString& className, WidgetCtor ctor);
+    /**
+     * @brief Creates the requested widget.
+     * @param className Value passed to the method.
+     * @param parent Optional parent object that owns this instance.
+     * @return The resulting widget.
+     */
     SwWidget* createWidget(const SwString& className, SwWidget* parent) const;
 
 private:
@@ -80,7 +123,19 @@ public:
         bool ok{false};
     };
 
+    /**
+     * @brief Performs the `loadFromString` operation on the associated resource.
+     * @param xml Value passed to the method.
+     * @param parent Optional parent object that owns this instance.
+     * @return The resulting from String.
+     */
     static LoadResult loadFromString(const SwString& xml, SwWidget* parent = nullptr);
+    /**
+     * @brief Performs the `loadFromFile` operation on the associated resource.
+     * @param filePath Path of the target file.
+     * @param parent Optional parent object that owns this instance.
+     * @return The resulting from File.
+     */
     static LoadResult loadFromFile(const SwString& filePath, SwWidget* parent = nullptr);
 
 private:
@@ -99,6 +154,8 @@ private:
     static bool attachChildToContainer_(SwWidget* parent, SwWidget* child, const XmlNode& childWidgetNode, SwString& outError);
 
     static SwAbstractLayout* createLayout_(const SwString& className, SwWidget* parent, SwString& outError);
+    static SwSizePolicy::Policy spacerPolicyFromString_(SwString value);
+    static SwSpacerItem* loadSpacerItem_(const XmlNode& spacerNode);
     static bool applyLayout_(SwWidget* parentWidget,
                             const XmlNode& widgetNode,
                             SwString& outError,
@@ -156,7 +213,7 @@ inline SwWidget* UiFactory::createWidget(const SwString& className, SwWidget* pa
 inline UiFactory::UiFactory() {
     registerWidget("SwWidget", [](SwWidget* p) -> SwWidget* { return new SwWidget(p); });
     registerWidget("SwFrame", [](SwWidget* p) -> SwWidget* { return new SwFrame(p); });
-    registerWidget("Line", [](SwWidget* p) -> SwWidget* { return new SwFrame(p); }); // Qt Designer line separator
+    registerWidget("Line", [](SwWidget* p) -> SwWidget* { return new SwFrame(p); }); // Line separator used by the designer
     registerWidget("SwLabel", [](SwWidget* p) -> SwWidget* { return new SwLabel(p); });
     registerWidget("SwPushButton", [](SwWidget* p) -> SwWidget* { return new SwPushButton("PushButton", p); });
     registerWidget("SwLineEdit", [](SwWidget* p) -> SwWidget* { return new SwLineEdit(p); });
@@ -171,6 +228,7 @@ inline UiFactory::UiFactory() {
                    [](SwWidget* p) -> SwWidget* { return new SwSplitter(SwSplitter::Orientation::Horizontal, p); });
     registerWidget("SwStackedWidget", [](SwWidget* p) -> SwWidget* { return new SwStackedWidget(p); });
     registerWidget("SwScrollArea", [](SwWidget* p) -> SwWidget* { return new SwScrollArea(p); });
+    registerWidget("SwSpacer", [](SwWidget* p) -> SwWidget* { return new SwSpacer(p); });
     registerWidget("SwGroupBox", [](SwWidget* p) -> SwWidget* { return new SwGroupBox(p); });
     registerWidget("SwToolButton", [](SwWidget* p) -> SwWidget* { return new SwToolButton(p); });
     registerWidget("SwToolBox", [](SwWidget* p) -> SwWidget* { return new SwToolBox(p); });
@@ -221,7 +279,7 @@ inline bool UiLoader::toBool_(SwString s, bool def) {
 }
 
 inline SwString UiLoader::propertyNameToSw_(const SwString& name) {
-    // Support Qt-style names (lower camelCase) by mapping the ones we use.
+    // Support lower camelCase names by mapping the ones we use.
     if (name == "objectName") return "ObjectName";
     if (name == "toolTip") return "ToolTips";
     if (name == "styleSheet") return "StyleSheet";
@@ -253,7 +311,7 @@ inline SwString UiLoader::childText_(const XmlNode& node, const char* childName)
 }
 
 inline SwString UiLoader::textValue_(const XmlNode& propNode) {
-    // Qt designer stores typed values:
+    // Designer XML stores typed values:
     // <property name="text"><string>Hi</string></property>
     // <property name="enabled"><bool>true</bool></property>
     // We'll accept the first child element text if present, otherwise property.text.
@@ -364,7 +422,36 @@ inline void UiLoader::applyCommonProperty_(SwWidget* w, const SwString& rawName,
     const SwString propertyName = propertyNameToSw_(rawName);
     const SwString valueText = textValue_(propNode);
 
-    // Qt .ui: checkable/checked (subset).
+    // Splitter orientation
+    if (rawName == "orientation" || rawName == "Orientation") {
+        const bool isVert = valueText.contains("Vertical") || valueText.toLower() == "vertical";
+        if (auto* splitter = dynamic_cast<SwSplitter*>(w)) {
+            splitter->setOrientation(isVert ? SwSplitter::Orientation::Vertical
+                                            : SwSplitter::Orientation::Horizontal);
+            return;
+        }
+        if (auto* slider = dynamic_cast<SwSlider*>(w)) {
+            slider->setOrientation(isVert ? SwSlider::Orientation::Vertical
+                                          : SwSlider::Orientation::Horizontal);
+            return;
+        }
+        if (auto* pb = dynamic_cast<SwProgressBar*>(w)) {
+            pb->setOrientation(isVert ? SwProgressBar::Orientation::Vertical
+                                      : SwProgressBar::Orientation::Horizontal);
+            return;
+        }
+        if (auto* spacer = dynamic_cast<SwSpacer*>(w)) {
+            spacer->setDirection(isVert ? SwSpacer::Direction::Vertical
+                                        : SwSpacer::Direction::Horizontal);
+            return;
+        }
+        if (w->propertyExist(propertyName)) {
+            w->setProperty(propertyName, SwAny(valueText.trimmed()));
+            return;
+        }
+    }
+
+    // .ui checkable/checked support (subset).
     if (rawName == "checkable") {
         const bool v = toBool_(valueText, false);
         if (w->propertyExist(propertyName)) {
@@ -419,7 +506,7 @@ inline void UiLoader::applyCommonProperty_(SwWidget* w, const SwString& rawName,
         return;
     }
 
-    // Numeric Qt properties (subset).
+    // Numeric properties (subset).
     if (rawName == "value") {
         const int iv = toInt_(valueText, 0);
         if (auto* pb = dynamic_cast<SwProgressBar*>(w)) {
@@ -595,7 +682,7 @@ inline SwAbstractLayout* UiLoader::createLayout_(const SwString& className, SwWi
         return nullptr;
     }
 
-    // Qt -> Sw aliases.
+    // Aliases accepted by the loader.
     SwString cls = className;
     if (cls == "QVBoxLayout") cls = "SwVerticalLayout";
     if (cls == "QHBoxLayout") cls = "SwHorizontalLayout";
@@ -609,6 +696,84 @@ inline SwAbstractLayout* UiLoader::createLayout_(const SwString& className, SwWi
 
     outError = SwString("Unsupported layout class: ") + className;
     return nullptr;
+}
+
+inline SwSizePolicy::Policy UiLoader::spacerPolicyFromString_(SwString value) {
+    value = value.trimmed();
+    const size_t sep = value.lastIndexOf(':');
+    if (sep != static_cast<size_t>(-1)) {
+        value = value.mid(static_cast<int>(sep + 1));
+    }
+    value = value.trimmed();
+    if (value == "Fixed") return SwSizePolicy::Fixed;
+    if (value == "Minimum") return SwSizePolicy::Minimum;
+    if (value == "Maximum") return SwSizePolicy::Maximum;
+    if (value == "Preferred") return SwSizePolicy::Preferred;
+    if (value == "MinimumExpanding") return SwSizePolicy::MinimumExpanding;
+    if (value == "Expanding") return SwSizePolicy::Expanding;
+    if (value == "Ignored") return SwSizePolicy::Ignored;
+    return SwSizePolicy::Minimum;
+}
+
+inline SwSpacerItem* UiLoader::loadSpacerItem_(const XmlNode& spacerNode) {
+    int width = 40;
+    int height = 20;
+    SwString orientation = "Qt::Horizontal";
+    SwSizePolicy::Policy horizontalPolicy = SwSizePolicy::Minimum;
+    SwSizePolicy::Policy verticalPolicy = SwSizePolicy::Minimum;
+    bool explicitHorizontalPolicy = false;
+    bool explicitVerticalPolicy = false;
+    bool hasSizeType = false;
+    SwSizePolicy::Policy sizeTypePolicy = SwSizePolicy::Minimum;
+
+    for (const auto* prop : spacerNode.childrenNamed("property")) {
+        if (!prop) {
+            continue;
+        }
+
+        const SwString rawName = prop->attr("name");
+        if (rawName == "sizeHint") {
+            const XmlNode* size = prop->firstChild("size");
+            if (!size) {
+                continue;
+            }
+            width = std::max(0, toInt_(childText_(*size, "width"), width));
+            height = std::max(0, toInt_(childText_(*size, "height"), height));
+        } else if (rawName == "orientation") {
+            orientation = textValue_(*prop).trimmed();
+        } else if (rawName == "sizeType") {
+            hasSizeType = true;
+            sizeTypePolicy = spacerPolicyFromString_(textValue_(*prop));
+        } else if (rawName == "horizontalSizeType") {
+            explicitHorizontalPolicy = true;
+            horizontalPolicy = spacerPolicyFromString_(textValue_(*prop));
+        } else if (rawName == "verticalSizeType") {
+            explicitVerticalPolicy = true;
+            verticalPolicy = spacerPolicyFromString_(textValue_(*prop));
+        }
+    }
+
+    const SwString orientationLower = orientation.trimmed().toLower();
+    const bool vertical = orientationLower.contains("vertical");
+    if (hasSizeType) {
+        if (vertical) {
+            if (!explicitVerticalPolicy) {
+                verticalPolicy = sizeTypePolicy;
+            }
+            if (!explicitHorizontalPolicy) {
+                horizontalPolicy = SwSizePolicy::Minimum;
+            }
+        } else {
+            if (!explicitHorizontalPolicy) {
+                horizontalPolicy = sizeTypePolicy;
+            }
+            if (!explicitVerticalPolicy) {
+                verticalPolicy = SwSizePolicy::Minimum;
+            }
+        }
+    }
+
+    return new SwSpacerItem(width, height, horizontalPolicy, verticalPolicy);
 }
 
 inline bool UiLoader::applyLayout_(SwWidget* parentWidget,
@@ -643,7 +808,7 @@ inline bool UiLoader::applyLayout_(SwWidget* parentWidget,
         } else if (rawName == "margin") {
             layout->setMargin(toInt_(textValue_(*prop), layout->margin()));
         } else if (rawName == "leftMargin" || rawName == "topMargin" || rawName == "rightMargin" || rawName == "bottomMargin") {
-            // Qt has per-side margins; SwLayout has a single margin for now -> pick the first one we see.
+            // The source format has per-side margins; SwLayout has a single margin for now -> pick the first one we see.
             layout->setMargin(toInt_(textValue_(*prop), layout->margin()));
         }
     }
@@ -655,34 +820,69 @@ inline bool UiLoader::applyLayout_(SwWidget* parentWidget,
             continue;
         }
         const XmlNode* childWidgetNode = item->firstChild("widget");
-        if (!childWidgetNode) {
-            continue;
-        }
-        SwWidget* child = loadWidget_(*childWidgetNode, parentWidget, outError, customWidgetExtends);
-        if (!child) {
-            delete layout;
-            return false;
-        }
+        const XmlNode* childSpacerNode = item->firstChild("spacer");
 
-        if (auto* grid = dynamic_cast<SwGridLayout*>(layout)) {
-            const int row = toInt_(item->attr("row", "0"), 0);
-            const int col = toInt_(item->attr("column", "0"), 0);
-            const int rowSpan = toInt_(item->attr("rowspan", "1"), 1);
-            const int colSpan = toInt_(item->attr("colspan", "1"), 1);
-            grid->addWidget(child, row, col, rowSpan, colSpan);
-        } else if (auto* boxV = dynamic_cast<SwVerticalLayout*>(layout)) {
-            boxV->addWidget(child);
-        } else if (auto* boxH = dynamic_cast<SwHorizontalLayout*>(layout)) {
-            boxH->addWidget(child);
-        } else if (auto* form = dynamic_cast<SwFormLayout*>(layout)) {
-            const bool hasRowAttr = item->attributes.find("row") != item->attributes.end();
-            const bool hasColAttr = item->attributes.find("column") != item->attributes.end();
-            if (hasRowAttr || hasColAttr) {
+        if (childWidgetNode) {
+            SwWidget* child = loadWidget_(*childWidgetNode, parentWidget, outError, customWidgetExtends);
+            if (!child) {
+                delete layout;
+                return false;
+            }
+
+            if (auto* grid = dynamic_cast<SwGridLayout*>(layout)) {
                 const int row = toInt_(item->attr("row", "0"), 0);
                 const int col = toInt_(item->attr("column", "0"), 0);
-                form->setCell(row, col, child);
+                const int rowSpan = toInt_(item->attr("rowspan", "1"), 1);
+                const int colSpan = toInt_(item->attr("colspan", "1"), 1);
+                grid->addWidget(child, row, col, rowSpan, colSpan);
+            } else if (auto* boxV = dynamic_cast<SwVerticalLayout*>(layout)) {
+                boxV->addWidget(child);
+            } else if (auto* boxH = dynamic_cast<SwHorizontalLayout*>(layout)) {
+                boxH->addWidget(child);
+            } else if (auto* form = dynamic_cast<SwFormLayout*>(layout)) {
+                const bool hasRowAttr = item->attributes.find("row") != item->attributes.end();
+                const bool hasColAttr = item->attributes.find("column") != item->attributes.end();
+                if (hasRowAttr || hasColAttr) {
+                    const int row = toInt_(item->attr("row", "0"), 0);
+                    const int col = toInt_(item->attr("column", "0"), 0);
+                    form->setCell(row, col, child);
+                } else {
+                    form->addWidget(child);
+                }
+            }
+            continue;
+        }
+
+        if (childSpacerNode) {
+            SwSpacerItem* spacer = loadSpacerItem_(*childSpacerNode);
+            if (!spacer) {
+                delete layout;
+                outError = "Failed to create spacer item";
+                return false;
+            }
+
+            if (auto* grid = dynamic_cast<SwGridLayout*>(layout)) {
+                const int row = toInt_(item->attr("row", "0"), 0);
+                const int col = toInt_(item->attr("column", "0"), 0);
+                const int rowSpan = toInt_(item->attr("rowspan", "1"), 1);
+                const int colSpan = toInt_(item->attr("colspan", "1"), 1);
+                grid->addItem(spacer, row, col, rowSpan, colSpan);
+            } else if (auto* boxV = dynamic_cast<SwVerticalLayout*>(layout)) {
+                boxV->addSpacerItem(spacer);
+            } else if (auto* boxH = dynamic_cast<SwHorizontalLayout*>(layout)) {
+                boxH->addSpacerItem(spacer);
+            } else if (auto* form = dynamic_cast<SwFormLayout*>(layout)) {
+                const bool hasRowAttr = item->attributes.find("row") != item->attributes.end();
+                const bool hasColAttr = item->attributes.find("column") != item->attributes.end();
+                if (hasRowAttr || hasColAttr) {
+                    const int row = toInt_(item->attr("row", "0"), 0);
+                    const int col = toInt_(item->attr("column", "0"), 0);
+                    form->setItem(row, col, spacer);
+                } else {
+                    form->addItem(spacer);
+                }
             } else {
-                form->addWidget(child);
+                delete spacer;
             }
         }
     }
@@ -745,7 +945,7 @@ inline SwWidget* UiLoader::loadWidget_(const XmlNode& widgetNode,
         applyCommonProperty_(w, rawName, *prop);
     }
 
-    // Layouts (Qt-style) take precedence; if present, children are created through <layout><item>...
+    // Layout blocks take precedence; if present, children are created through <layout><item>...
     if (!applyLayout_(w, widgetNode, outError, customWidgetExtends)) {
         if (!parent) {
             delete w;
@@ -955,14 +1155,14 @@ inline UiLoader::LoadResult UiLoader::loadFromString(const SwString& xml, SwWidg
         return out;
     }
 
-    // Accept either <ui> (Qt-like) or <swui> as root.
+    // Accept either <ui> or <swui> as root.
     const XmlNode* uiRoot = &parsed.root;
     if (uiRoot->name != "ui" && uiRoot->name != "swui") {
         out.error = "Root element must be <ui> or <swui>";
         return out;
     }
 
-    // In Qt Designer: <ui><widget .../></ui>
+    // Expected shape: <ui><widget .../></ui>
     const XmlNode* widgetNode = uiRoot->firstChild("widget");
     if (!widgetNode) {
         out.error = "No <widget> found in document";
@@ -971,7 +1171,7 @@ inline UiLoader::LoadResult UiLoader::loadFromString(const SwString& xml, SwWidg
 
     const auto customWidgetExtends = parseCustomWidgets_(*uiRoot);
 
-    // Special-case: Qt Designer main window form.
+    // Special-case: main window form.
     const SwString rootClass = widgetNode->attr("class");
     if (rootClass == "QMainWindow" || rootClass == "SwMainWindow") {
         if (!parent) {
@@ -987,7 +1187,7 @@ inline UiLoader::LoadResult UiLoader::loadFromString(const SwString& xml, SwWidg
             return out;
         }
 
-        // If a parent is provided, embed the Qt MainWindow's centralWidget content into a plain SwWidget.
+        // If a parent is provided, embed the main window central widget content into a plain SwWidget.
         SwWidget* embedded = new SwWidget(parent);
         if (!loadQtMainWindowCentralWidgetInto_(embedded, *widgetNode, out.error, customWidgetExtends)) {
             delete embedded;

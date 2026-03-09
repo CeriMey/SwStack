@@ -1,4 +1,29 @@
 #pragma once
+
+/**
+ * @file src/core/gui/chatbubble/SwChatBubbleTypes.h
+ * @ingroup core_chatbubble
+ * @brief Declares the public interface exposed by SwChatBubbleTypes in the CoreSw chat bubble UI
+ * layer.
+ *
+ * This header belongs to the CoreSw chat bubble UI layer. It contains models, theme data, and
+ * delegates used to render conversation-style user interfaces.
+ *
+ * Within that layer, this file focuses on the chat bubble types interface. The declarations
+ * exposed here define the stable surface that adjacent code can rely on while the implementation
+ * remains free to evolve behind the header.
+ *
+ * The main declarations in this header are SwChatBubbleRole, SwChatMessageKind,
+ * SwChatMessageStatus, and SwChatBubbleMessage.
+ *
+ * Type-oriented declarations here establish shared vocabulary for the surrounding subsystem so
+ * multiple components can exchange data and configuration without ad-hoc conventions.
+ *
+ * The declarations in this area focus on layout, theme, item presentation, and delegate behavior
+ * rather than business logic.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -36,7 +61,7 @@ enum class SwChatMessageKind {
 };
 
 enum class SwChatMessageStatus {
-    None,
+    Unset,      // was "None" — renamed to avoid conflict with X11 "#define None 0L"
     Sent,
     Delivered,
     Read
@@ -49,9 +74,8 @@ struct SwChatBubbleMessage {
 
     SwChatBubbleRole role{SwChatBubbleRole::Bot};
     SwChatMessageKind kind{SwChatMessageKind::Text};
-    SwChatMessageStatus status{SwChatMessageStatus::None};
+    SwChatMessageStatus status{SwChatMessageStatus::Unset};
 
     // Optional image for image messages (non-owning).
     const SwImage* image{nullptr};
 };
-

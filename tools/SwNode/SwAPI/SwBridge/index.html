@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SwBridge</title>
+  <link rel="stylesheet" href="/home/css/style.css">
+</head>
+<body>
+  <h1>SwBridge</h1>
+  <p class="muted">Select an application (domain) then a device (object). Then use Config/Signals tabs.</p>
+
+  <div class="card">
+    <div class="grid">
+      <div>
+        <h2>Applications</h2>
+        <div class="row">
+          <button class="secondary" onclick="reloadApps()">Reload</button>
+        </div>
+        <div id="appsList"></div>
+      </div>
+      <div>
+        <h2>Devices</h2>
+        <div class="row">
+          <button class="secondary" onclick="reloadDevices()">Reload</button>
+        </div>
+        <div id="devicesList"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <button class="secondary" onclick="selectTab('config')">Config</button>
+      <button class="secondary" onclick="selectTab('signals')">Signals</button>
+      <button class="secondary" onclick="selectTab('rpc')">RPC</button>
+      <button class="secondary" onclick="selectTab('debug')">Debug</button>
+    </div>
+
+    <div id="tabConfig">
+      <h2>Config</h2>
+      <div class="row">
+        <button class="secondary" onclick="reloadConfig()">Reload</button>
+        <button class="secondary" onclick="reloadConfigDoc()">Reload (doc)</button>
+        <button onclick="sendAllConfig()">Send all</button>
+        <span id="cfgDirty" class="muted"></span>
+        <span id="cfgPubId" class="muted"></span>
+      </div>
+      <p class="muted">Changes are local until ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œSend allÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â (pushes full config via <code>__config__|*</code>).</p>
+      <div id="configForm"></div>
+    </div>
+
+    <div id="tabSignals" style="display:none">
+      <h2>Signals</h2>
+      <div class="row">
+        <button class="secondary" onclick="reloadSignals()">Reload</button>
+      </div>
+      <div id="signalsList"></div>
+    </div>
+
+    <div id="tabRpc" style="display:none">
+      <h2>RPC</h2>
+      <div class="row">
+        <button class="secondary" onclick="reloadRpcs()">Reload</button>
+      </div>
+      <div id="rpcList"></div>
+      <p class="muted">Calls typed RPC queues discovered from the registry (<code>__rpc__|*</code>). If <code>ok</code> is true, shows the returned <code>result</code> directly.</p>
+    </div>
+
+    <div id="tabDebug" style="display:none">
+      <h2>Debug</h2>
+      <div class="row">
+        <button class="secondary" onclick="refreshState()">Refresh state</button>
+        <button class="secondary" onclick="loadAppsRaw()">Apps snapshot</button>
+        <button class="secondary" onclick="loadRegistryRaw()">Registry raw</button>
+        <button class="secondary" onclick="loadConnectionsRaw()">Connections</button>
+      </div>
+      <p class="muted">State:</p>
+      <pre id="state"></pre>
+      <p class="muted">Raw:</p>
+      <pre id="registry"></pre>
+    </div>
+  </div>
+  <script src="/home/js/app.js"></script>
+</body>
+</html>

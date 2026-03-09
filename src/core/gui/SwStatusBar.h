@@ -1,4 +1,4 @@
-/***************************************************************************************************
+﻿/***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
  * Copyright (C) 2025 Ariya Consulting
@@ -22,8 +22,32 @@
 
 #pragma once
 
+/**
+ * @file src/core/gui/SwStatusBar.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwStatusBar in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the status bar interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwStatusBar.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
 /***************************************************************************************************
- * SwStatusBar - Qt-like status bar widget (≈ QStatusBar).
+ * SwStatusBar - status bar widget.
  *
  * Focus:
  * - Bottom bar with a message area + optional permanent widgets on the right.
@@ -42,12 +66,23 @@ class SwStatusBar : public SwFrame {
     SW_OBJECT(SwStatusBar, SwFrame)
 
 public:
+    /**
+     * @brief Constructs a `SwStatusBar` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwStatusBar(SwWidget* parent = nullptr)
         : SwFrame(parent) {
         initDefaults();
         buildChildren();
     }
 
+    /**
+     * @brief Performs the `showMessage` operation.
+     * @param message Value passed to the method.
+     * @param timeoutMs Timeout expressed in milliseconds.
+     */
     void showMessage(const SwString& message, int timeoutMs = 0) {
         if (m_messageLabel) {
             m_messageLabel->setText(message);
@@ -62,6 +97,9 @@ public:
         updateLayout();
     }
 
+    /**
+     * @brief Clears the current object state.
+     */
     void clearMessage() {
         if (m_messageLabel) {
             m_messageLabel->setText("");
@@ -72,6 +110,10 @@ public:
         updateLayout();
     }
 
+    /**
+     * @brief Adds the specified permanent Widget.
+     * @param widget Widget associated with the operation.
+     */
     void addPermanentWidget(SwWidget* widget) {
         if (!widget) {
             return;
@@ -84,11 +126,23 @@ public:
     }
 
 protected:
+    /**
+     * @brief Handles the resize Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void resizeEvent(ResizeEvent* event) override {
         SwFrame::resizeEvent(event);
         updateLayout();
     }
 
+    /**
+     * @brief Handles the paint Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void paintEvent(PaintEvent* event) override {
         if (!isVisibleInHierarchy()) {
             return;
@@ -98,7 +152,7 @@ protected:
             return;
         }
 
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
         StyleSheet* sheet = getToolSheet();
 
         SwColor bg{248, 250, 252};
@@ -119,16 +173,16 @@ protected:
 
 private:
     void initDefaults() {
-        resize(520, 38);
+        resize(520, 26);
         setCursor(CursorType::Arrow);
         setFocusPolicy(FocusPolicyEnum::NoFocus);
         setFrameShape(Shape::NoFrame);
         setStyleSheet(R"(
             SwStatusBar {
-                background-color: rgb(248, 250, 252);
-                border-color: rgb(226, 232, 240);
+                background-color: rgb(243, 243, 243);
+                border-color: rgb(218, 218, 218);
                 border-width: 1px;
-                border-radius: 16px;
+                border-radius: 0px;
             }
         )");
     }
@@ -143,7 +197,7 @@ private:
                 background-color: rgba(0,0,0,0);
                 border-width: 0px;
                 color: rgb(51, 65, 85);
-                font-size: 13px;
+                font-size: 12px;
             }
         )");
         m_messageLabel->setAlignment(DrawTextFormats(DrawTextFormat::Left | DrawTextFormat::VCenter | DrawTextFormat::SingleLine));
@@ -159,35 +213,36 @@ private:
     }
 
     void updateLayout() {
-        const SwRect bounds = getRect();
         int borderWidth = 1;
         int radius = 0;
         SwColor border{0, 0, 0};
         resolveBorder(getToolSheet(), border, borderWidth, radius);
         borderWidth = std::max(0, borderWidth);
 
-        const int x0 = bounds.x + borderWidth + m_margin;
-        const int y0 = bounds.y + borderWidth;
-        const int h = std::max(0, bounds.height - 2 * borderWidth);
-        const int innerH = std::max(0, h - 2 * m_margin);
+        // Use local coordinates (relative to this widget) for child positioning
+        const int w = width();
+        const int h = height();
+        const int x0 = borderWidth + m_margin;
+        const int y0 = borderWidth + m_margin;
+        const int innerH = std::max(0, h - 2 * borderWidth - 2 * m_margin);
 
-        int right = bounds.x + bounds.width - borderWidth - m_margin;
+        int right = w - borderWidth - m_margin;
         for (int i = m_permanent.size() - 1; i >= 0; --i) {
-            SwWidget* w = m_permanent[i];
-            if (!w) {
+            SwWidget* pw = m_permanent[i];
+            if (!pw) {
                 continue;
             }
-            SwRect hint = w->sizeHint();
+            SwSize hint = pw->sizeHint();
             const int ww = std::max(24, hint.width);
             right -= ww;
-            w->move(right, y0 + m_margin);
-            w->resize(ww, innerH);
+            pw->move(right, y0);
+            pw->resize(ww, innerH);
             right -= m_spacing;
         }
 
         if (m_messageLabel) {
             const int msgW = std::max(0, right - x0);
-            m_messageLabel->move(x0, y0 + m_margin);
+            m_messageLabel->move(x0, y0);
             m_messageLabel->resize(msgW, innerH);
         }
 
@@ -198,7 +253,7 @@ private:
     SwVector<SwWidget*> m_permanent;
     SwTimer* m_clearTimer{nullptr};
 
-    int m_margin{8};
-    int m_spacing{8};
+    int m_margin{4};
+    int m_spacing{6};
 };
 

@@ -1,4 +1,28 @@
-#pragma once
+﻿#pragma once
+
+/**
+ * @file src/core/gui/SwToolBox.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwToolBox in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the tool box interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwToolBox.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -33,6 +57,12 @@ class SwToolBox : public SwFrame {
     SW_OBJECT(SwToolBox, SwFrame)
 
 public:
+    /**
+     * @brief Constructs a `SwToolBox` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwToolBox(SwWidget* parent = nullptr)
         : SwFrame(parent) {
         setFrameShape(SwFrame::Shape::Box);
@@ -47,8 +77,18 @@ public:
         m_headerStyleSheet = defaultHeaderStyleSheet_();
     }
 
+    /**
+     * @brief Performs the `count` operation.
+     * @return The current count value.
+     */
     int count() const { return static_cast<int>(m_items.size()); }
 
+    /**
+     * @brief Sets the content Based Layout.
+     * @param on Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setContentBasedLayout(bool on) {
         if (m_contentBasedLayout == on) {
             return;
@@ -58,15 +98,34 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the current content Based Layout.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool contentBasedLayout() const { return m_contentBasedLayout; }
 
+    /**
+     * @brief Performs the `contentHeightHint` operation.
+     * @return The requested content Height Hint.
+     */
     int contentHeightHint() const { return computeContentHeight_(); }
 
+    /**
+     * @brief Performs the `refreshLayout` operation.
+     */
     void refreshLayout() {
         updateLayout_();
         update();
     }
 
+    /**
+     * @brief Sets the header Style Sheet.
+     * @param styleSheet Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setHeaderStyleSheet(const SwString& styleSheet) {
         SwString next = styleSheet;
         if (next.isEmpty()) {
@@ -83,8 +142,20 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the current header Style Sheet.
+     * @return The current header Style Sheet.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString headerStyleSheet() const { return m_headerStyleSheet; }
 
+    /**
+     * @brief Sets the contents Margin.
+     * @param margin Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setContentsMargin(int margin) {
         const int clamped = std::max(0, margin);
         if (m_contentsMargin == clamped) {
@@ -95,8 +166,20 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the current contents Margin.
+     * @return The current contents Margin.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int contentsMargin() const { return m_contentsMargin; }
 
+    /**
+     * @brief Sets the spacing.
+     * @param spacing Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setSpacing(int spacing) {
         const int clamped = std::max(0, spacing);
         if (m_spacing == clamped) {
@@ -107,8 +190,29 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the current spacing.
+     * @return The current spacing.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int spacing() const { return m_spacing; }
 
+    void setHeaderHeight(int h) {
+        const int clamped = std::max(16, h);
+        if (m_headerHeight == clamped) return;
+        m_headerHeight = clamped;
+        updateLayout_();
+        update();
+    }
+    int headerHeight() const { return m_headerHeight; }
+
+    /**
+     * @brief Sets the exclusive.
+     * @param on Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setExclusive(bool on) {
         if (m_exclusive == on) {
             return;
@@ -141,10 +245,29 @@ public:
         }
     }
 
+    /**
+     * @brief Returns whether the object reports exclusive.
+     * @return `true` when the object reports exclusive; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isExclusive() const { return m_exclusive; }
 
+    /**
+     * @brief Adds the specified item.
+     * @param page Value passed to the method.
+     * @param title Title text applied by the operation.
+     * @return The requested item.
+     */
     int addItem(SwWidget* page, const SwString& title) { return insertItem(count(), page, title); }
 
+    /**
+     * @brief Performs the `insertItem` operation.
+     * @param index Value passed to the method.
+     * @param page Value passed to the method.
+     * @param title Title text applied by the operation.
+     * @return The requested insert Item.
+     */
     int insertItem(int index, SwWidget* page, const SwString& title) {
         if (!page) {
             return -1;
@@ -207,8 +330,20 @@ public:
         return index;
     }
 
+    /**
+     * @brief Returns the current current Index.
+     * @return The current current Index.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int currentIndex() const { return m_currentIndex; }
 
+    /**
+     * @brief Sets the current Index.
+     * @param idx Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setCurrentIndex(int idx) {
         if (idx < 0 || idx >= static_cast<int>(m_items.size())) {
             idx = -1;
@@ -227,6 +362,13 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns whether the object reports item Expanded.
+     * @param idx Value passed to the method.
+     * @return `true` when the object reports item Expanded; otherwise `false`.
+     *
+     * @details This query does not modify the object state.
+     */
     bool isItemExpanded(int idx) const {
         if (idx < 0 || idx >= static_cast<int>(m_items.size())) {
             return false;
@@ -234,6 +376,13 @@ public:
         return m_items[static_cast<size_t>(idx)].expanded;
     }
 
+    /**
+     * @brief Sets the item Expanded.
+     * @param idx Value passed to the method.
+     * @param expanded Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setItemExpanded(int idx, bool expanded) {
         if (idx < 0 || idx >= static_cast<int>(m_items.size())) {
             return;
@@ -256,6 +405,10 @@ public:
         update();
     }
 
+    /**
+     * @brief Removes the specified item.
+     * @param idx Value passed to the method.
+     */
     void removeItem(int idx) {
         if (idx < 0 || idx >= count()) {
             return;
@@ -289,6 +442,11 @@ public:
         update();
     }
 
+    /**
+     * @brief Performs the `indexOf` operation.
+     * @param page Value passed to the method.
+     * @return The requested index Of.
+     */
     int indexOf(const SwWidget* page) const {
         if (!page) {
             return -1;
@@ -301,8 +459,21 @@ public:
         return -1;
     }
 
+    /**
+     * @brief Performs the `currentWidget` operation.
+     * @param m_currentIndex Value passed to the method.
+     * @return The requested current Widget.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwWidget* currentWidget() const { return widget(m_currentIndex); }
 
+    /**
+     * @brief Sets the current Widget.
+     * @param w Width value.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setCurrentWidget(SwWidget* w) {
         const int idx = indexOf(w);
         if (idx < 0) {
@@ -311,11 +482,23 @@ public:
         setCurrentIndex(idx);
     }
 
+    /**
+     * @brief Performs the `itemText` operation.
+     * @param idx Value passed to the method.
+     * @return The requested item Text.
+     */
     SwString itemText(int idx) const {
         auto* h = header(idx);
         return h ? h->getText() : SwString();
     }
 
+    /**
+     * @brief Sets the item Text.
+     * @param idx Value passed to the method.
+     * @param text Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setItemText(int idx, const SwString& text) {
         auto* h = header(idx);
         if (!h) {
@@ -325,6 +508,13 @@ public:
         update();
     }
 
+    /**
+     * @brief Sets the item Enabled.
+     * @param idx Value passed to the method.
+     * @param enabled Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setItemEnabled(int idx, bool enabled) {
         Item* it = itemAt_(idx);
         if (!it) {
@@ -339,6 +529,13 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns whether the object reports item Enabled.
+     * @param idx Value passed to the method.
+     * @return `true` when the object reports item Enabled; otherwise `false`.
+     *
+     * @details This query does not modify the object state.
+     */
     bool isItemEnabled(int idx) const {
         const Item* it = itemAtConst_(idx);
         if (!it || !it->header) {
@@ -347,6 +544,11 @@ public:
         return it->header->getEnable();
     }
 
+    /**
+     * @brief Performs the `widget` operation.
+     * @param idx Value passed to the method.
+     * @return The requested widget.
+     */
     SwWidget* widget(int idx) const {
         if (idx < 0 || idx >= static_cast<int>(m_items.size())) {
             return nullptr;
@@ -354,6 +556,11 @@ public:
         return m_items[static_cast<size_t>(idx)].page;
     }
 
+    /**
+     * @brief Performs the `header` operation.
+     * @param idx Value passed to the method.
+     * @return The requested header.
+     */
     SwToolButton* header(int idx) const {
         if (idx < 0 || idx >= static_cast<int>(m_items.size())) {
             return nullptr;
@@ -366,40 +573,78 @@ signals:
     DECLARE_SIGNAL(contentSizeChanged, int);
 
 protected:
+    /**
+     * @brief Handles the resize Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void resizeEvent(ResizeEvent* event) override {
         SwFrame::resizeEvent(event);
         updateLayout_();
     }
 
-    SwRect sizeHint() const override {
-        SwRect hint = getRect();
-        hint.height = computeContentHeight_();
-        return hint;
+    /**
+     * @brief Returns the current size Hint.
+     * @return The current size Hint.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
+    SwSize sizeHint() const override {
+        return SwSize{width(), computeContentHeight_()};
     }
 
-    SwRect minimumSizeHint() const override { return sizeHint(); }
+    /**
+     * @brief Performs the `minimumSizeHint` operation.
+     * @return The requested minimum Size Hint.
+     */
+    SwSize minimumSizeHint() const override { return sizeHint(); }
 
 private:
     class SwToolBoxHeaderButton final : public SwToolButton {
         SW_OBJECT(SwToolBoxHeaderButton, SwToolButton)
 
     public:
+        /**
+         * @brief Performs the `SwToolBoxHeaderButton` operation.
+         * @param text Value passed to the method.
+         * @param parent Optional parent object that owns this instance.
+         * @return The requested sw Tool Box Header Button.
+         */
         explicit SwToolBoxHeaderButton(const SwString& text, SwWidget* parent = nullptr)
             : SwToolButton(text, parent) {
             setFocusPolicy(FocusPolicyEnum::NoFocus);
         }
 
     protected:
+        /**
+         * @brief Performs the `clampInt_` operation.
+         * @param value Value passed to the method.
+         * @param minValue Value passed to the method.
+         * @param maxValue Value passed to the method.
+         * @return The requested clamp Int.
+         */
         static int clampInt_(int value, int minValue, int maxValue) {
             if (value < minValue) return minValue;
             if (value > maxValue) return maxValue;
             return value;
         }
 
+        /**
+         * @brief Performs the `clampColor_` operation.
+         * @param c Value passed to the method.
+         * @return The requested clamp Color.
+         */
         static SwColor clampColor_(const SwColor& c) {
             return SwColor{clampInt_(c.r, 0, 255), clampInt_(c.g, 0, 255), clampInt_(c.b, 0, 255)};
         }
 
+        /**
+         * @brief Performs the `lighten_` operation.
+         * @param c Value passed to the method.
+         * @param amount Value passed to the method.
+         * @return The requested lighten.
+         */
         static SwColor lighten_(SwColor c, int amount) {
             c.r = clampInt_(c.r + amount, 0, 255);
             c.g = clampInt_(c.g + amount, 0, 255);
@@ -407,6 +652,12 @@ private:
             return c;
         }
 
+        /**
+         * @brief Performs the `darken_` operation.
+         * @param c Value passed to the method.
+         * @param amount Value passed to the method.
+         * @return The requested darken.
+         */
         static SwColor darken_(SwColor c, int amount) {
             c.r = clampInt_(c.r - amount, 0, 255);
             c.g = clampInt_(c.g - amount, 0, 255);
@@ -414,6 +665,12 @@ private:
             return c;
         }
 
+        /**
+         * @brief Performs the `parsePixelValue_` operation.
+         * @param value Value passed to the method.
+         * @param defaultValue Value passed to the method.
+         * @return The requested parse Pixel Value.
+         */
         static int parsePixelValue_(const SwString& value, int defaultValue) {
             if (value.isEmpty()) {
                 return defaultValue;
@@ -432,6 +689,11 @@ private:
             int left{0};
         };
 
+        /**
+         * @brief Performs the `parsePadding_` operation.
+         * @param value Value passed to the method.
+         * @return The requested parse Padding.
+         */
         static Padding parsePadding_(const SwString& value) {
             Padding padding;
             if (value.isEmpty()) {
@@ -483,8 +745,15 @@ private:
             return padding;
         }
 
+        /**
+         * @brief Performs the `styleValue_` operation.
+         * @param sheet Value passed to the method.
+         * @param hierarchy Value passed to the method.
+         * @param propertyName Value passed to the method.
+         * @return The requested style Value.
+         */
         static SwString styleValue_(const StyleSheet* sheet,
-                                   const std::vector<SwString>& hierarchy,
+                                   const SwList<SwString>& hierarchy,
                                    const char* propertyName) {
             if (!sheet || !propertyName) {
                 return SwString();
@@ -496,7 +765,7 @@ private:
                 if (selector.isEmpty()) {
                     continue;
                 }
-                SwString v = sheet->getStyleProperty(selector.toStdString(), propertyName);
+                SwString v = sheet->getStyleProperty(selector, propertyName);
                 if (!v.isEmpty()) {
                     out = v;
                 }
@@ -504,18 +773,31 @@ private:
             return out;
         }
 
+        /**
+         * @brief Performs the `tryParseColor_` operation.
+         * @param sheet Value passed to the method.
+         * @param value Value passed to the method.
+         * @param out Value passed to the method.
+         * @return The requested try Parse Color.
+         */
         static bool tryParseColor_(const StyleSheet* sheet, const SwString& value, SwColor& out) {
             if (!sheet || value.isEmpty()) {
                 return false;
             }
             try {
-                out = clampColor_(const_cast<StyleSheet*>(sheet)->parseColor(value.toStdString(), nullptr));
+                out = clampColor_(const_cast<StyleSheet*>(sheet)->parseColor(value, nullptr));
                 return true;
             } catch (...) {
                 return false;
             }
         }
 
+        /**
+         * @brief Handles the paint Event forwarded by the framework.
+         * @param event Event object forwarded by the framework.
+         *
+         * @details Override this hook when the default framework behavior needs to be extended or replaced.
+         */
         void paintEvent(PaintEvent* event) override {
             if (!isVisibleInHierarchy()) {
                 return;
@@ -526,11 +808,11 @@ private:
                 return;
             }
 
-            const SwRect bounds = getRect();
+            const SwRect bounds = rect();
             const StyleSheet* sheet = getToolSheet();
             const auto hierarchy = classHierarchy(); // most-derived first
 
-            // Defaults (Qt-ish neutral).
+            // Neutral defaults.
             SwColor bg{248, 250, 252};
             SwColor bgHover = lighten_(bg, 6);
             SwColor bgPressed = darken_(bg, 10);
@@ -656,6 +938,19 @@ private:
                               getFont());
         }
 
+        /**
+         * @brief Performs the `paintRoundedRectWithCorners_` operation.
+         * @param painter Value passed to the method.
+         * @param rect Rectangle used by the operation.
+         * @param tl Value passed to the method.
+         * @param tr Value passed to the method.
+         * @param br Value passed to the method.
+         * @param bl Value passed to the method.
+         * @param fill Value passed to the method.
+         * @param border Value passed to the method.
+         * @param borderWidth Value passed to the method.
+         * @return The requested paint Rounded Rect With Corners.
+         */
         static void paintRoundedRectWithCorners_(SwPainter* painter,
                                                  const SwRect& rect,
                                                  int tl,
@@ -778,10 +1073,10 @@ private:
     }
 
     void updateLayout_() {
-        const SwRect r = getRect();
+        const SwRect r = rect();
         const int margin = std::max(0, m_contentsMargin);
-        const SwRect inner{r.x + margin,
-                           r.y + margin,
+        const SwRect inner{margin,
+                           margin,
                            std::max(0, r.width - 2 * margin),
                            std::max(0, r.height - 2 * margin)};
         const int n = static_cast<int>(m_items.size());
@@ -898,7 +1193,7 @@ private:
 
             int pageH = 0;
             if (m_contentBasedLayout) {
-                SwRect hint = it.page->sizeHint();
+                SwSize hint = it.page->sizeHint();
                 pageH = std::max(0, hint.height);
             } else {
                 pageH = basePageH;
@@ -957,7 +1252,7 @@ private:
 
     int computeContentHeight_() const {
         if (!m_contentBasedLayout) {
-            return getRect().height;
+            return height();
         }
 
         const int n = static_cast<int>(m_items.size());
@@ -1016,3 +1311,4 @@ private:
         )");
     }
 };
+

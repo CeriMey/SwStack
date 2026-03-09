@@ -22,6 +22,30 @@
 
 #pragma once
 
+/**
+ * @file src/core/gui/SwStyle.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwStyle in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the style interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are WidgetState, WidgetStateHelper, WidgetStyle, and
+ * SwStyle.
+ *
+ * Style-oriented declarations here capture reusable visual parameters so rendering code can stay
+ * deterministic while still allowing higher-level customization.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
 /***************************************************************************************************
  * Platform-agnostic styling helpers.
  **************************************************************************************************/
@@ -49,14 +73,36 @@ enum class WidgetState {
 
 class WidgetStateHelper {
 public:
+    /**
+     * @brief Returns whether the object reports state.
+     * @param state Value passed to the method.
+     * @param flag Value passed to the method.
+     * @return The requested state.
+     *
+     * @details This query does not modify the object state.
+     */
     static bool isState(WidgetState state, WidgetState flag) {
         return (static_cast<int>(state) & static_cast<int>(flag)) != 0;
     }
 
+    /**
+     * @brief Sets the state.
+     * @param state Value passed to the method.
+     * @param flag Value passed to the method.
+     * @return The requested state.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     static WidgetState setState(WidgetState state, WidgetState flag) {
         return static_cast<WidgetState>(static_cast<int>(state) | static_cast<int>(flag));
     }
 
+    /**
+     * @brief Clears the current object state.
+     * @param state Value passed to the method.
+     * @param flag Value passed to the method.
+     * @return The requested state.
+     */
     static WidgetState clearState(WidgetState state, WidgetState flag) {
         return static_cast<WidgetState>(static_cast<int>(state) & ~static_cast<int>(flag));
     }
@@ -94,6 +140,11 @@ enum class WidgetStyle {
 
 class SwStyle {
 public:
+    /**
+     * @brief Constructs a `SwStyle` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwStyle()
         : normalColor{70, 130, 180},
           hoverColor{100, 149, 237},
@@ -101,6 +152,14 @@ public:
           borderColor{0, 0, 0},
           textColor{255, 255, 255} {}
 
+    /**
+     * @brief Performs the `drawControl` operation.
+     * @param style Value passed to the method.
+     * @param rect Rectangle used by the operation.
+     * @param painter Value passed to the method.
+     * @param widget Widget associated with the operation.
+     * @param state Value passed to the method.
+     */
     void drawControl(WidgetStyle style,
                      const SwRect& rect,
                      SwPainter* painter,
@@ -119,6 +178,13 @@ public:
         bool paintBackground = true;
         float backgroundAlpha = 1.0f;
         Padding padding{};
+
+        if (style == WidgetStyle::LabelStyle) {
+            // Labels are transparent by default; they only paint a background when styled explicitly.
+            borderWidth = 0;
+            paintBackground = false;
+            text = SwColor{32, 32, 32};
+        }
         SwString backgroundValue;
         SwString boxShadowValue;
 
@@ -267,6 +333,13 @@ public:
         painter->finalize();
     }
 
+    /**
+     * @brief Performs the `drawBackground` operation.
+     * @param rect Rectangle used by the operation.
+     * @param painter Value passed to the method.
+     * @param color Value passed to the method.
+     * @param borderless Value passed to the method.
+     */
     void drawBackground(const SwRect& rect, SwPainter* painter, const SwColor& color, bool borderless = true) {
         if (!painter) {
             return;
@@ -289,7 +362,7 @@ private:
     void overrideColor(const SwString& value, SwColor& target, StyleSheet* sheet, float* alphaOut = nullptr) {
         if (!value.isEmpty()) {
             float alpha = 1.0f;
-            target = sheet->parseColor(value.toStdString(), &alpha);
+            target = sheet->parseColor(value, &alpha);
             if (alphaOut) {
                 *alphaOut = alpha;
             }

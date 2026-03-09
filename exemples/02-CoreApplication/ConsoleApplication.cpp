@@ -97,7 +97,7 @@ int main()
     printDoubleLine("Scientific value (double): ", scientificVal);
 
     printHeader("Testing numbers and averages");
-    SwJsonArray scoresArray = *scores.toArray();
+    SwJsonArray scoresArray = scores.toArray();
     auto scoresData = scoresArray.data();
     double sum = 0.0;
     int numericValues = 0;
@@ -115,7 +115,7 @@ int main()
     scores = scoresArray;
 
     printHeader("Manipulating arrays and strings");
-    SwJsonArray hobbiesArray = *hobbies.toArray();
+    SwJsonArray hobbiesArray = hobbies.toArray();
     hobbiesArray.append("coding");
     hobbiesArray.append("bouldering");
     hobbies = hobbiesArray;
@@ -130,7 +130,7 @@ int main()
     printHeader("Working with nested objects");
     SwJsonValue &preferred = doc.find("person/misc/preferred");
     printCheck("preferred isObject", preferred.isObject());
-    SwJsonObject preferredObj = *preferred.toObject();
+    SwJsonObject preferredObj = preferred.toObject();
     std::cout << "Preferred color: " << preferredObj["color"].toString() << std::endl;
     preferredObj.insert("drink", SwJsonValue("coffee"));
     preferred = preferredObj;

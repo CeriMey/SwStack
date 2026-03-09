@@ -1,4 +1,29 @@
-#pragma once
+﻿#pragma once
+
+/**
+ * @file src/core/gui/SwVideoWidget.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwVideoWidget in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the video widget interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are SwVideoRenderer, SwFallbackVideoRenderer,
+ * SwWin32VideoRenderer, SwD2DVideoRenderer, and SwVideoWidget.
+ *
+ * Widget-oriented declarations here usually capture persistent UI state, input handling, layout
+ * participation, and paint-time behavior while keeping platform-specific rendering details behind
+ * lower layers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -51,7 +76,19 @@
 
 class SwVideoRenderer {
 public:
+    /**
+     * @brief Destroys the `SwVideoRenderer` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     virtual ~SwVideoRenderer() = default;
+    /**
+     * @brief Performs the `render` operation.
+     * @param painter Value passed to the method.
+     * @param frame Value passed to the method.
+     * @param targetRect Value passed to the method.
+     * @return The requested render.
+     */
     virtual bool render(SwPainter* painter,
                         const SwVideoFrame& frame,
                         const SwRect& targetRect) = 0;
@@ -59,6 +96,13 @@ public:
 
 class SwFallbackVideoRenderer : public SwVideoRenderer {
 public:
+    /**
+     * @brief Performs the `render` operation.
+     * @param painter Value passed to the method.
+     * @param frame Value passed to the method.
+     * @param targetRect Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool render(SwPainter* painter,
                 const SwVideoFrame& frame,
                 const SwRect& targetRect) override {
@@ -81,6 +125,13 @@ public:
 #if defined(_WIN32)
 class SwWin32VideoRenderer : public SwVideoRenderer {
 public:
+    /**
+     * @brief Performs the `render` operation.
+     * @param painter Value passed to the method.
+     * @param frame Value passed to the method.
+     * @param targetRect Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool render(SwPainter* painter,
                 const SwVideoFrame& frame,
                 const SwRect& targetRect) override {
@@ -148,14 +199,32 @@ public:
 
 class SwD2DVideoRenderer : public SwVideoRenderer {
 public:
+    /**
+     * @brief Constructs a `SwD2DVideoRenderer` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwD2DVideoRenderer() {
         ensureFactory();
     }
 
+    /**
+     * @brief Returns whether the object reports supported.
+     * @return `true` when the object reports supported; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isSupported() const {
         return sharedFactory().Get() != nullptr;
     }
 
+    /**
+     * @brief Performs the `render` operation.
+     * @param painter Value passed to the method.
+     * @param frame Value passed to the method.
+     * @param targetRect Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool render(SwPainter* painter,
                 const SwVideoFrame& frame,
                 const SwRect& targetRect) override {
@@ -312,6 +381,12 @@ public:
         Center
     };
 
+    /**
+     * @brief Constructs a `SwVideoWidget` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     SwVideoWidget(SwWidget* parent = nullptr)
         : SwWidget(parent),
           m_pipeline(std::make_shared<SwVideoPipeline>()),
@@ -329,10 +404,21 @@ public:
 #endif
     }
 
+    /**
+     * @brief Destroys the `SwVideoWidget` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~SwVideoWidget() override {
         stop();
     }
 
+    /**
+     * @brief Sets the video Source.
+     * @param source Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setVideoSource(const std::shared_ptr<SwVideoSource>& source) {
         m_source = source;
         if (m_pipeline) {
@@ -340,8 +426,20 @@ public:
         }
     }
 
+    /**
+     * @brief Returns the current video Source.
+     * @return The current video Source.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     std::shared_ptr<SwVideoSource> videoSource() const { return m_source; }
 
+    /**
+     * @brief Sets the video Decoder.
+     * @param decoder Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setVideoDecoder(const std::shared_ptr<SwVideoDecoder>& decoder) {
         if (!decoder) {
             return;
@@ -355,14 +453,37 @@ public:
         }
     }
 
+    /**
+     * @brief Returns the current video Decoder.
+     * @return The current video Decoder.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     std::shared_ptr<SwVideoDecoder> videoDecoder() const { return m_decoder; }
 
+    /**
+     * @brief Sets the renderer.
+     * @param renderer Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setRenderer(const std::shared_ptr<SwVideoRenderer>& renderer) {
         m_renderer = renderer ? renderer : createDefaultRenderer();
     }
 
+    /**
+     * @brief Returns the current renderer.
+     * @return The current renderer.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     std::shared_ptr<SwVideoRenderer> renderer() const { return m_renderer; }
 
+    /**
+     * @brief Starts the underlying activity managed by the object.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     void start() {
         if (!m_pipeline || !m_source) {
             return;
@@ -370,37 +491,96 @@ public:
         m_pipeline->start();
     }
 
+    /**
+     * @brief Stops the underlying activity managed by the object.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     void stop() {
         if (m_pipeline) {
             m_pipeline->stop();
         }
     }
 
+    /**
+     * @brief Sets the scaling Mode.
+     * @param mode Mode value that controls the operation.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setScalingMode(ScalingMode mode) { m_scalingMode = mode; }
+    /**
+     * @brief Returns the current scaling Mode.
+     * @return The current scaling Mode.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     ScalingMode scalingMode() const { return m_scalingMode; }
 
+    /**
+     * @brief Sets the background Color.
+     * @param color Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setBackgroundColor(const SwColor& color) { m_backgroundColor = color; }
+    /**
+     * @brief Returns the current background Color.
+     * @return The current background Color.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwColor backgroundColor() const { return m_backgroundColor; }
 
+    /**
+     * @brief Sets the frame Arrived Callback.
+     * @param callback Callback invoked by the operation.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setFrameArrivedCallback(std::function<void(const SwVideoFrame&)> callback) {
         m_frameArrived = std::move(callback);
     }
 
+    /**
+     * @brief Returns whether the object reports frame.
+     * @return `true` when the object reports frame; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool hasFrame() const {
         std::lock_guard<std::mutex> lock(m_frameMutex);
         return m_currentFrame.isValid();
     }
 
+    /**
+     * @brief Returns the current current Frame.
+     * @return The current current Frame.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwVideoFrame currentFrame() const {
         std::lock_guard<std::mutex> lock(m_frameMutex);
         return m_currentFrame;
     }
 
+    /**
+     * @brief Returns the current last Frame Time.
+     * @return The current last Frame Time.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     std::chrono::steady_clock::time_point lastFrameTime() const {
         std::lock_guard<std::mutex> lock(m_frameMutex);
         return m_lastFrameTime;
     }
 
+    /**
+     * @brief Handles the paint Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void paintEvent(PaintEvent* event) override {
         if (!event) {
             return;
@@ -410,7 +590,7 @@ public:
             return;
         }
 
-        const SwRect rect = getRect();
+        const SwRect rect = this->rect();
         painter->fillRect(rect, m_backgroundColor, m_backgroundColor, 0);
 
         SwVideoFrame frame = currentFrame();
@@ -441,6 +621,12 @@ public:
         }
     }
 
+    /**
+     * @brief Handles the resize Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void resizeEvent(ResizeEvent* event) override {
         SwWidget::resizeEvent(event);
     }
@@ -748,3 +934,4 @@ private:
     }
 
 };
+

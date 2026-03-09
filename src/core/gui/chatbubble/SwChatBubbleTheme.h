@@ -1,4 +1,17 @@
 #pragma once
+
+/**
+ * @file
+ * @ingroup core_chatbubble
+ * @brief Defines the styling and layout structures used by chat bubble rendering.
+ *
+ * These plain data types collect paddings, colors, typography, and shape settings that
+ * control how chat messages are measured and painted. Keeping them in a dedicated header
+ * makes theme selection independent from the delegate and widget implementations.
+ */
+
+
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *

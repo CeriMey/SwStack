@@ -22,6 +22,31 @@
 
 #pragma once
 
+/**
+ * @file src/platform/x11/SwX11Painter.h
+ * @ingroup platform_backends
+ * @brief Declares the public interface exposed by SwX11Painter in the CoreSw X11 platform
+ * integration layer.
+ *
+ * This header belongs to the CoreSw X11 platform integration layer. It binds portable framework
+ * abstractions to concrete X11 windowing, painting, and input services.
+ *
+ * Within that layer, this file focuses on the X11 painter interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are SwX11Painter.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * Types here define the seam between portable APIs and the native event and rendering loop on X11
+ * systems.
+ *
+ */
+
+
 /***************************************************************************************************
  * Minimal X11-backed implementation of SwPainter so widgets can render without touching GDI.
  **************************************************************************************************/
@@ -41,12 +66,27 @@
 
 class SwX11Painter : public SwPainter {
 public:
+    /**
+     * @brief Constructs a `SwX11Painter` instance.
+     * @param display Value passed to the method.
+     * @param window Value passed to the method.
+     * @param width Width value.
+     * @param height Height value.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwX11Painter(Display* display, ::Window window, int width, int height)
         : m_display(display), m_window(window), m_width(width), m_height(height) {
         ensureDrawable();
     }
 
+    /**
+     * @brief Destroys the `SwX11Painter` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~SwX11Painter() override {
+        presentIfNeeded_();
         if (m_display && m_gc) {
             XFreeGC(m_display, m_gc);
         }
@@ -58,6 +98,10 @@ public:
         }
     }
 
+    /**
+     * @brief Clears the current object state.
+     * @param color Value passed to the method.
+     */
     void clear(const SwColor& color) override {
         if (!ensureDrawable()) {
             return;
@@ -72,6 +116,13 @@ public:
                        static_cast<unsigned int>(m_height));
     }
 
+    /**
+     * @brief Performs the `fillRect` operation.
+     * @param rect Rectangle used by the operation.
+     * @param fillColor Value passed to the method.
+     * @param borderColor Value passed to the method.
+     * @param borderWidth Value passed to the method.
+     */
     void fillRect(const SwRect& rect,
                   const SwColor& fillColor,
                   const SwColor& borderColor,
@@ -92,6 +143,14 @@ public:
         }
     }
 
+    /**
+     * @brief Performs the `fillRoundedRect` operation.
+     * @param rect Rectangle used by the operation.
+     * @param radius Value passed to the method.
+     * @param fillColor Value passed to the method.
+     * @param borderColor Value passed to the method.
+     * @param borderWidth Value passed to the method.
+     */
     void fillRoundedRect(const SwRect& rect,
                          int radius,
                          const SwColor& fillColor,
@@ -166,6 +225,12 @@ public:
         }
     }
 
+    /**
+     * @brief Performs the `drawRect` operation.
+     * @param rect Rectangle used by the operation.
+     * @param borderColor Value passed to the method.
+     * @param borderWidth Value passed to the method.
+     */
     void drawRect(const SwRect& rect,
                   const SwColor& borderColor,
                   int borderWidth) override {
@@ -183,6 +248,15 @@ public:
                        static_cast<unsigned int>(rect.height));
     }
 
+    /**
+     * @brief Performs the `drawLine` operation.
+     * @param x1 Value passed to the method.
+     * @param y1 Value passed to the method.
+     * @param x2 Value passed to the method.
+     * @param y2 Value passed to the method.
+     * @param color Value passed to the method.
+     * @param width Width value.
+     */
     void drawLine(int x1,
                   int y1,
                   int x2,
@@ -197,6 +271,14 @@ public:
         XDrawLine(m_display, targetDrawable(), m_gc, x1, y1, x2, y2);
     }
 
+    /**
+     * @brief Performs the `fillPolygon` operation.
+     * @param points Value passed to the method.
+     * @param count Value passed to the method.
+     * @param fillColor Value passed to the method.
+     * @param borderColor Value passed to the method.
+     * @param borderWidth Value passed to the method.
+     */
     void fillPolygon(const SwPoint* points,
                      int count,
                      const SwColor& fillColor,
@@ -243,6 +325,10 @@ public:
         }
     }
 
+    /**
+     * @brief Performs the `pushClipRect` operation.
+     * @param rect Rectangle used by the operation.
+     */
     void pushClipRect(const SwRect& rect) override {
         if (!ensureDrawable()) {
             return;
@@ -262,6 +348,9 @@ public:
         XSetClipRectangles(m_display, m_gc, 0, 0, &clip, 1, Unsorted);
     }
 
+    /**
+     * @brief Performs the `popClipRect` operation.
+     */
     void popClipRect() override {
         if (!m_display || !m_gc) {
             return;
@@ -274,11 +363,18 @@ public:
         if (m_clipStack.empty()) {
             XSetClipMask(m_display, m_gc, None);
         } else {
-            const XRectangle& clip = m_clipStack.back();
+            XRectangle clip = m_clipStack.back();
             XSetClipRectangles(m_display, m_gc, 0, 0, &clip, 1, Unsorted);
         }
     }
 
+    /**
+     * @brief Performs the `fillEllipse` operation.
+     * @param rect Rectangle used by the operation.
+     * @param fillColor Value passed to the method.
+     * @param borderColor Value passed to the method.
+     * @param borderWidth Value passed to the method.
+     */
     void fillEllipse(const SwRect& rect,
                      const SwColor& fillColor,
                      const SwColor& borderColor,
@@ -303,6 +399,12 @@ public:
         }
     }
 
+    /**
+     * @brief Performs the `drawEllipse` operation.
+     * @param rect Rectangle used by the operation.
+     * @param borderColor Value passed to the method.
+     * @param borderWidth Value passed to the method.
+     */
     void drawEllipse(const SwRect& rect,
                      const SwColor& borderColor,
                      int borderWidth) override {
@@ -323,32 +425,140 @@ public:
                  360 * 64);
     }
 
+    /**
+     * @brief Performs the `drawImage` operation.
+     * @param targetRect Value passed to the method.
+     * @param image Value passed to the method.
+     * @param sourceRect Value passed to the method.
+     */
     void drawImage(const SwRect& targetRect,
                    const SwImage& image,
                    const SwRect* sourceRect = nullptr) override {
-        SW_UNUSED(sourceRect)
         if (!ensureDrawable()) {
             return;
         }
         if (image.isNull()) {
             return;
         }
-        // Placeholder implementation: draw a framed rectangle + diagonal cross.
-        fillRect(targetRect, SwColor{245, 245, 245}, SwColor{180, 180, 180}, 1);
-        drawLine(targetRect.x,
-                 targetRect.y,
-                 targetRect.x + targetRect.width,
-                 targetRect.y + targetRect.height,
-                 SwColor{200, 200, 200},
-                 1);
-        drawLine(targetRect.x + targetRect.width,
-                 targetRect.y,
-                 targetRect.x,
-                 targetRect.y + targetRect.height,
-                 SwColor{200, 200, 200},
-                 1);
+
+        const int imgW = image.width();
+        const int imgH = image.height();
+        if (imgW <= 0 || imgH <= 0) {
+            return;
+        }
+
+        int srcX = 0, srcY = 0, srcW = imgW, srcH = imgH;
+        if (sourceRect) {
+            srcX = sourceRect->x;
+            srcY = sourceRect->y;
+            srcW = sourceRect->width;
+            srcH = sourceRect->height;
+        }
+
+        const int dstW = targetRect.width;
+        const int dstH = targetRect.height;
+        if (dstW <= 0 || dstH <= 0 || srcW <= 0 || srcH <= 0) {
+            return;
+        }
+
+        const int screen = DefaultScreen(m_display);
+        const int depth  = DefaultDepth(m_display, screen);
+        Visual* visual   = DefaultVisual(m_display, screen);
+
+        // Build a 32-bpp pixel buffer (native RGB, alpha blended against back-buffer)
+        const int stride = dstW * 4;
+        std::vector<uint32_t> pixelData(static_cast<size_t>(dstW * dstH));
+
+        // Snapshot the existing back-buffer region so we can alpha-blend against it
+        XImage* bgSnap = nullptr;
+        if (m_backBuffer) {
+            bgSnap = XGetImage(m_display, m_backBuffer,
+                               targetRect.x, targetRect.y,
+                               static_cast<unsigned int>(dstW),
+                               static_cast<unsigned int>(dstH),
+                               AllPlanes, ZPixmap);
+        }
+
+        for (int row = 0; row < dstH; ++row) {
+            const int srcRow = srcY + (dstH == srcH ? row : row * srcH / dstH);
+            const int clampedRow = std::min(srcRow, imgH - 1);
+            const uint32_t* srcLine = image.constScanLine(clampedRow);
+            if (!srcLine) {
+                continue;
+            }
+            uint32_t* dstLine = pixelData.data() + row * dstW;
+            for (int col = 0; col < dstW; ++col) {
+                const int srcCol = srcX + (dstW == srcW ? col : col * srcW / dstW);
+                const int clampedCol = std::min(srcCol, imgW - 1);
+                const uint32_t px = srcLine[clampedCol];
+
+                const uint32_t a = (px >> 24) & 0xFFu;
+                uint32_t r = (px >> 16) & 0xFFu;
+                uint32_t g = (px >>  8) & 0xFFu;
+                uint32_t b = (px      ) & 0xFFu;
+
+                // Alpha blend against back-buffer content (read via XGetImage snapshot)
+                if (a < 255u) {
+                    uint32_t bgR = 249u, bgG = 249u, bgB = 249u;
+                    if (bgSnap) {
+                        const int bx = col;
+                        const int by = row;
+                        if (bx >= 0 && bx < dstW && by >= 0 && by < dstH) {
+                            const unsigned long bgPx = XGetPixel(bgSnap, bx, by);
+                            bgR = (bgPx >> 16) & 0xFFu;
+                            bgG = (bgPx >>  8) & 0xFFu;
+                            bgB = (bgPx      ) & 0xFFu;
+                        }
+                    }
+                    const uint32_t inv = 255u - a;
+                    r = (r * a + bgR * inv) / 255u;
+                    g = (g * a + bgG * inv) / 255u;
+                    b = (b * a + bgB * inv) / 255u;
+                }
+
+                dstLine[col] = (r << 16) | (g << 8) | b;
+            }
+        }
+
+        if (bgSnap) {
+            XDestroyImage(bgSnap);
+        }
+
+        XImage* ximg = XCreateImage(m_display,
+                                    visual,
+                                    static_cast<unsigned int>(depth),
+                                    ZPixmap,
+                                    0,
+                                    reinterpret_cast<char*>(pixelData.data()),
+                                    static_cast<unsigned int>(dstW),
+                                    static_cast<unsigned int>(dstH),
+                                    32,
+                                    stride);
+        if (!ximg) {
+            return;
+        }
+
+        XPutImage(m_display,
+                  targetDrawable(),
+                  m_gc,
+                  ximg,
+                  0, 0,
+                  targetRect.x, targetRect.y,
+                  static_cast<unsigned int>(dstW),
+                  static_cast<unsigned int>(dstH));
+
+        ximg->data = nullptr; // Don't let XDestroyImage free our buffer
+        XDestroyImage(ximg);
     }
 
+    /**
+     * @brief Performs the `drawText` operation.
+     * @param rect Rectangle used by the operation.
+     * @param text Value passed to the method.
+     * @param alignment Value passed to the method.
+     * @param color Value passed to the method.
+     * @param font Font value used by the operation.
+     */
     void drawText(const SwRect& rect,
                   const SwString& text,
                   DrawTextFormats alignment,
@@ -418,8 +628,19 @@ public:
         }
     }
 
+    /**
+     * @brief Performs the `finalize` operation.
+     */
     void finalize() override {
-        if (!m_display) {
+        m_finalizeRequested = true;
+        if (!m_deferPresent) {
+            presentIfNeeded_();
+        }
+    }
+
+private:
+    void presentIfNeeded_() {
+        if (!m_finalizeRequested || m_presented || !m_display) {
             return;
         }
         if (m_backBuffer && m_presentGC) {
@@ -435,9 +656,9 @@ public:
                       0);
         }
         XFlush(m_display);
+        m_presented = true;
     }
 
-private:
     static XRectangle intersectClip(const XRectangle& a, const XRectangle& b) {
         const int ax1 = a.x;
         const int ay1 = a.y;
@@ -482,6 +703,18 @@ private:
                                          static_cast<unsigned int>(depth));
             m_bufferWidth = m_width;
             m_bufferHeight = m_height;
+
+            // Clear new back-buffer to white so unpainted regions aren't black
+            GC clearGc = XCreateGC(m_display, m_backBuffer, 0, nullptr);
+            if (clearGc) {
+                // Windows 11 default surface: rgb(249, 249, 249)
+                const unsigned long win11Surface = (249u << 16) | (249u << 8) | 249u;
+                XSetForeground(m_display, clearGc, win11Surface);
+                XFillRectangle(m_display, m_backBuffer, clearGc, 0, 0,
+                               static_cast<unsigned int>(m_width),
+                               static_cast<unsigned int>(m_height));
+                XFreeGC(m_display, clearGc);
+            }
         }
 
         if (!m_gc) {
@@ -525,6 +758,9 @@ private:
     int m_bufferHeight{0};
     int m_width{0};
     int m_height{0};
+    bool m_finalizeRequested{false};
+    bool m_presented{false};
+    bool m_deferPresent{true};
     std::vector<XRectangle> m_clipStack;
 };
 

@@ -22,8 +22,32 @@
 
 #pragma once
 
+/**
+ * @file src/core/gui/SwStackedWidget.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwStackedWidget in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the stacked widget interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are SwStackedWidget.
+ *
+ * Widget-oriented declarations here usually capture persistent UI state, input handling, layout
+ * participation, and paint-time behavior while keeping platform-specific rendering details behind
+ * lower layers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
 /***************************************************************************************************
- * SwStackedWidget - Qt-like stacked container (≈ QStackedWidget).
+ * SwStackedWidget - stacked container.
  *
  * Shows one child widget at a time; all others are hidden.
  **************************************************************************************************/
@@ -35,15 +59,32 @@ class SwStackedWidget : public SwWidget {
     SW_OBJECT(SwStackedWidget, SwWidget)
 
 public:
+    /**
+     * @brief Constructs a `SwStackedWidget` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwStackedWidget(SwWidget* parent = nullptr)
         : SwWidget(parent) {
         initDefaults();
     }
 
+    /**
+     * @brief Adds the specified widget.
+     * @param widget Widget associated with the operation.
+     * @return The requested widget.
+     */
     int addWidget(SwWidget* widget) {
         return insertWidget(m_widgets.size(), widget);
     }
 
+    /**
+     * @brief Performs the `insertWidget` operation.
+     * @param index Value passed to the method.
+     * @param widget Widget associated with the operation.
+     * @return The requested insert Widget.
+     */
     int insertWidget(int index, SwWidget* widget) {
         if (!widget) {
             return -1;
@@ -86,6 +127,10 @@ public:
         return index;
     }
 
+    /**
+     * @brief Removes the specified widget.
+     * @param widget Widget associated with the operation.
+     */
     void removeWidget(SwWidget* widget) {
         if (!widget) {
             return;
@@ -108,8 +153,17 @@ public:
         }
     }
 
+    /**
+     * @brief Performs the `count` operation.
+     * @return The current count value.
+     */
     int count() const { return m_widgets.size(); }
 
+    /**
+     * @brief Performs the `widget` operation.
+     * @param index Value passed to the method.
+     * @return The requested widget.
+     */
     SwWidget* widget(int index) const {
         if (index < 0 || index >= m_widgets.size()) {
             return nullptr;
@@ -117,12 +171,30 @@ public:
         return m_widgets[index];
     }
 
+    /**
+     * @brief Returns the current current Index.
+     * @return The current current Index.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int currentIndex() const { return m_currentIndex; }
 
+    /**
+     * @brief Returns the current current Widget.
+     * @return The current current Widget.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwWidget* currentWidget() const {
         return widget(m_currentIndex);
     }
 
+    /**
+     * @brief Sets the current Index.
+     * @param index Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setCurrentIndex(int index) {
         if (index < 0 || index >= m_widgets.size()) {
             return;
@@ -140,6 +212,12 @@ public:
     DECLARE_SIGNAL(currentChanged, int);
 
 protected:
+    /**
+     * @brief Handles the resize Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void resizeEvent(ResizeEvent* event) override {
         SwWidget::resizeEvent(event);
         updateLayout();
@@ -161,20 +239,19 @@ private:
     }
 
     void updateLayout() {
-        const SwRect r = getRect();
         const int pad = std::max(0, m_padding);
-        const SwRect inner{r.x + pad,
-                           r.y + pad,
-                           std::max(0, r.width - 2 * pad),
-                           std::max(0, r.height - 2 * pad)};
+        const int innerX = pad;
+        const int innerY = pad;
+        const int innerW = std::max(0, width() - 2 * pad);
+        const int innerH = std::max(0, height() - 2 * pad);
 
         for (int i = 0; i < m_widgets.size(); ++i) {
             SwWidget* w = m_widgets[i];
             if (!w) {
                 continue;
             }
-            w->move(inner.x, inner.y);
-            w->resize(inner.width, inner.height);
+            w->move(innerX, innerY);
+            w->resize(innerW, innerH);
         }
     }
 

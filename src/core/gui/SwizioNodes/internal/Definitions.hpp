@@ -1,9 +1,39 @@
 #pragma once
 
+/**
+ * @file src/core/gui/SwizioNodes/internal/Definitions.hpp
+ * @ingroup core_swizio_nodes
+ * @brief Declares the public interface exposed by Definitions in the CoreSw node-editor layer.
+ *
+ * This header belongs to the CoreSw node-editor layer. It contains the graph, geometry, style,
+ * and scene infrastructure used by the embedded node editor.
+ *
+ * Within that layer, this file focuses on the definitions interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * This header mainly contributes module-level utilities, helper declarations, or namespaced types
+ * that are consumed by the surrounding subsystem.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * Most declarations here are extension points or internal contracts that coordinate graph
+ * editing, visualization, and interaction.
+ *
+ */
+
+
 #include "core/types/Sw.h"
 
 #include <algorithm>
 #include <limits>
+
+// X11 defines `None` as a macro, which breaks scoped enums such as `PortType::None`.
+#ifdef None
+#undef None
+#endif
 
 /**
  * @file
@@ -108,4 +138,3 @@ inline void invertConnection(ConnectionId& id)
 }
 
 } // namespace SwizioNodes
-

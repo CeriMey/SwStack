@@ -22,13 +22,38 @@
 
 #pragma once
 
+/**
+ * @file src/core/gui/SwStandardItemModel.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwStandardItemModel in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the standard item model interface. The declarations
+ * exposed here define the stable surface that adjacent code can rely on while the implementation
+ * remains free to evolve behind the header.
+ *
+ * The main declarations in this header are SwStandardItem and SwStandardItemModel.
+ *
+ * Model-oriented declarations here define the data contract consumed by views, delegates, or
+ * algorithms, with an emphasis on stable roles, ownership, and update flow rather than on
+ * presentation details.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
 /***************************************************************************************************
- * SwStandardItemModel - Qt-like standard item model (≈ QStandardItemModel).
+ * SwStandardItemModel - standard item model.
  *
  * Minimal implementation to back SwTreeView / SwTableView.
  **************************************************************************************************/
 
 #include "SwAbstractItemModel.h"
+#include "graphics/SwImage.h"
 
 #include "SwList.h"
 #include "SwString.h"
@@ -37,30 +62,129 @@ class SwStandardItemModel;
 
 class SwStandardItem {
 public:
+    /**
+     * @brief Constructs a `SwStandardItem` instance.
+     * @param text Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     explicit SwStandardItem(const SwString& text = SwString())
         : m_text(text) {}
 
+    /**
+     * @brief Destroys the `SwStandardItem` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~SwStandardItem() { clearChildren(); }
 
+    /**
+     * @brief Constructs a `SwStandardItem` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwStandardItem(const SwStandardItem&) = delete;
+    /**
+     * @brief Performs the `operator=` operation.
+     * @return The requested operator =.
+     */
     SwStandardItem& operator=(const SwStandardItem&) = delete;
 
+    /**
+     * @brief Sets the text.
+     * @param text Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setText(const SwString& text) { m_text = text; }
+    /**
+     * @brief Returns the current text.
+     * @return The current text.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString text() const { return m_text; }
 
+    /**
+     * @brief Sets the tool Tip.
+     * @param text Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setToolTip(const SwString& text) { m_toolTip = text; }
+    /**
+     * @brief Returns the current tool Tip.
+     * @return The current tool Tip.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString toolTip() const { return m_toolTip; }
 
+    /**
+     * @brief Sets the editable.
+     * @param on Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setEditable(bool on) { m_editable = on; }
+    /**
+     * @brief Returns whether the object reports editable.
+     * @return `true` when the object reports editable; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isEditable() const { return m_editable; }
 
+    /**
+     * @brief Sets the icon.
+     * @param icon Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
+    void setIcon(const SwImage& icon) { m_icon = icon; }
+    /**
+     * @brief Returns the current icon.
+     * @return The current icon.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
+    SwImage icon() const { return m_icon; }
+
+    /**
+     * @brief Returns the current parent.
+     * @return The current parent.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwStandardItem* parent() const { return m_parent; }
 
+    /**
+     * @brief Returns the current row.
+     * @return The current row.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int row() const { return m_rowInParent; }
+    /**
+     * @brief Returns the current column.
+     * @return The current column.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int column() const { return m_columnInParent; }
 
+    /**
+     * @brief Performs the `rowCount` operation.
+     * @return The requested row Count.
+     */
     int rowCount() const { return static_cast<int>(m_children.size()); }
 
+    /**
+     * @brief Returns the current column Count.
+     * @return The current column Count.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int columnCount() const {
         int maxCols = 0;
         for (const SwList<SwStandardItem*>& row : m_children) {
@@ -72,6 +196,12 @@ public:
         return maxCols;
     }
 
+    /**
+     * @brief Performs the `child` operation.
+     * @param row Value passed to the method.
+     * @param column Value passed to the method.
+     * @return The requested child.
+     */
     SwStandardItem* child(int row, int column = 0) const {
         if (row < 0 || row >= static_cast<int>(m_children.size())) {
             return nullptr;
@@ -83,12 +213,20 @@ public:
         return cols[static_cast<size_t>(column)];
     }
 
+    /**
+     * @brief Performs the `appendRow` operation.
+     * @param item Item affected by the operation.
+     */
     void appendRow(SwStandardItem* item) {
         SwList<SwStandardItem*> row;
         row.append(item);
         appendRow(row);
     }
 
+    /**
+     * @brief Performs the `appendRow` operation.
+     * @param items Collection of items affected by the operation.
+     */
     void appendRow(const SwList<SwStandardItem*>& items) {
         SwList<SwStandardItem*> row = items;
         const int rowIndex = static_cast<int>(m_children.size());
@@ -101,6 +239,14 @@ public:
         m_children.append(row);
     }
 
+    /**
+     * @brief Sets the child.
+     * @param row Value passed to the method.
+     * @param column Value passed to the method.
+     * @param item Item affected by the operation.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setChild(int row, int column, SwStandardItem* item) {
         if (row < 0 || column < 0) {
             return;
@@ -143,6 +289,7 @@ private:
 
     SwString m_text;
     SwString m_toolTip;
+    SwImage  m_icon;
     bool m_editable{false};
     SwStandardItem* m_parent{nullptr};
     int m_rowInParent{-1};
@@ -154,6 +301,14 @@ class SwStandardItemModel : public SwAbstractItemModel {
     SW_OBJECT(SwStandardItemModel, SwAbstractItemModel)
 
 public:
+    /**
+     * @brief Constructs a `SwStandardItemModel` instance.
+     * @param rows Value passed to the method.
+     * @param columns Value passed to the method.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwStandardItemModel(int rows = 0,
                                  int columns = 1,
                                  SwObject* parent = nullptr)
@@ -171,29 +326,59 @@ public:
         }
     }
 
+    /**
+     * @brief Destroys the `SwStandardItemModel` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~SwStandardItemModel() override {
         delete m_root;
         m_root = nullptr;
     }
 
+    /**
+     * @brief Returns the current invisible Root Item.
+     * @return The current invisible Root Item.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwStandardItem* invisibleRootItem() const { return m_root; }
 
+    /**
+     * @brief Clears the current object state.
+     */
     void clear() {
         delete m_root;
         m_root = new SwStandardItem();
         modelReset();
     }
 
+    /**
+     * @brief Sets the column Count.
+     * @param columns Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setColumnCount(int columns) {
         m_columnCount = (columns > 0) ? columns : 1;
         modelReset();
     }
 
+    /**
+     * @brief Performs the `columnCount` operation.
+     * @param parent Optional parent object that owns this instance.
+     * @return The requested column Count.
+     */
     int columnCount(const SwModelIndex& parent = SwModelIndex()) const override {
         SW_UNUSED(parent)
         return m_columnCount;
     }
 
+    /**
+     * @brief Performs the `rowCount` operation.
+     * @param parent Optional parent object that owns this instance.
+     * @return The requested row Count.
+     */
     int rowCount(const SwModelIndex& parent = SwModelIndex()) const override {
         SwStandardItem* parentItem = itemFromIndex(parent);
         if (!parentItem) {
@@ -202,6 +387,13 @@ public:
         return parentItem->rowCount();
     }
 
+    /**
+     * @brief Performs the `index` operation.
+     * @param row Value passed to the method.
+     * @param column Value passed to the method.
+     * @param parent Optional parent object that owns this instance.
+     * @return The requested index.
+     */
     SwModelIndex index(int row,
                        int column,
                        const SwModelIndex& parent = SwModelIndex()) const override {
@@ -219,6 +411,11 @@ public:
         return createIndex(row, column, child);
     }
 
+    /**
+     * @brief Performs the `parent` operation.
+     * @param child Value passed to the method.
+     * @return The requested parent.
+     */
     SwModelIndex parent(const SwModelIndex& child) const override {
         if (!child.isValid()) {
             return SwModelIndex();
@@ -234,6 +431,12 @@ public:
         return createIndex(parentItem->row(), 0, parentItem);
     }
 
+    /**
+     * @brief Performs the `data` operation.
+     * @param index Value passed to the method.
+     * @param role Value passed to the method.
+     * @return The requested data.
+     */
     SwAny data(const SwModelIndex& index, SwItemDataRole role = SwItemDataRole::DisplayRole) const override {
         if (!index.isValid()) {
             return SwAny();
@@ -245,12 +448,24 @@ public:
         if (role == SwItemDataRole::ToolTipRole) {
             return SwAny(item->toolTip());
         }
+        if (role == SwItemDataRole::DecorationRole) {
+            return SwAny::from<SwImage>(item->icon());
+        }
         if (role == SwItemDataRole::DisplayRole || role == SwItemDataRole::EditRole) {
             return SwAny(item->text());
         }
         return SwAny();
     }
 
+    /**
+     * @brief Sets the data.
+     * @param index Value passed to the method.
+     * @param value Value passed to the method.
+     * @param role Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     bool setData(const SwModelIndex& index, const SwAny& value, SwItemDataRole role = SwItemDataRole::EditRole) override {
         if (!index.isValid()) {
             return false;
@@ -295,6 +510,13 @@ public:
         return true;
     }
 
+    /**
+     * @brief Performs the `headerData` operation.
+     * @param section Value passed to the method.
+     * @param orientation Value passed to the method.
+     * @param role Value passed to the method.
+     * @return The requested header Data.
+     */
     SwAny headerData(int section,
                      SwOrientation orientation,
                      SwItemDataRole role = SwItemDataRole::DisplayRole) const override {
@@ -310,6 +532,11 @@ public:
         return SwAny();
     }
 
+    /**
+     * @brief Performs the `sort` operation.
+     * @param column Value passed to the method.
+     * @param order Value passed to the method.
+     */
     void sort(int column, SwSortOrder order = SwSortOrder::AscendingOrder) override {
         if (!m_root) {
             return;
@@ -321,6 +548,12 @@ public:
         modelReset();
     }
 
+    /**
+     * @brief Sets the horizontal Header Labels.
+     * @param labels Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setHorizontalHeaderLabels(const SwList<SwString>& labels) {
         m_horizontalHeaders = labels;
         if (static_cast<int>(m_horizontalHeaders.size()) > m_columnCount) {
@@ -329,6 +562,12 @@ public:
         modelReset();
     }
 
+    /**
+     * @brief Performs the `item` operation.
+     * @param row Value passed to the method.
+     * @param column Value passed to the method.
+     * @return The requested item.
+     */
     SwStandardItem* item(int row, int column = 0) const {
         if (row < 0 || column < 0) {
             return nullptr;
@@ -336,6 +575,14 @@ public:
         return m_root ? m_root->child(row, column) : nullptr;
     }
 
+    /**
+     * @brief Sets the item.
+     * @param row Value passed to the method.
+     * @param column Value passed to the method.
+     * @param item Item affected by the operation.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setItem(int row, int column, SwStandardItem* item) {
         if (!m_root) {
             return;
@@ -347,6 +594,10 @@ public:
         modelReset();
     }
 
+    /**
+     * @brief Performs the `appendRow` operation.
+     * @param item Item affected by the operation.
+     */
     void appendRow(SwStandardItem* item) {
         if (!m_root) {
             return;
@@ -363,6 +614,10 @@ public:
         modelReset();
     }
 
+    /**
+     * @brief Performs the `appendRow` operation.
+     * @param items Collection of items affected by the operation.
+     */
     void appendRow(const SwList<SwStandardItem*>& items) {
         if (!m_root) {
             return;
@@ -379,6 +634,11 @@ public:
         modelReset();
     }
 
+    /**
+     * @brief Performs the `flags` operation.
+     * @param index Value passed to the method.
+     * @return The requested flags.
+     */
     SwItemFlags flags(const SwModelIndex& index) const override {
         SwItemFlags base = SwAbstractItemModel::flags(index);
         if (!index.isValid()) {

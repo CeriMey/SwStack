@@ -22,10 +22,34 @@
 
 #pragma once
 
-/***************************************************************************************************
- * SwEmojiPiker - Emoji picker widget (Qt-like "EmojiPickerWidget", but SwCore GUI only).
+/**
+ * @file src/core/gui/SwEmojiPiker.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwEmojiPiker in the CoreSw GUI layer.
  *
- * - Header-only, no Qt dependency.
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the emoji piker interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are SwEmojiPiker.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
+/***************************************************************************************************
+ * SwEmojiPiker - Emoji picker widget for SwCore GUI.
+ *
+ * - Header-only, no external GUI dependency.
  * - Uses SwTabWidget + SwListWidget (icon mode).
  **************************************************************************************************/
 
@@ -47,20 +71,43 @@ public:
     using EmojiList = SwVector<SwString>;
     using EmojisByTheme = SwMap<SwString, EmojiList>;
 
+    /**
+     * @brief Constructs a `SwEmojiPiker` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwEmojiPiker(SwWidget* parent = nullptr)
         : SwWidget(parent) {
         initDefaults_();
         setEmojisByTheme(defaultThemes_());
     }
 
+    /**
+     * @brief Sets the emojis By Theme.
+     * @param emojisByTheme Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setEmojisByTheme(const EmojisByTheme& emojisByTheme) {
         m_emojisByTheme = emojisByTheme;
         rebuildTabs_();
     }
 
+    /**
+     * @brief Returns the current emojis By Theme.
+     * @return The current emojis By Theme.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const EmojisByTheme& emojisByTheme() const { return m_emojisByTheme; }
 
     DECLARE_SIGNAL(emojiClicked, SwString);
+
+protected:
+    void paintEvent(PaintEvent* event) override {
+        SwWidget::paintEvent(event);
+    }
 
 private:
     static int clampInt_(int value, int minValue, int maxValue) {
@@ -73,9 +120,20 @@ private:
         SW_OBJECT(EmojiIconDelegate, SwStyledItemDelegate)
 
     public:
+        /**
+         * @brief Performs the `EmojiIconDelegate` operation.
+         * @param parent Optional parent object that owns this instance.
+         * @return The requested emoji Icon Delegate.
+         */
         explicit EmojiIconDelegate(SwObject* parent = nullptr)
             : SwStyledItemDelegate(parent) {}
 
+        /**
+         * @brief Performs the `paint` operation.
+         * @param painter Value passed to the method.
+         * @param option Value passed to the method.
+         * @param index Value passed to the method.
+         */
         void paint(SwPainter* painter,
                    const SwStyleOptionViewItem& option,
                    const SwModelIndex& index) const override {
@@ -103,6 +161,12 @@ private:
                               option.font);
         }
 
+        /**
+         * @brief Performs the `sizeHint` operation.
+         * @param option Value passed to the method.
+         * @param index Value passed to the method.
+         * @return The requested size Hint.
+         */
         SwSize sizeHint(const SwStyleOptionViewItem& option,
                         const SwModelIndex& index) const override {
             SW_UNUSED(option)
@@ -2090,6 +2154,63 @@ private:
         m_tabWidget->setFont(SwFont(L"Segoe UI Emoji", m_emojiFontSize + 2, Normal));
         m_tabWidget->setStyleSheet("SwTabWidget { background-color: rgba(0,0,0,0); border-width: 0px; }");
         mainLayout->addWidget(m_tabWidget, 1, 0);
+
+        // Single connection for lazy tab loading (safe across rebuildTabs_ calls).
+        SwObject::connect(m_tabWidget, &SwTabWidget::currentChanged, this, [this](int idx) {
+            ensureTabPopulated_(idx);
+        });
+    }
+
+    // Create a styled but empty SwListWidget for a tab.
+    SwListWidget* createTabList_() {
+        auto* list = new SwListWidget();
+        list->setStyleSheet(R"(
+            SwListView {
+                background-color: rgba(0,0,0,0);
+                border-width: 0px;
+                border-radius: 0px;
+            }
+        )");
+        list->setViewMode(SwListView::ViewMode::IconMode);
+        list->setGridSize(SwSize{m_buttonSize, m_buttonSize});
+        list->setSpacing(m_gridSpacing);
+        list->setViewportPadding(m_gridMargin);
+        list->setFont(SwFont(L"Segoe UI Emoji", m_emojiFontSize, Normal));
+        list->setItemDelegate(new EmojiIconDelegate(list));
+
+        SwObject::connect(list, &SwListView::clicked, this, [this](const SwModelIndex& idx) {
+            if (!idx.isValid() || !idx.model()) {
+                return;
+            }
+            const SwString emoji = idx.model()->data(idx, SwItemDataRole::DisplayRole).toString();
+            emojiClicked(emoji);
+        });
+        return list;
+    }
+
+    // Populate a tab's list on first access (lazy loading).
+    void ensureTabPopulated_(int index) {
+        if (index < 0 || index >= static_cast<int>(m_tabKeys.size())) {
+            return;
+        }
+        if (m_populatedTabs[index]) {
+            return;
+        }
+        m_populatedTabs[index] = true;
+
+        auto* list = dynamic_cast<SwListWidget*>(m_tabWidget->widget(index));
+        if (!list) {
+            return;
+        }
+        const SwString& key = m_tabKeys[index];
+        auto it = m_emojisByTheme.find(key);
+        if (it == m_emojisByTheme.end()) {
+            return;
+        }
+        const EmojiList& emojis = it.value();
+        for (int i = 0; i < emojis.size(); ++i) {
+            list->addItem(emojis[i]);
+        }
     }
 
     void rebuildTabs_() {
@@ -2097,41 +2218,23 @@ private:
             return;
         }
 
-        // Requires SwTabWidget::clear() (Qt-like container semantics).
+        // Requires SwTabWidget::clear() with the usual container semantics.
         m_tabWidget->clear();
+        m_tabKeys.clear();
+        m_populatedTabs.clear();
 
+        // Create tabs with empty lists (no items yet).
         for (auto it = m_emojisByTheme.cbegin(); it != m_emojisByTheme.cend(); ++it) {
             const SwString themeName = it.key();
-            const EmojiList& emojis = it.value();
+            m_tabKeys.push_back(themeName);
+            m_populatedTabs.push_back(false);
+            m_tabWidget->addTab(createTabList_(), themeName);
+        }
 
-            auto* list = new SwListWidget();
-            list->setStyleSheet(R"(
-                SwListView {
-                    background-color: rgba(0,0,0,0);
-                    border-width: 0px;
-                    border-radius: 0px;
-                }
-            )");
-            list->setViewMode(SwListView::ViewMode::IconMode);
-            list->setGridSize(SwSize{m_buttonSize, m_buttonSize});
-            list->setSpacing(m_gridSpacing);
-            list->setViewportPadding(m_gridMargin);
-            list->setFont(SwFont(L"Segoe UI Emoji", m_emojiFontSize, Normal));
-            list->setItemDelegate(new EmojiIconDelegate(list));
-
-            for (int i = 0; i < emojis.size(); ++i) {
-                list->addItem(emojis[i]);
-            }
-
-            SwObject::connect(list, &SwListView::clicked, this, [this, list](const SwModelIndex& idx) {
-                if (!idx.isValid() || !idx.model()) {
-                    return;
-                }
-                const SwString emoji = idx.model()->data(idx, SwItemDataRole::DisplayRole).toString();
-                emojiClicked(emoji);
-            });
-
-            m_tabWidget->addTab(list, themeName);
+        // Populate the first visible tab immediately (others are lazy-loaded
+        // via the currentChanged connection established in initDefaults_).
+        if (!m_tabKeys.isEmpty()) {
+            ensureTabPopulated_(0);
         }
 
         update();
@@ -2140,6 +2243,8 @@ private:
 private:
     SwTabWidget* m_tabWidget{nullptr};
     EmojisByTheme m_emojisByTheme;
+    SwVector<SwString> m_tabKeys;           // Theme keys in tab order.
+    SwVector<bool> m_populatedTabs;         // True once a tab's list has been filled.
 
     int m_buttonSize{40};
     int m_gridSpacing{5};

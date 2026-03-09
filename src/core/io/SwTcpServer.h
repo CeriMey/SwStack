@@ -1,4 +1,28 @@
 #pragma once
+
+/**
+ * @file src/core/io/SwTcpServer.h
+ * @ingroup core_io
+ * @brief Declares the public interface exposed by SwTcpServer in the CoreSw IO layer.
+ *
+ * This header belongs to the CoreSw IO layer. It defines files, sockets, servers, descriptors,
+ * processes, and network helpers that sit directly at operating-system boundaries.
+ *
+ * Within that layer, this file focuses on the TCP server interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwTcpServer.
+ *
+ * Server-oriented declarations here usually coordinate listener setup, connection or session
+ * lifetime, dispatch boundaries, and integration points for higher-level request or protocol
+ * logic.
+ *
+ * IO-facing declarations here usually manage handles, readiness state, buffering, and error
+ * propagation while presenting a portable framework API.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -42,23 +66,42 @@ static constexpr const char* kSwLogCategory_SwTcpServer = "sw.core.io.swtcpserve
 class SwTcpServer : public SwObject {
     SW_OBJECT(SwTcpServer, SwObject)
 public:
+    /**
+     * @brief Constructs a `SwTcpServer` instance.
+     * @param parent Optional parent object that owns this instance.
+     * @param NULL Value passed to the method.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     SwTcpServer(SwObject* parent = nullptr)
         : SwObject(parent), m_listenSocket(INVALID_SOCKET), m_listenEvent(NULL)
     {
         initializeWinsock();
         m_timer = new SwTimer(50, this);
-        connect(m_timer, SIGNAL(timeout), this, &SwTcpServer::onCheckEvents);
+        connect(m_timer, &SwTimer::timeout, this, &SwTcpServer::onCheckEvents);
         m_timer->start();
     }
 
+    /**
+     * @brief Destroys the `SwTcpServer` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     virtual ~SwTcpServer() {
         close();
     }
 
+    /**
+     * @brief Starts listening for incoming traffic.
+     * @param port Local port used by the operation.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     bool listen(uint16_t port) {
         close();
 
-        m_listenSocket = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
+        m_listenSocket = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
         if (m_listenSocket == INVALID_SOCKET) {
             swCError(kSwLogCategory_SwTcpServer) << "WSASocket failed: " << WSAGetLastError();
             return false;
@@ -100,6 +143,11 @@ public:
         return true;
     }
 
+    /**
+     * @brief Closes the underlying resource and stops active work.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     void close() {
         if (m_listenSocket != INVALID_SOCKET) {
             closesocket(m_listenSocket);
@@ -111,6 +159,12 @@ public:
         }
     }
 
+    /**
+     * @brief Returns the current next Pending Connection.
+     * @return The current next Pending Connection.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwTcpSocket* nextPendingConnection() {
         if (m_pendingConnections.isEmpty()) {
             return nullptr;
@@ -124,6 +178,9 @@ signals:
     DECLARE_SIGNAL_VOID(newConnection)
 
 private slots:
+    /**
+     * @brief Performs the `onCheckEvents` operation.
+     */
     void onCheckEvents() {
         if (m_listenEvent == NULL || m_listenSocket == INVALID_SOCKET) {
             return;
@@ -203,18 +260,36 @@ private:
 class SwTcpServer : public SwObject {
     SW_OBJECT(SwTcpServer, SwObject)
 public:
+    /**
+     * @brief Constructs a `SwTcpServer` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     SwTcpServer(SwObject* parent = nullptr)
         : SwObject(parent), m_listenSocket(-1)
     {
         m_timer = new SwTimer(50, this);
-        connect(m_timer, SIGNAL(timeout), this, &SwTcpServer::onCheckEvents);
+        connect(m_timer, &SwTimer::timeout, this, &SwTcpServer::onCheckEvents);
         m_timer->start();
     }
 
+    /**
+     * @brief Destroys the `SwTcpServer` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     virtual ~SwTcpServer() {
         close();
     }
 
+    /**
+     * @brief Starts listening for incoming traffic.
+     * @param port Local port used by the operation.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     bool listen(uint16_t port) {
         close();
 
@@ -252,6 +327,11 @@ public:
         return true;
     }
 
+    /**
+     * @brief Closes the underlying resource and stops active work.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     void close() {
         if (m_listenSocket >= 0) {
             ::close(m_listenSocket);
@@ -259,6 +339,12 @@ public:
         }
     }
 
+    /**
+     * @brief Returns the current next Pending Connection.
+     * @return The current next Pending Connection.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwTcpSocket* nextPendingConnection() {
         if (m_pendingConnections.isEmpty()) {
             return nullptr;
@@ -272,6 +358,9 @@ signals:
     DECLARE_SIGNAL_VOID(newConnection)
 
 private slots:
+    /**
+     * @brief Performs the `onCheckEvents` operation.
+     */
     void onCheckEvents() {
         if (m_listenSocket < 0) {
             return;

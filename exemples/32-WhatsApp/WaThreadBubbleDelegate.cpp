@@ -76,7 +76,7 @@ SwChatBubbleMessage WaThreadBubbleDelegate::messageForIndex_(const SwModelIndex&
         } else if (status == "read") {
             msg.status = SwChatMessageStatus::Read;
         } else {
-            msg.status = SwChatMessageStatus::None;
+            msg.status = SwChatMessageStatus::Unset;
         }
     }
 

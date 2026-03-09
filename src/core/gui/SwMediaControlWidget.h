@@ -22,6 +22,30 @@
 
 #pragma once
 
+/**
+ * @file src/core/gui/SwMediaControlWidget.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwMediaControlWidget in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the media control widget interface. The declarations
+ * exposed here define the stable surface that adjacent code can rely on while the implementation
+ * remains free to evolve behind the header.
+ *
+ * The main declarations in this header are SwMediaControlWidget.
+ *
+ * Widget-oriented declarations here usually capture persistent UI state, input handling, layout
+ * participation, and paint-time behavior while keeping platform-specific rendering details behind
+ * lower layers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
 /***************************************************************************************************
  * Compact media control widget composed of the SwAbstractSlider timeline and SwPushButton actions.
  *
@@ -46,6 +70,13 @@ class SwMediaControlWidget : public SwWidget {
     SW_OBJECT(SwMediaControlWidget, SwWidget)
 
 public:
+    /**
+     * @brief Constructs a `SwMediaControlWidget` instance.
+     * @param parent Optional parent object that owns this instance.
+     * @param false Value passed to the method.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     SwMediaControlWidget(SwWidget* parent = nullptr)
         : SwWidget(parent)
         , m_durationSeconds(300.0)
@@ -133,6 +164,12 @@ public:
         updateTimeLabels();
     }
 
+    /**
+     * @brief Sets the duration Seconds.
+     * @param seconds Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setDurationSeconds(double seconds) {
         m_durationSeconds = std::max(0.0, seconds);
         m_timeline->setRange(0.0, m_durationSeconds);
@@ -141,20 +178,56 @@ public:
         updateTimeLabels();
     }
 
+    /**
+     * @brief Sets the position Seconds.
+     * @param seconds Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setPositionSeconds(double seconds) {
         m_positionSeconds = clampToDuration(seconds);
         m_timeline->setValue(m_positionSeconds);
         updateTimeLabels();
     }
 
+    /**
+     * @brief Sets the buffered Seconds.
+     * @param seconds Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setBufferedSeconds(double seconds) {
         m_bufferedSeconds = clampToDuration(seconds);
         m_timeline->setBufferedValue(m_bufferedSeconds);
     }
 
+    /**
+     * @brief Returns the current duration Seconds.
+     * @return The current duration Seconds.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     double durationSeconds() const { return m_durationSeconds; }
+    /**
+     * @brief Returns the current position Seconds.
+     * @return The current position Seconds.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     double positionSeconds() const { return m_positionSeconds; }
+    /**
+     * @brief Returns the current buffered Seconds.
+     * @return The current buffered Seconds.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     double bufferedSeconds() const { return m_bufferedSeconds; }
+    /**
+     * @brief Returns whether the object reports playing.
+     * @return `true` when the object reports playing; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isPlaying() const { return m_isPlaying; }
 
     DECLARE_SIGNAL(positionChanged, double);
@@ -165,6 +238,15 @@ public:
     DECLARE_SIGNAL_VOID(nextRequested);
 
 protected:
+    /**
+     * @brief Performs the `makeButton` operation.
+     * @param text Value passed to the method.
+     * @param parent Optional parent object that owns this instance.
+     * @param w Width value.
+     * @param h Height value.
+     * @param radius Value passed to the method.
+     * @return The requested make Button.
+     */
     SwPushButton* makeButton(const std::string& text, SwWidget* parent, int w, int h, int radius) {
         auto* btn = new SwPushButton(text, parent);
         btn->setCursor(CursorType::Hand);
@@ -175,6 +257,12 @@ protected:
         return btn;
     }
 
+    /**
+     * @brief Returns the current default Style Sheet.
+     * @return The current default Style Sheet.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     std::string defaultStyleSheet() const {
         return R"(
             SwMediaControlWidget {
@@ -207,11 +295,19 @@ protected:
         )";
     }
 
+    /**
+     * @brief Updates the time Labels managed by the object.
+     */
     void updateTimeLabels() {
         m_currentLabel->setText(formatTime(m_positionSeconds));
         m_totalLabel->setText(formatTime(m_durationSeconds));
     }
 
+    /**
+     * @brief Performs the `formatTime` operation.
+     * @param seconds Value passed to the method.
+     * @return The requested format Time.
+     */
     SwString formatTime(double seconds) const {
         int total = static_cast<int>(std::round(seconds));
         if (total < 0) {
@@ -224,6 +320,11 @@ protected:
         return SwString(buffer);
     }
 
+    /**
+     * @brief Performs the `clampToDuration` operation.
+     * @param seconds Value passed to the method.
+     * @return The requested clamp To Duration.
+     */
     double clampToDuration(double seconds) const {
         if (seconds < 0.0) {
             return 0.0;
@@ -234,6 +335,9 @@ protected:
         return seconds;
     }
 
+    /**
+     * @brief Performs the `togglePlayPause` operation.
+     */
     void togglePlayPause() {
         setPlaying(!m_isPlaying);
         if (m_isPlaying) {
@@ -243,6 +347,12 @@ protected:
         }
     }
 
+    /**
+     * @brief Sets the playing.
+     * @param playing Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setPlaying(bool playing) {
         m_isPlaying = playing;
         m_playButton->setText(playing ? "||" : ">");

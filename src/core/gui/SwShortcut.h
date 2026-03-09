@@ -22,8 +22,32 @@
 
 #pragma once
 
+/**
+ * @file src/core/gui/SwShortcut.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwShortcut in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the shortcut interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwShortcut.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
 /***************************************************************************************************
- * SwShortcut - Qt-like shortcut object (≈ QShortcut).
+ * SwShortcut - shortcut object.
  *
  * Scope (v1):
  * - Single-key sequence (SwKeySequence) attached to a widget.
@@ -39,13 +63,32 @@ class SwShortcut : public SwObject {
     SW_OBJECT(SwShortcut, SwObject)
 
 public:
+    /**
+     * @brief Constructs a `SwShortcut` instance.
+     * @param parentWidget Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     explicit SwShortcut(SwWidget* parentWidget = nullptr)
         : SwObject(parentWidget) {}
 
+    /**
+     * @brief Constructs a `SwShortcut` instance.
+     * @param key Value passed to the method.
+     * @param key Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwShortcut(const SwKeySequence& key, SwWidget* parentWidget)
         : SwObject(parentWidget)
         , m_key(key) {}
 
+    /**
+     * @brief Sets the key.
+     * @param key Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setKey(const SwKeySequence& key) {
         if (m_key == key) {
             return;
@@ -54,8 +97,20 @@ public:
         changed();
     }
 
+    /**
+     * @brief Returns the current key.
+     * @return The current key.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwKeySequence key() const { return m_key; }
 
+    /**
+     * @brief Sets the enabled.
+     * @param on Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setEnabled(bool on) {
         if (m_enabled == on) {
             return;
@@ -64,8 +119,20 @@ public:
         changed();
     }
 
+    /**
+     * @brief Returns whether the object reports enabled.
+     * @return `true` when the object reports enabled; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isEnabled() const { return m_enabled; }
 
+    /**
+     * @brief Performs the `dispatch` operation.
+     * @param root Value passed to the method.
+     * @param event Event object forwarded by the framework.
+     * @return The requested dispatch.
+     */
     static bool dispatch(SwWidget* root, KeyEvent* event) {
         if (!root || !event || event->isAccepted()) {
             return false;
@@ -76,7 +143,7 @@ public:
 
         SwWidget* w = start;
         while (w) {
-            const std::vector<SwObject*>& kids = w->getChildren();
+            const auto& kids = w->children();
             for (SwObject* obj : kids) {
                 auto* sc = dynamic_cast<SwShortcut*>(obj);
                 if (!sc) {
@@ -124,4 +191,3 @@ private:
     SwKeySequence m_key;
     bool m_enabled{true};
 };
-

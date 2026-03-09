@@ -1,3 +1,14 @@
+
+/**
+ * @file
+ * @ingroup core_gui
+ * @brief Declares the pie and donut series type used by the chart subsystem.
+ *
+ * `SwPieSeries` stores labeled slices, their numeric weights, and per-slice display state
+ * such as colors or exploded offsets. Unlike XY series, it models part-of-whole data and
+ * exposes aggregate properties like total value, hole size, and start angle.
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -22,6 +33,8 @@
 
 #pragma once
 
+
+
 #include "SwAbstractSeries.h"
 
 #include <algorithm>
@@ -39,12 +52,36 @@ public:
         double explodeFactor{0.07}; // relative to radius
     };
 
+    /**
+     * @brief Constructs a `SwPieSeries` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwPieSeries(SwObject* parent = nullptr)
         : SwAbstractSeries(parent) {}
 
+    /**
+     * @brief Returns the current type.
+     * @return The current type.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SeriesType type() const override { return SeriesType::Pie; }
+    /**
+     * @brief Returns whether the object reports xYSeries.
+     * @return `true` when the object reports xYSeries; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isXYSeries() const override { return false; }
 
+    /**
+     * @brief Performs the `append` operation.
+     * @param label Value passed to the method.
+     * @param value Value passed to the method.
+     * @param color Value passed to the method.
+     */
     void append(const SwString& label, double value, const SwColor& color) {
         if (!std::isfinite(value) || value < 0.0) {
             return;
@@ -58,12 +95,24 @@ public:
         updated();
     }
 
+    /**
+     * @brief Performs the `append` operation.
+     * @param label Value passed to the method.
+     * @param value Value passed to the method.
+     */
     void append(const SwString& label, double value) {
         append(label, value, nextPaletteColor_());
     }
 
+    /**
+     * @brief Performs the `count` operation.
+     * @return The current count value.
+     */
     int count() const override { return m_slices.size(); }
 
+    /**
+     * @brief Clears the current object state.
+     */
     void clear() override {
         if (m_slices.isEmpty()) {
             return;
@@ -72,8 +121,20 @@ public:
         updated();
     }
 
+    /**
+     * @brief Returns the current slices.
+     * @return The current slices.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwVector<Slice>& slices() const { return m_slices; }
 
+    /**
+     * @brief Sets the hole Size.
+     * @param ratio Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setHoleSize(double ratio) {
         if (!std::isfinite(ratio)) {
             return;
@@ -86,8 +147,20 @@ public:
         updated();
     }
 
+    /**
+     * @brief Returns the current hole Size.
+     * @return The current hole Size.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     double holeSize() const { return m_holeSize; }
 
+    /**
+     * @brief Sets the start Angle Degrees.
+     * @param degrees Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setStartAngleDegrees(double degrees) {
         if (!std::isfinite(degrees)) {
             return;
@@ -99,8 +172,22 @@ public:
         updated();
     }
 
+    /**
+     * @brief Returns the current angle Degrees.
+     * @return The current angle Degrees.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     double startAngleDegrees() const { return m_startAngleDegrees; }
 
+    /**
+     * @brief Sets the exploded.
+     * @param index Value passed to the method.
+     * @param on Value passed to the method.
+     * @param explodeFactor Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setExploded(int index, bool on, double explodeFactor = 0.07) {
         if (index < 0 || index >= m_slices.size()) {
             return;
@@ -115,6 +202,12 @@ public:
         updated();
     }
 
+    /**
+     * @brief Returns the current total Value.
+     * @return The current total Value.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     double totalValue() const {
         double total = 0.0;
         for (int i = 0; i < m_slices.size(); ++i) {
@@ -150,4 +243,3 @@ private:
     double m_startAngleDegrees{-90.0}; // nicer default (start at top)
     int m_paletteIndex{0};
 };
-

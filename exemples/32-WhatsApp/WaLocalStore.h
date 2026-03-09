@@ -22,6 +22,20 @@ public:
         SwString status;
         SwString initial;
         SwColor avatarColor{100, 116, 139};
+
+        Contact() {}
+        Contact(const SwString& idValue,
+                const SwString& displayNameValue,
+                const SwString& phoneValue,
+                const SwString& statusValue,
+                const SwString& initialValue,
+                const SwColor& avatarColorValue)
+            : id(idValue)
+            , displayName(displayNameValue)
+            , phone(phoneValue)
+            , status(statusValue)
+            , initial(initialValue)
+            , avatarColor(avatarColorValue) {}
     };
 
     struct Message {
@@ -47,6 +61,48 @@ public:
         bool favorite{false};
         int unreadCount{0};
         SwList<Message> messages;
+
+        Conversation() {}
+        Conversation(const SwString& idValue,
+                     const SwString& typeValue,
+                     const SwString& titleValue,
+                     const SwString& statusValue,
+                     const SwString& avatarInitialValue,
+                     const SwColor& avatarColorValue,
+                     const SwList<SwString>& participantIdsValue,
+                     int unreadCountValue,
+                     const SwList<Message>& messagesValue)
+            : id(idValue)
+            , type(typeValue)
+            , title(titleValue)
+            , status(statusValue)
+            , avatarInitial(avatarInitialValue)
+            , avatarColor(avatarColorValue)
+            , participantIds(participantIdsValue)
+            , favorite(false)
+            , unreadCount(unreadCountValue)
+            , messages(messagesValue) {}
+
+        Conversation(const SwString& idValue,
+                     const SwString& typeValue,
+                     const SwString& titleValue,
+                     const SwString& statusValue,
+                     const SwString& avatarInitialValue,
+                     const SwColor& avatarColorValue,
+                     const SwList<SwString>& participantIdsValue,
+                     bool favoriteValue,
+                     int unreadCountValue,
+                     const SwList<Message>& messagesValue)
+            : id(idValue)
+            , type(typeValue)
+            , title(titleValue)
+            , status(statusValue)
+            , avatarInitial(avatarInitialValue)
+            , avatarColor(avatarColorValue)
+            , participantIds(participantIdsValue)
+            , favorite(favoriteValue)
+            , unreadCount(unreadCountValue)
+            , messages(messagesValue) {}
 
         SwString lastPreviewText() const;
         SwString lastTimeText() const;

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "SwFrame.h"
 #include "SwLineEdit.h"
@@ -979,7 +979,7 @@ protected:
 
 private:
     void updateLayout_() {
-        const SwRect r = getRect();
+        const SwRect r = frameGeometry();
         const int pad = 10;
         const int searchH = 34;
         const int gap = 8;
@@ -1080,7 +1080,7 @@ protected:
         }
 
         if (m_popup) {
-            const SwRect r = m_popup->getRect();
+            const SwRect r = m_popup->frameGeometry();
             const bool inside = event->x() >= r.x && event->x() <= (r.x + r.width) &&
                                 event->y() >= r.y && event->y() <= (r.y + r.height);
             if (!inside) {
@@ -1127,7 +1127,7 @@ public:
         m_graphRegistry->registerModel<GenericNodeModel>();
         m_graphRegistry->registerModel<OutputNodeModel>();
 
-        m_graph = std::make_unique<SwizioNodes::DataFlowGraphModel>("NodeEditorExample", m_graphRegistry);
+        m_graph.reset(new SwizioNodes::DataFlowGraphModel("NodeEditorExample", m_graphRegistry));
 
         SwObject::connect(m_graph.get(),
                           &SwizioNodes::DataFlowGraphModel::outPortDataUpdated,
@@ -1868,7 +1868,7 @@ private:
     }
 
     void zoomAround_(double newScale, const SwPointF& viewPos) {
-        const SwRect vr = getRect();
+        const SwRect vr = frameGeometry();
         const SwPointF anchor = mapToScene(viewPos);
         const double s = std::max(0.01, newScale);
 
@@ -2889,7 +2889,7 @@ private:
     }
 
     bool hasTextInputFocus_() const {
-        for (SwObject* objChild : getChildren()) {
+        for (SwObject* objChild : children()) {
             auto* w = dynamic_cast<SwWidget*>(objChild);
             if (!w) {
                 continue;
@@ -3432,7 +3432,7 @@ private:
         if (outNode && targetNode) {
             const SwNodeItem::PortHit port = targetNode->hitTestPort(scenePos);
             if (port.hit && port.type == SwNodeItem::InPort) {
-                // "Single connection per input" – if occupied, treat as an invalid drop.
+                // "Single connection per input" â€“ if occupied, treat as an invalid drop.
                 if (!targetNode->allowsMultipleConnections(SwNodeItem::InPort, port.index) && connectionForInput_(targetNode, port.index)) {
                     if (scene()) {
                         scene()->removeItem(preview);
@@ -3570,3 +3570,4 @@ private:
 };
 
 } // namespace swnodeeditor
+

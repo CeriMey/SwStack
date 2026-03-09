@@ -1,4 +1,29 @@
 #pragma once
+
+/**
+ * @file src/core/remote/SwProxyObject.h
+ * @ingroup core_remote
+ * @brief Declares the public interface exposed by SwProxyObject in the CoreSw remote and IPC
+ * layer.
+ *
+ * This header belongs to the CoreSw remote and IPC layer. It provides the abstractions used to
+ * expose objects across process boundaries and to transport data or signals between peers.
+ *
+ * Within that layer, this file focuses on the proxy object interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are ClassName.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * Remote-facing declarations in this area usually coordinate identity, proxying, serialization,
+ * and synchronization across runtimes.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -74,8 +99,8 @@ inline SwStringList discoverRpcTargets(const SwString& domain,
     static const std::string kRpcPrefix("__rpc__|");
     for (size_t i = 0; i < all.size(); ++i) {
         const SwJsonValue v = all[i];
-        if (!v.isObject() || !v.toObject()) continue;
-        const SwJsonObject o(*v.toObject());
+        if (!v.isObject()) continue;
+        const SwJsonObject o(v.toObject());
 
         const std::string object = SwString(o["object"].toString()).toStdString();
         const std::string signal = SwString(o["signal"].toString()).toStdString();
@@ -134,20 +159,63 @@ inline SwStringList discoverRpcTargets(const SwString& domain,
 // Use the SW_PROXY_OBJECT_* macros below to generate typed RPC methods.
 class ProxyObjectBase {
 public:
+    /**
+     * @brief Constructs a `ProxyObjectBase` instance.
+     * @param domain Value passed to the method.
+     * @param object Value passed to the method.
+     * @param clientInfo Value passed to the method.
+     * @param clientInfo Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     ProxyObjectBase(const SwString& domain, const SwString& object, const SwString& clientInfo = SwString())
         : domain_(domain), object_(object), clientInfo_(clientInfo) {}
 
+    /**
+     * @brief Returns the current domain.
+     * @return The current domain.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwString& domain() const { return domain_; }
+    /**
+     * @brief Returns the current object.
+     * @return The current object.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwString& object() const { return object_; }
+    /**
+     * @brief Returns the current client Info.
+     * @return The current client Info.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwString& clientInfo() const { return clientInfo_; }
 
     // "<domain>/<object>" (human-readable remote target id).
+    /**
+     * @brief Returns the current target.
+     * @return The current target.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString target() const { return domain_ + "/" + object_; }
 
     // Best-effort: does the remote process exposing this object still exist?
     // Uses the registry PID(s) for this object and checks OS-level liveness.
+    /**
+     * @brief Performs the `remotePid` operation.
+     * @return The requested remote Pid.
+     */
     uint32_t remotePid() const { return remotePid_(); }
 
+    /**
+     * @brief Returns whether the object reports alive.
+     * @return `true` when the object reports alive; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isAlive() const {
         const uint32_t pid = remotePid_();
         if (!pid) return false;
@@ -155,6 +223,12 @@ public:
     }
 
     // Runtime introspection: list RPC methods exposed by the remote object (from shm registry).
+    /**
+     * @brief Returns the current functions.
+     * @return The current functions.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwStringList functions() const {
         SwStringList out;
         if (domain_.isEmpty() || object_.isEmpty()) return out;
@@ -165,8 +239,8 @@ public:
         static const std::string kRpcPrefix("__rpc__|");
         for (size_t i = 0; i < all.size(); ++i) {
             const SwJsonValue v = all[i];
-            if (!v.isObject() || !v.toObject()) continue;
-            const SwJsonObject o(*v.toObject());
+            if (!v.isObject()) continue;
+            const SwJsonObject o(v.toObject());
 
             if (SwString(o["object"].toString()) != object_) continue;
 
@@ -191,6 +265,11 @@ public:
 
     // Runtime introspection: list argument types for a remote RPC method (from shm registry).
     // Returned type names are best-effort (compiler-dependent), e.g. "int", "unsigned __int64", "SwString"...
+    /**
+     * @brief Performs the `argType` operation.
+     * @param functionName Value passed to the method.
+     * @return The requested arg Type.
+     */
     SwStringList argType(const SwString& functionName) const {
         SwStringList out;
         if (domain_.isEmpty() || object_.isEmpty()) return out;
@@ -205,8 +284,8 @@ public:
         const SwJsonArray all = shmRegistrySnapshot(domain_);
         for (size_t i = 0; i < all.size(); ++i) {
             const SwJsonValue v = all[i];
-            if (!v.isObject() || !v.toObject()) continue;
-            const SwJsonObject o(*v.toObject());
+            if (!v.isObject()) continue;
+            const SwJsonObject o(v.toObject());
 
             if (SwString(o["object"].toString()) != object_) continue;
             if (SwString(o["signal"].toString()).toStdString() != wantSig) continue;
@@ -282,8 +361,8 @@ private:
         const SwJsonArray all = shmRegistrySnapshot(domain_);
         for (size_t i = 0; i < all.size(); ++i) {
             const SwJsonValue v = all[i];
-            if (!v.isObject() || !v.toObject()) continue;
-            const SwJsonObject o(*v.toObject());
+            if (!v.isObject()) continue;
+            const SwJsonObject o(v.toObject());
             if (SwString(o["object"].toString()) != object_) continue;
 
             const uint32_t pid = static_cast<uint32_t>(o["pid"].toInt());

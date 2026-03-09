@@ -22,6 +22,31 @@
 
 #pragma once
 
+/**
+ * @file src/core/types/Sw.h
+ * @ingroup core_types
+ * @brief Declares the public interface exposed by Sw in the CoreSw fundamental types layer.
+ *
+ * This header belongs to the CoreSw fundamental types layer. It provides value types, containers,
+ * text and binary helpers, and lightweight serialization primitives shared across the stack.
+ *
+ * Within that layer, this file focuses on the public interface interface. The declarations
+ * exposed here define the stable surface that adjacent code can rely on while the implementation
+ * remains free to evolve behind the header.
+ *
+ * The main declarations in this header are SwFlagSet, SwSize, SwColor, SwRect, SwPoint,
+ * EntryType, WindowFlag, and CursorType, plus related helper declarations.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * Interfaces in this area are intentionally reused by runtime, IO, GUI, remote, and media modules
+ * to keep cross-module semantics consistent.
+ *
+ */
+
+
 #include "SwFlags.h"
 #ifndef SW_UNUSED
 #define SW_UNUSED(x) (void)(x);
@@ -39,15 +64,41 @@ class SwFlagSet {
 public:
     using Underlying = int;
 
+    /**
+     * @brief Constructs a `SwFlagSet` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwFlagSet() : value(0) {}
+    /**
+     * @brief Constructs a `SwFlagSet` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwFlagSet(Enum flag) : value(static_cast<Underlying>(flag)) {}
+    /**
+     * @brief Constructs a `SwFlagSet` instance.
+     * @param raw Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwFlagSet(Underlying raw) : value(raw) {}
 
+    /**
+     * @brief Performs the `operator|=` operation.
+     * @param flag Value passed to the method.
+     * @return The requested operator |=.
+     */
     SwFlagSet& operator|=(Enum flag) {
         value |= static_cast<Underlying>(flag);
         return *this;
     }
 
+    /**
+     * @brief Performs the `operator|` operation.
+     * @param flag Value passed to the method.
+     * @return The requested operator |.
+     */
     SwFlagSet operator|(Enum flag) const {
         SwFlagSet copy(*this);
         copy |= flag;
@@ -60,6 +111,13 @@ public:
         return flags;
     }
 
+    /**
+     * @brief Sets the flag.
+     * @param flag Value passed to the method.
+     * @param on Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setFlag(Enum flag, bool on = true) {
         if (on) {
             value |= static_cast<Underlying>(flag);
@@ -68,18 +126,45 @@ public:
         }
     }
 
+    /**
+     * @brief Performs the `testFlag` operation.
+     * @param flag Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool testFlag(Enum flag) const {
         return (value & static_cast<Underlying>(flag)) != 0;
     }
 
+    /**
+     * @brief Returns the current raw.
+     * @return The current raw.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     Underlying raw() const { return value; }
 
+    /**
+     * @brief Returns the current underlying.
+     * @return The current underlying.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     explicit operator Underlying() const { return value; }
 
+    /**
+     * @brief Performs the `operator==` operation.
+     * @param other Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool operator==(const SwFlagSet& other) const {
         return value == other.value;
     }
 
+    /**
+     * @brief Performs the `operator!=` operation.
+     * @param other Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool operator!=(const SwFlagSet& other) const {
         return !(*this == other);
     }

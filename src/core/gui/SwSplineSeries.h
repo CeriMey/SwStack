@@ -1,3 +1,14 @@
+
+/**
+ * @file
+ * @ingroup core_gui
+ * @brief Declares the spline-based series type used for smoothed charts.
+ *
+ * `SwSplineSeries` models the same logical point set as a line series, but it carries the
+ * intent that the renderer should interpolate those points with smooth curves. This makes
+ * it suitable for dashboards that want less angular visual output than straight segments.
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -22,15 +33,28 @@
 
 #pragma once
 
+
+
 #include "SwAbstractSeries.h"
 
 class SwSplineSeries : public SwAbstractSeries {
     SW_OBJECT(SwSplineSeries, SwAbstractSeries)
 
 public:
+    /**
+     * @brief Constructs a `SwSplineSeries` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwSplineSeries(SwObject* parent = nullptr)
         : SwAbstractSeries(parent) {}
 
+    /**
+     * @brief Returns the current type.
+     * @return The current type.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SeriesType type() const override { return SeriesType::Spline; }
 };
-

@@ -1,4 +1,27 @@
 #pragma once
+
+/**
+ * @file src/core/io/SwAbstractSocket.h
+ * @ingroup core_io
+ * @brief Declares the public interface exposed by SwAbstractSocket in the CoreSw IO layer.
+ *
+ * This header belongs to the CoreSw IO layer. It defines files, sockets, servers, descriptors,
+ * processes, and network helpers that sit directly at operating-system boundaries.
+ *
+ * Within that layer, this file focuses on the abstract socket interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are SwAbstractSocket.
+ *
+ * Socket-oriented declarations here abstract OS-level descriptors and expose the read, write,
+ * connection, and readiness semantics that higher layers build upon.
+ *
+ * IO-facing declarations here usually manage handles, readiness state, buffering, and error
+ * propagation while presenting a portable framework API.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *

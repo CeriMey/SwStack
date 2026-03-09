@@ -23,7 +23,11 @@ namespace {
 SwString execCommand(const SwString& command)
 {
     SwString result;
+#if defined(_WIN32)
+    FILE* pipe = _popen(command.toStdString().c_str(), "r");
+#else
     FILE* pipe = popen(command.toStdString().c_str(), "r");
+#endif
     if (!pipe) {
         return result;
     }
@@ -31,7 +35,11 @@ SwString execCommand(const SwString& command)
     while (fgets(buffer, sizeof(buffer), pipe)) {
         result += buffer;
     }
+#if defined(_WIN32)
+    _pclose(pipe);
+#else
     pclose(pipe);
+#endif
     return result.trimmed();
 }
 

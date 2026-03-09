@@ -1,0 +1,74 @@
+{
+  "sys": "pn",
+  "duration_ms": 0,
+  "containers": [],
+  "nodes": [
+    {
+      "ns": "pn",
+      "name": "capture",
+      "executable": "install/bin/PnCaptureManagerNode",
+      "workingDirectory": "install/bin",
+      "options": {
+        "reloadOnCrash": true,
+        "reloadOnDisconnect": true,
+        "disconnectTimeoutMs": 5000
+      },
+      "params": {
+        "period_ms": 100,
+        "width": 32,
+        "height": 32,
+        "device_index": -1
+      }
+    },
+    {
+      "ns": "pn",
+      "name": "algoManager",
+      "executable": "install/bin/PnAlgoManagerNode",
+      "workingDirectory": "install/bin",
+      "options": {
+        "reloadOnCrash": true,
+        "reloadOnDisconnect": true,
+        "disconnectTimeoutMs": 5000
+      },
+      "params": {
+        "capture": "pn/pn/capture",
+        "mode": "threshold",
+        "threshold": 120
+      }
+    },
+    {
+      "ns": "pn",
+      "name": "renderManager",
+      "executable": "install/bin/PnRenderManagerNode",
+      "workingDirectory": "install/bin",
+      "options": {
+        "reloadOnCrash": true,
+        "reloadOnDisconnect": true,
+        "disconnectTimeoutMs": 5000
+      },
+      "params": {
+        "capture": "pn/pn/capture",
+        "algo": "pn/pn/algoManager",
+        "blend_percent": 65
+      }
+    },
+    {
+      "ns": "pn",
+      "name": "serverManager",
+      "executable": "install/bin/PnServerManagerNode",
+      "workingDirectory": "install/bin",
+      "options": {
+        "reloadOnCrash": true,
+        "reloadOnDisconnect": true,
+        "disconnectTimeoutMs": 5000
+      },
+      "params": {
+        "http_port": 8090,
+        "video_url": "webcam://0",
+        "device_index": 0,
+        "stream_fps": 20,
+        "jpeg_quality": 80
+      }
+    }
+  ]
+}

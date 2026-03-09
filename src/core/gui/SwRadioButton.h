@@ -1,4 +1,4 @@
-/***************************************************************************************************
+﻿/***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
  * Copyright (C) 2025 Ariya Consulting
@@ -22,8 +22,32 @@
 
 #pragma once
 
+/**
+ * @file src/core/gui/SwRadioButton.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwRadioButton in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the radio button interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are SwRadioButton.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
 /***************************************************************************************************
- * SwRadioButton - Qt-like radio button widget.
+ * SwRadioButton - radio button widget.
  *
  * Notes:
  * - Auto-exclusive behaviour is implemented at the parent level (siblings under the same parent).
@@ -35,27 +59,70 @@ class SwRadioButton : public SwWidget {
     SW_OBJECT(SwRadioButton, SwWidget)
 
 public:
+    /**
+     * @brief Constructs a `SwRadioButton` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwRadioButton(SwWidget* parent = nullptr)
         : SwWidget(parent) {
         initDefaults();
     }
 
+    /**
+     * @brief Constructs a `SwRadioButton` instance.
+     * @param text Value passed to the method.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     SwRadioButton(const SwString& text, SwWidget* parent = nullptr)
         : SwWidget(parent) {
         initDefaults();
         setText(text);
     }
 
+    /**
+     * @brief Sets the accent Color.
+     * @param color Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setAccentColor(const SwColor& color) {
         m_accent = clampColor(color);
         update();
     }
 
+    /**
+     * @brief Returns the current accent Color.
+     * @return The current accent Color.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwColor accentColor() const { return m_accent; }
 
+    /**
+     * @brief Sets the auto Exclusive.
+     * @param on Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setAutoExclusive(bool on) { m_autoExclusive = on; }
+    /**
+     * @brief Returns the current auto Exclusive.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool autoExclusive() const { return m_autoExclusive; }
 
+    /**
+     * @brief Sets the checked.
+     * @param checked Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setChecked(bool checked) {
         if (m_checked == checked) {
             return;
@@ -68,8 +135,18 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns whether the object reports checked.
+     * @return `true` when the object reports checked; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isChecked() const { return m_checked; }
 
+    /**
+     * @brief Performs the `text` operation.
+     * @return The requested text.
+     */
     SwString text() const { return getText(); }
 
     DECLARE_SIGNAL(toggled, bool);
@@ -84,13 +161,19 @@ protected:
         update();
     }
 
+    /**
+     * @brief Handles the paint Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void paintEvent(PaintEvent* event) override {
         SwPainter* painter = event ? event->painter() : nullptr;
         if (!painter) {
             return;
         }
 
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
         const int indicatorSize = clampInt(m_indicatorSize, 12, 28);
         const int indicatorX = bounds.x;
         const int indicatorY = bounds.y + (bounds.height - indicatorSize) / 2;
@@ -134,6 +217,12 @@ protected:
         }
     }
 
+    /**
+     * @brief Handles the mouse Press Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mousePressEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -146,6 +235,12 @@ protected:
         event->accept();
     }
 
+    /**
+     * @brief Handles the mouse Release Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseReleaseEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -167,21 +262,17 @@ protected:
         SwWidget::mouseReleaseEvent(event);
     }
 
+    /**
+     * @brief Handles the mouse Move Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseMoveEvent(MouseEvent* event) override {
         SwWidget::mouseMoveEvent(event);
     }
 
 private:
-    static int clampInt(int value, int minValue, int maxValue) {
-        if (value < minValue) return minValue;
-        if (value > maxValue) return maxValue;
-        return value;
-    }
-
-    static SwColor clampColor(const SwColor& c) {
-        return SwColor{clampInt(c.r, 0, 255), clampInt(c.g, 0, 255), clampInt(c.b, 0, 255)};
-    }
-
     void initDefaults() {
         resize(200, 28);
         setCursor(CursorType::Hand);
@@ -203,7 +294,7 @@ private:
             return;
         }
 
-        const auto& siblings = parentWidget->getChildren();
+        const auto& siblings = parentWidget->children();
         for (SwObject* child : siblings) {
             if (!child || child == this) {
                 continue;

@@ -22,6 +22,30 @@
 
 #ifndef SWSTRING_H
 #define SWSTRING_H
+
+/**
+ * @file src/core/types/SwString.h
+ * @ingroup core_types
+ * @brief Declares the public interface exposed by SwString in the CoreSw fundamental types layer.
+ *
+ * This header belongs to the CoreSw fundamental types layer. It provides value types, containers,
+ * text and binary helpers, and lightweight serialization primitives shared across the stack.
+ *
+ * Within that layer, this file focuses on the string interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwString.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * Interfaces in this area are intentionally reused by runtime, IO, GUI, remote, and media modules
+ * to keep cross-module semantics consistent.
+ *
+ */
+
 static constexpr const char* kSwLogCategory_SwString = "sw.core.types.swstring";
 
 #ifdef QT_CORE_LIB
@@ -32,13 +56,17 @@ static constexpr const char* kSwLogCategory_SwString = "sw.core.types.swstring";
 #include <iostream>
 #include <cstring>
 #include <cctype>
+#include <algorithm>
 #include <unordered_map>
 #include <stdexcept>
 #include <sstream>
+#include <iomanip>
 #include <vector>
 #include <deque>
 #include <functional>
 #include <locale>
+#include <limits>
+#include <type_traits>
 #include <codecvt> // used on non-Windows for UTF conversions (deprecated in C++17+, but widely available)
 
 #include "SwDebug.h"
@@ -63,49 +91,211 @@ class SwString {
 
 public:
     // Constructeurs
+    /**
+     * @brief Constructs a `SwString` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwString() : data_("") {}
+    /**
+     * @brief Constructs a `SwString` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwString(const char* str) : data_(str ? str : "") {}
 #ifdef QT_CORE_LIB
+    /**
+     * @brief Constructs a `SwString` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwString(const QByteArray& arr) : data_(arr.constData(), arr.constData() + arr.size()) {}
 #endif
+    /**
+     * @brief Constructs a `SwString` instance.
+     * @param str Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwString(const std::string& str) : data_(str) {}
+    /**
+     * @brief Constructs a `SwString` instance.
+     * @param data_ Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwString(const SwString& other) : data_(other.data_) {}
+    /**
+     * @brief Constructs a `SwString` instance.
+     * @param bytes Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwString(const SwByteArray& bytes);
+    /**
+     * @brief Constructs a `SwString` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwString(SwString&& other) noexcept : data_(std::move(other.data_)) {}
+    /**
+     * @brief Constructs a `SwString` instance.
+     * @param count Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwString(size_t count, char ch) : data_(std::string(count, ch)) {}
+    /**
+     * @brief Constructs a `SwString` instance.
+     * @param ch Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwString(char ch) : data_(1, ch) {}
 
+    /**
+     * @brief Returns the current string&.
+     * @return The current string&.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     operator std::string&() { return data_; }
+    /**
+     * @brief Returns the current string&.
+     * @return The current string&.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     operator const std::string&() const { return data_; }
 
+    /**
+     * @brief Performs the `operator=` operation.
+     * @return The requested operator =.
+     */
     SwString& operator=(const SwString& other) { if (this != &other) data_ = other.data_; return *this; }
+    /**
+     * @brief Performs the `operator=` operation.
+     * @return The requested operator =.
+     */
     SwString& operator=(SwString&& other) noexcept { if (this != &other) data_ = std::move(other.data_); return *this; }
+    /**
+     * @brief Performs the `operator=` operation.
+     * @param data_ Value passed to the method.
+     * @return The requested operator =.
+     */
     SwString& operator=(const char* str) { data_ = (str ? str : ""); return *this; }
+    /**
+     * @brief Performs the `operator=` operation.
+     * @param str Value passed to the method.
+     * @return The requested operator =.
+     */
     SwString& operator=(const std::string& str) { data_ = str; return *this; }
+    /**
+     * @brief Performs the `operator=` operation.
+     * @param bytes Value passed to the method.
+     * @return The requested operator =.
+     */
     SwString& operator=(const SwByteArray& bytes);
 
+    /**
+     * @brief Performs the `operator+=` operation.
+     * @param other Value passed to the method.
+     * @return The requested operator +=.
+     */
     SwString& operator+=(const SwString& other) { data_ += other.data_; return *this; }
 
+    /**
+     * @brief Performs the `operator+` operation.
+     * @return The requested operator +.
+     */
     SwString operator+(const char* str) const { return SwString(data_ + (str ? str : "")); }
+    /**
+     * @brief Performs the `operator+` operation.
+     * @param str Value passed to the method.
+     * @return The requested operator +.
+     */
     SwString operator+(const std::string& str) const { return SwString(data_ + str); }
+    /**
+     * @brief Performs the `operator+` operation.
+     * @param data_ Value passed to the method.
+     * @return The requested operator +.
+     */
     SwString operator+(const SwString& other) const { return SwString(data_ + other.data_); }
 
+    /**
+     * @brief Performs the `operator==` operation.
+     * @param other Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool operator==(const SwString& other) const { return data_ == other.data_; }
+    /**
+     * @brief Performs the `operator!=` operation.
+     * @param other Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool operator!=(const SwString& other) const { return data_ != other.data_; }
+    /**
+     * @brief Performs the `operator<` operation.
+     * @param other Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool operator<(const SwString& other) const { return data_ < other.data_; }
+    /**
+     * @brief Performs the `operator>` operation.
+     * @param other Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool operator>(const SwString& other) const { return data_ > other.data_; }
 
+    /**
+     * @brief Performs the `operator[]` operation.
+     * @param index Value passed to the method.
+     * @return The requested operator [].
+     */
     char operator[](size_t index) const { return data_[index]; }
+    /**
+     * @brief Performs the `operator[]` operation.
+     * @param index Value passed to the method.
+     * @return The requested operator [].
+     */
     char& operator[](size_t index) { return data_[index]; }
 
+    /**
+     * @brief Returns the current string.
+     * @return The current string.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     operator std::string() const { return data_; }
 
-    // Méthodes de base
+    // MÃ©thodes de base
+    /**
+     * @brief Performs the `size` operation.
+     * @return The current size value.
+     */
     size_t size() const { return data_.size(); }
+    /**
+     * @brief Performs the `length` operation.
+     * @return The current length value.
+     */
     size_t length() const { return data_.length(); }
+    /**
+     * @brief Returns whether the object reports empty.
+     * @return `true` when the object reports empty; otherwise `false`.
+     *
+     * @details This query does not modify the object state.
+     */
     bool isEmpty() const { return data_.empty(); }
+    /**
+     * @brief Clears the current object state.
+     */
     void clear() { data_.clear(); }
 
+    /**
+     * @brief Performs the `at` operation.
+     * @param index Value passed to the method.
+     * @return The requested at.
+     */
     SwChar at(int index) const noexcept {
         if (index < 0) return SwChar('\0');
         const size_t i = static_cast<size_t>(index);
@@ -113,11 +303,22 @@ public:
         return SwChar(static_cast<unsigned char>(data_[i]));
     }
 
-    // optionnel: même overload côté non-const (QString::at() est const, mais ça aide la compat)
+    // optionnel: meme overload cote non-const (la version de lecture seule reste la reference, mais ca aide la compat)
+    /**
+     * @brief Performs the `at` operation.
+     * @param index Value passed to the method.
+     * @return The requested at.
+     */
     SwChar at(int index) noexcept {
         return static_cast<const SwString&>(*this).at(index);
     }
 
+    /**
+     * @brief Returns whether the object reports int.
+     * @return `true` when the object reports int; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isInt() const {
         if (data_.empty() || (data_[0] == '-' && data_.size() == 1)) return false;
         for (size_t i = (data_[0] == '-') ? 1 : 0; i < data_.size(); ++i)
@@ -125,6 +326,12 @@ public:
         return true;
     }
 
+    /**
+     * @brief Returns whether the object reports float.
+     * @return `true` when the object reports float; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isFloat() const {
         if (data_.empty() || (data_[0] == '-' && data_.size() == 1)) return false;
         bool hasDot = false;
@@ -142,9 +349,24 @@ public:
         return hasDot && hasDigit;
     }
 
+    /**
+     * @brief Returns the current to Std String.
+     * @return The current to Std String.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const std::string& toStdString() const { return data_; }
+    /**
+     * @brief Performs the `reserve` operation.
+     * @param capacity Value passed to the method.
+     */
     void reserve(size_t capacity) { data_.reserve(capacity); }
 
+    /**
+     * @brief Performs the `toInt` operation.
+     * @param ok Optional flag updated to report success.
+     * @return The requested to Int.
+     */
     int toInt(bool* ok = nullptr) const {
         SwString cleaned = trimmed();
         std::string sanitized = sanitizeNumericString(cleaned.data_);
@@ -164,6 +386,30 @@ public:
         return static_cast<int>(parsedValue);
     }
 
+    /**
+     * @brief Performs the `toLongLong` operation.
+     * @param ok Optional flag updated to report success.
+     * @return The requested to Long Long.
+     */
+    long long toLongLong(bool* ok = nullptr) const {
+        SwString cleaned = trimmed();
+        std::string sanitized = sanitizeNumericString(cleaned.data_);
+        long long parsedValue = 0;
+        bool success = parseIntegerString(sanitized, parsedValue);
+        if (!success) {
+            if (ok) *ok = false;
+            swCError(kSwLogCategory_SwString) << "Invalid long long conversion in SwString: " << data_;
+            return 0;
+        }
+        if (ok) *ok = true;
+        return parsedValue;
+    }
+
+    /**
+     * @brief Performs the `toFloat` operation.
+     * @param ok Optional flag updated to report success.
+     * @return The requested to Float.
+     */
     float toFloat(bool* ok = nullptr) const {
         double value = 0.0;
         if (!parseNumericDouble(value)) {
@@ -175,6 +421,11 @@ public:
         return static_cast<float>(value);
     }
 
+    /**
+     * @brief Performs the `toDouble` operation.
+     * @param ok Optional flag updated to report success.
+     * @return The requested to Double.
+     */
     double toDouble(bool* ok = nullptr) const {
         double value = 0.0;
         if (!parseNumericDouble(value)) {
@@ -186,6 +437,12 @@ public:
         return value;
     }
 
+    /**
+     * @brief Performs the `number` operation.
+     * @param value Value passed to the method.
+     * @param precision Value passed to the method.
+     * @return The requested number.
+     */
     static SwString number(float value, int precision = -1) {
         std::ostringstream os;
         os << std::fixed;
@@ -199,7 +456,13 @@ public:
         return SwString(result);
     }
 
-    static SwString number(double value, int precision = -1) {
+    /**
+     * @brief Performs the `number` operation.
+     * @param value Value passed to the method.
+     * @param precision Value passed to the method.
+     * @return The requested number.
+     */
+    static SwString number(double value, int precision) {
         std::ostringstream os;
         os << std::fixed;
         if (precision >= 0) os.precision(precision);
@@ -212,30 +475,113 @@ public:
         return SwString(result);
     }
 
-    static SwString number(int value) { return SwString(std::to_string(value)); }
+    // Compatibility overloads
+    /**
+     * @brief Performs the `number` operation.
+     * @param value Value passed to the method.
+     * @param base Value passed to the method.
+     * @return The requested number.
+     */
+    static SwString number(int value, int base = 10) { return numberSignedImpl_<int>(value, base); }
+    /**
+     * @brief Performs the `number` operation.
+     * @param value Value passed to the method.
+     * @param base Value passed to the method.
+     * @return The requested number.
+     */
+    static SwString number(unsigned int value, int base = 10) { return numberUnsignedImpl_<unsigned int>(value, base); }
+    /**
+     * @brief Performs the `number` operation.
+     * @param value Value passed to the method.
+     * @param base Value passed to the method.
+     * @return The requested number.
+     */
+    static SwString number(long value, int base = 10) { return numberSignedImpl_<long>(value, base); }
+    /**
+     * @brief Performs the `number` operation.
+     * @param value Value passed to the method.
+     * @param base Value passed to the method.
+     * @return The requested number.
+     */
+    static SwString number(unsigned long value, int base = 10) { return numberUnsignedImpl_<unsigned long>(value, base); }
+    /**
+     * @brief Performs the `number` operation.
+     * @param value Value passed to the method.
+     * @param base Value passed to the method.
+     * @return The requested number.
+     */
+    static SwString number(long long value, int base = 10) { return numberSignedImpl_<long long>(value, base); }
+    /**
+     * @brief Performs the `number` operation.
+     * @param value Value passed to the method.
+     * @param base Value passed to the method.
+     * @return The requested number.
+     */
+    static SwString number(unsigned long long value, int base = 10) { return numberUnsignedImpl_<unsigned long long>(value, base); }
+    /**
+     * @brief Performs the `number` operation.
+     * @param value Value passed to the method.
+     * @param format Value passed to the method.
+     * @param precision Value passed to the method.
+     * @return The requested number.
+     */
+    static SwString number(double value, char format = 'g', int precision = 6) {
+        return numberFloatingImpl_(value, format, precision);
+    }
 
+    /**
+     * @brief Performs the `toBase64` operation.
+     * @return The requested to Base64.
+     */
     SwString toBase64() const { return SwString(SwCrypto::base64Encode(data_)); }
 
+    /**
+     * @brief Returns the current de Base64.
+     * @return The current de Base64.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString deBase64() {
         std::vector<unsigned char> decoded = SwCrypto::base64Decode(data_);
         return SwString(std::string(decoded.begin(), decoded.end()));
     }
 
+    /**
+     * @brief Performs the `fromBase64` operation.
+     * @param base64 Value passed to the method.
+     * @return The requested from Base64.
+     */
     static SwString fromBase64(const SwString& base64) {
         std::vector<unsigned char> decoded = SwCrypto::base64Decode(base64.toStdString());
         return SwString(std::string(decoded.begin(), decoded.end()));
     }
 
+    /**
+     * @brief Performs the `encryptAES` operation.
+     * @param key Value passed to the method.
+     * @return The requested encrypt AES.
+     */
     SwString encryptAES(const SwString& key) const {
         try { return SwString(SwCrypto::encryptAES(data_, key.data_)); }
         catch (const std::exception& e) { swCError(kSwLogCategory_SwString) << "Encryption error: " << e.what(); return SwString(""); }
     }
 
+    /**
+     * @brief Performs the `decryptAES` operation.
+     * @param key Value passed to the method.
+     * @return The requested decrypt AES.
+     */
     SwString decryptAES(const SwString& key) {
         try { return SwString(SwCrypto::decryptAES(data_, key.data_)); }
         catch (const std::exception& e) { swCError(kSwLogCategory_SwString) << "Decryption error: " << e.what(); return SwString(""); }
     }
 
+    /**
+     * @brief Performs the `decryptAES` operation.
+     * @param encryptedBase64 Value passed to the method.
+     * @param key Value passed to the method.
+     * @return The requested decrypt AES.
+     */
     static SwString decryptAES(const SwString& encryptedBase64, const SwString& key) {
         try { return SwString(SwCrypto::decryptAES(encryptedBase64.data_, key.data_)); }
         catch (const std::exception& e) { swCError(kSwLogCategory_SwString) << "Decryption error: " << e.what(); return SwString(""); }
@@ -244,6 +590,11 @@ public:
     friend std::ostream& operator<<(std::ostream& os, const SwString& str) { os << str.data_; return os; }
     friend std::istream& operator>>(std::istream& is, SwString& str) { is >> str.data_; return is; }
 
+    /**
+     * @brief Performs the `split` operation.
+     * @param delimiter Value passed to the method.
+     * @return The requested split.
+     */
     SwList<SwString> split(const char* delimiter) const {
         SwList<SwString> result;
         if (!delimiter || *delimiter == '\0') return result;
@@ -259,6 +610,11 @@ public:
         return result;
     }
 
+    /**
+     * @brief Performs the `split` operation.
+     * @param delimiter Value passed to the method.
+     * @return The requested split.
+     */
     SwList<SwString> split(char delimiter) const {
         SwList<SwString> result;
         size_t start = 0;
@@ -272,11 +628,21 @@ public:
         return result;
     }
 
+    /**
+     * @brief Performs the `split` operation.
+     * @param delimiter Value passed to the method.
+     * @return The requested split.
+     */
     SwList<SwString> split(const std::string& delimiter) const {
         if (delimiter.empty()) throw std::invalid_argument("Delimiter cannot be empty.");
         return split(SwString(delimiter));
     }
 
+    /**
+     * @brief Performs the `split` operation.
+     * @param delimiter Value passed to the method.
+     * @return The requested split.
+     */
     SwList<SwString> split(const SwString& delimiter) const {
         if (delimiter.isEmpty()) throw std::invalid_argument("Delimiter cannot be empty.");
         SwList<SwString> result;
@@ -291,10 +657,31 @@ public:
         return result;
     }
 
+    /**
+     * @brief Performs the `contains` operation.
+     * @param ch Value passed to the method.
+     * @return `true` when the object reports contains; otherwise `false`.
+     */
+    bool contains(char ch) const {
+        return data_.find(ch) != std::string::npos;
+    }
+
+    /**
+     * @brief Performs the `contains` operation.
+     * @param substring Value passed to the method.
+     * @param cs Value passed to the method.
+     * @return `true` when the object reports contains; otherwise `false`.
+     */
     bool contains(const SwString& substring, Sw::CaseSensitivity cs = Sw::CaseSensitive) const {
         return contains(substring.data_.c_str(), cs);
     }
 
+    /**
+     * @brief Performs the `contains` operation.
+     * @param substring Value passed to the method.
+     * @param cs Value passed to the method.
+     * @return `true` when the object reports contains; otherwise `false`.
+     */
     bool contains(const char* substring, Sw::CaseSensitivity cs = Sw::CaseSensitive) const {
         if (!substring) {
             return false;
@@ -309,8 +696,34 @@ public:
         return haystack.find(needle) != std::string::npos;
     }
 
+    /**
+     * @brief Performs the `reversed` operation.
+     * @return The requested reversed.
+     */
     SwString reversed() const { return SwString(std::string(data_.rbegin(), data_.rend())); }
 
+    /**
+     * @brief Starts the s With managed by the object.
+     * @param ch Value passed to the method.
+     * @param cs Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
+    bool startsWith(char ch, Sw::CaseSensitivity cs = Sw::CaseSensitive) const {
+        if (data_.empty()) return false;
+        if (cs == Sw::CaseSensitive) return data_.front() == ch;
+        return std::tolower(static_cast<unsigned char>(data_.front())) == std::tolower(static_cast<unsigned char>(ch));
+    }
+
+    /**
+     * @brief Starts the s With managed by the object.
+     * @param prefix Prefix used by the operation.
+     * @param cs Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     bool startsWith(const SwString& prefix, Sw::CaseSensitivity cs = Sw::CaseSensitive) const {
         if (prefix.size() > data_.size()) {
             return false;
@@ -327,6 +740,24 @@ public:
         return true;
     }
 
+    /**
+     * @brief Performs the `endsWith` operation.
+     * @param ch Value passed to the method.
+     * @param cs Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
+    bool endsWith(char ch, Sw::CaseSensitivity cs = Sw::CaseSensitive) const {
+        if (data_.empty()) return false;
+        if (cs == Sw::CaseSensitive) return data_.back() == ch;
+        return std::tolower(static_cast<unsigned char>(data_.back())) == std::tolower(static_cast<unsigned char>(ch));
+    }
+
+    /**
+     * @brief Performs the `endsWith` operation.
+     * @param suffix Value passed to the method.
+     * @param cs Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool endsWith(const SwString& suffix, Sw::CaseSensitivity cs = Sw::CaseSensitive) const {
         if (suffix.size() > data_.size()) return false;
         if (cs == Sw::CaseSensitive) {
@@ -342,35 +773,91 @@ public:
         return true;
     }
 
+    /**
+     * @brief Performs the `compare` operation.
+     * @param other Value passed to the method.
+     * @param cs Value passed to the method.
+     * @return The requested compare.
+     */
     int compare(const SwString& other, Sw::CaseSensitivity cs = Sw::CaseSensitive) const;
+    /**
+     * @brief Performs the `compare` operation.
+     * @param str Value passed to the method.
+     * @param cs Value passed to the method.
+     * @return The requested compare.
+     */
     int compare(const char* str, Sw::CaseSensitivity cs = Sw::CaseSensitive) const;
 
+    /**
+     * @brief Performs the `indexOf` operation.
+     * @param ch Value passed to the method.
+     * @param startIndex Value passed to the method.
+     * @return The requested index Of.
+     */
+    int indexOf(char ch, size_t startIndex = 0) const {
+        if (startIndex >= data_.size()) return -1;
+        size_t pos = data_.find(ch, startIndex);
+        return (pos != std::string::npos) ? static_cast<int>(pos) : -1;
+    }
+
+    /**
+     * @brief Performs the `indexOf` operation.
+     * @param substring Value passed to the method.
+     * @param startIndex Value passed to the method.
+     * @return The requested index Of.
+     */
     int indexOf(const SwString& substring, size_t startIndex = 0) const {
         if (startIndex >= data_.size()) return -1;
         size_t pos = data_.find(substring.data_, startIndex);
         return (pos != std::string::npos) ? static_cast<int>(pos) : -1;
     }
 
+    /**
+     * @brief Performs the `lastIndexOf` operation.
+     * @param substring Value passed to the method.
+     * @return The requested last Index Of.
+     */
     size_t lastIndexOf(const SwString& substring) const {
         size_t pos = data_.rfind(substring.data_);
         return (pos != std::string::npos) ? pos : static_cast<size_t>(-1);
     }
 
+    /**
+     * @brief Performs the `lastIndexOf` operation.
+     * @param character Value passed to the method.
+     * @return The requested last Index Of.
+     */
     size_t lastIndexOf(char character) const {
         size_t pos = data_.rfind(character);
         return (pos != std::string::npos) ? pos : static_cast<size_t>(-1);
     }
 
+    /**
+     * @brief Performs the `firstIndexOf` operation.
+     * @param substring Value passed to the method.
+     * @return The requested first Index Of.
+     */
     size_t firstIndexOf(const SwString& substring) const {
         size_t pos = data_.find(substring.data_);
         return (pos != std::string::npos) ? pos : static_cast<size_t>(-1);
     }
 
+    /**
+     * @brief Performs the `firstIndexOf` operation.
+     * @param character Value passed to the method.
+     * @return The requested first Index Of.
+     */
     size_t firstIndexOf(char character) const {
         size_t pos = data_.find(character);
         return (pos != std::string::npos) ? pos : static_cast<size_t>(-1);
     }
 
+    /**
+     * @brief Returns the current trimmed.
+     * @return The current trimmed.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString trimmed() const {
         size_t start = data_.find_first_not_of(" \t\n\r");
         size_t end = data_.find_last_not_of(" \t\n\r");
@@ -378,12 +865,24 @@ public:
         return SwString(data_.substr(start, end - start + 1));
     }
 
+    /**
+     * @brief Returns the current to Upper.
+     * @return The current to Upper.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString toUpper() const {
         std::string upper(data_);
         for (auto& c : upper) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
         return SwString(upper);
     }
 
+    /**
+     * @brief Returns the current to Lower.
+     * @return The current to Lower.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString toLower() const {
         std::string lower(data_);
         for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -391,13 +890,22 @@ public:
     }
 
     // --- UTF conversions: Windows uses WinAPI; Linux uses std::wstring_convert ---
+    /**
+     * @brief Performs the `fromWString` operation.
+     * @param wideStr Value passed to the method.
+     * @return The requested from WString.
+     */
     static SwString fromWString(const std::wstring& wideStr) {
         if (wideStr.empty()) return SwString();
 #ifdef _WIN32
-        int bufferSize = WideCharToMultiByte(CP_UTF8, 0, wideStr.c_str(), -1, nullptr, 0, nullptr, nullptr);
+        const int sourceLen = static_cast<int>(wideStr.size());
+        int bufferSize = WideCharToMultiByte(CP_UTF8, 0, wideStr.data(), sourceLen, nullptr, 0, nullptr, nullptr);
         if (bufferSize <= 0) return SwString();
-        std::string utf8Str(static_cast<size_t>(bufferSize - 1), '\0');
-        WideCharToMultiByte(CP_UTF8, 0, wideStr.c_str(), -1, &utf8Str[0], bufferSize, nullptr, nullptr);
+        std::string utf8Str(static_cast<size_t>(bufferSize), '\0');
+        int written = WideCharToMultiByte(CP_UTF8, 0, wideStr.data(), sourceLen, &utf8Str[0], bufferSize, nullptr, nullptr);
+        if (written <= 0) {
+            return SwString();
+        }
         return SwString(utf8Str);
 #else
         try {
@@ -409,13 +917,24 @@ public:
 #endif
     }
 
+    /**
+     * @brief Performs the `fromWCharArray` operation.
+     * @param wideStr Value passed to the method.
+     * @return The requested from WChar Array.
+     */
     static SwString fromWCharArray(const wchar_t* wideStr) {
         if (!wideStr) return SwString();
 #ifdef _WIN32
         int bufferSize = WideCharToMultiByte(CP_UTF8, 0, wideStr, -1, nullptr, 0, nullptr, nullptr);
         if (bufferSize <= 0) return SwString();
-        std::string utf8Str(static_cast<size_t>(bufferSize - 1), '\0');
-        WideCharToMultiByte(CP_UTF8, 0, wideStr, -1, &utf8Str[0], bufferSize, nullptr, nullptr);
+        std::string utf8Str(static_cast<size_t>(bufferSize), '\0');
+        int written = WideCharToMultiByte(CP_UTF8, 0, wideStr, -1, &utf8Str[0], bufferSize, nullptr, nullptr);
+        if (written <= 0) {
+            return SwString();
+        }
+        if (!utf8Str.empty() && utf8Str.back() == '\0') {
+            utf8Str.pop_back();
+        }
         return SwString(utf8Str);
 #else
         try {
@@ -427,6 +946,12 @@ public:
 #endif
     }
 
+    /**
+     * @brief Performs the `replace` operation.
+     * @param oldSub Value passed to the method.
+     * @param newSub Value passed to the method.
+     * @return The requested replace.
+     */
     SwString& replace(const SwString& oldSub, const SwString& newSub) {
         if (oldSub == "" || oldSub == "\0") return *this;
         size_t pos = 0;
@@ -437,10 +962,21 @@ public:
         return *this;
     }
 
+    /**
+     * @brief Removes the specified remove.
+     * @param re Value passed to the method.
+     * @return The requested remove.
+     */
     SwString& remove(const SwRegularExpression& re);
 
     // remove(position, n)
     // - si position hors bornes => ne fait rien
+    /**
+     * @brief Removes the specified remove.
+     * @param position Value passed to the method.
+     * @param n Value passed to the method.
+     * @return The requested remove.
+     */
     SwString& remove(int position, int n = 1) {
         if (n == 0) return *this;
 
@@ -462,6 +998,11 @@ public:
         return *this;
     }
 
+    /**
+     * @brief Performs the `arg` operation.
+     * @param value Value passed to the method.
+     * @return The requested arg.
+     */
     SwString arg(const SwString& value) const {
         SwString result(*this);
         size_t start = result.data_.find('%');
@@ -483,6 +1024,66 @@ public:
         return result;
     }
 
+    /**
+     * @brief Performs the `arg` operation.
+     * @return The requested arg.
+     */
+    SwString arg(int value) const { return arg(SwString::number(value)); }
+    /**
+     * @brief Performs the `arg` operation.
+     * @return The requested arg.
+     */
+    SwString arg(unsigned int value) const { return arg(SwString::number(static_cast<long long>(value))); }
+    /**
+     * @brief Performs the `arg` operation.
+     * @return The requested arg.
+     */
+    SwString arg(long value) const { return arg(SwString::number(static_cast<long long>(value))); }
+    /**
+     * @brief Performs the `arg` operation.
+     * @return The requested arg.
+     */
+    SwString arg(unsigned long value) const { return arg(SwString::number(static_cast<unsigned long long>(value))); }
+    /**
+     * @brief Performs the `arg` operation.
+     * @return The requested arg.
+     */
+    SwString arg(long long value) const { return arg(SwString::number(value)); }
+    /**
+     * @brief Performs the `arg` operation.
+     * @return The requested arg.
+     */
+    SwString arg(unsigned long long value) const { return arg(SwString::number(value)); }
+    /**
+     * @brief Performs the `arg` operation.
+     * @param value Value passed to the method.
+     * @param precision Value passed to the method.
+     * @return The requested arg.
+     */
+    SwString arg(double value, int precision = -1) const { return arg(SwString::number(value, 'g', precision < 0 ? 6 : precision)); }
+    /**
+     * @brief Performs the `arg` operation.
+     * @param value Value passed to the method.
+     * @param precision Value passed to the method.
+     * @return The requested arg.
+     */
+    SwString arg(float value, int precision = -1) const { return arg(static_cast<double>(value), precision); }
+    /**
+     * @brief Performs the `arg` operation.
+     * @return The requested arg.
+     */
+    SwString arg(bool value) const { return arg(SwString(value ? "true" : "false")); }
+    /**
+     * @brief Performs the `arg` operation.
+     * @return The requested arg.
+     */
+    SwString arg(char value) const { return arg(SwString(std::string(1, value))); }
+
+    /**
+     * @brief Performs the `count` operation.
+     * @param substring Value passed to the method.
+     * @return The current count value.
+     */
     size_t count(const SwString& substring) const {
         size_t pos = 0, occurrences = 0;
         while ((pos = data_.find(substring.data_, pos)) != std::string::npos) {
@@ -492,6 +1093,12 @@ public:
         return occurrences;
     }
 
+    /**
+     * @brief Returns the current simplified.
+     * @return The current simplified.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString simplified() const {
         std::string result;
         result.reserve(data_.size());
@@ -504,76 +1111,187 @@ public:
         return SwString(result);
     }
 
+    /**
+     * @brief Performs the `mid` operation.
+     * @param pos Position used by the operation.
+     * @param len Value passed to the method.
+     * @return The requested mid.
+     */
     SwString mid(int pos, int len = -1) const {
         if (pos < 0 || pos >= static_cast<int>(data_.size())) return SwString("");
         if (len < 0 || pos + len > static_cast<int>(data_.size())) len = static_cast<int>(data_.size()) - pos;
         return SwString(data_.substr(static_cast<size_t>(pos), static_cast<size_t>(len)));
     }
 
+    /**
+     * @brief Performs the `left` operation.
+     * @param n Value passed to the method.
+     * @return The requested left.
+     */
     SwString left(int n) const {
         if (n < 0) n = 0;
         return SwString(data_.substr(0, static_cast<size_t>(n)));
     }
 
+    /**
+     * @brief Performs the `right` operation.
+     * @param n Value passed to the method.
+     * @return The requested right.
+     */
     SwString right(size_t n) const {
         if (n >= data_.size()) return *this;
         return SwString(data_.substr(data_.size() - n));
     }
 
+    /**
+     * @brief Performs the `first` operation.
+     * @return The requested first.
+     */
     SwString first() const { return data_.empty() ? SwString("") : SwString(1, data_.front()); }
+    /**
+     * @brief Performs the `last` operation.
+     * @return The requested last.
+     */
     SwString last()  const { return data_.empty() ? SwString("") : SwString(1, data_.back()); }
 
+    /**
+     * @brief Performs the `append` operation.
+     * @param other Value passed to the method.
+     * @return The requested append.
+     */
     SwString& append(const SwString& other) { data_ += other.data_; return *this; }
+    /**
+     * @brief Performs the `append` operation.
+     * @param str Value passed to the method.
+     * @return The requested append.
+     */
     SwString& append(const std::string& str) { data_ += str; return *this; }
+    /**
+     * @brief Performs the `append` operation.
+     * @return The requested append.
+     */
     SwString& append(const char* cstr) { data_ += (cstr ? std::string(cstr) : std::string()); return *this; }
+    /**
+     * @brief Performs the `append` operation.
+     * @param ch Value passed to the method.
+     * @return The requested append.
+     */
     SwString& append(char ch) { data_ += ch; return *this; }
 
+    /**
+     * @brief Performs the `prepend` operation.
+     * @param other Value passed to the method.
+     * @return The requested prepend.
+     */
     SwString& prepend(const SwString& other) { data_ = other.data_ + data_; return *this; }
+    /**
+     * @brief Performs the `prepend` operation.
+     * @param str Value passed to the method.
+     * @return The requested prepend.
+     */
     SwString& prepend(const std::string& str) { data_ = str + data_; return *this; }
+    /**
+     * @brief Performs the `prepend` operation.
+     * @param data_ Value passed to the method.
+     * @return The requested prepend.
+     */
     SwString& prepend(const char* cstr) { data_ = (cstr ? std::string(cstr) : std::string()) + data_; return *this; }
+    /**
+     * @brief Performs the `prepend` operation.
+     * @param ch Value passed to the method.
+     * @return The requested prepend.
+     */
     SwString& prepend(char ch) { data_.insert(data_.begin(), ch); return *this; }
 
+    /**
+     * @brief Performs the `substr` operation.
+     * @param pos Position used by the operation.
+     * @param len Value passed to the method.
+     * @return The requested substr.
+     */
     SwString substr(size_t pos = 0, size_t len = std::string::npos) const {
         return SwString(data_.substr(pos, len));
     }
 
+    /**
+     * @brief Performs the `erase` operation.
+     * @param pos Position used by the operation.
+     * @param len Value passed to the method.
+     * @return The requested erase.
+     */
     SwString& erase(size_t pos = 0, size_t len = std::string::npos) {
         data_.erase(pos, len);
         return *this;
     }
 
+    /**
+     * @brief Performs the `insert` operation.
+     * @param pos Position used by the operation.
+     * @param str Value passed to the method.
+     * @return The requested insert.
+     */
     SwString& insert(size_t pos, const SwString& str) {
         data_.insert(pos, str.data_);
         return *this;
     }
 
+    /**
+     * @brief Performs the `insert` operation.
+     * @param pos Position used by the operation.
+     * @param str Value passed to the method.
+     * @return The requested insert.
+     */
     SwString& insert(size_t pos, const std::string& str) {
         data_.insert(pos, str);
         return *this;
     }
 
+    /**
+     * @brief Performs the `insert` operation.
+     * @param pos Position used by the operation.
+     * @param count Value passed to the method.
+     * @param ch Value passed to the method.
+     * @return The requested insert.
+     */
     SwString& insert(size_t pos, size_t count, char ch) {
         data_.insert(pos, count, ch);
         return *this;
     }
 
+    /**
+     * @brief Performs the `toUtf8` operation.
+     * @return The requested to Utf8.
+     */
     const char* toUtf8() const { return data_.c_str(); }
 
     // WARNING (fixed): previous implementation returned pointer to temporary
+    /**
+     * @brief Returns the current to WChar.
+     * @return The current to WChar.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const wchar_t* toWChar() const {
         thread_local std::wstring wideBuffer;
         wideBuffer = toStdWString();
         return wideBuffer.c_str();
     }
 
+    /**
+     * @brief Returns the current to Std WString.
+     * @return The current to Std WString.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     std::wstring toStdWString() const {
         if (data_.empty()) return std::wstring();
 #ifdef _WIN32
-        int size_needed = MultiByteToWideChar(CP_UTF8, 0, data_.c_str(), -1, nullptr, 0);
+        const int sourceLen = static_cast<int>(data_.size());
+        int size_needed = MultiByteToWideChar(CP_UTF8, 0, data_.data(), sourceLen, nullptr, 0);
         if (size_needed <= 0) throw std::runtime_error("Failed to convert string to wstring");
         std::wstring wstr(static_cast<size_t>(size_needed), 0);
-        MultiByteToWideChar(CP_UTF8, 0, data_.c_str(), -1, &wstr[0], size_needed);
-        if (!wstr.empty() && wstr.back() == L'\0') wstr.pop_back();
+        int converted = MultiByteToWideChar(CP_UTF8, 0, data_.data(), sourceLen, &wstr[0], size_needed);
+        if (converted <= 0) throw std::runtime_error("Failed to convert string to wstring");
         return wstr;
 #else
         try {
@@ -586,6 +1304,12 @@ public:
     }
 
     // Convert UTF-8 to Latin1 best-effort (fallback '?')
+    /**
+     * @brief Returns the current to Latin1.
+     * @return The current to Latin1.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const char* toLatin1() const {
         static thread_local std::string latin1String;
         latin1String.clear();
@@ -626,7 +1350,18 @@ public:
         return latin1String.c_str();
     }
 
+    /**
+     * @brief Performs the `fromLatin1` operation.
+     * @param str Value passed to the method.
+     * @return The requested from Latin1.
+     */
     static SwString fromLatin1(const char* str, size_t length) { return SwString(std::string(str, length)); }
+    /**
+     * @brief Performs the `fromUtf8` operation.
+     * @param str Value passed to the method.
+     * @param length Value passed to the method.
+     * @return The requested from Utf8.
+     */
     static SwString fromUtf8(const char* str, size_t length = static_cast<size_t>(-1)) {
         if (!str) {
             return SwString();
@@ -640,17 +1375,50 @@ public:
     }
 
 
+    /**
+     * @brief Performs the `resize` operation.
+     */
     void resize(int newSize) { data_.resize(static_cast<size_t>(newSize)); }
 
+    /**
+     * @brief Performs the `data` operation.
+     * @return The requested data.
+     */
     const char* data() const { return data_.data(); }
+    /**
+     * @brief Performs the `data` operation.
+     * @return The requested data.
+     */
     char* data() { return data_.empty() ? nullptr : &data_[0]; }
 
+    /**
+     * @brief Performs the `begin` operation.
+     * @return The requested begin.
+     */
     char* begin() { return data_.empty() ? nullptr : &data_[0]; }
+    /**
+     * @brief Performs the `end` operation.
+     * @return The requested end.
+     */
     char* end() { return data_.empty() ? nullptr : &data_[0] + data_.size(); }
+    /**
+     * @brief Performs the `begin` operation.
+     * @return The requested begin.
+     */
     const char* begin() const { return data_.data(); }
+    /**
+     * @brief Performs the `end` operation.
+     * @return The requested end.
+     */
     const char* end() const { return data_.data() + data_.size(); }
 
     // Sizes in UTF-16/UTF-32 code units
+    /**
+     * @brief Returns the current utf16 Size.
+     * @return The current utf16 Size.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     size_t utf16Size() const {
 #ifdef _WIN32
         return toStdWString().size(); // wchar_t is UTF-16 on Windows
@@ -664,6 +1432,12 @@ public:
 #endif
     }
 
+    /**
+     * @brief Returns the current utf32 Size.
+     * @return The current utf32 Size.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     size_t utf32Size() const {
         try {
 #ifdef _WIN32
@@ -682,11 +1456,41 @@ public:
         }
     }
 
+    /**
+     * @brief Performs the `chop` operation.
+     * @param n Value passed to the method.
+     * @return The requested chop.
+     */
     SwString& chop(int n) {
         if (n <= 0) return *this;
         if (static_cast<size_t>(n) >= data_.size()) data_.clear();
         else data_.erase(data_.size() - static_cast<size_t>(n));
         return *this;
+    }
+
+    /**
+     * @brief Performs the `join` operation.
+     * @param list Value passed to the method.
+     * @param separator Value passed to the method.
+     * @return The requested join.
+     */
+    static SwString join(const SwList<SwString>& list, const SwString& separator) {
+        SwString result;
+        for (int i = 0; i < list.size(); ++i) {
+            if (i > 0) result += separator;
+            result += list[i];
+        }
+        return result;
+    }
+
+    /**
+     * @brief Performs the `join` operation.
+     * @param list Value passed to the method.
+     * @param separator Value passed to the method.
+     * @return The requested join.
+     */
+    static SwString join(const SwList<SwString>& list, char separator) {
+        return join(list, SwString(std::string(1, separator)));
     }
 
     friend SwString operator+(const char* lhs, const SwString& rhs);
@@ -710,6 +1514,11 @@ private:
     static std::string sanitizeNumericString(const std::string& input);
     static bool parseIntegerString(const std::string& input, long long& value);
     bool parseNumericDouble(double& value) const;
+    template <typename UnsignedT>
+    static SwString numberUnsignedImpl_(UnsignedT value, int base);
+    template <typename SignedT>
+    static SwString numberSignedImpl_(SignedT value, int base);
+    static SwString numberFloatingImpl_(double value, char format, int precision);
 
     char unicodeToLatin1(char32_t unicode) const {
         static const std::unordered_map<char32_t, char> unicodeToLatin1Table = {
@@ -751,6 +1560,65 @@ private:
 
 inline SwString operator+(const char* lhs, const SwString& rhs) { return SwString(lhs ? lhs : "") + rhs; }
 
+template <typename UnsignedT>
+inline SwString SwString::numberUnsignedImpl_(UnsignedT value, int base) {
+    if (base < 2 || base > 36) {
+        base = 10;
+    }
+
+    std::string digits;
+    do {
+        const unsigned int digit = static_cast<unsigned int>(value % static_cast<UnsignedT>(base));
+        digits.push_back("0123456789abcdefghijklmnopqrstuvwxyz"[digit]);
+        value /= static_cast<UnsignedT>(base);
+    } while (value != 0);
+    std::reverse(digits.begin(), digits.end());
+    return SwString(digits);
+}
+
+template <typename SignedT>
+inline SwString SwString::numberSignedImpl_(SignedT value, int base) {
+    typedef typename std::make_unsigned<SignedT>::type UnsignedT;
+    const bool negative = value < static_cast<SignedT>(0);
+
+    UnsignedT magnitude = 0;
+    if (negative) {
+        magnitude = static_cast<UnsignedT>(-(value + static_cast<SignedT>(1)));
+        magnitude = static_cast<UnsignedT>(magnitude + static_cast<UnsignedT>(1));
+    } else {
+        magnitude = static_cast<UnsignedT>(value);
+    }
+
+    SwString out = numberUnsignedImpl_(magnitude, base);
+    if (!negative) {
+        return out;
+    }
+    return SwString("-") + out;
+}
+
+inline SwString SwString::numberFloatingImpl_(double value, char format, int precision) {
+    int safePrecision = precision;
+    if (safePrecision < 0) {
+        safePrecision = 6;
+    }
+
+    const char lowerFormat = static_cast<char>(std::tolower(static_cast<unsigned char>(format)));
+    std::ostringstream os;
+    os.imbue(std::locale::classic());
+    if (format == 'E' || format == 'G') {
+        os << std::uppercase;
+    }
+    if (lowerFormat == 'f') {
+        os << std::fixed;
+    } else if (lowerFormat == 'e') {
+        os << std::scientific;
+    } else {
+        os.setf(std::ios::fmtflags(0), std::ios::floatfield);
+    }
+    os << std::setprecision(safePrecision) << value;
+    return SwString(os.str());
+}
+
 inline std::string SwString::sanitizeNumericString(const std::string& input) {
     std::string sanitized;
     sanitized.reserve(input.size());
@@ -782,15 +1650,30 @@ inline bool SwString::parseIntegerString(const std::string& input, long long& va
         if (pos + 2 >= input.size()) {
             return false;
         }
-        long long accumulator = 0;
+        const unsigned long long maxPositive =
+            static_cast<unsigned long long>(std::numeric_limits<long long>::max());
+        const unsigned long long maxMagnitude = negative ? (maxPositive + 1ull) : maxPositive;
+        unsigned long long accumulator = 0;
         for (size_t i = pos + 2; i < input.size(); ++i) {
             char c = input[i];
             if (c != '0' && c != '1') {
                 return false;
             }
-            accumulator = (accumulator << 1) | (c - '0');
+            const unsigned long long bit = static_cast<unsigned long long>(c - '0');
+            if (accumulator > ((maxMagnitude - bit) >> 1)) {
+                return false;
+            }
+            accumulator = (accumulator << 1) | bit;
         }
-        value = negative ? -accumulator : accumulator;
+        if (negative) {
+            if (accumulator == maxPositive + 1ull) {
+                value = std::numeric_limits<long long>::min();
+            } else {
+                value = -static_cast<long long>(accumulator);
+            }
+        } else {
+            value = static_cast<long long>(accumulator);
+        }
         return true;
     }
 
@@ -889,6 +1772,10 @@ inline SwString& SwString::operator=(const SwByteArray& bytes) {
 namespace std {
 template <>
 struct hash<SwString> {
+    /**
+     * @brief Performs the `operator` operation.
+     * @return The requested operator.
+     */
     size_t operator()(const SwString& s) const noexcept { return std::hash<std::string>{}(s.toStdString()); }
 };
 }

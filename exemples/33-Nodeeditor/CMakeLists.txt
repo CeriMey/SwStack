@@ -4,6 +4,10 @@ project(NodeEditorExample)
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+if(NOT TARGET SwizioNodes)
+    message(FATAL_ERROR "Build NodeEditorExample from the repository root so the SwizioNodes target is available.")
+endif()
+
 add_executable(NodeEditorExample
     NodeEditorExample.cpp
     nodes/AddNodeModel.cpp
@@ -14,6 +18,7 @@ add_executable(NodeEditorExample
     nodes/TimesNodeModel.cpp
 )
 target_include_directories(NodeEditorExample PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/src/core
 )

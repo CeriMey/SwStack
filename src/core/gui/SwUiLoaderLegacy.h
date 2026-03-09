@@ -1,4 +1,29 @@
 #pragma once
+
+/**
+ * @file src/core/gui/SwUiLoaderLegacy.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwUiLoaderLegacy in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the ui loader legacy interface. The declarations
+ * exposed here define the stable surface that adjacent code can rely on while the implementation
+ * remains free to evolve behind the header.
+ *
+ * This header mainly contributes module-level utilities, helper declarations, or namespaced types
+ * that are consumed by the surrounding subsystem.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -40,6 +65,7 @@
 #include "SwSpinBox.h"
 #include "SwSplitter.h"
 #include "SwStackedWidget.h"
+#include "SwSpacer.h"
 #include "SwTabWidget.h"
 #include "SwTableView.h"
 #include "SwTableWidget.h"
@@ -77,11 +103,21 @@ public:
         bool ok{false};
     };
 
+    /**
+     * @brief Performs the `parse` operation.
+     * @param xml Value passed to the method.
+     * @return The requested parse.
+     */
     static ParseResult parse(const std::string& xml) {
         XmlParser p(xml);
         return p.parseImpl();
     }
 
+    /**
+     * @brief Performs the `trimInPlace` operation.
+     * @param s Value passed to the method.
+     * @return The requested trim In Place.
+     */
     static void trimInPlace(std::string& s) {
         size_t a = 0;
         while (a < s.size() && std::isspace(static_cast<unsigned char>(s[a]))) {
@@ -397,6 +433,11 @@ public:
         bool ok{false};
     };
 
+    /**
+     * @brief Performs the `parse` operation.
+     * @param xml Value passed to the method.
+     * @return The requested parse.
+     */
     static ParseResult parse(const std::string& xml) {
         const auto parsed = SwXmlDocument::parse(xml);
         ParseResult out;
@@ -406,6 +447,11 @@ public:
         return out;
     }
 
+    /**
+     * @brief Performs the `trimInPlace` operation.
+     * @param s Value passed to the method.
+     * @return The requested trim In Place.
+     */
     static void trimInPlace(std::string& s) {
         size_t a = 0;
         while (a < s.size() && std::isspace(static_cast<unsigned char>(s[a]))) {
@@ -426,11 +472,22 @@ class UiFactory {
 public:
     using WidgetCtor = std::function<SwWidget*(SwWidget* parent)>;
 
+    /**
+     * @brief Returns the current instance.
+     * @return The current instance.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static UiFactory& instance() {
         static UiFactory f;
         return f;
     }
 
+    /**
+     * @brief Performs the `registerWidget` operation.
+     * @param className Value passed to the method.
+     * @param ctor Value passed to the method.
+     */
     void registerWidget(const std::string& className, WidgetCtor ctor) {
         if (className.empty() || !ctor) {
             return;
@@ -438,13 +495,19 @@ public:
         m_widgetCtors[className] = std::move(ctor);
     }
 
+    /**
+     * @brief Creates the requested widget.
+     * @param className Value passed to the method.
+     * @param parent Optional parent object that owns this instance.
+     * @return The resulting widget.
+     */
     SwWidget* createWidget(const std::string& className, SwWidget* parent) const {
         auto it = m_widgetCtors.find(className);
         if (it != m_widgetCtors.end()) {
             return it->second(parent);
         }
 
-        // Common Qt -> Sw aliases (to accept near-identical .ui files).
+        // Common aliases accepted by the loader (to accept near-identical .ui files).
         const std::string alias = qtAliasToSw_(className);
         if (alias != className) {
             it = m_widgetCtors.find(alias);
@@ -461,7 +524,7 @@ private:
         // Register a minimal default set (MVP).
         registerWidget("SwWidget", [](SwWidget* p) { return new SwWidget(p); });
         registerWidget("SwFrame", [](SwWidget* p) { return new SwFrame(p); });
-        registerWidget("Line", [](SwWidget* p) { return new SwFrame(p); }); // Qt Designer "Line" (QFrame separator)
+        registerWidget("Line", [](SwWidget* p) { return new SwFrame(p); }); // Designer "Line" separator
         registerWidget("SwLabel", [](SwWidget* p) { return new SwLabel(p); });
         registerWidget("SwPushButton", [](SwWidget* p) { return new SwPushButton("PushButton", p); });
         registerWidget("SwLineEdit", [](SwWidget* p) { return new SwLineEdit(p); });
@@ -475,6 +538,7 @@ private:
         registerWidget("SwSplitter", [](SwWidget* p) { return new SwSplitter(SwSplitter::Orientation::Horizontal, p); });
         registerWidget("SwStackedWidget", [](SwWidget* p) { return new SwStackedWidget(p); });
         registerWidget("SwScrollArea", [](SwWidget* p) { return new SwScrollArea(p); });
+        registerWidget("SwSpacer", [](SwWidget* p) { return new SwSpacer(p); });
         registerWidget("SwGroupBox", [](SwWidget* p) { return new SwGroupBox(p); });
         registerWidget("SwToolButton", [](SwWidget* p) { return new SwToolButton(p); });
         registerWidget("SwToolBox", [](SwWidget* p) { return new SwToolBox(p); });
@@ -506,6 +570,12 @@ public:
         bool ok{false};
     };
 
+    /**
+     * @brief Performs the `loadFromString` operation on the associated resource.
+     * @param xml Value passed to the method.
+     * @param parent Optional parent object that owns this instance.
+     * @return The resulting from String.
+     */
     static LoadResult loadFromString(const std::string& xml, SwWidget* parent = nullptr) {
         LoadResult out;
 
@@ -515,14 +585,14 @@ public:
             return out;
         }
 
-        // Accept either <ui> (Qt-like) or <swui> as root.
+        // Accept either <ui> or <swui> as root.
         const XmlNode* uiRoot = &parsed.root;
         if (uiRoot->name != "ui" && uiRoot->name != "swui") {
             out.error = "Root element must be <ui> or <swui>";
             return out;
         }
 
-        // In Qt Designer: <ui><widget .../></ui>
+        // Expected shape: <ui><widget .../></ui>
         const XmlNode* widgetNode = uiRoot->firstChild("widget");
         if (!widgetNode) {
             out.error = "No <widget> found in document";
@@ -531,7 +601,7 @@ public:
 
         const auto customWidgetExtends = parseCustomWidgets_(*uiRoot);
 
-        // Special-case: Qt Designer main window form.
+        // Special-case: main window form.
         const std::string rootClass = widgetNode->attr("class");
         if (rootClass == "QMainWindow" || rootClass == "SwMainWindow") {
             if (!parent) {
@@ -547,7 +617,7 @@ public:
                 return out;
             }
 
-            // If a parent is provided, embed the Qt MainWindow's centralWidget content into a plain SwWidget.
+            // If a parent is provided, embed the main window central widget content into a plain SwWidget.
             SwWidget* embedded = new SwWidget(parent);
             if (!loadQtMainWindowCentralWidgetInto_(embedded, *widgetNode, out.error, customWidgetExtends)) {
                 delete embedded;
@@ -574,6 +644,12 @@ public:
         return out;
     }
 
+    /**
+     * @brief Performs the `loadFromFile` operation on the associated resource.
+     * @param filePath Path of the target file.
+     * @param parent Optional parent object that owns this instance.
+     * @return The resulting from File.
+     */
     static LoadResult loadFromFile(const SwString& filePath, SwWidget* parent = nullptr) {
         LoadResult out;
         SwFile f(filePath);
@@ -636,7 +712,7 @@ private:
     }
 
     static std::string propertyNameToSw_(const std::string& name) {
-        // Support Qt-style names (lower camelCase) by mapping the ones we use.
+        // Support lower camelCase names by mapping the ones we use.
         if (name == "objectName") return "ObjectName";
         if (name == "toolTip") return "ToolTips";
         if (name == "styleSheet") return "StyleSheet";
@@ -700,7 +776,7 @@ private:
             return;
         }
 
-        // Common widget-specific Qt .ui properties (subset).
+        // Common widget-specific .ui properties (subset).
         if (rawName == "checkable") {
             const bool v = toBool_(rawValue, false);
             if (auto* gb = dynamic_cast<SwGroupBox*>(w)) {
@@ -819,6 +895,11 @@ private:
                 pb->setOrientation(vertical ? SwProgressBar::Orientation::Vertical : SwProgressBar::Orientation::Horizontal);
                 return;
             }
+            if (auto* spacer = dynamic_cast<SwSpacer*>(w)) {
+                spacer->setDirection(vertical ? SwSpacer::Direction::Vertical
+                                              : SwSpacer::Direction::Horizontal);
+                return;
+            }
         }
 
         if (rawName == "handleWidth") {
@@ -890,7 +971,7 @@ private:
     }
 
     static std::string textValue_(const XmlNode& propNode) {
-        // Qt designer stores typed values:
+        // Designer XML stores typed values:
         // <property name="text"><string>Hi</string></property>
         // <property name="enabled"><bool>true</bool></property>
         // We'll accept the first child element text if present, otherwise property.text.
@@ -1017,7 +1098,7 @@ private:
             return nullptr;
         }
 
-        // Qt -> Sw aliases.
+        // Aliases accepted by the loader.
         std::string cls = className;
         if (cls == "QVBoxLayout") cls = "SwVerticalLayout";
         if (cls == "QHBoxLayout") cls = "SwHorizontalLayout";
@@ -1031,6 +1112,86 @@ private:
 
         outError = "Unsupported layout class: " + className;
         return nullptr;
+    }
+
+    static SwSizePolicy::Policy spacerPolicyFromString_(std::string value) {
+        XmlParser::trimInPlace(value);
+        const size_t sep = value.rfind(':');
+        if (sep != std::string::npos) {
+            value = value.substr(sep + 1);
+        }
+        XmlParser::trimInPlace(value);
+        if (value == "Fixed") return SwSizePolicy::Fixed;
+        if (value == "Minimum") return SwSizePolicy::Minimum;
+        if (value == "Maximum") return SwSizePolicy::Maximum;
+        if (value == "Preferred") return SwSizePolicy::Preferred;
+        if (value == "MinimumExpanding") return SwSizePolicy::MinimumExpanding;
+        if (value == "Expanding") return SwSizePolicy::Expanding;
+        if (value == "Ignored") return SwSizePolicy::Ignored;
+        return SwSizePolicy::Minimum;
+    }
+
+    static SwSpacerItem* loadSpacerItem_(const XmlNode& spacerNode) {
+        int width = 40;
+        int height = 20;
+        std::string orientation = "Qt::Horizontal";
+        SwSizePolicy::Policy horizontalPolicy = SwSizePolicy::Minimum;
+        SwSizePolicy::Policy verticalPolicy = SwSizePolicy::Minimum;
+        bool explicitHorizontalPolicy = false;
+        bool explicitVerticalPolicy = false;
+        bool hasSizeType = false;
+        SwSizePolicy::Policy sizeTypePolicy = SwSizePolicy::Minimum;
+
+        for (const auto* prop : spacerNode.childrenNamed("property")) {
+            if (!prop) {
+                continue;
+            }
+
+            const std::string rawName = prop->attr("name");
+            if (rawName == "sizeHint") {
+                const XmlNode* size = prop->firstChild("size");
+                if (!size) {
+                    continue;
+                }
+                width = std::max(0, toInt_(childText_(*size, "width"), width));
+                height = std::max(0, toInt_(childText_(*size, "height"), height));
+            } else if (rawName == "orientation") {
+                orientation = trimCopy_(textValue_(*prop));
+            } else if (rawName == "sizeType") {
+                hasSizeType = true;
+                sizeTypePolicy = spacerPolicyFromString_(trimCopy_(textValue_(*prop)));
+            } else if (rawName == "horizontalSizeType") {
+                explicitHorizontalPolicy = true;
+                horizontalPolicy = spacerPolicyFromString_(trimCopy_(textValue_(*prop)));
+            } else if (rawName == "verticalSizeType") {
+                explicitVerticalPolicy = true;
+                verticalPolicy = spacerPolicyFromString_(trimCopy_(textValue_(*prop)));
+            }
+        }
+
+        std::string orientationLower = orientation;
+        XmlParser::trimInPlace(orientationLower);
+        orientationLower = toLowerAscii_(std::move(orientationLower));
+        const bool vertical = orientationLower.find("vertical") != std::string::npos;
+        if (hasSizeType) {
+            if (vertical) {
+                if (!explicitVerticalPolicy) {
+                    verticalPolicy = sizeTypePolicy;
+                }
+                if (!explicitHorizontalPolicy) {
+                    horizontalPolicy = SwSizePolicy::Minimum;
+                }
+            } else {
+                if (!explicitHorizontalPolicy) {
+                    horizontalPolicy = sizeTypePolicy;
+                }
+                if (!explicitVerticalPolicy) {
+                    verticalPolicy = SwSizePolicy::Minimum;
+                }
+            }
+        }
+
+        return new SwSpacerItem(width, height, horizontalPolicy, verticalPolicy);
     }
 
     static bool applyLayout_(SwWidget* parentWidget,
@@ -1065,7 +1226,7 @@ private:
             } else if (rawName == "margin") {
                 layout->setMargin(toInt_(textValue_(*prop), layout->margin()));
             } else if (rawName == "leftMargin" || rawName == "topMargin" || rawName == "rightMargin" || rawName == "bottomMargin") {
-                // Qt has per-side margins; SwLayout has a single margin for now -> pick the first one we see.
+                // The source format has per-side margins; SwLayout has a single margin for now -> pick the first one we see.
                 layout->setMargin(toInt_(textValue_(*prop), layout->margin()));
             }
         }
@@ -1077,33 +1238,67 @@ private:
                 continue;
             }
             const XmlNode* childWidgetNode = item->firstChild("widget");
-            if (!childWidgetNode) {
-                continue;
-            }
-            SwWidget* child = loadWidget_(*childWidgetNode, parentWidget, outError, customWidgetExtends);
-            if (!child) {
-                return false;
-            }
+            const XmlNode* childSpacerNode = item->firstChild("spacer");
 
-            if (auto* grid = dynamic_cast<SwGridLayout*>(layout.get())) {
-                const int row = toInt_(item->attr("row", "0"), 0);
-                const int col = toInt_(item->attr("column", "0"), 0);
-                const int rowSpan = toInt_(item->attr("rowspan", "1"), 1);
-                const int colSpan = toInt_(item->attr("colspan", "1"), 1);
-                grid->addWidget(child, row, col, rowSpan, colSpan);
-            } else if (auto* boxV = dynamic_cast<SwVerticalLayout*>(layout.get())) {
-                boxV->addWidget(child);
-            } else if (auto* boxH = dynamic_cast<SwHorizontalLayout*>(layout.get())) {
-                boxH->addWidget(child);
-            } else if (auto* form = dynamic_cast<SwFormLayout*>(layout.get())) {
-                const bool hasRowAttr = item->attributes.find("row") != item->attributes.end();
-                const bool hasColAttr = item->attributes.find("column") != item->attributes.end();
-                if (hasRowAttr || hasColAttr) {
+            if (childWidgetNode) {
+                SwWidget* child = loadWidget_(*childWidgetNode, parentWidget, outError, customWidgetExtends);
+                if (!child) {
+                    return false;
+                }
+
+                if (auto* grid = dynamic_cast<SwGridLayout*>(layout.get())) {
                     const int row = toInt_(item->attr("row", "0"), 0);
                     const int col = toInt_(item->attr("column", "0"), 0);
-                    form->setCell(row, col, child);
+                    const int rowSpan = toInt_(item->attr("rowspan", "1"), 1);
+                    const int colSpan = toInt_(item->attr("colspan", "1"), 1);
+                    grid->addWidget(child, row, col, rowSpan, colSpan);
+                } else if (auto* boxV = dynamic_cast<SwVerticalLayout*>(layout.get())) {
+                    boxV->addWidget(child);
+                } else if (auto* boxH = dynamic_cast<SwHorizontalLayout*>(layout.get())) {
+                    boxH->addWidget(child);
+                } else if (auto* form = dynamic_cast<SwFormLayout*>(layout.get())) {
+                    const bool hasRowAttr = item->attributes.find("row") != item->attributes.end();
+                    const bool hasColAttr = item->attributes.find("column") != item->attributes.end();
+                    if (hasRowAttr || hasColAttr) {
+                        const int row = toInt_(item->attr("row", "0"), 0);
+                        const int col = toInt_(item->attr("column", "0"), 0);
+                        form->setCell(row, col, child);
+                    } else {
+                        form->addWidget(child);
+                    }
+                }
+                continue;
+            }
+
+            if (childSpacerNode) {
+                SwSpacerItem* spacer = loadSpacerItem_(*childSpacerNode);
+                if (!spacer) {
+                    outError = "Failed to create spacer item";
+                    return false;
+                }
+
+                if (auto* grid = dynamic_cast<SwGridLayout*>(layout.get())) {
+                    const int row = toInt_(item->attr("row", "0"), 0);
+                    const int col = toInt_(item->attr("column", "0"), 0);
+                    const int rowSpan = toInt_(item->attr("rowspan", "1"), 1);
+                    const int colSpan = toInt_(item->attr("colspan", "1"), 1);
+                    grid->addItem(spacer, row, col, rowSpan, colSpan);
+                } else if (auto* boxV = dynamic_cast<SwVerticalLayout*>(layout.get())) {
+                    boxV->addSpacerItem(spacer);
+                } else if (auto* boxH = dynamic_cast<SwHorizontalLayout*>(layout.get())) {
+                    boxH->addSpacerItem(spacer);
+                } else if (auto* form = dynamic_cast<SwFormLayout*>(layout.get())) {
+                    const bool hasRowAttr = item->attributes.find("row") != item->attributes.end();
+                    const bool hasColAttr = item->attributes.find("column") != item->attributes.end();
+                    if (hasRowAttr || hasColAttr) {
+                        const int row = toInt_(item->attr("row", "0"), 0);
+                        const int col = toInt_(item->attr("column", "0"), 0);
+                        form->setItem(row, col, spacer);
+                    } else {
+                        form->addItem(spacer);
+                    }
                 } else {
-                    form->addWidget(child);
+                    delete spacer;
                 }
             }
         }
@@ -1167,7 +1362,7 @@ private:
             applyCommonProperty_(w, rawName, *prop);
         }
 
-        // Layouts (Qt-style) take precedence; if present, children are created through <layout><item>...
+        // Layout blocks take precedence; if present, children are created through <layout><item>...
         if (!applyLayout_(w, widgetNode, outError, customWidgetExtends)) {
             return nullptr;
         }

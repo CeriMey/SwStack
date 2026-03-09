@@ -1,4 +1,4 @@
-/***************************************************************************************************
+﻿/***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
  * Copyright (C) 2025 Ariya Consulting
@@ -22,6 +22,30 @@
 
 // MainWindow.h
 #pragma once
+
+/**
+ * @file src/core/gui/SwMainWindow.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwMainWindow in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the main window interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are SwMainWindow.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
 #include "SwGuiApplication.h"
 #include "SwDialog.h"
 #include "SwLabel.h"
@@ -79,6 +103,7 @@ public:
         wc.hInstance = GetModuleHandle(nullptr);
         wc.lpszClassName = CLASS_NAME;
         wc.style = CS_DBLCLKS;
+        wc.hbrBackground = CreateSolidBrush(RGB(249, 249, 249));
 
         // Attempt to register the window class
         if (!RegisterClassW(&wc)) {
@@ -89,9 +114,10 @@ public:
         }
 
         // Create the window
+        const std::wstring nativeTitle = toNativeWindowsTitle_(m_windowTitle);
         hwnd = CreateWindowExW(0,
                                CLASS_NAME,
-                               m_windowTitle.c_str(),
+                               nativeTitle.c_str(),
                                WS_OVERLAPPEDWINDOW,
                                CW_USEDEFAULT,
                                CW_USEDEFAULT,
@@ -140,7 +166,7 @@ public:
             onMouseMove(x, y, ctrlPressed, shiftPressed, altPressed);
         };
         callbacks.mouseWheelHandler = std::bind(&SwMainWindow::onMouseWheel, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, std::placeholders::_4, std::placeholders::_5, std::placeholders::_6);
-        callbacks.keyPressHandler = std::bind(&SwMainWindow::onKeyPress, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, std::placeholders::_4);
+        callbacks.keyPressHandler = std::bind(&SwMainWindow::onKeyPress, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, std::placeholders::_4, std::placeholders::_5, std::placeholders::_6);
         callbacks.resizeHandler = std::bind(&SwMainWindow::onResize, this, std::placeholders::_1, std::placeholders::_2);
 
         // Register this window with SwGuiApplication
@@ -154,8 +180,40 @@ public:
 #endif
         SwWidget::resize(width, height);
         setWindowTitle(m_windowTitle);
-        ensureChrome();
     }
+
+    /**
+     * @brief Constructs a `SwMainWindow` instance.
+     * @param title Title text applied by the operation.
+     * @param width Width value.
+     * @param height Height value.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
+    SwMainWindow(const SwString& title, int width = 800, int height = 600)
+        : SwMainWindow(title.toStdWString(), width, height) {}
+
+    /**
+     * @brief Constructs a `SwMainWindow` instance.
+     * @param title Title text applied by the operation.
+     * @param width Width value.
+     * @param height Height value.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
+    SwMainWindow(const wchar_t* title, int width = 800, int height = 600)
+        : SwMainWindow(title ? std::wstring(title) : std::wstring(), width, height) {}
+
+    /**
+     * @brief Constructs a `SwMainWindow` instance.
+     * @param title Title text applied by the operation.
+     * @param width Width value.
+     * @param height Height value.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
+    SwMainWindow(const char* title, int width = 800, int height = 600)
+        : SwMainWindow(decodeWindowTitleFromChar_(title), width, height) {}
 
     /**
      * @brief Destructor. Deregisters the window from SwGuiApplication.
@@ -251,24 +309,84 @@ public:
         #endif
     }
 
-    // Qt-like main window chrome helpers.
+    // Main window chrome helpers.
+    /**
+     * @brief Performs the `menuBar` operation.
+     * @return The requested menu Bar.
+     */
     SwMenuBar* menuBar() { ensureChrome(); return m_menuBar; }
+    /**
+     * @brief Returns the current menu Bar.
+     * @return The current menu Bar.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwMenuBar* menuBar() const { return m_menuBar; }
 
+    /**
+     * @brief Performs the `toolBar` operation.
+     * @return The requested tool Bar.
+     */
     SwToolBar* toolBar() { ensureChrome(); ensureToolBar(); return m_toolBar; }
+    /**
+     * @brief Returns the current tool Bar.
+     * @return The current tool Bar.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwToolBar* toolBar() const { return m_toolBar; }
 
+    /**
+     * @brief Performs the `statusBar` operation.
+     * @return The requested status Bar.
+     */
     SwStatusBar* statusBar() { ensureChrome(); return m_statusBar; }
+    /**
+     * @brief Returns the current status Bar.
+     * @return The current status Bar.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwStatusBar* statusBar() const { return m_statusBar; }
 
+    /**
+     * @brief Performs the `helpMenu` operation.
+     * @return The requested help Menu.
+     */
     SwMenu* helpMenu() { ensureChrome(); return m_helpMenu; }
+    /**
+     * @brief Returns the current help Menu.
+     * @return The current help Menu.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwMenu* helpMenu() const { return m_helpMenu; }
 
+    /**
+     * @brief Performs the `centralWidget` operation.
+     * @return The requested central Widget.
+     */
     SwWidget* centralWidget() { ensureChrome(); return m_centralWidget; }
+    /**
+     * @brief Returns the current central Widget.
+     * @return The current central Widget.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwWidget* centralWidget() const { return m_centralWidget; }
 
-    // Backward compatible: layouts are applied to the central widget (Qt-like QMainWindow behavior).
+    // Backward compatible: layouts are applied to the central widget.
+    /**
+     * @brief Sets the layout.
+     * @param layout Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setLayout(SwAbstractLayout* layout) { ensureChrome(); if (m_centralWidget) { m_centralWidget->setLayout(layout); } }
+    /**
+     * @brief Performs the `layout` operation.
+     * @return The requested layout.
+     */
     SwAbstractLayout* layout() const { return m_centralWidget ? m_centralWidget->layout() : nullptr; }
 
     /**
@@ -306,29 +424,77 @@ public:
 #endif
     }
 
+    /**
+     * @brief Sets the window Title.
+     * @param title Title text applied by the operation.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setWindowTitle(const std::wstring& title) {
         m_windowTitle = title;
         applyWindowTitle();
     }
 
+    /**
+     * @brief Sets the window Title.
+     * @param title Title text applied by the operation.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
+    void setWindowTitle(const SwString& title) {
+        setWindowTitle(title.toStdWString());
+    }
+
+    /**
+     * @brief Sets the window Title.
+     * @param title Title text applied by the operation.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
+    void setWindowTitle(const wchar_t* title) {
+        setWindowTitle(title ? std::wstring(title) : std::wstring());
+    }
+
+    /**
+     * @brief Sets the window Title.
+     * @param title Title text applied by the operation.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
+    void setWindowTitle(const char* title) {
+        setWindowTitle(decodeWindowTitleFromChar_(title));
+    }
+
+    /**
+     * @brief Returns the current window Title.
+     * @return The current window Title.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const std::wstring& windowTitle() const {
         return m_windowTitle;
     }
 
+    /**
+     * @brief Sets the window Flags.
+     * @param flags Flags that refine the operation.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setWindowFlags(WindowFlags flags) {
 #if defined(_WIN32)
         if (!hwnd) return;
 
-        // Récupération des styles actuels
+        // RÃ©cupÃ©ration des styles actuels
         LONG_PTR style = GetWindowLongPtr(hwnd, GWL_STYLE);
         LONG_PTR exStyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
 
-        // Style de base : fenêtre classique
+        // Style de base : fenÃªtre classique
         style = WS_OVERLAPPEDWINDOW;
 
         // Gestion du style sans cadre (Frameless)
         if (flags.testFlag(WindowFlag::FramelessWindowHint)) {
-            // Fenêtre sans bordure ni barre de titre
+            // FenÃªtre sans bordure ni barre de titre
             style = WS_POPUP;
         } else {
             // Boutons de la barre de titre
@@ -340,10 +506,10 @@ public:
             }
         }
 
-        // Fenêtre outil (ToolWindowHint)
+        // FenÃªtre outil (ToolWindowHint)
         if (flags.testFlag(WindowFlag::ToolWindowHint)) {
             exStyle |= WS_EX_TOOLWINDOW;
-            exStyle &= ~WS_EX_APPWINDOW; // pour éviter l'affichage dans la barre des tâches
+            exStyle &= ~WS_EX_APPWINDOW; // pour Ã©viter l'affichage dans la barre des tÃ¢ches
         }
 
         // Toujours au-dessus (StayOnTopHint)
@@ -364,7 +530,7 @@ public:
                 RemoveMenu(hMenu, SC_CLOSE, MF_BYCOMMAND);
             }
         } else {
-            // Réinsertion du bouton "Fermer" s'il avait été retiré
+            // RÃ©insertion du bouton "Fermer" s'il avait Ã©tÃ© retirÃ©
             if (hMenu && GetMenuState(hMenu, SC_CLOSE, MF_BYCOMMAND) == (UINT)-1) {
                 AppendMenuW(hMenu, MF_STRING, SC_CLOSE, L"Close");
             }
@@ -379,6 +545,12 @@ public:
 #endif
     }
 
+    /**
+     * @brief Returns the current window Flags.
+     * @return The current window Flags.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     WindowFlags getWindowFlags() const {
 #if defined(_WIN32)
         WindowFlags flags = WindowFlag::NoFlag;
@@ -389,13 +561,13 @@ public:
         LONG_PTR style = GetWindowLongPtr(hwnd, GWL_STYLE);
         LONG_PTR exStyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
 
-        // Déterminer si la fenêtre est frameless
-        // On considère qu'elle est frameless si style == WS_POPUP et pas WS_OVERLAPPEDWINDOW
-        // (Ajuster selon votre logique interne si nécessaire)
+        // DÃ©terminer si la fenÃªtre est frameless
+        // On considÃ¨re qu'elle est frameless si style == WS_POPUP et pas WS_OVERLAPPEDWINDOW
+        // (Ajuster selon votre logique interne si nÃ©cessaire)
         if ((style & WS_POPUP) == WS_POPUP && (style & WS_OVERLAPPEDWINDOW) != WS_OVERLAPPEDWINDOW) {
             flags |= WindowFlag::FramelessWindowHint;
         } else {
-            // Vérifier les boutons minimize/maximize
+            // VÃ©rifier les boutons minimize/maximize
             if ((style & WS_MINIMIZEBOX) == 0) {
                 flags |= WindowFlag::NoMinimizeButton;
             }
@@ -404,25 +576,25 @@ public:
             }
         }
 
-        // Vérifier ToolWindowHint
-        // Si WS_EX_TOOLWINDOW est présent, la fenêtre est probablement un tool window
+        // VÃ©rifier ToolWindowHint
+        // Si WS_EX_TOOLWINDOW est prÃ©sent, la fenÃªtre est probablement un tool window
         if ((exStyle & WS_EX_TOOLWINDOW) == WS_EX_TOOLWINDOW) {
             flags |= WindowFlag::ToolWindowHint;
         }
 
-        // Vérifier StayOnTop
-        // Si WS_EX_TOPMOST est présent, alors la fenêtre est au-dessus
+        // VÃ©rifier StayOnTop
+        // Si WS_EX_TOPMOST est prÃ©sent, alors la fenÃªtre est au-dessus
         if ((exStyle & WS_EX_TOPMOST) == WS_EX_TOPMOST) {
             flags |= WindowFlag::StayOnTopHint;
         }
 
-        // Vérifier NoCloseButton
-        // On regarde dans le menu système si le close est présent
+        // VÃ©rifier NoCloseButton
+        // On regarde dans le menu systÃ¨me si le close est prÃ©sent
         HMENU hMenu = GetSystemMenu(hwnd, FALSE);
         if (hMenu) {
             UINT state = GetMenuState(hMenu, SC_CLOSE, MF_BYCOMMAND);
             if (state == (UINT)-1) {
-                // Le bouton close a été supprimé
+                // Le bouton close a Ã©tÃ© supprimÃ©
                 flags |= WindowFlag::NoCloseButton;
             }
         }
@@ -434,7 +606,17 @@ public:
     }
 
     // Public event dispatch helpers (useful for popups / overlays).
+    /**
+     * @brief Performs the `dispatchMousePress` operation.
+     * @param x Horizontal coordinate.
+     * @param Left Value passed to the method.
+     */
     void dispatchMousePress(int x, int y) { onMousePress(x, y, SwMouseButton::Left); }
+    /**
+     * @brief Performs the `dispatchMouseRelease` operation.
+     * @param x Horizontal coordinate.
+     * @param Left Value passed to the method.
+     */
     void dispatchMouseRelease(int x, int y) { onMouseRelease(x, y, SwMouseButton::Left); }
 
 private:
@@ -463,18 +645,22 @@ private:
 
     static SwString defaultAboutHtml() {
         return SwString(
-            "<span style='font-weight: bold; color: #0F172A;'>SwCore GUI</span><br/>"
-            "SwCore is developed by <b>Eymeric O&#39;Neill</b>.<br/>"
-            "A powerful, Qt-inspired C++ toolkit to ship polished desktop tools fast:<br/>"
-            "- Build UIs quickly with widgets, layouts, and styling<br/>"
-            "- Ship dialogs, menus, toolbars, and more<br/>"
-            "- Create custom editors with a graphics canvas<br/>"
-            "Between Qt and ROS: build nodes that communicate via RPC<br/>"
-            "and inter-process signals/slots, then plug them into a clean desktop UI.<br/>"
-            "If SwCore helped you build something cool, I&#39;d love to see it.<br/>"
-            "A donation is the best way to say thanks; spreading the word is already plenty.<br/>"
-            "License: GPLv3<br/>"
-            "Contact: eymeric.oneill@gmail.com | +33 6 52 83 83 31");
+            "<span style='color:#9CA3AF;'>version 1.0  -  Apache License 2.0  -  Ariya Consulting</span><br/>"
+            "<br/>"
+            "<b>SwStack</b> is a Qt-inspired C++ framework for building polished<br/>"
+            "cross-platform desktop applications on Windows and Linux,<br/>"
+            "without any commercial licensing constraints.<br/>"
+            "<br/>"
+            "<b>What it includes</b><br/>"
+            "- Widgets, layouts, dialogs, menus, toolbars, status bars<br/>"
+            "- Typed signals and slots, property system, stylesheet engine<br/>"
+            "- IPC and RPC: live inter-process signals across processes<br/>"
+            "- SwNode: distributed computing with desktop integration<br/>"
+            "- Node-based graphics canvas for custom visual editors<br/>"
+            "<br/>"
+            "<span style='color:#9CA3AF;'>Developed by Eymeric O'Neill<br/>"
+            "eymeric.oneill@gmail.com</span>"
+        );
     }
 
     void ensureAboutDialog() {
@@ -483,55 +669,73 @@ private:
         }
 
         m_aboutDialog = new SwDialog(this);
-        m_aboutDialog->setMinimumSize(640, 320);
-        m_aboutDialog->resize(640, 320);
-        m_aboutDialog->setWindowTitle("About SwCore");
+        m_aboutDialog->setMinimumSize(460, 380);
+        m_aboutDialog->resize(460, 380);
+        m_aboutDialog->setWindowTitle("About SwStack");
 
+        // â”€â”€ Body fills the entire content area â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         SwWidget* content = m_aboutDialog->contentWidget();
         auto* contentLayout = new SwVerticalLayout(content);
         contentLayout->setMargin(0);
-        contentLayout->setSpacing(8);
+        contentLayout->setSpacing(0);
         content->setLayout(contentLayout);
 
-        auto* text = new SwTextEdit(content);
-        text->setReadOnly(true);
-        text->setFocusPolicy(FocusPolicyEnum::NoFocus);
-        text->setCursor(CursorType::Arrow);
-        text->setHtml(defaultAboutHtml());
-        text->setStyleSheet(R"(
+        auto* body = new SwTextEdit(content);
+        body->setReadOnly(true);
+        body->setFocusPolicy(FocusPolicyEnum::NoFocus);
+        body->setCursor(CursorType::Arrow);
+        body->setHtml(defaultAboutHtml());
+        body->setFont(SwFont(L"Segoe UI", 10, Normal));
+        body->setStyleSheet(R"(
             SwTextEdit {
-                background-color: rgb(241, 245, 249);
-                border-color: rgb(241, 245, 249);
+                background-color: rgb(255,255,255);
                 border-width: 0px;
                 border-radius: 0px;
-                padding: 0px;
-                color: rgb(51, 65, 85);
-                font-size: 13px;
+                padding: 2px 4px;
+                color: rgb(31,41,55);
             }
             SwPlainTextEdit {
-                background-color: rgb(241, 245, 249);
-                border-color: rgb(241, 245, 249);
+                background-color: rgb(255,255,255);
                 border-width: 0px;
                 border-radius: 0px;
-                padding: 0px;
-                color: rgb(51, 65, 85);
-                font-size: 13px;
+                padding: 2px 4px;
+                color: rgb(31,41,55);
             }
         )");
-        contentLayout->addWidget(text, 1, 0);
+        contentLayout->addWidget(body, 1, 0);
 
+        // â”€â”€ Button bar: licence label left, Close button right â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         SwWidget* buttonBar = m_aboutDialog->buttonBarWidget();
         auto* buttonLayout = new SwHorizontalLayout(buttonBar);
         buttonLayout->setMargin(0);
-        buttonLayout->setSpacing(8);
+        buttonLayout->setSpacing(0);
         buttonBar->setLayout(buttonLayout);
+
+        auto* licLabel = new SwLabel("Apache License 2.0", buttonBar);
+        licLabel->setFont(SwFont(L"Segoe UI", 9, Normal));
+        licLabel->setStyleSheet(R"(
+            SwLabel {
+                background-color: rgba(0,0,0,0);
+                border-width: 0px;
+                color: rgb(156,163,175);
+            }
+        )");
+        buttonLayout->addWidget(licLabel, 0, 140);
 
         auto* spacer = new SwWidget(buttonBar);
         spacer->setStyleSheet("SwWidget { background-color: rgba(0,0,0,0); border-width: 0px; }");
         buttonLayout->addWidget(spacer, 1, 0);
 
-        auto* ok = new SwPushButton("OK", buttonBar);
-        ok->resize(120, 36);
+        auto* ok = new SwPushButton("Close", buttonBar);
+        ok->resize(90, 32);
+        ok->setStyleSheet(R"(
+            SwPushButton {
+                background-color: rgb(55,65,81);
+                color: rgb(255,255,255);
+                border-radius: 6px;
+                border-width: 0px;
+            }
+        )");
         SwObject::connect(ok, &SwPushButton::clicked, m_aboutDialog, [this]() {
             if (m_aboutDialog) {
                 m_aboutDialog->accept();
@@ -651,7 +855,8 @@ private:
     void applyWindowTitle() {
 #if defined(_WIN32)
         if (hwnd) {
-            SetWindowTextW(hwnd, m_windowTitle.c_str());
+            const std::wstring nativeTitle = toNativeWindowsTitle_(m_windowTitle);
+            SetWindowTextW(hwnd, nativeTitle.c_str());
         }
 #elif defined(__linux__)
         if (m_platformWindow) {
@@ -790,8 +995,10 @@ private:
         SwWidget* target = getChildUnderCursor(x, y);
         SwWidget* current = target ? target : this;
         while (current) {
-            current->wheelEvent(&wheelEvent);
-            if (wheelEvent.isAccepted()) {
+            WheelEvent localEvent = mapWheelEventToChild_(wheelEvent, this, current);
+            current->wheelEvent(&localEvent);
+            if (localEvent.isAccepted()) {
+                wheelEvent.accept();
                 return;
             }
             current = dynamic_cast<SwWidget*>(current->parent());
@@ -805,14 +1012,52 @@ private:
      * @param shiftPressed Whether Shift is pressed.
      * @param altPressed Whether Alt is pressed.
      */
-    void onKeyPress(int keyCode, bool ctrlPressed, bool shiftPressed, bool altPressed) {
+    void onKeyPress(int keyCode, bool ctrlPressed, bool shiftPressed, bool altPressed, wchar_t textChar = L'\0', bool textProvided = false) {
         SwToolTip::handleKeyPress();
-        KeyEvent keyEvent(keyCode, ctrlPressed, shiftPressed, altPressed);
+        KeyEvent keyEvent(keyCode, ctrlPressed, shiftPressed, altPressed, textChar, textProvided);
         if (SwShortcut::dispatch(this, &keyEvent)) {
             return;
         }
         SwWidget::keyPressEvent(&keyEvent);
     }
+
+#if defined(_WIN32)
+    static std::wstring decodeWindowTitleFromChar_(const char* title) {
+        if (!title) {
+            return std::wstring();
+        }
+        // Defensive compatibility: handle accidental UTF-16LE pointer passed as char*.
+        if (title[0] != '\0' && title[1] == '\0') {
+            const wchar_t* wide = reinterpret_cast<const wchar_t*>(title);
+            return wide ? std::wstring(wide) : std::wstring();
+        }
+        return SwString::fromUtf8(title).toStdWString();
+    }
+
+    static std::wstring toNativeWindowsTitle_(const std::wstring& title) {
+        if (title.empty()) {
+            return std::wstring();
+        }
+        if (title.find(L'\0') == std::wstring::npos) {
+            return title;
+        }
+        // Defensive: strip embedded NULs to avoid Win32 truncating at first character.
+        std::wstring sanitized;
+        sanitized.reserve(title.size());
+        for (wchar_t ch : title) {
+            if (ch != L'\0') {
+                sanitized.push_back(ch);
+            }
+        }
+        return sanitized;
+    }
+#endif
+
+#if !defined(_WIN32)
+    static std::wstring decodeWindowTitleFromChar_(const char* title) {
+        return title ? SwString::fromUtf8(title).toStdWString() : std::wstring();
+    }
+#endif
 
 #if defined(__linux__)
     static std::string toUtf8(const std::wstring& value) {
@@ -877,13 +1122,28 @@ private:
             return;
         }
 
-        SwRect rect = getRect();
-        if (rect.width <= 0) {
-            rect.width = 1;
+        SwRect clientRect = SwWidgetPlatformAdapter::clientRect(nativeWindowHandle());
+        if (clientRect.width <= 0) {
+            clientRect.width = width();
         }
-        if (rect.height <= 0) {
-            rect.height = 1;
+        if (clientRect.height <= 0) {
+            clientRect.height = height();
         }
+
+        if (clientRect.width <= 0) {
+            clientRect.width = 1;
+        }
+        if (clientRect.height <= 0) {
+            clientRect.height = 1;
+        }
+
+        if (width() != clientRect.width || height() != clientRect.height) {
+            SwWidget::resize(clientRect.width, clientRect.height);
+        }
+
+        SwRect rect = this->rect();
+        rect.width = clientRect.width;
+        rect.height = clientRect.height;
 
         SwX11Painter painter(m_x11Integration->display(), x11Window->handle(), rect.width, rect.height);
         PaintEvent paintEvent(&painter, rect);
@@ -917,7 +1177,8 @@ private:
     }
 
     void handleKeyEvent(const SwKeyEvent& event) {
-        onKeyPress(event.keyCode, event.ctrl, event.shift, event.alt);
+        onKeyPress(event.keyCode, event.ctrl, event.shift, event.alt, event.text, event.textProvided);
     }
 #endif
 };
+

@@ -1,4 +1,4 @@
-/***************************************************************************************************
+﻿/***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
  * Copyright (C) 2025 Ariya Consulting
@@ -22,8 +22,32 @@
 
 #pragma once
 
+/**
+ * @file src/core/gui/SwMenuBar.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwMenuBar in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the menu bar interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwMenuBar.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
 /***************************************************************************************************
- * SwMenuBar - Qt-like menu bar widget (≈ QMenuBar).
+ * SwMenuBar - menu bar widget.
  *
  * Focus:
  * - Lightweight in-client menu bar (not OS-native).
@@ -42,11 +66,22 @@ class SwMenuBar : public SwFrame {
     SW_OBJECT(SwMenuBar, SwFrame)
 
 public:
+    /**
+     * @brief Constructs a `SwMenuBar` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwMenuBar(SwWidget* parent = nullptr)
         : SwFrame(parent) {
         initDefaults();
     }
 
+    /**
+     * @brief Adds the specified menu.
+     * @param title Title text applied by the operation.
+     * @return The requested menu.
+     */
     SwMenu* addMenu(const SwString& title) {
         auto* menu = new SwMenu(this);
         hookMenuLifecycle_(menu);
@@ -59,6 +94,11 @@ public:
         return menu;
     }
 
+    /**
+     * @brief Adds the specified menu Right.
+     * @param title Title text applied by the operation.
+     * @return The requested menu Right.
+     */
     SwMenu* addMenuRight(const SwString& title) {
         auto* menu = new SwMenu(this);
         hookMenuLifecycle_(menu);
@@ -71,8 +111,17 @@ public:
         return menu;
     }
 
+    /**
+     * @brief Performs the `menuCount` operation.
+     * @return The requested menu Count.
+     */
     int menuCount() const { return m_leftMenus.size() + m_rightMenus.size(); }
 
+    /**
+     * @brief Performs the `menuAt` operation.
+     * @param index Value passed to the method.
+     * @return The requested menu At.
+     */
     SwMenu* menuAt(int index) const {
         const MenuEntry* entry = entryAt_(index);
         if (!entry) {
@@ -81,6 +130,11 @@ public:
         return entry->menu;
     }
 
+    /**
+     * @brief Performs the `menuRect` operation.
+     * @param index Value passed to the method.
+     * @return The requested menu Rect.
+     */
     SwRect menuRect(int index) const {
         if (index < 0 || index >= m_menuRects.size()) {
             return {};
@@ -88,6 +142,11 @@ public:
         return m_menuRects[index];
     }
 
+    /**
+     * @brief Closes the active Menu handled by the object.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     void closeActiveMenu() {
         if (m_activeIndex >= 0 && m_activeIndex < menuCount()) {
             if (SwMenu* menu = menuAt(m_activeIndex)) {
@@ -101,11 +160,23 @@ public:
 protected:
     CUSTOM_PROPERTY(int, HoverIndex, -1) { update(); }
 
+    /**
+     * @brief Handles the resize Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void resizeEvent(ResizeEvent* event) override {
         SwFrame::resizeEvent(event);
         updateGeometryCache();
     }
 
+    /**
+     * @brief Handles the paint Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void paintEvent(PaintEvent* event) override {
         if (!isVisibleInHierarchy()) {
             return;
@@ -116,7 +187,7 @@ protected:
             return;
         }
 
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
         StyleSheet* sheet = getToolSheet();
 
         SwColor bg{248, 250, 252};
@@ -138,9 +209,10 @@ protected:
             painter->fillRect(SwRect{bounds.x, yLine, bounds.width, borderWidth}, border, border, 0);
         }
 
-        const SwColor textColor{51, 65, 85};
-        const SwColor textActive{24, 28, 36};
-        const SwColor hoverFill{241, 245, 249};
+        const SwColor textColor{30, 30, 30};
+        const SwColor textActive{0, 84, 166};
+        const SwColor hoverFill{224, 238, 255};
+        const SwColor activeFill{198, 222, 252};
 
         const int total = std::min(menuCount(), m_menuRects.size());
         for (int i = 0; i < total; ++i) {
@@ -148,9 +220,12 @@ protected:
             const bool hovered = (i == getHoverIndex());
             const bool active = (i == m_activeIndex);
 
-            if (hovered || active) {
-                SwRect hi{r.x, r.y + 2, r.width, std::max(0, r.height - 4)};
-                painter->fillRoundedRect(hi, 6, hoverFill, hoverFill, 0);
+            if (active) {
+                SwRect hi{r.x + 2, r.y + 2, r.width - 4, std::max(0, r.height - 4)};
+                painter->fillRoundedRect(hi, 4, activeFill, activeFill, 0);
+            } else if (hovered) {
+                SwRect hi{r.x + 2, r.y + 2, r.width - 4, std::max(0, r.height - 4)};
+                painter->fillRoundedRect(hi, 4, hoverFill, hoverFill, 0);
             }
 
             painter->drawText(r,
@@ -163,6 +238,12 @@ protected:
         painter->finalize();
     }
 
+    /**
+     * @brief Handles the mouse Move Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseMoveEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -185,6 +266,12 @@ protected:
         event->accept();
     }
 
+    /**
+     * @brief Handles the mouse Press Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mousePressEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -210,22 +297,16 @@ private:
         SwMenu* menu{nullptr};
     };
 
-    static int clampInt(int value, int minValue, int maxValue) {
-        if (value < minValue) return minValue;
-        if (value > maxValue) return maxValue;
-        return value;
-    }
-
     void initDefaults() {
-        resize(560, 34);
+        resize(560, 28);
         setCursor(CursorType::Hand);
         setFocusPolicy(FocusPolicyEnum::Strong);
         setFrameShape(Shape::NoFrame);
-        setFont(SwFont(L"Segoe UI", 10, Medium));
+        setFont(SwFont(L"Segoe UI", 9, Normal));
         setStyleSheet(R"(
             SwMenuBar {
-                background-color: rgb(248, 250, 252);
-                border-color: rgb(226, 232, 240);
+                background-color: rgb(255, 255, 255);
+                border-color: rgb(218, 218, 218);
                 border-width: 1px;
                 border-radius: 0px;
             }
@@ -270,7 +351,7 @@ private:
             rightWidths.push_back(measureWidth(m_rightMenus[i].title));
         }
 
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
         const int left = bounds.x + m_margin;
         const int right = bounds.x + std::max(0, bounds.width - m_margin);
         const int y = bounds.y;
@@ -330,7 +411,7 @@ private:
 
         const SwRect r = menuRect(index);
         // Allow auto-close when the cursor is no longer over the menubar entry nor the popup.
-        menu->popup(r.x, r.y + r.height + 4, r);
+        menu->popup(r.x, r.y + r.height, r);
         update();
     }
 
@@ -374,3 +455,4 @@ private:
     int m_spacing{6};
     int m_activeIndex{-1};
 };
+

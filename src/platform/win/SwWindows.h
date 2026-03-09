@@ -22,6 +22,32 @@
 
 #pragma once
 
+/**
+ * @file src/platform/win/SwWindows.h
+ * @ingroup platform_backends
+ * @brief Declares the public interface exposed by SwWindows in the CoreSw Win32 platform
+ * integration layer.
+ *
+ * This header belongs to the CoreSw Win32 platform integration layer. It binds portable framework
+ * abstractions to concrete Win32 windowing, painting, and input services.
+ *
+ * Within that layer, this file focuses on the windows interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * This header mainly contributes module-level utilities, helper declarations, or namespaced types
+ * that are consumed by the surrounding subsystem.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * Types here define the seam between portable APIs and the native event and rendering loop on
+ * Windows.
+ *
+ */
+
+
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX

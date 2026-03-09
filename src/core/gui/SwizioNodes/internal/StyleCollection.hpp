@@ -1,5 +1,18 @@
 #pragma once
 
+/**
+ * @file
+ * @ingroup core_swizio_nodes
+ * @brief Declares the singleton-style repository for node-editor visual styles.
+ *
+ * `StyleCollection` stores the active node, connection, and view style objects used by
+ * the embedded node-editor module. It gives rendering code a central place to read or
+ * override the current theme without threading style instances through every object.
+ */
+
+
+
+
 #include "Export.hpp"
 
 #include "ConnectionStyle.hpp"
@@ -13,21 +26,72 @@ namespace SwizioNodes {
 class SWIZIO_NODES_PUBLIC StyleCollection
 {
 public:
+    /**
+     * @brief Returns the current node Style.
+     * @return The current node Style.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static NodeStyle const& nodeStyle();
 
+    /**
+     * @brief Returns the current connection Style.
+     * @return The current connection Style.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static ConnectionStyle const& connectionStyle();
 
+    /**
+     * @brief Returns the current flow View Style.
+     * @return The current flow View Style.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static GraphicsViewStyle const& flowViewStyle();
 
+    /**
+     * @brief Returns the current widget Node Style.
+     * @return The current widget Node Style.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static SwString const& widgetNodeStyle();
 
 public:
+    /**
+     * @brief Sets the node Style.
+     * @param NodeStyle Value passed to the method.
+     * @return The requested node Style.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     static void setNodeStyle(NodeStyle);
 
+    /**
+     * @brief Sets the connection Style.
+     * @param ConnectionStyle Value passed to the method.
+     * @return The requested connection Style.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     static void setConnectionStyle(ConnectionStyle);
 
+    /**
+     * @brief Sets the graphics View Style.
+     * @param GraphicsViewStyle Value passed to the method.
+     * @return The requested graphics View Style.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     static void setGraphicsViewStyle(GraphicsViewStyle);
 
+    /**
+     * @brief Sets the widget Node Style.
+     * @return The requested widget Node Style.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     static void setWidgetNodeStyle(const SwString&);
 
 private:

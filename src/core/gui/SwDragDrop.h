@@ -22,8 +22,32 @@
 
 #pragma once
 
+/**
+ * @file src/core/gui/SwDragDrop.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwDragDrop in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the drag drop interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwDragDrop.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
 /***************************************************************************************************
- * SwDragDrop - small internal drag visual helper (Qt-like).
+ * SwDragDrop - small internal drag visual helper.
  *
  * Goal:
  * - Provide a lightweight "drag pixmap / + badge" feedback for in-app drags (palette, views, etc.).
@@ -39,14 +63,42 @@
 
 class SwDragDrop {
 public:
+    /**
+     * @brief Returns the current instance.
+     * @return The current instance.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static SwDragDrop& instance() {
         static SwDragDrop s;
         return s;
     }
 
+    /**
+     * @brief Returns whether the object reports active.
+     * @return `true` when the object reports active; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isActive() const { return m_active; }
+    /**
+     * @brief Returns the current drop Allowed.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool dropAllowed() const { return m_dropAllowed; }
 
+    /**
+     * @brief Performs the `begin` operation.
+     * @param windowHandle Value passed to the method.
+     * @param text Value passed to the method.
+     * @param font Font value used by the operation.
+     * @param globalX Value passed to the method.
+     * @param globalY Value passed to the method.
+     * @param showPlus Value passed to the method.
+     * @param dropAllowed Value passed to the method.
+     */
     void begin(const SwWidgetPlatformHandle& windowHandle,
                const SwString& text,
                const SwFont& font,
@@ -74,6 +126,12 @@ public:
         invalidate_(overlayRect_(m_x, m_y));
     }
 
+    /**
+     * @brief Sets the drop Allowed.
+     * @param allowed Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setDropAllowed(bool allowed) {
         if (!m_active) {
             return;
@@ -85,6 +143,11 @@ public:
         invalidate_(overlayRect_(m_x, m_y));
     }
 
+    /**
+     * @brief Updates the position managed by the object.
+     * @param globalX Value passed to the method.
+     * @param globalY Value passed to the method.
+     */
     void updatePosition(int globalX, int globalY) {
         if (!m_active) {
             return;
@@ -96,6 +159,9 @@ public:
         invalidate_(unionRect_(oldR, newR));
     }
 
+    /**
+     * @brief Performs the `end` operation.
+     */
     void end() {
         if (!m_active) {
             return;
@@ -107,6 +173,10 @@ public:
         m_handle = SwWidgetPlatformHandle{};
     }
 
+    /**
+     * @brief Performs the `paintOverlay` operation.
+     * @param painter Value passed to the method.
+     */
     void paintOverlay(SwPainter* painter) const {
         if (!m_active || !painter) {
             return;

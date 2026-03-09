@@ -1,4 +1,29 @@
 #pragma once
+
+/**
+ * @file src/core/types/SwXmlDocument.h
+ * @ingroup core_types
+ * @brief Declares the public interface exposed by SwXmlDocument in the CoreSw fundamental types
+ * layer.
+ *
+ * This header belongs to the CoreSw fundamental types layer. It provides value types, containers,
+ * text and binary helpers, and lightweight serialization primitives shared across the stack.
+ *
+ * Within that layer, this file focuses on the XML document interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are SwXmlNode and SwXmlDocument.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * Interfaces in this area are intentionally reused by runtime, IO, GUI, remote, and media modules
+ * to keep cross-module semantics consistent.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -37,6 +62,11 @@ struct SwXmlNode {
     SwString text;
     SwVector<SwXmlNode> children;
 
+    /**
+     * @brief Performs the `firstChild` operation.
+     * @param childName Value passed to the method.
+     * @return The requested first Child.
+     */
     const SwXmlNode* firstChild(const SwString& childName) const {
         if (childName.isEmpty()) {
             return nullptr;
@@ -49,6 +79,11 @@ struct SwXmlNode {
         return nullptr;
     }
 
+    /**
+     * @brief Performs the `firstChild` operation.
+     * @param childName Value passed to the method.
+     * @return The requested first Child.
+     */
     const SwXmlNode* firstChild(const char* childName) const {
         if (!childName) {
             return nullptr;
@@ -56,6 +91,11 @@ struct SwXmlNode {
         return firstChild(SwString(childName));
     }
 
+    /**
+     * @brief Performs the `childrenNamed` operation.
+     * @param childName Value passed to the method.
+     * @return The requested children Named.
+     */
     SwVector<const SwXmlNode*> childrenNamed(const SwString& childName) const {
         SwVector<const SwXmlNode*> out;
         if (childName.isEmpty()) {
@@ -70,6 +110,11 @@ struct SwXmlNode {
         return out;
     }
 
+    /**
+     * @brief Performs the `childrenNamed` operation.
+     * @param childName Value passed to the method.
+     * @return The requested children Named.
+     */
     SwVector<const SwXmlNode*> childrenNamed(const char* childName) const {
         if (!childName) {
             return {};
@@ -77,6 +122,12 @@ struct SwXmlNode {
         return childrenNamed(SwString(childName));
     }
 
+    /**
+     * @brief Performs the `attr` operation.
+     * @param key Value passed to the method.
+     * @param def Value passed to the method.
+     * @return The requested attr.
+     */
     SwString attr(const SwString& key, const SwString& def = SwString()) const {
         if (key.isEmpty()) {
             return def;
@@ -85,6 +136,12 @@ struct SwXmlNode {
         return it == attributes.end() ? def : it->second;
     }
 
+    /**
+     * @brief Performs the `attr` operation.
+     * @param key Value passed to the method.
+     * @param def Value passed to the method.
+     * @return The requested attr.
+     */
     SwString attr(const char* key, const SwString& def = SwString()) const {
         if (!key) {
             return def;
@@ -101,15 +158,31 @@ public:
         bool ok{false};
     };
 
+    /**
+     * @brief Performs the `parse` operation.
+     * @param xml Value passed to the method.
+     * @return The requested parse.
+     */
     static ParseResult parse(const SwString& xml) {
         SwXmlDocument::ParseResult r;
 
         class Parser {
         public:
+            /**
+             * @brief Constructs a `Parser` instance.
+             *
+             * @details The instance is initialized and prepared for immediate use.
+             */
             explicit Parser(const SwString& xml)
                 : m_xml(xml)
                 , m_raw(xml.toStdString()) {}
 
+            /**
+             * @brief Returns the current parse Impl.
+             * @return The current parse Impl.
+             *
+             * @details The returned value reflects the state currently stored by the instance.
+             */
             SwXmlDocument::ParseResult parseImpl() {
                 SwXmlDocument::ParseResult r;
                 skipWhitespace();
@@ -517,8 +590,12 @@ public:
         return p.parseImpl();
     }
 
+    /**
+     * @brief Performs the `parse` operation.
+     * @param xml Value passed to the method.
+     * @return The requested parse.
+     */
     static ParseResult parse(const std::string& xml) {
         return parse(SwString(xml));
     }
 };
-

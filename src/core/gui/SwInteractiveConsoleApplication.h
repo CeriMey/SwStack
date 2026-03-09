@@ -22,6 +22,30 @@
 
 #pragma once
 
+/**
+ * @file src/core/gui/SwInteractiveConsoleApplication.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwInteractiveConsoleApplication in the CoreSw
+ * GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the interactive console application interface. The
+ * declarations exposed here define the stable surface that adjacent code can rely on while the
+ * implementation remains free to evolve behind the header.
+ *
+ * The main declarations in this header are NonBlockingReader and SwInteractiveConsoleApplication.
+ *
+ * Application-oriented declarations here define the top-level lifecycle surface for startup,
+ * shutdown, event processing, and integration with the rest of the framework.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
 #include <SwCommandLineParser.h>
 #include <SwCommandLineOption.h>
 #include <SwJsonDocument.h>
@@ -51,6 +75,11 @@ static constexpr const char* kSwLogCategory_SwInteractiveConsoleApplication = "s
 
 class NonBlockingReader {
 public:
+    /**
+     * @brief Constructs a `NonBlockingReader` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     NonBlockingReader() {
 #if defined(_WIN32)
         hStdin = GetStdHandle(STD_INPUT_HANDLE);
@@ -76,12 +105,23 @@ public:
 #endif
     }
 
+    /**
+     * @brief Destroys the `NonBlockingReader` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~NonBlockingReader() {
 #if !defined(_WIN32)
         tcsetattr(hStdin, TCSANOW, &origTermios);
 #endif
     }
 
+    /**
+     * @brief Returns the current line Non Blocking.
+     * @return The current line Non Blocking.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     std::string readLineNonBlocking() {
 #if defined(_WIN32)
         DWORD numEvents = 0;
@@ -244,7 +284,7 @@ public:
 
 
         m_timer.setInterval(100);
-        connect(&m_timer, SIGNAL(timeout), this, &SwInteractiveConsoleApplication::pollInput);
+        connect(&m_timer, &SwTimer::timeout, this, &SwInteractiveConsoleApplication::pollInput);
         m_timer.start();
 
 
@@ -490,19 +530,18 @@ private:
         }
 
         output << "Sub-options available:\n";
-        for (auto &key : node.toObject()->keys()) {
-            SwString childKey(key.c_str());
-            SwString childPath = m_currentPath.isEmpty() ? childKey : (m_currentPath + "/" + childKey);
+        for (auto &key : node.toObject().keys()) {
+            SwString childPath = m_currentPath.isEmpty() ? key : (m_currentPath + "/" + key);
             SwJsonValue &child = m_config.find(childPath, false);
 
             if (child.isObject()) {
                 // Sub-menu
-                output << " - " << key << " -> sub-menu\n";
+                output << " - " << key.toStdString() << " -> sub-menu\n";
             } else {
                 // Leaf
                 SwString value = child.toString();
                 bool hasCommand = m_commands.contains(childPath);
-                output << " - " << key << ": "
+                output << " - " << key.toStdString() << ": "
                        << value.toStdString()
                        << (hasCommand ? " [R/W]" : " [R]") << "\n";
             }
@@ -524,11 +563,11 @@ private:
             return output.str();
         }
 
-        int lastSlash = m_currentPath.lastIndexOf("/");
-        if (lastSlash < 0) {
+        const size_t lastSlash = m_currentPath.lastIndexOf("/");
+        if (lastSlash == static_cast<size_t>(-1)) {
             m_currentPath = "";
         } else {
-            m_currentPath = m_currentPath.left(lastSlash);
+            m_currentPath = m_currentPath.left(static_cast<int>(lastSlash));
         }
 
         output << "Current path: " << (m_currentPath.isEmpty() ? "/" : m_currentPath.toStdString()) << "\n";
@@ -596,10 +635,9 @@ private:
                 output << "\n" << (path.isEmpty() ? "/" : path.toStdString()) << ": "
                        << m_comments[path].toStdString() << "\n";
             }
-            for (auto &key : node.toObject()->keys()) {
-                SwString childKey(key.c_str());
-                SwString childPath = path.isEmpty() ? childKey : (path + "/" + childKey);
-                printHelpRecursive(node.toObject()->data()[key], childPath, output);
+            for (auto &key : node.toObject().keys()) {
+                SwString childPath = path.isEmpty() ? key : (path + "/" + key);
+                printHelpRecursive(node.toObject().data()[key.toStdString()], childPath, output);
             }
         } else {
             // Leaf node

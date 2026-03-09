@@ -1,4 +1,28 @@
 #pragma once
+
+/**
+ * @file src/core/gui/graphics/SwTransform.h
+ * @ingroup core_graphics
+ * @brief Declares the public interface exposed by SwTransform in the CoreSw graphics layer.
+ *
+ * This header belongs to the CoreSw graphics layer. It provides geometry types, painting
+ * primitives, images, scene-graph helpers, and rendering support consumed by widgets and views.
+ *
+ * Within that layer, this file focuses on the transform interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwTransform.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * Graphics-facing declarations here define the data flow from high-level UI state to lower-level
+ * rendering backends.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -21,14 +45,42 @@
  *
  ***************************************************************************************************/
 
+/**
+ * @file
+ * @brief Declares the affine/projective transform used by the graphics stack.
+ *
+ * SwTransform stores a 3x3 matrix and exposes the small set of mapping and
+ * composition helpers needed by scene items, views, and render contexts. The
+ * class is header-only, value-based, and backend-agnostic so it can be reused
+ * freely throughout the UI layer.
+ */
+
 #include "SwGraphicsTypes.h"
 
 #include <cmath>
 
+/**
+ * @brief Stores a 2D transform matrix together with convenience constructors.
+ *
+ * The matrix supports translation, scaling, rotation, point mapping, rectangle
+ * mapping, and composition. It forms the basis of item-local, scene, and view
+ * coordinate conversions elsewhere in the graphics subsystem.
+ */
 class SwTransform {
 public:
+    /**
+     * @brief Constructs a `SwTransform` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwTransform() = default;
 
+    /**
+     * @brief Performs the `fromTranslate` operation.
+     * @param dx Value passed to the method.
+     * @param dy Value passed to the method.
+     * @return The requested from Translate.
+     */
     static SwTransform fromTranslate(double dx, double dy) {
         SwTransform t;
         t.m31 = dx;
@@ -36,6 +88,12 @@ public:
         return t;
     }
 
+    /**
+     * @brief Performs the `fromScale` operation.
+     * @param sx Value passed to the method.
+     * @param sy Value passed to the method.
+     * @return The requested from Scale.
+     */
     static SwTransform fromScale(double sx, double sy) {
         SwTransform t;
         t.m11 = sx;
@@ -43,6 +101,11 @@ public:
         return t;
     }
 
+    /**
+     * @brief Performs the `fromRotateDegrees` operation.
+     * @param degrees Value passed to the method.
+     * @return The requested from Rotate Degrees.
+     */
     static SwTransform fromRotateDegrees(double degrees) {
         const double radians = degrees * (3.14159265358979323846 / 180.0);
         const double c = std::cos(radians);
@@ -55,18 +118,40 @@ public:
         return t;
     }
 
+    /**
+     * @brief Performs the `translated` operation.
+     * @param dx Value passed to the method.
+     * @param dy Value passed to the method.
+     * @return The requested translated.
+     */
     SwTransform translated(double dx, double dy) const {
         return *this * fromTranslate(dx, dy);
     }
 
+    /**
+     * @brief Performs the `scaled` operation.
+     * @param sx Value passed to the method.
+     * @param sy Value passed to the method.
+     * @return The requested scaled.
+     */
     SwTransform scaled(double sx, double sy) const {
         return *this * fromScale(sx, sy);
     }
 
+    /**
+     * @brief Performs the `rotated` operation.
+     * @param degrees Value passed to the method.
+     * @return The requested rotated.
+     */
     SwTransform rotated(double degrees) const {
         return *this * fromRotateDegrees(degrees);
     }
 
+    /**
+     * @brief Performs the `map` operation.
+     * @param p Value passed to the method.
+     * @return The requested map.
+     */
     SwPointF map(const SwPointF& p) const {
         const double x = m11 * p.x + m21 * p.y + m31;
         const double y = m12 * p.x + m22 * p.y + m32;
@@ -77,6 +162,11 @@ public:
         return SwPointF(x, y);
     }
 
+    /**
+     * @brief Performs the `mapRect` operation.
+     * @param rect Rectangle used by the operation.
+     * @return The requested map Rect.
+     */
     SwRectF mapRect(const SwRectF& rect) const {
         SwPointF pts[4] = {
             map(SwPointF(rect.x, rect.y)),
@@ -87,6 +177,11 @@ public:
         return swBoundingRectOfPoints(pts, 4);
     }
 
+    /**
+     * @brief Performs the `operator*` operation.
+     * @param o Value passed to the method.
+     * @return The requested operator *.
+     */
     SwTransform operator*(const SwTransform& o) const {
         SwTransform r;
         r.m11 = m11 * o.m11 + m12 * o.m21 + m13 * o.m31;
@@ -107,4 +202,3 @@ public:
     double m21{0.0}, m22{1.0}, m23{0.0};
     double m31{0.0}, m32{0.0}, m33{1.0};
 };
-

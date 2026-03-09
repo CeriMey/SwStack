@@ -1,4 +1,29 @@
 #pragma once
+
+/**
+ * @file src/core/platform/SwPlatformSelector.h
+ * @ingroup core_platform
+ * @brief Declares the public interface exposed by SwPlatformSelector in the CoreSw core platform
+ * abstraction layer.
+ *
+ * This header belongs to the CoreSw core platform abstraction layer. It encapsulates low-level
+ * filesystem and standard-location services that differ across supported operating systems.
+ *
+ * Within that layer, this file focuses on the platform selector interface. The declarations
+ * exposed here define the stable surface that adjacent code can rely on while the implementation
+ * remains free to evolve behind the header.
+ *
+ * This header mainly contributes module-level utilities, helper declarations, or namespaced types
+ * that are consumed by the surrounding subsystem.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * The declarations in this area keep higher layers independent from direct POSIX or Win32 usage.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *

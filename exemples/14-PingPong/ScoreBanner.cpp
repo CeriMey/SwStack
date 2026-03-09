@@ -1,4 +1,4 @@
-#include "ScoreBanner.h"
+﻿#include "ScoreBanner.h"
 
 #include "SwPainter.h"
 #include "SwFont.h"
@@ -37,7 +37,7 @@ void ScoreBanner::paintEvent(PaintEvent* event) {
         return;
     }
 
-    SwRect rect = getRect();
+    SwRect rect = this->rect();
     painter->fillRoundedRect(rect, 14, SwColor{24, 34, 64}, SwColor{90, 120, 190}, 2);
 
     SwFont titleFont = getFont();
@@ -67,3 +67,4 @@ void ScoreBanner::paintEvent(PaintEvent* event) {
                       SwColor{200, 205, 220},
                       infoFont);
 }
+

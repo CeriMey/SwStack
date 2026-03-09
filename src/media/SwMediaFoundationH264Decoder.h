@@ -22,10 +22,46 @@
 
 #pragma once
 
+/**
+ * @file src/media/SwMediaFoundationH264Decoder.h
+ * @ingroup media
+ * @brief Declares the public interface exposed by SwMediaFoundationH264Decoder in the CoreSw
+ * media layer.
+ *
+ * This header belongs to the CoreSw media layer. It exposes video frames, packets, decoders,
+ * capture sources, and streaming-oriented helpers used by media pipelines.
+ *
+ * Within that layer, this file focuses on the media foundation h264 decoder interface. The
+ * declarations exposed here define the stable surface that adjacent code can rely on while the
+ * implementation remains free to evolve behind the header.
+ *
+ * The main declarations in this header are SwMediaFoundationDecoderBase,
+ * SwMediaFoundationH264Decoder, SwMediaFoundationH265Decoder, and SwMediaFoundationAv1Decoder.
+ *
+ * Decoder-oriented declarations here establish the boundary between encoded input and decoded
+ * output, including the format assumptions and ownership expectations that surround that
+ * conversion.
+ *
+ * Media-facing declarations here focus on packet and frame ownership, format description,
+ * decoding boundaries, and real-time source control.
+ *
+ */
+
+
 /***************************************************************************************************
  * Windows-only H.26x decoder(s) using Media Foundation MFTs.
  * Converts to BGRA32 SwVideoFrames and emits via SwVideoDecoder interface.
  **************************************************************************************************/
+
+/**
+ * @file
+ * @brief Declares Windows Media Foundation video decoders exposed through the SwVideoDecoder API.
+ *
+ * This header adapts Media Foundation transforms (MFTs) to the generic video
+ * decoder contract used by the rest of the stack. The implementation accepts
+ * compressed packets such as H.264 or H.265, configures the appropriate MFT,
+ * drains decoded output, and publishes frames as BGRA32 SwVideoFrame objects.
+ */
 
 #include "media/SwVideoDecoder.h"
 #include "media/SwVideoPacket.h"
@@ -53,21 +89,59 @@ static constexpr const char* kSwLogCategory_SwMediaFoundationH264Decoder = "sw.m
 
 
 
+/**
+ * @brief Shared Media Foundation decoder implementation used by codec-specific wrappers.
+ *
+ * The base class owns COM and Media Foundation initialization, transform
+ * creation, input submission, output draining, and lifecycle control. Derived
+ * classes only provide codec-specific details such as the target input subtype
+ * and decoder creation strategy.
+ */
 class SwMediaFoundationDecoderBase : public SwVideoDecoder {
 public:
+    /**
+     * @brief Constructs a `SwMediaFoundationDecoderBase` instance.
+     * @param codec Value passed to the method.
+     * @param decoderName Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwMediaFoundationDecoderBase(SwVideoPacket::Codec codec, const char* decoderName)
         : m_targetCodec(codec), m_name(decoderName) {}
+    /**
+     * @brief Destroys the `SwMediaFoundationDecoderBase` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~SwMediaFoundationDecoderBase() override {
         shutdown();
     }
 
+    /**
+     * @brief Returns the current name.
+     * @return The current name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const char* name() const override { return m_name; }
 
+    /**
+     * @brief Opens the underlying resource managed by the object.
+     * @param expectedFormat Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     bool open(const SwVideoFormatInfo& expectedFormat) override {
         (void)expectedFormat;
         return ensureInitialized();
     }
 
+    /**
+     * @brief Performs the `feed` operation.
+     * @param packet Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool feed(const SwVideoPacket& packet) override {
         if (packet.codec() != m_targetCodec || packet.payload().isEmpty()) {
             return false;
@@ -82,6 +156,9 @@ public:
         return true;
     }
 
+    /**
+     * @brief Performs the `flush` operation.
+     */
     void flush() override {
         if (m_decoder) {
             m_decoder->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
@@ -89,8 +166,24 @@ public:
     }
 
 protected:
+    /**
+     * @brief Returns the current input Subtype.
+     * @return The current input Subtype.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     virtual GUID inputSubtype() const = 0;
+    /**
+     * @brief Creates the requested decoder.
+     * @param decoder Value passed to the method.
+     * @return The resulting decoder.
+     */
     virtual HRESULT createDecoder(IMFTransform** decoder) const = 0;
+    /**
+     * @brief Performs the `configureInputType` operation.
+     * @param type Value passed to the method.
+     * @return The requested configure Input Type.
+     */
     virtual void configureInputType(IMFMediaType* type) const {
         (void)type;
     }
@@ -464,6 +557,11 @@ private:
 
 class SwMediaFoundationH264Decoder : public SwMediaFoundationDecoderBase {
 public:
+    /**
+     * @brief Constructs a `SwMediaFoundationH264Decoder` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwMediaFoundationH264Decoder()
         : SwMediaFoundationDecoderBase(SwVideoPacket::Codec::H264, "SwMediaFoundationH264Decoder") {}
 
@@ -474,6 +572,10 @@ protected:
         return createDecoderFromEnum(MFVideoFormat_H264, decoder);
     }
 
+    /**
+     * @brief Performs the `configureInputType` operation.
+     * @param type Value passed to the method.
+     */
     void configureInputType(IMFMediaType* type) const override {
         if (type) {
             type->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main);
@@ -483,6 +585,11 @@ protected:
 
 class SwMediaFoundationH265Decoder : public SwMediaFoundationDecoderBase {
 public:
+    /**
+     * @brief Constructs a `SwMediaFoundationH265Decoder` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwMediaFoundationH265Decoder()
         : SwMediaFoundationDecoderBase(SwVideoPacket::Codec::H265, "SwMediaFoundationH265Decoder") {}
 
@@ -493,6 +600,10 @@ protected:
         return createDecoderFromEnum(MFVideoFormat_HEVC, decoder);
     }
 
+    /**
+     * @brief Performs the `configureInputType` operation.
+     * @param type Value passed to the method.
+     */
     void configureInputType(IMFMediaType* type) const override {
         (void)type;
     }
@@ -500,6 +611,11 @@ protected:
 
 class SwMediaFoundationAv1Decoder : public SwMediaFoundationDecoderBase {
 public:
+    /**
+     * @brief Constructs a `SwMediaFoundationAv1Decoder` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwMediaFoundationAv1Decoder()
         : SwMediaFoundationDecoderBase(SwVideoPacket::Codec::AV1, "SwMediaFoundationAv1Decoder") {}
 
@@ -538,19 +654,49 @@ static bool g_registerMFAv1Decoder = []() {
 // Stub for non-Windows platforms
 class SwMediaFoundationH264Decoder : public SwVideoDecoder {
 public:
+    /**
+     * @brief Returns the current name.
+     * @return The current name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const char* name() const override { return "SwMediaFoundationH264DecoderStub"; }
+    /**
+     * @brief Performs the `feed` operation.
+     * @return `true` on success; otherwise `false`.
+     */
     bool feed(const SwVideoPacket&) override { return false; }
 };
 
 class SwMediaFoundationH265Decoder : public SwVideoDecoder {
 public:
+    /**
+     * @brief Returns the current name.
+     * @return The current name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const char* name() const override { return "SwMediaFoundationH265DecoderStub"; }
+    /**
+     * @brief Performs the `feed` operation.
+     * @return `true` on success; otherwise `false`.
+     */
     bool feed(const SwVideoPacket&) override { return false; }
 };
 
 class SwMediaFoundationAv1Decoder : public SwVideoDecoder {
 public:
+    /**
+     * @brief Returns the current name.
+     * @return The current name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const char* name() const override { return "SwMediaFoundationAv1DecoderStub"; }
+    /**
+     * @brief Performs the `feed` operation.
+     * @return `true` on success; otherwise `false`.
+     */
     bool feed(const SwVideoPacket&) override { return false; }
 };
 

@@ -1,4 +1,27 @@
 #pragma once
+
+/**
+ * @file src/core/io/SwFile.h
+ * @ingroup core_io
+ * @brief Declares the public interface exposed by SwFile in the CoreSw IO layer.
+ *
+ * This header belongs to the CoreSw IO layer. It defines files, sockets, servers, descriptors,
+ * processes, and network helpers that sit directly at operating-system boundaries.
+ *
+ * Within that layer, this file focuses on the file interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwFile.
+ *
+ * File-oriented declarations here usually define handle ownership, access mode selection, and the
+ * transfer of bytes between the framework API and operating-system services.
+ *
+ * IO-facing declarations here usually manage handles, readiness state, buffering, and error
+ * propagation while presenting a portable framework API.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -43,6 +66,7 @@ static constexpr const char* kSwLogCategory_SwFile = "sw.core.io.swfile";
 
 
 class SwFile : public SwIODevice {
+    SW_OBJECT(SwFile, SwIODevice)
 public:
     enum OpenMode {
         Read,
@@ -50,24 +74,56 @@ public:
         Append
     };
 
+    /**
+     * @brief Constructs a `SwFile` instance.
+     * @param parent Optional parent object that owns this instance.
+     * @param Read Value passed to the method.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     SwFile(SwObject* parent = nullptr)
         : SwIODevice(parent), currentMode_(Read) {}
 
+    /**
+     * @brief Constructs a `SwFile` instance.
+     * @param filePath Path of the target file.
+     * @param parent Optional parent object that owns this instance.
+     * @param Read Value passed to the method.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwFile(const SwString& filePath, SwObject* parent = nullptr)
         : SwIODevice(parent), currentMode_(Read) {
         filePath_ = filePath;
     }
 
+    /**
+     * @brief Destroys the `SwFile` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     virtual ~SwFile() {
         close();
     }
 
 
     // Définir le chemin du fichier
+    /**
+     * @brief Sets the file Path.
+     * @param filePath Path of the target file.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setFilePath(const SwString& filePath) {
         filePath_ = filePath;
     }
 
+    /**
+     * @brief Returns the current file Name.
+     * @return The current file Name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString fileName() const {
         if (filePath_.isEmpty()) {
             swCError(kSwLogCategory_SwFile) << "Error: File path is empty!";
@@ -81,6 +137,13 @@ public:
     }
 
     // Ouvrir un fichier
+    /**
+     * @brief Opens the underlying resource managed by the object.
+     * @param mode Mode value that controls the operation.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     bool open(OpenMode mode) {
         if (filePath_.isEmpty()) {
             swCError(kSwLogCategory_SwFile) << "Chemin du fichier non défini.";
@@ -109,6 +172,13 @@ public:
     }
 
     // Ouvrir un fichier en mode binaire (utile pour ecrire des fichiers non texte).
+    /**
+     * @brief Opens the binary handled by the object.
+     * @param mode Mode value that controls the operation.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     bool openBinary(OpenMode mode) {
         if (filePath_.isEmpty()) {
             swCError(kSwLogCategory_SwFile) << "Chemin du fichier non defini.";
@@ -139,6 +209,11 @@ public:
     }
 
     // Fermer le fichier
+    /**
+     * @brief Closes the underlying resource and stops active work.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     void close() override {
         if (fileStream_.is_open()) {
             fileStream_.close();
@@ -147,6 +222,11 @@ public:
     }
 
     // Écrire dans le fichier
+    /**
+     * @brief Performs the `write` operation on the associated resource.
+     * @param data Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool write(const SwString& data) {
         if (currentMode_ != Write && currentMode_ != Append) {
             swCError(kSwLogCategory_SwFile) << "Fichier non ouvert en mode écriture.";
@@ -156,6 +236,11 @@ public:
         return fileStream_.good();
     }
 
+    /**
+     * @brief Performs the `write` operation on the associated resource.
+     * @param data Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool write(const SwByteArray& data) override {
         if (currentMode_ != Write && currentMode_ != Append) {
             swCError(kSwLogCategory_SwFile) << "Fichier non ouvert en mode ecriture.";
@@ -172,6 +257,12 @@ public:
         return fileStream_.good();
     }
 
+    /**
+     * @brief Returns the current all.
+     * @return The current all.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString readAll() {
         if (currentMode_ != Read) {
             swCError(kSwLogCategory_SwFile) << "Fichier non ouvert en mode lecture.";
@@ -186,10 +277,22 @@ public:
     }
 
     // Vérifier si le fichier est ouvert
+    /**
+     * @brief Returns whether the object reports open.
+     * @return `true` when the object reports open; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isOpen() const override {
         return fileStream_.is_open();
     }
 
+    /**
+     * @brief Returns the current directory.
+     * @return The current directory.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString getDirectory() const {
         if (filePath_.isEmpty()) {
             swCError(kSwLogCategory_SwFile) << "Chemin du fichier non défini.";
@@ -206,11 +309,23 @@ public:
     }
 
 
+    /**
+     * @brief Returns whether the object reports file.
+     * @param path Path used by the operation.
+     * @return The requested file.
+     *
+     * @details This query does not modify the object state.
+     */
     static bool isFile(const SwString& path) {
         return swFilePlatform().isFile(path);
     }
 
 
+    /**
+     * @brief Performs the `contains` operation.
+     * @param keyword Value passed to the method.
+     * @return `true` when the object reports contains; otherwise `false`.
+     */
     bool contains(const SwString& keyword) {
         if (currentMode_ != Read) {
             swCError(kSwLogCategory_SwFile) << "Fichier non ouvert en mode lecture.";
@@ -226,6 +341,11 @@ public:
         return false;
     }
 
+    /**
+     * @brief Performs the `readLine` operation on the associated resource.
+     * @param lineNumber Value passed to the method.
+     * @return The resulting line.
+     */
     SwString readLine(std::size_t lineNumber) {
         if (currentMode_ != Read) {
             swCError(kSwLogCategory_SwFile) << "Fichier non ouvert en mode lecture.";
@@ -241,6 +361,12 @@ public:
         return line;
     }
 
+    /**
+     * @brief Returns the current line.
+     * @return The current line.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString readLine() {
         if (currentMode_ != Read) {
             swCError(kSwLogCategory_SwFile) << "Fichier non ouvert en mode lecture.";
@@ -253,6 +379,12 @@ public:
         return line;
     }
 
+    /**
+     * @brief Returns the current at End.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool atEnd() const {
         if (!fileStream_.is_open()) {
             swCError(kSwLogCategory_SwFile) << "Fichier non ouvert.";
@@ -260,6 +392,11 @@ public:
         return fileStream_.eof();
     }
 
+    /**
+     * @brief Performs the `readChunk` operation on the associated resource.
+     * @param chunkSize Value passed to the method.
+     * @return The resulting chunk.
+     */
     SwString readChunk(std::size_t chunkSize) {
         if (currentMode_ != Read) {
             throw std::runtime_error("Fichier non ouvert en mode lecture.");
@@ -272,6 +409,10 @@ public:
         return buffer;
     }
 
+    /**
+     * @brief Performs the `seek` operation.
+     * @param position Value passed to the method.
+     */
     void seek(std::streampos position) {
         if (!isOpen()) {
             throw std::runtime_error("Fichier non ouvert.");
@@ -279,6 +420,12 @@ public:
         fileStream_.seekg(position);
     }
 
+    /**
+     * @brief Returns the current current Position.
+     * @return The current current Position.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     std::streampos currentPosition() {
         if (!isOpen()) {
             throw std::runtime_error("Fichier non ouvert.");
@@ -287,6 +434,12 @@ public:
     }
 
 
+    /**
+     * @brief Performs the `readLinesInRangeLazy` operation on the associated resource.
+     * @param startLine Value passed to the method.
+     * @param endLine Value passed to the method.
+     * @return The resulting lines In Range Lazy.
+     */
     SwString readLinesInRangeLazy(std::size_t startLine, std::size_t endLine) {
         if (currentMode_ != Read) {
             throw std::runtime_error("Fichier non ouvert en mode lecture.");
@@ -321,10 +474,25 @@ public:
         return result;
     }
 
+    /**
+     * @brief Performs the `copy` operation.
+     * @param source Value passed to the method.
+     * @param destination Value passed to the method.
+     * @param overwrite Value passed to the method.
+     * @return The requested copy.
+     */
     static bool copy(const SwString& source, const SwString& destination, bool overwrite = true) {
         return swFilePlatform().copy(source, destination, overwrite);
     }
 
+    /**
+     * @brief Performs the `copyByChunk` operation.
+     * @param source Value passed to the method.
+     * @param destination Value passed to the method.
+     * @param nonBlocking Value passed to the method.
+     * @param chunkSize Value passed to the method.
+     * @return The requested copy By Chunk.
+     */
     static bool copyByChunk(const SwString& source, const SwString& destination,
                             bool nonBlocking = true, int chunkSize = 1024) {
         // Vérifier si le fichier source existe
@@ -378,6 +546,13 @@ public:
     }
 
 
+    /**
+     * @brief Performs the `copyByChunk` operation.
+     * @param destination Value passed to the method.
+     * @param nonBlocking Value passed to the method.
+     * @param chunkSize Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool copyByChunk(const SwString& destination, bool nonBlocking = true, int chunkSize = 1024) {
         if (filePath_.isEmpty()) {
             swCError(kSwLogCategory_SwFile) << "Source file path is not set.";
@@ -446,30 +621,75 @@ public:
 
 
     // Lire les métadonnées d'un fichier
+    /**
+     * @brief Performs the `getFileMetadata` operation.
+     * @param creationTime Value passed to the method.
+     * @param lastAccessTime Value passed to the method.
+     * @param lastWriteTime Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool getFileMetadata(SwDateTime& creationTime, SwDateTime& lastAccessTime, SwDateTime& lastWriteTime) {
         return swFilePlatform().getFileMetadata(filePath_, creationTime, lastAccessTime, lastWriteTime);
     }
 
     // Modifier la date de création
+    /**
+     * @brief Sets the creation Time.
+     * @param creationTime Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     bool setCreationTime(SwDateTime creationTime) {
         return swFilePlatform().setCreationTime(filePath_, creationTime);
     }
 
     // Modifier la date de dernière modification
+    /**
+     * @brief Sets the last Write Date.
+     * @param lastWriteTime Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     bool setLastWriteDate(SwDateTime lastWriteTime) {
         return swFilePlatform().setLastWriteDate(filePath_, lastWriteTime);
     }
 
     // Modifier la date de dernier accès
+    /**
+     * @brief Sets the last Access Date.
+     * @param lastAccessTime Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     bool setLastAccessDate(SwDateTime lastAccessTime) {
         return swFilePlatform().setLastAccessDate(filePath_, lastAccessTime);
     }
 
     // Modifier toutes les dates (création, dernier accès, dernière modification)
+    /**
+     * @brief Sets the all Dates.
+     * @param creationTime Value passed to the method.
+     * @param lastAccessTime Value passed to the method.
+     * @param lastWriteTime Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     bool setAllDates(SwDateTime creationTime, SwDateTime lastAccessTime, SwDateTime lastWriteTime) {
         return swFilePlatform().setAllDates(filePath_, creationTime, lastAccessTime, lastWriteTime);
     }
 
+    /**
+     * @brief Returns the current file Checksum.
+     * @return The current file Checksum.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString fileChecksum()
     {
         SwString checksum;
@@ -483,10 +703,21 @@ public:
         return checksum;
     }
 
+    /**
+     * @brief Performs the `writeMetadata` operation on the associated resource.
+     * @param key Value passed to the method.
+     * @param value Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool writeMetadata(const SwString& key, const SwString& value) {
         return swFilePlatform().writeMetadata(filePath_, key, value);
     }
 
+    /**
+     * @brief Performs the `readMetadata` operation on the associated resource.
+     * @param key Value passed to the method.
+     * @return The resulting metadata.
+     */
     SwString readMetadata(const SwString& key) {
         return swFilePlatform().readMetadata(filePath_, key);
     }

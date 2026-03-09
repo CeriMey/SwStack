@@ -22,6 +22,30 @@
 
 #pragma once
 
+/**
+ * @file src/fireBD/FireBDChatService.h
+ * @ingroup firebd
+ * @brief Declares the public interface exposed by FireBDChatService in the FireBD service layer.
+ *
+ * This header belongs to the FireBD service layer. It declares application-facing clients,
+ * service types, and data models used to communicate with the FireBD backend.
+ *
+ * Within that layer, this file focuses on the fire bd chat service interface. The declarations
+ * exposed here define the stable surface that adjacent code can rely on while the implementation
+ * remains free to evolve behind the header.
+ *
+ * The main declarations in this header are FireBDChatService.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * The contracts in this area mainly describe request and response shapes, client composition, and
+ * higher-level service boundaries.
+ *
+ */
+
+
 /***************************************************************************************************
  * fireBD - Firebase RTDB chat-oriented service.
  *
@@ -56,9 +80,21 @@ class FireBDChatService : public SwObject {
     SW_OBJECT(FireBDChatService, SwObject)
 
 public:
+    /**
+     * @brief Constructs a `FireBDChatService` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit FireBDChatService(SwObject* parent = nullptr)
         : SwObject(parent) {}
 
+    /**
+     * @brief Sets the database Url.
+     * @param url Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setDatabaseUrl(SwString url) {
         url = url.trimmed();
         while (url.endsWith("/")) {
@@ -67,17 +103,65 @@ public:
         m_baseUrl = url;
     }
 
+    /**
+     * @brief Returns the current database Url.
+     * @return The current database Url.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString databaseUrl() const { return m_baseUrl; }
 
+    /**
+     * @brief Sets the auth Token.
+     * @param m_authToken Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setAuthToken(const SwString& token) { m_authToken = token.trimmed(); }
+    /**
+     * @brief Returns the current auth Token.
+     * @return The current auth Token.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString authToken() const { return m_authToken; }
 
+    /**
+     * @brief Sets the user Id.
+     * @param m_userId Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setUserId(const SwString& userId) { m_userId = userId.trimmed(); }
+    /**
+     * @brief Returns the current user Id.
+     * @return The current user Id.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString userId() const { return m_userId; }
 
+    /**
+     * @brief Sets the poll Interval Ms.
+     * @param m_pollIntervalMs Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setPollIntervalMs(int ms) { m_pollIntervalMs = std::max(250, ms); }
+    /**
+     * @brief Returns the current poll Interval Ms.
+     * @return The current poll Interval Ms.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int pollIntervalMs() const { return m_pollIntervalMs; }
 
+    /**
+     * @brief Returns the current start.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool start() {
         if (m_running) {
             return true;
@@ -98,6 +182,11 @@ public:
         return true;
     }
 
+    /**
+     * @brief Stops the underlying activity managed by the object.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     void stop() {
         m_running = false;
         m_pollInFlight = false;
@@ -106,9 +195,26 @@ public:
         }
     }
 
+    /**
+     * @brief Returns whether the object reports running.
+     * @return `true` when the object reports running; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isRunning() const { return m_running; }
 
     // Returns the messageId (generated if empty). Completion is emitted via outgoingMessageResult.
+    /**
+     * @brief Performs the `sendMessage` operation.
+     * @param toUserId Value passed to the method.
+     * @param conversationId Value passed to the method.
+     * @param text Value passed to the method.
+     * @param kind Value passed to the method.
+     * @param payload Value passed to the method.
+     * @param meta Value passed to the method.
+     * @param messageId Value passed to the method.
+     * @return The requested send Message.
+     */
     SwString sendMessage(const SwString& toUserId,
                          const SwString& conversationId,
                          const SwString& text,
@@ -135,14 +241,15 @@ public:
 
         const SwString url = buildUrl_(inboxItemPath_(msg.toUserId, msg.messageId));
         const SwByteArray body = SwByteArray(encodeMessageJson_(msg).toStdString());
+        const SwString mid = msg.messageId;
 
         auto* http = new FireBDHttpClient(this);
-        SwObject::connect(http, &FireBDHttpClient::finished, this, [this, http, mid = msg.messageId](const SwByteArray&) {
+        SwObject::connect(http, &FireBDHttpClient::finished, this, [this, http, mid](const SwByteArray&) {
             const bool ok = (http->statusCode() >= 200 && http->statusCode() < 300);
             http->deleteLater();
             outgoingMessageResult(mid, ok);
         });
-        SwObject::connect(http, &FireBDHttpClient::errorOccurred, this, [this, http, mid = msg.messageId](int) {
+        SwObject::connect(http, &FireBDHttpClient::errorOccurred, this, [this, http, mid](int) {
             http->deleteLater();
             outgoingMessageResult(mid, false);
         });
@@ -151,6 +258,13 @@ public:
         return msg.messageId;
     }
 
+    /**
+     * @brief Performs the `sendMessageStatus` operation.
+     * @param originalSenderId Value passed to the method.
+     * @param conversationId Value passed to the method.
+     * @param messageId Value passed to the method.
+     * @param status Value passed to the method.
+     */
     void sendMessageStatus(const SwString& originalSenderId,
                            const SwString& conversationId,
                            const SwString& messageId,
@@ -180,6 +294,9 @@ public:
     }
 
     // Force a poll cycle (safe to call even if not started).
+    /**
+     * @brief Performs the `pollNow` operation.
+     */
     void pollNow() {
         if (!m_running) {
             return;
@@ -306,10 +423,10 @@ private:
     static FireBDMessage decodeMessage_(const SwString& key, const SwJsonValue& v) {
         FireBDMessage msg;
         msg.messageId = key;
-        if (!v.isObject() || !v.toObject()) {
+        if (!v.isObject()) {
             return msg;
         }
-        const SwJsonObject& o = *v.toObject();
+        const SwJsonObject o = v.toObject();
         const SwString mid = jsonString_(o.value("messageId"));
         if (!mid.isEmpty()) {
             msg.messageId = mid;
@@ -328,10 +445,10 @@ private:
     static FireBDStatusEvent decodeStatusEvent_(const SwString& key, const SwJsonValue& v) {
         FireBDStatusEvent ev;
         ev.eventId = key;
-        if (!v.isObject() || !v.toObject()) {
+        if (!v.isObject()) {
             return ev;
         }
-        const SwJsonObject& o = *v.toObject();
+        const SwJsonObject o = v.toObject();
         const SwString eventId = jsonString_(o.value("eventId"));
         if (!eventId.isEmpty()) {
             ev.eventId = eventId;
@@ -441,11 +558,11 @@ private:
         if (root.isNull()) {
             return out;
         }
-        if (!root.isObject() || !root.toObject()) {
+        if (!root.isObject()) {
             return out;
         }
 
-        const SwJsonObject& obj = *root.toObject();
+        const SwJsonObject obj = root.toObject();
         for (auto it = obj.begin(); it != obj.end(); ++it) {
             const SwString key = it.key();
             const SwJsonValue& v = it.value();
@@ -465,11 +582,11 @@ private:
         if (root.isNull()) {
             return out;
         }
-        if (!root.isObject() || !root.toObject()) {
+        if (!root.isObject()) {
             return out;
         }
 
-        const SwJsonObject& obj = *root.toObject();
+        const SwJsonObject obj = root.toObject();
         for (auto it = obj.begin(); it != obj.end(); ++it) {
             const SwString key = it.key();
             const SwJsonValue& v = it.value();

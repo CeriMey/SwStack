@@ -21,6 +21,24 @@
  *
  ***************************************************************************************************/
 
+/**
+ * @file SwCrashHandler.h
+ * @ingroup core_runtime
+ * @brief Declares helpers that install a best-effort crash capture path for supported platforms.
+ *
+ * @details
+ * `SwCrashHandler` centralizes the minimal infrastructure required to preserve diagnostics after an
+ * unexpected process termination. The implementation is intentionally conservative:
+ * - it is opt-in through the `SW_CRASH_DUMPS` environment variable,
+ * - it computes a writable crash directory under standard application data locations,
+ * - it records a marker file describing the most recent crash artifacts,
+ * - it uses platform-specific capture primitives to generate the actual report.
+ *
+ * Windows uses an unhandled-exception filter together with DbgHelp to write a textual stack trace
+ * and a minidump. Linux installs signal handlers for common fatal signals and writes a best-effort
+ * backtrace to a log file before re-raising the signal with the default handler.
+ */
+
 #include "core/fs/SwDir.h"
 #include "core/fs/SwStandardPaths.h"
 #include "core/types/SwString.h"
@@ -44,26 +62,65 @@
 #include <unistd.h>
 #endif
 
+/**
+ * @struct SwCrashReport
+ * @brief Describes the artifacts produced by the most recently persisted crash.
+ */
 struct SwCrashReport {
-    SwString appName;
-    SwString timestamp;
-    SwString crashDir;
-    SwString logPath;
-    SwString dumpPath;
+    SwString appName;    ///< Application identifier passed to `SwCrashHandler::install()`.
+    SwString timestamp;  ///< Timestamp token embedded in generated artifact names.
+    SwString crashDir;   ///< Directory that stores marker, log, and dump files.
+    SwString logPath;    ///< Path to the human-readable crash log, if one was produced.
+    SwString dumpPath;   ///< Path to the platform dump file, if the platform supports it.
 };
 
+/**
+ * @class SwCrashHandler
+ * @brief Static utility that installs crash-report generation for the current process.
+ *
+ * @details
+ * The class does not need to be instantiated. Callers typically invoke `install()` during
+ * application startup, after they know the effective application name. Once installed, the handler
+ * remembers the target crash directory and exposes `takeLastCrashReport()` so the next process run
+ * can surface the previous failure to the user or telemetry pipeline.
+ *
+ * The API is designed around two principles:
+ * - crash capture must never activate implicitly,
+ * - normal runtime code should be able to query the last persisted report without having to know
+ *   how each platform stores the raw artifacts.
+ */
 class SwCrashHandler {
 public:
+    /**
+     * @brief Returns whether crash dumping is enabled through the environment.
+     * @return `true` when `SW_CRASH_DUMPS` contains an enabled value such as `1` or `true`.
+     *
+     * @details
+     * This method is intentionally side-effect free. It only inspects the environment and does not
+     * install handlers, allocate directories, or persist files.
+     */
     static bool enabledFromEnv() {
-        const char* env = std::getenv("SW_CRASH_DUMPS");
-        if (!env) {
+        SwString v = envValue_("SW_CRASH_DUMPS");
+        if (v.isEmpty()) {
             return false;
         }
-        SwString v(env);
         v = v.trimmed().toLower();
         return v == "1" || v == "true" || v == "yes" || v == "on";
     }
 
+    /**
+     * @brief Installs the process-wide crash handler for the provided application name.
+     * @param appName Logical application name used to compute artifact paths and file names.
+     *
+     * @details
+     * The method stores the normalized application name, resolves the crash directory, and installs
+     * the platform-specific hooks only when crash dumping is enabled. Repeated calls are idempotent:
+     * once the hooks are installed, later calls keep the stored directory information but do not
+     * register duplicate handlers.
+     *
+     * @note Passing an empty name is treated as a no-op because no stable output location can be
+     * derived from it.
+     */
     static void install(const SwString& appName) {
         if (appName.trimmed().isEmpty()) {
             return;
@@ -96,6 +153,15 @@ public:
 #endif
     }
 
+    /**
+     * @brief Returns the directory where crash artifacts are stored for the current application.
+     * @return Absolute or platform-native directory path, or an empty string when it cannot be
+     *         resolved yet.
+     *
+     * @details
+     * The directory is derived lazily from the installed application name. Standard writable
+     * application data locations are preferred, with cache and temporary locations used as fallback.
+     */
     static SwString crashDirectory() {
         if (crashDirStorage_().isEmpty() && !appNameStorage_().isEmpty()) {
             crashDirStorage_() = computeCrashDir_(appNameStorage_());
@@ -103,6 +169,18 @@ public:
         return crashDirStorage_();
     }
 
+    /**
+     * @brief Loads and clears the marker describing the last recorded crash.
+     * @param outReport Output structure filled with the parsed metadata on success.
+     * @return `true` when a previous crash marker was found and at least one artifact path was
+     *         recovered.
+     *
+     * @details
+     * The handler writes a lightweight marker file next to the crash artifacts so the next process
+     * invocation can discover them without scanning the crash directory. This method parses that
+     * marker, populates `outReport`, then removes the marker so the same report is not emitted
+     * repeatedly on subsequent launches.
+     */
     static bool takeLastCrashReport(SwCrashReport& outReport) {
         outReport = SwCrashReport{};
 
@@ -151,21 +229,59 @@ public:
     }
 
 private:
+    /**
+     * @brief Reads an environment variable into a `SwString`.
+     * @param name Environment variable name.
+     * @return Variable value, or an empty string when the variable is absent.
+     */
+    static SwString envValue_(const char* name) {
+        if (!name || !*name) {
+            return SwString();
+        }
+#if defined(_WIN32)
+        char* value = nullptr;
+        size_t len = 0;
+        if (_dupenv_s(&value, &len, name) != 0 || !value) {
+            return SwString();
+        }
+        SwString result(value);
+        std::free(value);
+        return result;
+#else
+        const char* value = std::getenv(name);
+        return value ? SwString(value) : SwString();
+#endif
+    }
+
+    /**
+     * @brief Returns the process-wide storage slot containing the installed application name.
+     */
     static SwString& appNameStorage_() {
         static SwString s_appName;
         return s_appName;
     }
 
+    /**
+     * @brief Returns the process-wide storage slot containing the resolved crash directory.
+     */
     static SwString& crashDirStorage_() {
         static SwString s_crashDir;
         return s_crashDir;
     }
 
+    /**
+     * @brief Returns the process-wide flag indicating whether handlers were already installed.
+     */
     static bool& installedStorage_() {
         static bool s_installed = false;
         return s_installed;
     }
 
+    /**
+     * @brief Computes the crash artifact directory for a given application name.
+     * @param appName Logical application name previously passed to `install()`.
+     * @return Platform-native crash directory path, or an empty string when none can be resolved.
+     */
     static SwString computeCrashDir_(const SwString& appName) {
         SwString base = SwStandardPaths::writableLocation(SwStandardPaths::AppLocalDataLocation);
         if (base.isEmpty()) {
@@ -190,6 +306,10 @@ private:
         return dir;
     }
 
+    /**
+     * @brief Returns a timestamp token suitable for crash artifact file names.
+     * @return Timestamp formatted as `YYYYMMDD_hhmmss`.
+     */
     static SwString timestampNow_() {
         std::time_t t = std::time(nullptr);
         std::tm tm{};
@@ -211,10 +331,19 @@ private:
         return SwString(stamp);
     }
 
+    /**
+     * @brief Returns the path of the marker file used to advertise the most recent crash.
+     */
     static SwString markerFilePath_() {
         return joinPath_(crashDirectory(), "last_crash.txt");
     }
 
+    /**
+     * @brief Joins a directory and file name using the current platform path style.
+     * @param dir Base directory.
+     * @param fileName Leaf file name.
+     * @return Joined path.
+     */
     static SwString joinPath_(const SwString& dir, const SwString& fileName) {
         if (dir.isEmpty()) {
             return fileName;
@@ -234,6 +363,12 @@ private:
         return out;
     }
 
+    /**
+     * @brief Reads a whole file into memory.
+     * @param path File path to load.
+     * @param out Output string receiving the file bytes.
+     * @return `true` on success, `false` when the file cannot be opened.
+     */
     static bool readAllTextFile_(const SwString& path, std::string& out) {
         out.clear();
 
@@ -264,6 +399,10 @@ private:
         return true;
     }
 
+    /**
+     * @brief Removes a file without propagating deletion errors.
+     * @param path File path to delete.
+     */
     static void removeFile_(const SwString& path) {
 #if defined(_WIN32)
         const std::wstring wpath = path.toStdWString();
@@ -273,6 +412,12 @@ private:
 #endif
     }
 
+    /**
+     * @brief Persists the marker consumed by `takeLastCrashReport()`.
+     * @param timestamp Crash timestamp token.
+     * @param logPath Path to the textual crash log.
+     * @param dumpPath Path to the platform dump file, when one exists.
+     */
     static void writeMarkerFile_(const SwString& timestamp,
                                  const SwString& logPath,
                                  const SwString& dumpPath) {
@@ -303,6 +448,11 @@ private:
     }
 
 #if defined(_WIN32)
+    /**
+     * @brief Writes a symbolic stack trace into the crash log on Windows.
+     * @param f Output stream already opened on the log file.
+     * @param ep Structured exception information provided by Windows.
+     */
     static void writeStackTrace_(std::FILE* f, EXCEPTION_POINTERS* ep) {
         if (!f || !ep || !ep->ContextRecord) {
             return;
@@ -399,6 +549,11 @@ private:
         ::SymCleanup(process);
     }
 
+    /**
+     * @brief Writes a Windows minidump beside the textual crash log.
+     * @param dumpPath Destination dump file path.
+     * @param ep Structured exception information provided by Windows.
+     */
     static void writeMiniDump_(const std::wstring& dumpPath, EXCEPTION_POINTERS* ep) {
         if (!ep) {
             return;
@@ -430,6 +585,11 @@ private:
         ::CloseHandle(hFile);
     }
 
+    /**
+     * @brief Process-wide unhandled-exception callback installed on Windows.
+     * @param ep Structured exception information describing the crash.
+     * @return `EXCEPTION_EXECUTE_HANDLER` after best-effort artifact generation.
+     */
     static LONG WINAPI unhandledExceptionFilter_(EXCEPTION_POINTERS* ep) {
         const SwString stamp = timestampNow_();
         const SwString base = crashDirectory();
@@ -459,6 +619,26 @@ private:
 #endif
 
 #if defined(__linux__)
+    /**
+     * @brief Performs a best-effort blocking write on a signal-safe file descriptor.
+     * @param fd Open file descriptor.
+     * @param data Byte buffer to write.
+     * @param size Number of bytes to write.
+     */
+    static void writeBestEffort_(int fd, const char* data, size_t size) {
+        size_t offset = 0;
+        while (offset < size) {
+            const ssize_t written = ::write(fd, data + offset, size - offset);
+            if (written <= 0) {
+                return;
+            }
+            offset += static_cast<size_t>(written);
+        }
+    }
+
+    /**
+     * @brief Installs handlers for the fatal Unix signals monitored by the crash handler.
+     */
     static void installSignalHandlers_() {
         struct sigaction sa;
         std::memset(&sa, 0, sizeof(sa));
@@ -473,6 +653,10 @@ private:
         sigaction(SIGBUS, &sa, nullptr);
     }
 
+    /**
+     * @brief Signal handler that writes a backtrace log, stores the marker, and re-raises.
+     * @param sig Fatal signal number.
+     */
     static void signalHandler_(int sig) {
         const SwString stamp = timestampNow_();
         const SwString base = crashDirectory();
@@ -481,7 +665,7 @@ private:
         int fd = ::open(logPath.toStdString().c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0644);
         if (fd >= 0) {
             const std::string header = appNameStorage_().toStdString() + " crash (signal " + std::to_string(sig) + ")\n";
-            (void)::write(fd, header.c_str(), header.size());
+            writeBestEffort_(fd, header.c_str(), header.size());
 
             void* frames[64];
             int n = ::backtrace(frames, 64);

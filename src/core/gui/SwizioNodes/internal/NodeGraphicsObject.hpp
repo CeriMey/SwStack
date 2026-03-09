@@ -1,5 +1,18 @@
 #pragma once
 
+/**
+ * @file
+ * @ingroup core_swizio_nodes
+ * @brief Declares the scene item that renders and interacts with a node instance.
+ *
+ * `NodeGraphicsObject` is the view-side wrapper for one node in the graph model. It owns
+ * the node visual, synchronizes geometry with the model, and translates user interaction
+ * such as selection, movement, and embedded-widget placement into scene updates.
+ */
+
+
+
+
 #include "Export.hpp"
 
 #include "SwizioNodes/internal/AbstractGraphModel.hpp"
@@ -34,6 +47,19 @@ public:
         int index{-1};
     };
 
+    /**
+     * @brief Constructs a `NodeGraphicsObject` instance.
+     * @param scene Value passed to the method.
+     * @param nodeId Value passed to the method.
+     * @param title Title text applied by the operation.
+     * @param inputs Value passed to the method.
+     * @param outputs Output value filled by the method.
+     * @param accent Value passed to the method.
+     * @param typeKey Value passed to the method.
+     * @param true Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     NodeGraphicsObject(BasicGraphicsScene& scene,
                        NodeId nodeId,
                        const SwString& title = SwString(),
@@ -53,19 +79,67 @@ public:
         setFlags(ItemIsSelectable | ItemIsMovable);
     }
 
+    /**
+     * @brief Destroys the `NodeGraphicsObject` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~NodeGraphicsObject() override = default;
 
+    /**
+     * @brief Returns the current node Id.
+     * @return The current node Id.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     NodeId nodeId() const { return m_nodeId; }
 
+    /**
+     * @brief Returns the current type Key.
+     * @return The current type Key.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString typeKey() const { return m_typeKey; }
+    /**
+     * @brief Returns the current title.
+     * @return The current title.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString title() const { return m_title; }
 
+    /**
+     * @brief Performs the `inputCount` operation.
+     * @return The requested input Count.
+     */
     int inputCount() const { return static_cast<int>(m_inputs.size()); }
+    /**
+     * @brief Performs the `outputCount` operation.
+     * @return The requested output Count.
+     */
     int outputCount() const { return static_cast<int>(m_outputs.size()); }
 
+    /**
+     * @brief Returns the current inputs.
+     * @return The current inputs.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const std::vector<SwString>& inputs() const { return m_inputs; }
+    /**
+     * @brief Returns the current outputs.
+     * @return The current outputs.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const std::vector<SwString>& outputs() const { return m_outputs; }
 
+    /**
+     * @brief Performs the `inputName` operation.
+     * @param index Value passed to the method.
+     * @return The requested input Name.
+     */
     SwString inputName(int index) const {
         if (index < 0 || index >= inputCount()) {
             return SwString();
@@ -73,6 +147,11 @@ public:
         return m_inputs[static_cast<size_t>(index)];
     }
 
+    /**
+     * @brief Performs the `outputName` operation.
+     * @param index Value passed to the method.
+     * @return The requested output Name.
+     */
     SwString outputName(int index) const {
         if (index < 0 || index >= outputCount()) {
             return SwString();
@@ -80,10 +159,28 @@ public:
         return m_outputs[static_cast<size_t>(index)];
     }
 
+    /**
+     * @brief Returns the current accent Color.
+     * @return The current accent Color.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwColor accentColor() const { return m_accent; }
 
+    /**
+     * @brief Returns the current body Text.
+     * @return The current body Text.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString bodyText() const { return m_bodyText; }
 
+    /**
+     * @brief Sets the body Text.
+     * @param text Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setBodyText(const SwString& text) {
         if (m_bodyText == text) {
             return;
@@ -92,6 +189,16 @@ public:
         update();
     }
 
+    /**
+     * @brief Sets the definition.
+     * @param title Title text applied by the operation.
+     * @param inputs Value passed to the method.
+     * @param outputs Output value filled by the method.
+     * @param accent Value passed to the method.
+     * @param typeKey Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setDefinition(const SwString& title,
                        const std::vector<SwString>& inputs,
                        const std::vector<SwString>& outputs,
@@ -109,6 +216,12 @@ public:
     }
 
     // By default, both input and output ports accept multiple connections.
+    /**
+     * @brief Performs the `allowsMultipleConnections` operation.
+     * @param type Value passed to the method.
+     * @param index Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool allowsMultipleConnections(PortType type, int index) const {
         if (type == PortType::In) {
             if (index < 0 || index >= inputCount()) {
@@ -125,6 +238,14 @@ public:
         return true;
     }
 
+    /**
+     * @brief Sets the allows Multiple Connections.
+     * @param type Value passed to the method.
+     * @param index Value passed to the method.
+     * @param allow Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setAllowsMultipleConnections(PortType type, int index, bool allow) {
         if (type == PortType::In) {
             if (index < 0 || index >= inputCount()) {
@@ -141,18 +262,31 @@ public:
         }
     }
 
+    /**
+     * @brief Performs the `inputPortScenePos` operation.
+     * @param index Value passed to the method.
+     * @return The requested input Port Scene Pos.
+     */
     SwPointF inputPortScenePos(int index) const {
-        const SwPointF sp = scenePos();
         const SwPointF local = inputPortLocalPos_(index);
-        return SwPointF(sp.x + local.x, sp.y + local.y);
+        return mapToScene(local);
     }
 
+    /**
+     * @brief Performs the `outputPortScenePos` operation.
+     * @param index Value passed to the method.
+     * @return The requested output Port Scene Pos.
+     */
     SwPointF outputPortScenePos(int index) const {
-        const SwPointF sp = scenePos();
         const SwPointF local = outputPortLocalPos_(index);
-        return SwPointF(sp.x + local.x, sp.y + local.y);
+        return mapToScene(local);
     }
 
+    /**
+     * @brief Performs the `hitTestPort` operation.
+     * @param scenePoint Value passed to the method.
+     * @return The requested hit Test Port.
+     */
     PortHit hitTestPort(const SwPointF& scenePoint) const {
         PortHit out{};
         const int inCount = inputCount();
@@ -182,6 +316,9 @@ public:
         return out;
     }
 
+    /**
+     * @brief Clears the current object state.
+     */
     void clearHoveredPort() {
         if (!m_hoverPort.hit) {
             return;
@@ -190,6 +327,12 @@ public:
         update();
     }
 
+    /**
+     * @brief Sets the hovered Port.
+     * @param port Local port used by the operation.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setHoveredPort(const PortHit& port) {
         if (!port.hit) {
             clearHoveredPort();
@@ -202,10 +345,26 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns whether the object reports port Hovered.
+     * @param type Value passed to the method.
+     * @param index Value passed to the method.
+     * @return `true` when the object reports port Hovered; otherwise `false`.
+     *
+     * @details This query does not modify the object state.
+     */
     bool isPortHovered(PortType type, int index) const {
         return m_hoverPort.hit && m_hoverPort.type == type && m_hoverPort.index == index;
     }
 
+    /**
+     * @brief Sets the embedded Widget.
+     * @param widget Widget associated with the operation.
+     * @param width Width value.
+     * @param height Height value.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setEmbeddedWidget(SwWidget* widget, int width = 0, int height = 0) {
         if (!widget) {
             return;
@@ -227,15 +386,36 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the current embedded Proxy.
+     * @return The current embedded Proxy.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwGraphicsProxyWidget* embeddedProxy() const { return m_proxyWidget; }
 
+    /**
+     * @brief Performs the `syncFromModel` operation.
+     * @param graphModel Value passed to the method.
+     */
     void syncFromModel(AbstractGraphModel& graphModel);
 
+    /**
+     * @brief Returns the current bounding Rect.
+     * @return The current bounding Rect.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwRectF boundingRect() const override {
         const LayoutMetrics layout = layoutMetrics_();
         return SwRectF(0.0, 0.0, static_cast<double>(layout.width), static_cast<double>(layout.height));
     }
 
+    /**
+     * @brief Performs the `paint` operation.
+     * @param painter Value passed to the method.
+     * @param ctx Value passed to the method.
+     */
     void paint(SwPainter* painter, const SwGraphicsRenderContext& ctx) override {
         if (!painter || !isVisible()) {
             return;
@@ -252,9 +432,7 @@ public:
         const bool drawShadow = (s >= 0.12);
 
         const SwRectF br = boundingRect();
-        SwRectF sceneRect = br;
-        const SwPointF sp = scenePos();
-        sceneRect.translate(sp.x, sp.y);
+        const SwRectF sceneRect = mapRectToScene(br);
         const SwRect vr = ctx.mapFromScene(sceneRect);
 
         const NodeStyle& style = StyleCollection::nodeStyle();

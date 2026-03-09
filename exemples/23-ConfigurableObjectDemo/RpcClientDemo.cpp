@@ -111,15 +111,16 @@ static void splitObjectFqn(const SwString& objectFqn, SwString& outNameSpace, Sw
     SwString s = objectFqn;
     s.replace('\\', '/');
 
-    const int slash = s.lastIndexOf('/');
-    if (slash < 0) {
+    const std::string path = s.toStdString();
+    const size_t slash = path.rfind('/');
+    if (slash == std::string::npos) {
         outNameSpace.clear();
         outObjectName = s;
         return;
     }
 
-    outNameSpace  = s.left(slash);
-    outObjectName = s.mid(slash + 1);
+    outNameSpace = SwString(path.substr(0, slash));
+    outObjectName = SwString(path.substr(slash + 1));
 }
 
 

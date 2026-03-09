@@ -1,4 +1,29 @@
 #pragma once
+
+/**
+ * @file src/core/runtime/SwLibrary.h
+ * @ingroup core_runtime
+ * @brief Declares the public interface exposed by SwLibrary in the CoreSw runtime layer.
+ *
+ * This header belongs to the CoreSw runtime layer. It coordinates application lifetime, event
+ * delivery, timers, threads, crash handling, and other process-level services consumed by the
+ * rest of the stack.
+ *
+ * Within that layer, this file focuses on the library interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwLibrary.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * Runtime declarations in this area define lifecycle and threading contracts that higher-level
+ * modules depend on for safe execution and orderly shutdown.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -58,13 +83,44 @@ class SwLibrary {
         std::uintptr_t address{0};
     };
 
+    /**
+     * @brief Constructs a `SwLibrary` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwLibrary() = default;
+    /**
+     * @brief Constructs a `SwLibrary` instance.
+     * @param path Path used by the operation.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     explicit SwLibrary(const SwString& path) { (void)load(path); }
 
+    /**
+     * @brief Constructs a `SwLibrary` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwLibrary(const SwLibrary&) = delete;
+    /**
+     * @brief Performs the `operator=` operation.
+     * @return The requested operator =.
+     */
     SwLibrary& operator=(const SwLibrary&) = delete;
 
+    /**
+     * @brief Constructs a `SwLibrary` instance.
+     * @param other Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwLibrary(SwLibrary&& other) noexcept { moveFrom_(other); }
+    /**
+     * @brief Performs the `operator=` operation.
+     * @param other Value passed to the method.
+     * @return The requested operator =.
+     */
     SwLibrary& operator=(SwLibrary&& other) noexcept {
         if (this == &other) return *this;
         unload();
@@ -72,16 +128,69 @@ class SwLibrary {
         return *this;
     }
 
+    /**
+     * @brief Destroys the `SwLibrary` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~SwLibrary() { unload(); }
 
+    /**
+     * @brief Returns whether the object reports loaded.
+     * @return `true` when the object reports loaded; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isLoaded() const { return handle_ != nullptr; }
+    /**
+     * @brief Returns the current native Handle.
+     * @return The current native Handle.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     void* nativeHandle() const { return handle_; }
+    /**
+     * @brief Returns the current requested Path.
+     * @return The current requested Path.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwString& requestedPath() const { return requestedPath_; }
+    /**
+     * @brief Returns the current path.
+     * @return The current path.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwString& path() const { return path_; }
+    /**
+     * @brief Returns the current last Error.
+     * @return The current last Error.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwString& lastError() const { return lastError_; }
+    /**
+     * @brief Returns the current attempts.
+     * @return The current attempts.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const std::vector<LoadAttempt>& loadAttempts() const { return loadAttempts_; }
+    /**
+     * @brief Returns the current symbol Lookups.
+     * @return The current symbol Lookups.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const std::vector<SymbolLookup>& symbolLookups() const { return symbolLookups_; }
 
+    /**
+     * @brief Returns the current platform Prefix.
+     * @return The current platform Prefix.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static SwString platformPrefix() {
 #ifdef _WIN32
         return SwString();
@@ -90,6 +199,12 @@ class SwLibrary {
 #endif
     }
 
+    /**
+     * @brief Returns the current platform Suffix.
+     * @return The current platform Suffix.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static SwString platformSuffix() {
 #ifdef _WIN32
         return SwString(".dll");
@@ -100,6 +215,11 @@ class SwLibrary {
 #endif
     }
 
+    /**
+     * @brief Performs the `load` operation on the associated resource.
+     * @param path Path used by the operation.
+     * @return `true` on success; otherwise `false`.
+     */
     bool load(const SwString& path) {
         unload();
         lastError_ = SwString();
@@ -165,6 +285,9 @@ class SwLibrary {
         return false;
     }
 
+    /**
+     * @brief Performs the `unload` operation.
+     */
     void unload() {
         if (!handle_) return;
 #ifdef _WIN32
@@ -177,6 +300,11 @@ class SwLibrary {
         path_ = SwString();
     }
 
+    /**
+     * @brief Performs the `resolve` operation.
+     * @param symbol Value passed to the method.
+     * @return The requested resolve.
+     */
     void* resolve(const SwString& symbol) const {
         SymbolLookup lookup;
         lookup.symbol = symbol;
@@ -204,6 +332,12 @@ class SwLibrary {
 #endif
     }
 
+    /**
+     * @brief Returns the current introspection Json.
+     * @return The current introspection Json.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwJsonObject introspectionJson() const {
         SwJsonObject o;
 

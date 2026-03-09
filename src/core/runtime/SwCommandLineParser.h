@@ -1,4 +1,30 @@
 #pragma once
+
+/**
+ * @file src/core/runtime/SwCommandLineParser.h
+ * @ingroup core_runtime
+ * @brief Declares the public interface exposed by SwCommandLineParser in the CoreSw runtime
+ * layer.
+ *
+ * This header belongs to the CoreSw runtime layer. It coordinates application lifetime, event
+ * delivery, timers, threads, crash handling, and other process-level services consumed by the
+ * rest of the stack.
+ *
+ * Within that layer, this file focuses on the command line parser interface. The declarations
+ * exposed here define the stable surface that adjacent code can rely on while the implementation
+ * remains free to evolve behind the header.
+ *
+ * The main declarations in this header are SwCommandLineParser.
+ *
+ * Parser-oriented declarations here are designed so that the implementation can accept partial
+ * input, preserve state between calls, and report structured outcomes without requiring
+ * whole-buffer processing.
+ *
+ * Runtime declarations in this area define lifecycle and threading contracts that higher-level
+ * modules depend on for safe execution and orderly shutdown.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -32,20 +58,38 @@ static constexpr const char* kSwLogCategory_SwCommandLineParser = "sw.core.runti
 
 class SwCommandLineParser {
 public:
+    /**
+     * @brief Constructs a `SwCommandLineParser` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwCommandLineParser()
         : helpOptionAdded(false), appDescription("") {}
 
     // Définir la description de l'application
+    /**
+     * @brief Sets the application Description.
+     * @param description Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setApplicationDescription(const SwString& description) {
         appDescription = description;
     }
 
     // Ajouter une option au parser
+    /**
+     * @brief Adds the specified option.
+     * @param option Value passed to the method.
+     */
     void addOption(const SwCommandLineOption& option) {
         options.append(option);
     }
 
     // Ajouter l'option d'aide (comme --help ou -h)
+    /**
+     * @brief Adds the specified help Option.
+     */
     void addHelpOption() {
         if (!helpOptionAdded) {
             SwCommandLineOption help({"h", "help"}, "Displays this help message.");
@@ -55,6 +99,11 @@ public:
     }
 
     // Traiter les arguments à partir de SwCoreApplication
+    /**
+     * @brief Performs the `process` operation.
+     * @param app Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool process(const SwCoreApplication& app) {
         parsedOptions.clear();
         positionalArguments.clear();
@@ -91,6 +140,13 @@ public:
     }
 
     // Vérifie si une option a été spécifiée
+    /**
+     * @brief Returns whether the object reports set.
+     * @param key Value passed to the method.
+     * @return `true` when the object reports set; otherwise `false`.
+     *
+     * @details This query does not modify the object state.
+     */
     bool isSet(const SwString& key) const {
         for (const auto& option : options) {
             if (option.getNames().contains(key)) {
@@ -105,6 +161,12 @@ public:
     }
 
     // Récupère la valeur d'une option
+    /**
+     * @brief Performs the `value` operation.
+     * @param key Value passed to the method.
+     * @param defaultValue Value passed to the method.
+     * @return The requested value.
+     */
     SwString value(const SwString& key, const SwString& defaultValue = "") const {
         for (const auto& option : options) {
             if (option.getNames().contains(key)) {
@@ -120,11 +182,23 @@ public:
 
 
     // Récupère les arguments positionnels
+    /**
+     * @brief Returns the current positional Arguments List.
+     * @return The current positional Arguments List.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwList<SwString> positionalArgumentsList() const {
         return positionalArguments;
     }
 
     // Génère le texte d'aide
+    /**
+     * @brief Returns the current generate Help Text.
+     * @return The current generate Help Text.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString generateHelpText() const {
         SwString result;
 
@@ -150,6 +224,12 @@ public:
     }
 
     // Récupérer le message d'erreur (en cas d'échec du parsing)
+    /**
+     * @brief Returns the current error.
+     * @return The current error.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString error() const {
         return errorMessage;
     }

@@ -1,4 +1,29 @@
 #pragma once
+
+/**
+ * @file src/core/hw/SwPinOut.h
+ * @ingroup core_hw
+ * @brief Declares the public interface exposed by SwPinOut in the CoreSw hardware description
+ * layer.
+ *
+ * This header belongs to the CoreSw hardware description layer. It provides lightweight
+ * descriptors for serial devices, pin mappings, and other hardware-facing metadata.
+ *
+ * Within that layer, this file focuses on the pin out interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwPinOut.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * These declarations focus on transportable metadata and capability description rather than
+ * direct device access.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *

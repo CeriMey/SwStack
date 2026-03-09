@@ -8,7 +8,17 @@
 #include "SwDir.h"
 #include "platform/SwPlatform.h"
 #include "SwDebug.h"
+#include <cstdlib>
 #include <fstream>
+
+static inline SwString mapboxTerrainUrlTemplate() {
+    const char* token = std::getenv("MAPBOX_ACCESS_TOKEN");
+    if (!token || !token[0]) {
+        return SwString();
+    }
+
+    return SwString("https://api.mapbox.com/v4/mapbox.terrain-rgb/%1/%2/%3.pngraw?access_token=") + SwString(token);
+}
 
 struct MapEntry {
     SwString name;
@@ -98,7 +108,10 @@ private:
         };
 
         ensureOne(SwString("standard"), SwString("https://tile.openstreetmap.org"));
-        ensureOne(SwString("elevation"), SwString("https://api.mapbox.com/v4/mapbox.terrain-rgb/%1/%2/%3.pngraw?access_token=pk.eyJ1IjoiZXltZXJpYyIsImEiOiJjbWd0a24ydHkwNDdpMmxzOG5scTJxcWVoIn0.wwYIKczafPghDK_tc7eYXQ"));
+        SwString elevationUrl = mapboxTerrainUrlTemplate();
+        if (!elevationUrl.isEmpty()) {
+            ensureOne(SwString("elevation"), elevationUrl);
+        }
     }
 
     bool load() {
@@ -118,7 +131,7 @@ private:
         for (size_t i = 0; i < arr.size(); ++i) {
             SwJsonValue val = arr[i];
             if (!val.isObject()) continue;
-            SwJsonObject obj = *val.toObject();
+            SwJsonObject obj = val.toObject();
             SwString name = obj.contains("name") ? SwString(obj["name"].toString()) : SwString();
             SwString url = obj.contains("url") ? SwString(obj["url"].toString()) : SwString();
             if (name.isEmpty() || url.isEmpty()) continue;

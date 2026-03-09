@@ -445,10 +445,10 @@
 - `PaintEvent` - Paint Event; methodes: `PaintEvent(...)`, `painter(...)`, `paintRect(...)`
 - `MouseEvent` - Mouse Event; methodes: `MouseEvent(...)`, `x(...)`, `y(...)`, `setX(...)`, `setY(...)`, `getDeltaX(...)`, `setDeltaX(...)`, `getDeltaY(...)`, `setDeltaY(...)`, `getSpeedX(...)`, `setSpeedX(...)`, `getSpeedY(...)`, `setSpeedY(...)`
 - `KeyEvent` - Key Event; methodes: `KeyEvent(...)`, `key(...)`, `isCtrlPressed(...)`, `isShiftPressed(...)`, `isAltPressed(...)`
-- `SwWidget` - Widget; methodes: `SwWidget(...)`, `~SwWidget(...)`, `addChild(...)`, `removeChild(...)`, `setLayout(...)`, `layout(...)`, `show(...)`, `hide(...)`, `update(...)`, `move(...)`, `resize(...)`, `width(...)`, `height(...)`, `setMinimumSize(...)`, `setMaximumSize(...)`, `getRect(...)`, `sizeHint(...)`, `minimumSizeHint(...)`, `getChildUnderCursor(...)`, `getToolSheet(...)`; signaux: `resized(...)`, `moved(...)`, `visibilityChanged()`
+- `SwWidget` - Widget; methodes: `SwWidget(...)`, `~SwWidget(...)`, `addChild(...)`, `removeChild(...)`, `setLayout(...)`, `layout(...)`, `show(...)`, `hide(...)`, `update(...)`, `move(...)`, `resize(...)`, `width(...)`, `height(...)`, `setMinimumSize(...)`, `setMaximumSize(...)`, `rect(...)`, `geometry(...)`, `frameGeometry(...)`, `pos(...)`, `sizeHint(...)`, `minimumSizeHint(...)`, `getChildUnderCursor(...)`, `getToolSheet(...)`; signaux: `resized(...)`, `moved(...)`, `visibilityChanged()`
 
 ### `src/core/SwWidgetInterface.h` - Widget Interface
-- `SwWidgetInterface` - Widget Interface; methodes: `SwWidgetInterface(...)`, `~SwWidgetInterface(...)`, `show(...)`, `hide(...)`, `update(...)`, `move(...)`, `resize(...)`, `paintEvent(...)`, `mousePressEvent(...)`, `mouseReleaseEvent(...)`, `mouseDoubleClickEvent(...)`, `mouseMoveEvent(...)`, `keyPressEvent(...)`, `getToolSheet(...)`, `getRect(...)`, `sizeHint(...)`, `minimumSizeHint(...)`
+- `SwWidgetInterface` - Widget Interface; methodes: `SwWidgetInterface(...)`, `~SwWidgetInterface(...)`, `show(...)`, `hide(...)`, `update(...)`, `move(...)`, `resize(...)`, `paintEvent(...)`, `mousePressEvent(...)`, `mouseReleaseEvent(...)`, `mouseDoubleClickEvent(...)`, `mouseMoveEvent(...)`, `keyPressEvent(...)`, `getToolSheet(...)`, `frameGeometry(...)`, `sizeHint(...)`, `minimumSizeHint(...)`
 
 ### `src/core/SwWidgetPlatformAdapter.h` - Widget Platform Adapter
 - `SwWidgetPlatformHandle` - Widget Platform Handle; methodes: none

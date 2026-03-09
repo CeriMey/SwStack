@@ -1,4 +1,4 @@
-#include "WhatsAppWindow.h"
+﻿#include "WhatsAppWindow.h"
 
 #include "SwDir.h"
 #include "SwWidgetSnapshot.h"
@@ -9,7 +9,6 @@
 #include "graphics/SwImage.h"
 
 #include <algorithm>
-
 static SwString normalizeOutDir_(SwString dir) {
     if (dir.isEmpty()) {
         return dir;
@@ -46,6 +45,10 @@ bool WhatsAppWindow::saveSnapshot(const SwString& outDir) {
     m_root->setLoggedInForSnapshot(true);
     // Keep the same name as the previous ref snapshot for easy diff.
     ok = ok && SwWidgetSnapshot::savePng(m_root, dir + "mvc_list.png");
+
+    m_root->setEmojiPopupForSnapshot(true);
+    ok = ok && SwWidgetSnapshot::savePng(m_root, dir + "wa_emoji_picker.png");
+    m_root->setEmojiPopupForSnapshot(false);
 
     m_root->setAttachMenuForSnapshot(true);
     ok = ok && SwWidgetSnapshot::savePng(m_root, dir + "wa_attach_menu.png");
@@ -95,16 +98,16 @@ bool WhatsAppWindow::saveSnapshot(const SwString& outDir) {
     ok = ok && SwWidgetSnapshot::savePng(m_root, dir + "wa_composer_multiline.png");
 
     m_root->setComposerTextForSnapshot(
-        "Message très long pour valider le word-wrap et l'auto-grow du composer. "
-        "Le champ doit passer de 1 à N lignes et pousser vers le haut, comme WhatsApp. "
-        "Message très long pour valider le word-wrap et l'auto-grow du composer. "
-        "Le champ doit passer de 1 à N lignes et pousser vers le haut, comme WhatsApp. "
-        "Message très long pour valider le word-wrap et l'auto-grow du composer. "
-        "Le champ doit passer de 1 à N lignes et pousser vers le haut, comme WhatsApp. "
-        "Message très long pour valider le word-wrap et l'auto-grow du composer. "
-        "Le champ doit passer de 1 à N lignes et pousser vers le haut, comme WhatsApp. "
-        "Message très long pour valider le word-wrap et l'auto-grow du composer. "
-        "Le champ doit passer de 1 à N lignes et pousser vers le haut, comme WhatsApp.");
+        "Message trÃ¨s long pour valider le word-wrap et l'auto-grow du composer. "
+        "Le champ doit passer de 1 Ã  N lignes et pousser vers le haut, comme WhatsApp. "
+        "Message trÃ¨s long pour valider le word-wrap et l'auto-grow du composer. "
+        "Le champ doit passer de 1 Ã  N lignes et pousser vers le haut, comme WhatsApp. "
+        "Message trÃ¨s long pour valider le word-wrap et l'auto-grow du composer. "
+        "Le champ doit passer de 1 Ã  N lignes et pousser vers le haut, comme WhatsApp. "
+        "Message trÃ¨s long pour valider le word-wrap et l'auto-grow du composer. "
+        "Le champ doit passer de 1 Ã  N lignes et pousser vers le haut, comme WhatsApp. "
+        "Message trÃ¨s long pour valider le word-wrap et l'auto-grow du composer. "
+        "Le champ doit passer de 1 Ã  N lignes et pousser vers le haut, comme WhatsApp.");
     ok = ok && SwWidgetSnapshot::savePng(m_root, dir + "wa_composer_wrap.png");
 
     // Thread: long message wrapping + selection (read-only).
@@ -130,8 +133,7 @@ void WhatsAppWindow::resizeEvent(ResizeEvent* event) {
     if (!m_root) {
         return;
     }
-    const SwRect r = getRect();
-    m_root->move(r.x, r.y);
+    const SwRect r = rect();
     m_root->resize(r.width, r.height);
 }
 
@@ -147,13 +149,12 @@ void WhatsAppWindow::ensureRoot_(const SwString& storageRoot) {
 
     m_rootStorageRoot = storageRoot;
     m_root = new WhatsAppWidget(this, m_rootStorageRoot);
-    const SwRect r = getRect();
-    m_root->move(r.x, r.y);
+    const SwRect r = rect();
     m_root->resize(r.width, r.height);
 }
 
 void WhatsAppWindow::stripChrome_() {
-    // SwMainWindow always creates Qt-like chrome (menu/tool/status bars). We hide them
+    // SwMainWindow always creates window chrome (menu/tool/status bars). We hide them
     // and detach its internal layout so this window becomes a clean canvas.
     if (menuBar()) {
         menuBar()->hide();
@@ -171,3 +172,4 @@ void WhatsAppWindow::stripChrome_() {
     // Detach the chrome layout (it reserves space even when the bars are hidden).
     SwWidget::setLayout(nullptr);
 }
+

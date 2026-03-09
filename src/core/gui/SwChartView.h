@@ -1,4 +1,28 @@
-#pragma once
+﻿#pragma once
+
+/**
+ * @file src/core/gui/SwChartView.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwChartView in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the chart view interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwChartView.
+ *
+ * View-oriented declarations here mainly describe how underlying state is projected into a visual
+ * or interactive surface, including how refresh, selection, or presentation concerns are exposed
+ * at the API boundary.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -45,6 +69,12 @@ class SwChartView : public SwWidget {
     SW_OBJECT(SwChartView, SwWidget)
 
 public:
+    /**
+     * @brief Constructs a `SwChartView` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwChartView(SwWidget* parent = nullptr)
         : SwWidget(parent) {
         resize(460, 280);
@@ -68,8 +98,20 @@ public:
         setEnableMousePan(true);
     }
 
+    /**
+     * @brief Returns the current chart.
+     * @return The current chart.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwChart* chart() const { return m_chart; }
 
+    /**
+     * @brief Sets the chart.
+     * @param chart Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setChart(SwChart* chart) {
         if (m_chart == chart) {
             return;
@@ -91,40 +133,96 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns whether the object reports mouse Zoom Enabled.
+     * @return `true` when the object reports mouse Zoom Enabled; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isMouseZoomEnabled() const { return m_enableMouseZoom; }
+    /**
+     * @brief Sets the enable Mouse Zoom.
+     * @param enable Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setEnableMouseZoom(bool enable) { m_enableMouseZoom = enable; }
 
+    /**
+     * @brief Returns whether the object reports mouse Pan Enabled.
+     * @return `true` when the object reports mouse Pan Enabled; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isMousePanEnabled() const { return m_enableMousePan; }
+    /**
+     * @brief Sets the enable Mouse Pan.
+     * @param enable Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setEnableMousePan(bool enable) { m_enableMousePan = enable; }
 
+    /**
+     * @brief Sets the enable Play Mode.
+     * @param enable Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setEnablePlayMode(bool enable) { m_enablePlayMode = enable; }
+    /**
+     * @brief Returns whether the object reports play Mode Enabled.
+     * @return `true` when the object reports play Mode Enabled; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isPlayModeEnabled() const { return m_enablePlayMode; }
 
-    // Convenience Qt-like wrappers.
+    // Convenience wrappers.
+    /**
+     * @brief Sets the title.
+     * @param title Title text applied by the operation.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setTitle(const SwString& title) {
         if (m_chart) {
             m_chart->setTitle(title);
         }
     }
 
+    /**
+     * @brief Adds the specified series.
+     * @param serie Value passed to the method.
+     */
     void addSeries(SwAbstractSeries* serie) {
         if (m_chart) {
             m_chart->addSeries(serie);
         }
     }
 
+    /**
+     * @brief Removes the specified series.
+     * @param serie Value passed to the method.
+     */
     void removeSeries(SwAbstractSeries* serie) {
         if (m_chart) {
             m_chart->removeSeries(serie);
         }
     }
 
+    /**
+     * @brief Creates the requested default Axes.
+     */
     void createDefaultAxes() {
         if (m_chart) {
             m_chart->createDefaultAxes();
         }
     }
 
+    /**
+     * @brief Performs the `centerView` operation.
+     */
     void centerView() {
         if (!m_chart) {
             return;
@@ -137,29 +235,55 @@ public:
         }
     }
 
+    /**
+     * @brief Sets the xRange.
+     * @param start Value passed to the method.
+     * @param end Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setXRange(double start, double end) {
         if (m_chart && m_chart->axisX()) {
             m_chart->axisX()->setRange(start, end);
         }
     }
 
+    /**
+     * @brief Sets the yRange.
+     * @param start Value passed to the method.
+     * @param end Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setYRange(double start, double end) {
         if (m_chart && m_chart->axisY()) {
             m_chart->axisY()->setRange(start, end);
         }
     }
 
+    /**
+     * @brief Performs the `zoomIn` operation.
+     */
     void zoomIn() { zoom_(1.1); }
+    /**
+     * @brief Performs the `zoomOut` operation.
+     */
     void zoomOut() { zoom_(1.0 / 1.1); }
 
 protected:
+    /**
+     * @brief Handles the paint Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void paintEvent(PaintEvent* event) override {
         SwPainter* painter = event ? event->painter() : nullptr;
         if (!painter) {
             return;
         }
 
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
         if (bounds.width <= 2 || bounds.height <= 2) {
             return;
         }
@@ -214,6 +338,12 @@ protected:
         painter->popClipRect();
     }
 
+    /**
+     * @brief Handles the mouse Press Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mousePressEvent(MouseEvent* event) override {
         if (!event || !isVisibleInHierarchy()) {
             return;
@@ -234,6 +364,12 @@ protected:
         SwWidget::mousePressEvent(event);
     }
 
+    /**
+     * @brief Handles the mouse Move Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseMoveEvent(MouseEvent* event) override {
         if (!event || !isVisibleInHierarchy()) {
             return;
@@ -255,6 +391,12 @@ protected:
         SwWidget::mouseMoveEvent(event);
     }
 
+    /**
+     * @brief Handles the mouse Release Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseReleaseEvent(MouseEvent* event) override {
         if (!event || !isVisibleInHierarchy()) {
             return;
@@ -269,6 +411,12 @@ protected:
         SwWidget::mouseReleaseEvent(event);
     }
 
+    /**
+     * @brief Handles the mouse Double Click Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseDoubleClickEvent(MouseEvent* event) override {
         if (!event || !isVisibleInHierarchy()) {
             return;
@@ -281,6 +429,12 @@ protected:
         SwWidget::mouseDoubleClickEvent(event);
     }
 
+    /**
+     * @brief Handles the wheel Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void wheelEvent(WheelEvent* event) override {
         if (!event || !isVisibleInHierarchy()) {
             return;
@@ -318,7 +472,7 @@ private:
     }
 
     SwRect plotRect_() const {
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
 
         const int left = 56;
         const int right = 18;
@@ -334,7 +488,7 @@ private:
     }
 
     SwRect pieRect_() const {
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
 
         const int left = 16;
         const int right = 16;
@@ -365,13 +519,13 @@ private:
         if (!sheet) {
             return fallback;
         }
-        std::vector<SwString> selectors = classHierarchy();
+        auto selectors = classHierarchy();
         for (const SwString& selector : selectors) {
             if (selector.isEmpty()) {
                 continue;
             }
-            const std::string value = sheet->getStyleProperty(selector.toStdString(), property);
-            if (value.empty()) {
+            const SwString value = sheet->getStyleProperty(selector, property);
+            if (value.isEmpty()) {
                 continue;
             }
             float alpha = 1.0f;
@@ -393,15 +547,16 @@ private:
         if (!sheet) {
             return fallback;
         }
-        std::vector<SwString> selectors = classHierarchy();
+        auto selectors = classHierarchy();
         for (const SwString& selector : selectors) {
             if (selector.isEmpty()) {
                 continue;
             }
-            std::string value = sheet->getStyleProperty(selector.toStdString(), property);
-            if (value.empty()) {
+            SwString swProp = sheet->getStyleProperty(selector, property);
+            if (swProp.isEmpty()) {
                 continue;
             }
+            std::string value = swProp.toStdString();
             value.erase(std::remove_if(value.begin(), value.end(), [](unsigned char c) {
                 return !(std::isdigit(c) || c == '-' || c == '+');
             }), value.end());
@@ -1319,3 +1474,4 @@ private:
 
     bool m_handlingChartChange{false};
 };
+

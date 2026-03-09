@@ -1,4 +1,28 @@
 #pragma once
+
+/**
+ * @file src/core/runtime/SwThread.h
+ * @ingroup core_runtime
+ * @brief Declares the public interface exposed by SwThread in the CoreSw runtime layer.
+ *
+ * This header belongs to the CoreSw runtime layer. It coordinates application lifetime, event
+ * delivery, timers, threads, crash handling, and other process-level services consumed by the
+ * rest of the stack.
+ *
+ * Within that layer, this file focuses on the thread interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwThread.
+ *
+ * Thread-oriented declarations here define execution-context ownership, affinity, or
+ * synchronization boundaries that the rest of the framework relies on.
+ *
+ * Runtime declarations in this area define lifecycle and threading contracts that higher-level
+ * modules depend on for safe execution and orderly shutdown.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -24,23 +48,32 @@
 #include "SwObject.h"
 #include "atomic/thread.h"
 
+#include "SwMutex.h"
+#include "SwMap.h"
 #include <functional>
-#include <map>
 #include <memory>
-#include <mutex>
 #include <thread>
 #include <utility>
 
 /**
  * @class SwThread
- * @brief High-level wrapper around the atomic::Thread, offering a Qt-like API.
+ * @brief High-level wrapper around atomic::Thread with a familiar API.
  */
 class SwThread : public SwObject {
+    SW_OBJECT(SwThread, SwObject)
     DECLARE_SIGNAL_VOID(started)
     DECLARE_SIGNAL_VOID(finished)
     DECLARE_SIGNAL_VOID(terminated)
 
 public:
+    /**
+     * @brief Constructs a `SwThread` instance.
+     * @param name Value passed to the method.
+     * @param parent Optional parent object that owns this instance.
+     * @param name Value passed to the method.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwThread(const SwString& name = "SwThread", SwObject* parent = nullptr)
         : SwObject(parent), m_name(name) {
         m_ownedThread.reset(new sw::atomic::Thread(name));
@@ -49,10 +82,21 @@ public:
         initializeCallbacks();
     }
 
+    /**
+     * @brief Constructs a `SwThread` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwThread(SwObject* parent)
         : SwThread("SwThread", parent) {
     }
 
+    /**
+     * @brief Destroys the `SwThread` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     virtual ~SwThread() {
         cleanup();
     }
@@ -91,22 +135,51 @@ public:
         }
     }
 
+    /**
+     * @brief Returns whether the object reports running.
+     * @return `true` when the object reports running; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isRunning() const {
         return m_threadHandle ? m_threadHandle->isRunning() : false;
     }
 
+    /**
+     * @brief Performs the `postTask` operation.
+     * @param task Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool postTask(std::function<void()> task) {
         return m_threadHandle ? m_threadHandle->postTask(std::move(task)) : false;
     }
 
+    /**
+     * @brief Returns the current application.
+     * @return The current application.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwCoreApplication* application() const {
         return m_threadHandle ? m_threadHandle->application() : nullptr;
     }
 
+    /**
+     * @brief Returns the current thread Id.
+     * @return The current thread Id.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     std::thread::id threadId() const {
         return m_threadHandle ? m_threadHandle->threadId() : std::thread::id{};
     }
 
+    /**
+     * @brief Returns the current handle.
+     * @return The current handle.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     sw::atomic::Thread* handle() const {
         return m_threadHandle;
     }
@@ -148,6 +221,11 @@ public:
         return adopted;
     }
 
+    /**
+     * @brief Performs the `fromHandle` operation.
+     * @param handle Value passed to the method.
+     * @return The requested from Handle.
+     */
     static SwThread* fromHandle(sw::atomic::Thread* handle) {
         return wrapperFor(handle);
     }
@@ -204,7 +282,7 @@ private:
         if (!handle || !wrapper) {
             return;
         }
-        std::lock_guard<std::mutex> lock(wrapperMutex());
+        SwMutexLocker lock(wrapperMutex());
         wrapperMap()[handle] = wrapper;
     }
 
@@ -212,15 +290,15 @@ private:
         if (!handle) {
             return;
         }
-        std::lock_guard<std::mutex> lock(wrapperMutex());
-        wrapperMap().erase(handle);
+        SwMutexLocker lock(wrapperMutex());
+        wrapperMap().remove(handle);
     }
 
     static SwThread* wrapperFor(sw::atomic::Thread* handle) {
         if (!handle) {
             return nullptr;
         }
-        std::lock_guard<std::mutex> lock(wrapperMutex());
+        SwMutexLocker lock(wrapperMutex());
         auto it = wrapperMap().find(handle);
         if (it != wrapperMap().end()) {
             return it->second;
@@ -228,13 +306,13 @@ private:
         return nullptr;
     }
 
-    static std::mutex& wrapperMutex() {
-        static std::mutex s_mutex;
+    static SwMutex& wrapperMutex() {
+        static SwMutex s_mutex;
         return s_mutex;
     }
 
-    static std::map<sw::atomic::Thread*, SwThread*>& wrapperMap() {
-        static std::map<sw::atomic::Thread*, SwThread*> s_map;
+    static SwMap<sw::atomic::Thread*, SwThread*>& wrapperMap() {
+        static SwMap<sw::atomic::Thread*, SwThread*> s_map;
         return s_map;
     }
 

@@ -1,5 +1,18 @@
 #pragma once
 
+/**
+ * @file
+ * @ingroup core_swizio_nodes
+ * @brief Declares the helper that paints node-editor connections.
+ *
+ * `ConnectionPainter` centralizes how connection curves, end points, and styling rules are
+ * drawn so the scene items do not duplicate low-level painting code. It is the rendering
+ * policy layer between connection geometry and the underlying `SwPainter` API.
+ */
+
+
+
+
 #include "Export.hpp"
 #include "StyleCollection.hpp"
 
@@ -32,6 +45,13 @@ public:
         double flowPhase{0.0}; // [0..1)
     };
 
+    /**
+     * @brief Performs the `paint` operation.
+     * @param painter Value passed to the method.
+     * @param ctx Value passed to the method.
+     * @param data Value passed to the method.
+     * @return The requested paint.
+     */
     static void paint(SwPainter* painter, const SwGraphicsRenderContext& ctx, const PaintData& data);
 
 private:
@@ -159,4 +179,3 @@ inline void ConnectionPainter::paint(SwPainter* painter, const SwGraphicsRenderC
 }
 
 } // namespace SwizioNodes
-

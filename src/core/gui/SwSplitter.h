@@ -1,4 +1,4 @@
-/***************************************************************************************************
+﻿/***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
  * Copyright (C) 2025 Ariya Consulting
@@ -22,8 +22,32 @@
 
 #pragma once
 
+/**
+ * @file src/core/gui/SwSplitter.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwSplitter in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the splitter interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwSplitter.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
 /***************************************************************************************************
- * SwSplitter - Qt-like splitter widget (≈ QSplitter).
+ * SwSplitter - splitter widget.
  *
  * Minimal implementation:
  * - Supports N children arranged in a row/column with draggable handles.
@@ -42,12 +66,26 @@ public:
         Vertical
     };
 
+    /**
+     * @brief Constructs a `SwSplitter` instance.
+     * @param orientation Value passed to the method.
+     * @param parent Optional parent object that owns this instance.
+     * @param orientation Value passed to the method.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwSplitter(Orientation orientation = Orientation::Horizontal, SwWidget* parent = nullptr)
         : SwWidget(parent)
         , m_orientation(orientation) {
         initDefaults();
     }
 
+    /**
+     * @brief Sets the orientation.
+     * @param orientation Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setOrientation(Orientation orientation) {
         if (m_orientation == orientation) {
             return;
@@ -57,8 +95,20 @@ public:
         invalidateRect();
     }
 
+    /**
+     * @brief Returns the current orientation.
+     * @return The current orientation.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     Orientation orientation() const { return m_orientation; }
 
+    /**
+     * @brief Sets the handle Width.
+     * @param width Width value.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setHandleWidth(int width) {
         const int clamped = clampInt(width, 0, 24);
         if (m_handleWidth == clamped) {
@@ -69,16 +119,43 @@ public:
         invalidateRect();
     }
 
+    /**
+     * @brief Returns the current handle Width.
+     * @return The current handle Width.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int handleWidth() const { return m_handleWidth; }
 
+    /**
+     * @brief Sets the opaque Resize.
+     * @param enabled Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setOpaqueResize(bool enabled) { m_opaqueResize = enabled; }
 
+    /**
+     * @brief Returns the current opaque Resize.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool opaqueResize() const { return m_opaqueResize; }
 
+    /**
+     * @brief Adds the specified widget.
+     * @param widget Widget associated with the operation.
+     */
     void addWidget(SwWidget* widget) {
         insertWidget(m_widgets.size(), widget);
     }
 
+    /**
+     * @brief Performs the `insertWidget` operation.
+     * @param index Value passed to the method.
+     * @param widget Widget associated with the operation.
+     */
     void insertWidget(int index, SwWidget* widget) {
         if (!widget) {
             return;
@@ -116,8 +193,17 @@ public:
         invalidateRect();
     }
 
+    /**
+     * @brief Performs the `count` operation.
+     * @return The current count value.
+     */
     int count() const { return m_widgets.size(); }
 
+    /**
+     * @brief Performs the `widget` operation.
+     * @param index Value passed to the method.
+     * @return The requested widget.
+     */
     SwWidget* widget(int index) const {
         if (index < 0 || index >= m_widgets.size()) {
             return nullptr;
@@ -125,6 +211,12 @@ public:
         return m_widgets[index];
     }
 
+    /**
+     * @brief Sets the sizes.
+     * @param sizes Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setSizes(const SwVector<int>& sizes) {
         if (sizes.size() != m_widgets.size()) {
             return;
@@ -134,16 +226,34 @@ public:
         invalidateRect();
     }
 
+    /**
+     * @brief Returns the current sizes.
+     * @return The current sizes.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwVector<int> sizes() const { return m_sizes; }
 
     DECLARE_SIGNAL(splitterMoved, int, int);
 
 protected:
+    /**
+     * @brief Handles the resize Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void resizeEvent(ResizeEvent* event) override {
         SwWidget::resizeEvent(event);
         updateLayout();
     }
 
+    /**
+     * @brief Handles the paint Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void paintEvent(PaintEvent* event) override {
         SwWidget::paintEvent(event);
 
@@ -160,29 +270,47 @@ protected:
             }
 
             const bool hot = (i == m_hoverHandle) || (i == m_dragHandle);
-            SwColor fill = hot ? SwColor{220, 224, 232} : SwColor{236, 236, 236};
-            SwColor border = hot ? SwColor{180, 186, 198} : SwColor{210, 210, 210};
-            const int radius = clampInt(std::min(h.width, h.height) / 4, 2, 8);
-            painter->fillRoundedRect(h, radius, fill, border, 1);
-
-            // Grip (3 small lines)
-            const int cx = h.x + h.width / 2;
-            const int cy = h.y + h.height / 2;
-            const int len = (m_orientation == Orientation::Horizontal) ? clampInt(h.height / 4, 6, 18)
-                                                                       : clampInt(h.width / 4, 6, 18);
-            SwColor grip{150, 150, 150};
-            if (m_orientation == Orientation::Horizontal) {
-                painter->drawLine(cx - 4, cy - len / 2, cx - 4, cy + len / 2, grip, 1);
-                painter->drawLine(cx, cy - len / 2, cx, cy + len / 2, grip, 1);
-                painter->drawLine(cx + 4, cy - len / 2, cx + 4, cy + len / 2, grip, 1);
+            if (m_handleWidth <= 5) {
+                // Thin-line style: just draw a single separator line
+                SwColor lineColor = hot ? SwColor{140, 150, 170} : SwColor{200, 205, 215};
+                if (m_orientation == Orientation::Horizontal) {
+                    const int cx = h.x + h.width / 2;
+                    painter->drawLine(cx, h.y, cx, h.y + h.height, lineColor, 1);
+                } else {
+                    const int cy = h.y + h.height / 2;
+                    painter->drawLine(h.x, cy, h.x + h.width, cy, lineColor, 1);
+                }
             } else {
-                painter->drawLine(cx - len / 2, cy - 4, cx + len / 2, cy - 4, grip, 1);
-                painter->drawLine(cx - len / 2, cy, cx + len / 2, cy, grip, 1);
-                painter->drawLine(cx - len / 2, cy + 4, cx + len / 2, cy + 4, grip, 1);
+                SwColor fill = hot ? SwColor{220, 224, 232} : SwColor{236, 236, 236};
+                SwColor border = hot ? SwColor{180, 186, 198} : SwColor{210, 210, 210};
+                const int radius = clampInt(std::min(h.width, h.height) / 4, 2, 8);
+                painter->fillRoundedRect(h, radius, fill, border, 1);
+
+                // Grip (3 small lines)
+                const int cx = h.x + h.width / 2;
+                const int cy = h.y + h.height / 2;
+                const int len = (m_orientation == Orientation::Horizontal) ? clampInt(h.height / 4, 6, 18)
+                                                                           : clampInt(h.width / 4, 6, 18);
+                SwColor grip{150, 150, 150};
+                if (m_orientation == Orientation::Horizontal) {
+                    painter->drawLine(cx - 4, cy - len / 2, cx - 4, cy + len / 2, grip, 1);
+                    painter->drawLine(cx, cy - len / 2, cx, cy + len / 2, grip, 1);
+                    painter->drawLine(cx + 4, cy - len / 2, cx + 4, cy + len / 2, grip, 1);
+                } else {
+                    painter->drawLine(cx - len / 2, cy - 4, cx + len / 2, cy - 4, grip, 1);
+                    painter->drawLine(cx - len / 2, cy, cx + len / 2, cy, grip, 1);
+                    painter->drawLine(cx - len / 2, cy + 4, cx + len / 2, cy + 4, grip, 1);
+                }
             }
         }
     }
 
+    /**
+     * @brief Handles the mouse Press Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mousePressEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -203,6 +331,12 @@ protected:
         SwWidget::mousePressEvent(event);
     }
 
+    /**
+     * @brief Handles the mouse Move Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseMoveEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -239,6 +373,12 @@ protected:
         SwWidget::mouseMoveEvent(event);
     }
 
+    /**
+     * @brief Handles the mouse Release Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseReleaseEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -260,12 +400,6 @@ protected:
     }
 
 private:
-    static int clampInt(int value, int minValue, int maxValue) {
-        if (value < minValue) return minValue;
-        if (value > maxValue) return maxValue;
-        return value;
-    }
-
     static SwRect unionRect_(const SwRect& a, const SwRect& b) {
         if (a.width <= 0 || a.height <= 0) return b;
         if (b.width <= 0 || b.height <= 0) return a;
@@ -362,7 +496,7 @@ private:
             SwWidget* w = m_widgets[i];
             int minPrimary = 0;
             if (w) {
-                const SwRect r = w->minimumSizeHint();
+                const SwSize r = w->minimumSizeHint();
                 minPrimary = std::max(0, (m_orientation == Orientation::Horizontal) ? r.width : r.height);
             }
             mins.push_back(minPrimary);
@@ -460,7 +594,7 @@ private:
     }
 
     SwRect handleRect(int handleIndex) const {
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
         const int n = count();
         if (n <= 1 || handleIndex < 0 || handleIndex >= n - 1) {
             return SwRect{0, 0, 0, 0};
@@ -498,12 +632,12 @@ private:
             return;
         }
 
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
         const int handles = handleCount();
         const int available = std::max(0, primaryLength(bounds) - handles * m_handleWidth);
         ensureSizesInitialized(available);
 
-        int pos = (m_orientation == Orientation::Horizontal) ? bounds.x : bounds.y;
+        int pos = 0;
 
         for (int i = 0; i < n; ++i) {
             SwWidget* w = m_widgets[i];
@@ -512,11 +646,11 @@ private:
             }
             const int sizePrimary = (i < m_sizes.size()) ? std::max(0, m_sizes[i]) : 0;
             if (m_orientation == Orientation::Horizontal) {
-                w->move(pos, bounds.y);
+                w->move(pos, 0);
                 w->resize(sizePrimary, bounds.height);
                 pos += sizePrimary + m_handleWidth;
             } else {
-                w->move(bounds.x, pos);
+                w->move(0, pos);
                 w->resize(bounds.width, sizePrimary);
                 pos += sizePrimary + m_handleWidth;
             }
@@ -529,7 +663,7 @@ private:
             return;
         }
 
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
         const int handles = handleCount();
         const int available = std::max(0, primaryLength(bounds) - handles * m_handleWidth);
         ensureSizesInitialized(available);
@@ -575,3 +709,4 @@ private:
     int m_dragOffset{0};
     bool m_opaqueResize{true};
 };
+

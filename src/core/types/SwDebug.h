@@ -67,7 +67,7 @@ struct SwDebugContext {
     int line;
     const char* function;
     SwDebugLevel level;
-    const char* category; // optional (Qt-like logging category / module name)
+    const char* category; // optional logging category / module name
 };
 
 class SwDebugMessage; // forward declaration
@@ -113,7 +113,7 @@ public:
     }
 
     /**
-     * Qt-like logging rules to enable/disable per-category output.
+     * Logging rules to enable or disable per-category output.
      *
      * Syntax (tokens separated by '\n' or ';'):
      *   - sw.core.iodevice.swprocess=true        (defaults to ".debug")
@@ -895,9 +895,17 @@ private:
 template<typename T, typename = void>
 struct SwDebugIsIterable : std::false_type {};
 
+template<typename...>
+struct SwDebugVoid {
+    typedef void type;
+};
+
+template<typename... Ts>
+using SwDebugVoidT = typename SwDebugVoid<Ts...>::type;
+
 template<typename T>
-struct SwDebugIsIterable<T, std::void_t<decltype(std::declval<T>().begin()),
-                                        decltype(std::declval<T>().end())>> : std::true_type {};
+struct SwDebugIsIterable<T, SwDebugVoidT<decltype(std::declval<T>().begin()),
+                                         decltype(std::declval<T>().end())>> : std::true_type {};
 
 template<typename T>
 struct SwDebugIsStdPairImpl : std::false_type {};
@@ -968,7 +976,7 @@ private:
 #define swWarning() SwDebugMessage({__FILE__, __LINE__, __FUNCTION__, SwDebugLevel::Warning, nullptr})
 #define swError() SwDebugMessage({__FILE__, __LINE__, __FUNCTION__, SwDebugLevel::Error, nullptr})
 
-// Qt-like category/module logging.
+// Category/module logging.
 // Note: the category should be a const char* with static lifetime (string literal or macro).
 #define swCDebug(category)                                                                                           \
     for (const char* SW_DEBUG_CONCAT(_swCat_, __LINE__) = (category); SW_DEBUG_CONCAT(_swCat_, __LINE__) != nullptr;  \

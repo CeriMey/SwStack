@@ -22,26 +22,51 @@
 
 #pragma once
 
+/**
+ * @file src/core/gui/StyleSheet.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by StyleSheet in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the style sheet interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are StyleSheet.
+ *
+ * Style-oriented declarations here capture reusable visual parameters so rendering code can stay
+ * deterministic while still allowing higher-level customization.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
+#include <sstream>
+#include <vector>
 #include <string>
-#include <sstream>      // Pour std::istringstream
-#include <map>          // Pour std::map
-#include <vector>       // Pour std::vector
-#include <algorithm>    // Pour std::find
-#include <cctype>       // Pour std::isspace
-#include <stdexcept>    // Pour std::invalid_argument
-#include <sstream>      // Pour std::stringstream
-#include <stdexcept>    // Pour std::invalid_argument
-#include <map>          // Pour stocker les noms de couleurs
+#include <algorithm>
+#include <stdexcept>
 
 #include "Sw.h"
+#include "SwString.h"
+#include "SwMap.h"
 
 
 
 class StyleSheet {
 public:
     // Un dictionnaire qui mappe des sélecteurs CSS à des styles (propriétés)
-    std::map<std::string, std::map<std::string, std::string>> styles;
+    SwMap<SwString, SwMap<SwString, SwString>> styles;
 
+    /**
+     * @brief Constructs a `StyleSheet` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     StyleSheet()
     {
         colorNames = {
@@ -68,10 +93,15 @@ public:
         };
     }
     // Méthode pour décoder une ligne CSS
-    void parseStyleSheet(const std::string& css) {
+    /**
+     * @brief Performs the `parseStyleSheet` operation.
+     * @param css Value passed to the method.
+     */
+    void parseStyleSheet(const SwString& css) {
+        std::string css_str = css.toStdString();
         std::string normalized;
-        normalized.reserve(css.size() * 2);
-        for (char ch : css) {
+        normalized.reserve(css_str.size() * 2);
+        for (char ch : css_str) {
             if (ch == '{') {
                 normalized.push_back('{');
                 normalized.push_back('\n');
@@ -109,14 +139,14 @@ public:
                     std::string property = trim(parts[0]);
                     std::string value = trim(parts[1]);
                     value = value.substr(0, value.size() - 1);  // Retirer le ; à la fin de la propriété
-                    styles[currentSelector][property] = value;
+                    styles[SwString(currentSelector)][SwString(property)] = SwString(value);
                 }
             }
         }
     }
 
     // Récupérer une propriété spécifique pour un sélecteur donné
-    std::string getStyleProperty(const std::string& selector, const std::string& property) const {
+    SwString getStyleProperty(const SwString& selector, const SwString& property) const {
         auto selectorIt = styles.find(selector);
         if (selectorIt != styles.end()) {
             const auto& props = selectorIt->second;
@@ -125,17 +155,17 @@ public:
                 return propIt->second;
             }
         }
-        return "";
+        return SwString();
     }
 
 
 
     // Convertir une couleur CSS en COLORREF (hex, rgb(), nom de couleur)
-    SwColor parseColor(const std::string& color, float* alphaOut = nullptr) {
+    SwColor parseColor(const SwString& color, float* alphaOut = nullptr) {
         if (alphaOut) {
             *alphaOut = 1.0f;
         }
-        std::string trimmedColor = trim(color);
+        std::string trimmedColor = trim(color.toStdString());
 
         if (trimmedColor.empty()) {
             return makeColor(0, 0, 0);
@@ -156,7 +186,7 @@ public:
                 std::string inner = trimmedColor.substr(open + 1, close - open - 1);
                 auto commaPos = inner.find(',');
                 std::string firstColor = (commaPos != std::string::npos) ? inner.substr(0, commaPos) : inner;
-                return parseColor(firstColor, alphaOut);
+                return parseColor(SwString(firstColor), alphaOut);
             }
         }
 
@@ -232,7 +262,7 @@ public:
                 throw std::invalid_argument("Invalid rgb() format. Expected rgb(R, G, B).");
             }
         }
-        auto it = colorNames.find(trimmedColor);
+        auto it = colorNames.find(SwString(trimmedColor));
         if (it != colorNames.end()) {
             return it->second;
         }
@@ -283,7 +313,7 @@ private:
     }
 
     // Gérer les noms de couleurs CSS courants
-     std::map<std::string, SwColor> colorNames;
+     SwMap<SwString, SwColor> colorNames;
 
      static SwColor makeColor(int r, int g, int b) {
          SwColor c;

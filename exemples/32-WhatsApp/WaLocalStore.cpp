@@ -43,10 +43,10 @@ static SwString toSwString_(const SwJsonValue& v) {
 }
 
 static SwColor toColor_(const SwJsonValue& v, const SwColor& fallback) {
-    if (!v.isArray() || !v.toArray()) {
+    if (!v.isArray()) {
         return fallback;
     }
-    const SwJsonArray& arr = *v.toArray();
+    const SwJsonArray arr = v.toArray();
     if (arr.size() < 3) {
         return fallback;
     }
@@ -75,10 +75,10 @@ static SwJsonValue fromStringList_(const SwList<SwString>& list) {
 
 static SwList<SwString> toStringList_(const SwJsonValue& v) {
     SwList<SwString> out;
-    if (!v.isArray() || !v.toArray()) {
+    if (!v.isArray()) {
         return out;
     }
-    const SwJsonArray& arr = *v.toArray();
+    const SwJsonArray arr = v.toArray();
     for (const SwJsonValue& item : arr) {
         if (!item.isString()) {
             continue;
@@ -443,8 +443,8 @@ SwString WaLocalStore::statusForConversationId(const SwString& conversationId) c
         if (!convo->status.isEmpty()) {
             return convo->status;
         }
-        const int n = convo->participantIds.size();
-        return SwString::number(n) + " participants";
+        const size_t participantCount = convo->participantIds.size();
+        return SwString::number(participantCount) + " participants";
     }
 
     if (const Contact* c = primaryContactForConversation_(*this, *convo)) {
@@ -691,11 +691,11 @@ SwString WaLocalStore::parentDirectory_(SwString path) {
     while (path.endsWith("/") && path.size() > 1) {
         path.chop(1);
     }
-    const int idx = path.lastIndexOf('/');
-    if (idx <= 0) {
+    const size_t idx = path.lastIndexOf('/');
+    if (idx == static_cast<size_t>(-1) || idx == 0) {
         return SwString();
     }
-    return path.left(idx);
+    return path.left(static_cast<int>(idx));
 }
 
 bool WaLocalStore::ensureDirectory_(const SwString& path) {
@@ -742,13 +742,13 @@ bool WaLocalStore::loadFromJson_(const SwString& json) {
         m_ui.selectedConversationId = toSwString_(root["selectedConversationId"]);
 
         const SwJsonValue convsV = root["conversations"];
-        if (convsV.isArray() && convsV.toArray()) {
-            const SwJsonArray& arr = *convsV.toArray();
+        if (convsV.isArray()) {
+            const SwJsonArray arr = convsV.toArray();
             for (const SwJsonValue& item : arr) {
-                if (!item.isObject() || !item.toObject()) {
+                if (!item.isObject()) {
                     continue;
                 }
-                const SwJsonObject& co = *item.toObject();
+                const SwJsonObject co = item.toObject();
 
                 Conversation c;
                 c.id = toSwString_(co["id"]);
@@ -769,13 +769,13 @@ bool WaLocalStore::loadFromJson_(const SwString& json) {
                 m_contacts.append(contact);
 
                 const SwJsonValue msgsV = co["messages"];
-                if (msgsV.isArray() && msgsV.toArray()) {
-                    const SwJsonArray& msgs = *msgsV.toArray();
+                if (msgsV.isArray()) {
+                    const SwJsonArray msgs = msgsV.toArray();
                     for (const SwJsonValue& mv : msgs) {
-                        if (!mv.isObject() || !mv.toObject()) {
+                        if (!mv.isObject()) {
                             continue;
                         }
-                        const SwJsonObject& mo = *mv.toObject();
+                        const SwJsonObject mo = mv.toObject();
                         Message m;
                         m.messageId = toSwString_(mo["messageId"]);
                         m.fromUserId = toSwString_(mo["fromUserId"]);
@@ -799,8 +799,8 @@ bool WaLocalStore::loadFromJson_(const SwString& json) {
 
     // v2+: full store.
     const SwJsonValue userV = root["user"];
-    if (userV.isObject() && userV.toObject()) {
-        const SwJsonObject& uo = *userV.toObject();
+    if (userV.isObject()) {
+        const SwJsonObject uo = userV.toObject();
         m_user.loggedIn = uo["loggedIn"].toBool();
         m_user.displayName = toSwString_(uo["displayName"]);
         m_user.phone = toSwString_(uo["phone"]);
@@ -809,13 +809,13 @@ bool WaLocalStore::loadFromJson_(const SwString& json) {
     }
 
     const SwJsonValue contactsV = root["contacts"];
-    if (contactsV.isArray() && contactsV.toArray()) {
-        const SwJsonArray& arr = *contactsV.toArray();
+    if (contactsV.isArray()) {
+        const SwJsonArray arr = contactsV.toArray();
         for (const SwJsonValue& item : arr) {
-            if (!item.isObject() || !item.toObject()) {
+            if (!item.isObject()) {
                 continue;
             }
-            const SwJsonObject& co = *item.toObject();
+            const SwJsonObject co = item.toObject();
             Contact c;
             c.id = toSwString_(co["id"]);
             c.displayName = toSwString_(co["displayName"]);
@@ -830,13 +830,13 @@ bool WaLocalStore::loadFromJson_(const SwString& json) {
     }
 
     const SwJsonValue convsV = root["conversations"];
-    if (convsV.isArray() && convsV.toArray()) {
-        const SwJsonArray& arr = *convsV.toArray();
+    if (convsV.isArray()) {
+        const SwJsonArray arr = convsV.toArray();
         for (const SwJsonValue& item : arr) {
-            if (!item.isObject() || !item.toObject()) {
+            if (!item.isObject()) {
                 continue;
             }
-            const SwJsonObject& co = *item.toObject();
+            const SwJsonObject co = item.toObject();
 
             Conversation c;
             c.id = toSwString_(co["id"]);
@@ -850,13 +850,13 @@ bool WaLocalStore::loadFromJson_(const SwString& json) {
             c.unreadCount = co["unreadCount"].toInt();
 
             const SwJsonValue msgsV = co["messages"];
-            if (msgsV.isArray() && msgsV.toArray()) {
-                const SwJsonArray& msgs = *msgsV.toArray();
+            if (msgsV.isArray()) {
+                const SwJsonArray msgs = msgsV.toArray();
                 for (const SwJsonValue& mv : msgs) {
-                    if (!mv.isObject() || !mv.toObject()) {
+                    if (!mv.isObject()) {
                         continue;
                     }
-                    const SwJsonObject& mo = *mv.toObject();
+                    const SwJsonObject mo = mv.toObject();
                     Message m;
                     m.messageId = toSwString_(mo["messageId"]);
                     m.fromUserId = toSwString_(mo["fromUserId"]);
@@ -881,13 +881,13 @@ bool WaLocalStore::loadFromJson_(const SwString& json) {
     }
 
     const SwJsonValue uiV = root["ui"];
-    if (uiV.isObject() && uiV.toObject()) {
-        const SwJsonObject& uio = *uiV.toObject();
+    if (uiV.isObject()) {
+        const SwJsonObject uio = uiV.toObject();
         m_ui.selectedConversationId = toSwString_(uio["selectedConversationId"]);
 
         const SwJsonValue draftsV = uio["drafts"];
-        if (draftsV.isObject() && draftsV.toObject()) {
-            const SwJsonObject& drafts = *draftsV.toObject();
+        if (draftsV.isObject()) {
+            const SwJsonObject drafts = draftsV.toObject();
             for (auto it = drafts.begin(); it != drafts.end(); ++it) {
                 const SwString key = it.key();
                 if (key.isEmpty()) {

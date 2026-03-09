@@ -1,4 +1,30 @@
 #pragma once
+
+/**
+ * @file src/core/remote/SwRemoteObjectComponent.h
+ * @ingroup core_remote
+ * @brief Declares the public interface exposed by SwRemoteObjectComponent in the CoreSw remote
+ * and IPC layer.
+ *
+ * This header belongs to the CoreSw remote and IPC layer. It provides the abstractions used to
+ * expose objects across process boundaries and to transport data or signals between peers.
+ *
+ * Within that layer, this file focuses on the remote object component interface. The declarations
+ * exposed here define the stable surface that adjacent code can rely on while the implementation
+ * remains free to evolve behind the header.
+ *
+ * This header mainly contributes module-level utilities, helper declarations, or namespaced types
+ * that are consumed by the surrounding subsystem.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * Remote-facing declarations in this area usually coordinate identity, proxying, serialization,
+ * and synchronization across runtimes.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -50,6 +76,12 @@ inline ComponentNode*& head() {
 }
 
 struct AutoRegister {
+    /**
+     * @brief Constructs a `AutoRegister` instance.
+     * @param n Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     explicit AutoRegister(ComponentNode* n) {
         if (!n) return;
         n->next = head();

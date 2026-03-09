@@ -1,4 +1,29 @@
 #pragma once
+
+/**
+ * @file src/core/remote/SwRemoteObjectComponentRegistry.h
+ * @ingroup core_remote
+ * @brief Declares the public interface exposed by SwRemoteObjectComponentRegistry in the CoreSw
+ * remote and IPC layer.
+ *
+ * This header belongs to the CoreSw remote and IPC layer. It provides the abstractions used to
+ * expose objects across process boundaries and to transport data or signals between peers.
+ *
+ * Within that layer, this file focuses on the remote object component registry interface. The
+ * declarations exposed here define the stable surface that adjacent code can rely on while the
+ * implementation remains free to evolve behind the header.
+ *
+ * The main declarations in this header are SwRemoteObjectComponentRegistry.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * Remote-facing declarations in this area usually coordinate identity, proxying, serialization,
+ * and synchronization across runtimes.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -44,6 +69,14 @@ class SwRemoteObjectComponentRegistry {
         SwString pluginPath;
     };
 
+    /**
+     * @brief Performs the `registerComponent` operation.
+     * @param typeName Value passed to the method.
+     * @param create Value passed to the method.
+     * @param destroy Value passed to the method.
+     * @param pluginPath Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool registerComponent(const SwString& typeName,
                            CreateFn create,
                            DestroyFn destroy,
@@ -72,11 +105,21 @@ class SwRemoteObjectComponentRegistry {
         return true;
     }
 
+    /**
+     * @brief Performs the `contains` operation.
+     * @param typeName Value passed to the method.
+     * @return `true` when the object reports contains; otherwise `false`.
+     */
     bool contains(const SwString& typeName) const {
         std::lock_guard<std::mutex> lk(mutex_);
         return entries_.find(typeName.toStdString()) != entries_.end();
     }
 
+    /**
+     * @brief Performs the `entry` operation.
+     * @param typeName Value passed to the method.
+     * @return The requested entry.
+     */
     Entry entry(const SwString& typeName) const {
         std::lock_guard<std::mutex> lk(mutex_);
         const std::string key = typeName.toStdString();
@@ -85,6 +128,12 @@ class SwRemoteObjectComponentRegistry {
         return it->second;
     }
 
+    /**
+     * @brief Returns the current types.
+     * @return The current types.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwStringList types() const {
         SwStringList out;
         std::lock_guard<std::mutex> lk(mutex_);
@@ -95,6 +144,13 @@ class SwRemoteObjectComponentRegistry {
         return out;
     }
 
+    /**
+     * @brief Sets the plugin Path.
+     * @param typeName Value passed to the method.
+     * @param pluginPath Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setPluginPath(const SwString& typeName, const SwString& pluginPath) {
         if (typeName.isEmpty() || pluginPath.isEmpty()) return;
         std::lock_guard<std::mutex> lk(mutex_);

@@ -1,4 +1,4 @@
-#include "WaAvatarCircle.h"
+﻿#include "WaAvatarCircle.h"
 
 #include "SwFont.h"
 #include "SwPainter.h"
@@ -29,7 +29,7 @@ void WaAvatarCircle::paintEvent(PaintEvent* event) {
         return;
     }
 
-    const SwRect r = getRect();
+    const SwRect r = rect();
     const int radius = (r.width < r.height ? r.width : r.height) / 2;
     painter->fillRoundedRect(r, radius, m_color, m_color, 0);
     painter->drawText(r,
@@ -38,4 +38,5 @@ void WaAvatarCircle::paintEvent(PaintEvent* event) {
                       SwColor{255, 255, 255},
                       getFont());
 }
+
 

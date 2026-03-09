@@ -1,4 +1,29 @@
 #pragma once
+
+/**
+ * @file src/atomic/thread.h
+ * @ingroup atomic_primitives
+ * @brief Declares the public interface exposed by thread in the CoreSw low-level concurrency
+ * layer.
+ *
+ * This header belongs to the CoreSw low-level concurrency layer. It exposes foundational
+ * threading primitives used by the object and runtime subsystems.
+ *
+ * Within that layer, this file focuses on the thread interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * This header mainly contributes module-level utilities, helper declarations, or namespaced types
+ * that are consumed by the surrounding subsystem.
+ *
+ * Thread-oriented declarations here define execution-context ownership, affinity, or
+ * synchronization boundaries that the rest of the framework relies on.
+ *
+ * This layer stays close to operating-system and standard-library concepts so higher abstractions
+ * can build predictable lifecycle and dispatch behavior on top.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -43,17 +68,28 @@ namespace atomic {
  * @class Thread
  * @brief Lightweight worker thread hosting its own SwCoreApplication event loop.
  *
- * This class mirrors the behavior of Qt's QThread by providing an isolated event loop
+ * This class provides an isolated event loop
  * for objects that need to live outside of the main thread. Each Thread owns a
  * dedicated SwCoreApplication instance, allowing SwObject::moveToThread() to safely
  * migrate objects and execute their queued events in the appropriate context.
  */
 class Thread {
 public:
+    /**
+     * @brief Constructs a `Thread` instance.
+     * @param name Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     explicit Thread(const SwString& name = "Thread")
         : m_name(name) {
     }
 
+    /**
+     * @brief Destroys the `Thread` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~Thread() {
         if (!m_isAdopted) {
             quit();
@@ -181,6 +217,26 @@ public:
     }
 
     /**
+     * @brief Returns a process-wide fallback runtime thread.
+     *
+     * This thread owns a SwCoreApplication event loop and is used when code creates
+     * SwObject instances without any SwCoreApplication bound to the current thread.
+     */
+    static Thread* sharedFallbackThread() {
+        static std::once_flag s_once;
+        static Thread* s_thread = nullptr;
+        std::call_once(s_once, []() {
+            Thread* candidate = new Thread("SwFallbackCoreThread");
+            if (candidate->start()) {
+                s_thread = candidate;
+            } else {
+                delete candidate;
+            }
+        });
+        return s_thread;
+    }
+
+    /**
      * @brief Adopts the current thread if it already owns a SwCoreApplication.
      *
      * @param name Optional friendly name used for logging/debugging.
@@ -230,11 +286,23 @@ public:
         m_objects.erase(object);
     }
 
+    /**
+     * @brief Sets the started Callback.
+     * @param cb Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setStartedCallback(std::function<void()> cb) {
         std::lock_guard<std::mutex> lock(m_callbackMutex);
         m_onStarted = std::move(cb);
     }
 
+    /**
+     * @brief Sets the finished Callback.
+     * @param cb Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setFinishedCallback(std::function<void()> cb) {
         std::lock_guard<std::mutex> lock(m_callbackMutex);
         m_onFinished = std::move(cb);
@@ -394,4 +462,3 @@ private:
 
 } // namespace atomic
 } // namespace sw
-

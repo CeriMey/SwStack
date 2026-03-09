@@ -1,4 +1,28 @@
 #pragma once
+
+/**
+ * @file src/core/gui/graphics/SwImage.h
+ * @ingroup core_graphics
+ * @brief Declares the public interface exposed by SwImage in the CoreSw graphics layer.
+ *
+ * This header belongs to the CoreSw graphics layer. It provides geometry types, painting
+ * primitives, images, scene-graph helpers, and rendering support consumed by widgets and views.
+ *
+ * Within that layer, this file focuses on the image interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwImage.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * Graphics-facing declarations here define the data flow from high-level UI state to lower-level
+ * rendering backends.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -21,6 +45,21 @@
  *
  ***************************************************************************************************/
 
+/**
+ * @file
+ * @brief Defines SwImage, the graphics stack's in-memory raster image container.
+ *
+ * SwImage is the lowest-level image value type used by the GUI layer. It owns a
+ * contiguous pixel buffer, exposes direct scanline access, and provides compact
+ * BMP-based load/save helpers so the rest of the stack can exchange pixels
+ * without relying on an external image backend.
+ *
+ * The implementation is intentionally narrow: it currently standardizes on a
+ * single 32-bit ARGB format. That keeps memory layout, serialization, and
+ * painting integration predictable for callers such as SwPixmap, icon helpers,
+ * scene items, snapshot tools, and custom widgets.
+ */
+
 #include "SwString.h"
 
 #include <cstdint>
@@ -28,6 +67,13 @@
 #include <string>
 #include <vector>
 
+/**
+ * @brief Owns a 32-bit pixel buffer together with basic image I/O helpers.
+ *
+ * The class behaves like a regular value type. Copying a SwImage duplicates the
+ * underlying pixel storage, which makes it easy to pass images between widgets
+ * and rendering helpers without sharing lifetime-sensitive backend objects.
+ */
 class SwImage {
 public:
     enum Format {
@@ -35,18 +81,67 @@ public:
         Format_ARGB32
     };
 
+    /**
+     * @brief Constructs a `SwImage` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwImage() = default;
+    /**
+     * @brief Constructs a `SwImage` instance.
+     * @param w Width value.
+     * @param h Height value.
+     * @param fmt Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwImage(int w, int h, Format fmt = Format_ARGB32) {
         create(w, h, fmt);
     }
 
+    /**
+     * @brief Returns whether the object reports null.
+     * @return `true` when the object reports null; otherwise `false`.
+     *
+     * @details This query does not modify the object state.
+     */
     bool isNull() const { return m_width <= 0 || m_height <= 0 || m_pixels.empty(); }
 
+    /**
+     * @brief Returns the current width.
+     * @return The current width.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int width() const { return m_width; }
+    /**
+     * @brief Returns the current height.
+     * @return The current height.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int height() const { return m_height; }
+    /**
+     * @brief Returns the current bytes Per Line.
+     * @return The current bytes Per Line.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int bytesPerLine() const { return m_width > 0 ? m_width * 4 : 0; }
+    /**
+     * @brief Returns the current format.
+     * @return The current format.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     Format format() const { return m_format; }
 
+    /**
+     * @brief Creates the requested create.
+     * @param w Width value.
+     * @param h Height value.
+     * @param fmt Value passed to the method.
+     */
     void create(int w, int h, Format fmt = Format_ARGB32) {
         m_width = w;
         m_height = h;
@@ -61,13 +156,30 @@ public:
         m_pixels.assign(static_cast<size_t>(m_width) * static_cast<size_t>(m_height), 0x00000000u);
     }
 
+    /**
+     * @brief Performs the `fill` operation.
+     * @param argb Value passed to the method.
+     */
     void fill(std::uint32_t argb) {
         std::fill(m_pixels.begin(), m_pixels.end(), argb);
     }
 
+    /**
+     * @brief Performs the `bits` operation.
+     * @return The requested bits.
+     */
     std::uint32_t* bits() { return m_pixels.empty() ? nullptr : m_pixels.data(); }
+    /**
+     * @brief Performs the `constBits` operation.
+     * @return The requested const Bits.
+     */
     const std::uint32_t* constBits() const { return m_pixels.empty() ? nullptr : m_pixels.data(); }
 
+    /**
+     * @brief Performs the `scanLine` operation.
+     * @param y Vertical coordinate.
+     * @return The requested scan Line.
+     */
     std::uint32_t* scanLine(int y) {
         if (y < 0 || y >= m_height || m_width <= 0) {
             return nullptr;
@@ -75,6 +187,11 @@ public:
         return m_pixels.data() + static_cast<size_t>(y) * static_cast<size_t>(m_width);
     }
 
+    /**
+     * @brief Performs the `constScanLine` operation.
+     * @param y Vertical coordinate.
+     * @return The requested const Scan Line.
+     */
     const std::uint32_t* constScanLine(int y) const {
         if (y < 0 || y >= m_height || m_width <= 0) {
             return nullptr;
@@ -82,6 +199,11 @@ public:
         return m_pixels.data() + static_cast<size_t>(y) * static_cast<size_t>(m_width);
     }
 
+    /**
+     * @brief Performs the `save` operation on the associated resource.
+     * @param filePath Path of the target file.
+     * @return `true` on success; otherwise `false`.
+     */
     bool save(const SwString& filePath) const {
         if (isNull()) {
             return false;
@@ -134,6 +256,11 @@ public:
         return out.good();
     }
 
+    /**
+     * @brief Performs the `load` operation on the associated resource.
+     * @param filePath Path of the target file.
+     * @return `true` on success; otherwise `false`.
+     */
     bool load(const SwString& filePath) {
         const std::string path = filePath.toStdString();
         std::ifstream in(path.c_str(), std::ios::binary);
@@ -231,4 +358,3 @@ private:
     Format m_format{Format_Invalid};
     std::vector<std::uint32_t> m_pixels;
 };
-

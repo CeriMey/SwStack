@@ -1,4 +1,4 @@
-/***************************************************************************************************
+﻿/***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
  * Copyright (C) 2025 Ariya Consulting
@@ -22,11 +22,35 @@
 
 #pragma once
 
+/**
+ * @file src/core/gui/SwDialog.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwDialog in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the dialog interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwDialog.
+ *
+ * Dialog-oriented declarations here usually describe a bounded modal interaction: configuration
+ * enters through setters or constructor state, the user edits the state through child widgets,
+ * and the caller retrieves the accepted result through the public API.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
 /***************************************************************************************************
- * SwDialog - Qt-like dialog widget (≈ QDialog).
+ * SwDialog - dialog widget.
  *
  * Focus:
- * - Native top-level window by default on Windows (Qt-like).
+ * - Native top-level window by default on Windows.
  * - Optional in-client modal overlay (snapshot-friendly, cross-platform-ready).
  * - Basic title + content area + button row.
  **************************************************************************************************/
@@ -48,6 +72,10 @@
 #if defined(_WIN32)
 #include "platform/win/SwWin32Painter.h"
 #include "platform/win/SwWindows.h"
+#elif defined(__linux__)
+#include "SwGuiApplication.h"
+#include "platform/x11/SwX11PlatformIntegration.h"
+#include "platform/x11/SwX11Painter.h"
 #endif
 
 class SwDialog : public SwFrame {
@@ -59,12 +87,24 @@ public:
         Accepted = 1
     };
 
+    /**
+     * @brief Constructs a `SwDialog` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwDialog(SwWidget* parent = nullptr)
         : SwFrame(parent) {
         initDefaults();
         buildChildren();
     }
 
+    /**
+     * @brief Sets the window Title.
+     * @param title Title text applied by the operation.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setWindowTitle(const SwString& title) {
         m_title = title;
         if (m_titleLabel) {
@@ -72,31 +112,149 @@ public:
         }
 #if defined(_WIN32)
         if (m_nativeHwnd) {
-            const std::wstring wide = m_title.toStdWString();
+            std::wstring wide = m_title.toStdWString();
+            wide.erase(std::remove(wide.begin(), wide.end(), L'\0'), wide.end());
             SetWindowTextW(m_nativeHwnd, wide.c_str());
         }
 #endif
         update();
     }
 
+    /**
+     * @brief Sets the window Title.
+     * @param title Title text applied by the operation.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
+    void setWindowTitle(const std::wstring& title) {
+        setWindowTitle(SwString::fromWString(title));
+    }
+
+    /**
+     * @brief Sets the window Title.
+     * @param title Title text applied by the operation.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
+    void setWindowTitle(const wchar_t* title) {
+        setWindowTitle(SwString::fromWCharArray(title));
+    }
+
+    /**
+     * @brief Sets the window Title.
+     * @param title Title text applied by the operation.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
+    void setWindowTitle(const char* title) {
+        if (!title) {
+            setWindowTitle(SwString());
+            return;
+        }
+#if defined(_WIN32)
+        // Defensive compatibility: accidental UTF-16LE pointer passed as char*.
+        if (title[0] != '\0' && title[1] == '\0') {
+            setWindowTitle(SwString::fromWCharArray(reinterpret_cast<const wchar_t*>(title)));
+            return;
+        }
+#endif
+        setWindowTitle(SwString::fromUtf8(title));
+    }
+
+    /**
+     * @brief Returns the current window Title.
+     * @return The current window Title.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString windowTitle() const { return m_title; }
 
+#if defined(_WIN32)
+    /**
+     * @brief Sets the native Window Icon.
+     * @param hIcon Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
+    void setNativeWindowIcon(HICON hIcon) {
+        m_nativeIcon = hIcon;
+        if (m_nativeHwnd && hIcon) {
+            SendMessage(m_nativeHwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(hIcon));
+            SendMessage(m_nativeHwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(hIcon));
+        }
+    }
+#endif
+
+    /**
+     * @brief Sets the modal.
+     * @param on Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setModal(bool on) { m_modal = on; }
+    /**
+     * @brief Returns whether the object reports modal.
+     * @return `true` when the object reports modal; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isModal() const { return m_modal; }
 
+    /**
+     * @brief Sets the use Native Window.
+     * @param on Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setUseNativeWindow(bool on) { m_useNativeWindow = on; }
+    /**
+     * @brief Returns the current use Native Window.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool useNativeWindow() const { return m_useNativeWindow; }
 
+    /**
+     * @brief Returns the current content Widget.
+     * @return The current content Widget.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwWidget* contentWidget() const { return m_content; }
+    /**
+     * @brief Returns the current button Bar Widget.
+     * @return The current button Bar Widget.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwWidget* buttonBarWidget() const { return m_buttonBar; }
 
+    /**
+     * @brief Returns the current result.
+     * @return The current result.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int result() const { return m_result; }
 
+    /**
+     * @brief Opens the underlying resource managed by the object.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     void open() {
 #if defined(_WIN32)
         if (m_useNativeWindow) {
             openNativeWindow();
             if (m_nativeHwnd) {
+                return;
+            }
+        }
+#elif defined(__linux__)
+        if (m_useNativeWindow) {
+            openNativeWindowX11();
+            if (m_x11PlatformWindow) {
                 return;
             }
         }
@@ -116,6 +274,12 @@ public:
         shown();
     }
 
+    /**
+     * @brief Returns the current exec.
+     * @return The current exec.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int exec() {
         setModal(true);
         SwEventLoop loop;
@@ -124,12 +288,20 @@ public:
         return loop.exec();
     }
 
+    /**
+     * @brief Performs the `done` operation.
+     * @param code Value passed to the method.
+     */
     void done(int code) {
         m_result = code;
         hide();
 #if defined(_WIN32)
         if (m_activePresentation == Presentation::NativeWindow) {
             closeNativeWindow();
+        }
+#elif defined(__linux__)
+        if (m_activePresentation == Presentation::NativeWindow) {
+            closeNativeWindowX11();
         }
 #endif
         if (m_overlay) {
@@ -144,7 +316,15 @@ public:
         }
     }
 
+    /**
+     * @brief Performs the `accept` operation.
+     * @param Accepted Value passed to the method.
+     */
     void accept() { done(Accepted); }
+    /**
+     * @brief Performs the `reject` operation.
+     * @param Rejected Value passed to the method.
+     */
     void reject() { done(Rejected); }
 
 signals:
@@ -154,11 +334,23 @@ signals:
     DECLARE_SIGNAL_VOID(rejected);
 
 protected:
+    /**
+     * @brief Handles the resize Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void resizeEvent(ResizeEvent* event) override {
         SwFrame::resizeEvent(event);
         updateLayout();
     }
 
+    /**
+     * @brief Handles the key Press Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void keyPressEvent(KeyEvent* event) override {
         if (!event) {
             return;
@@ -198,11 +390,11 @@ private:
             CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
             dialog = reinterpret_cast<SwDialog*>(cs ? cs->lpCreateParams : nullptr);
             SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(dialog));
-            return DefWindowProc(hwnd, uMsg, wParam, lParam);
+            return DefWindowProcW(hwnd, uMsg, wParam, lParam);
         }
 
         if (!dialog) {
-            return DefWindowProc(hwnd, uMsg, wParam, lParam);
+            return DefWindowProcW(hwnd, uMsg, wParam, lParam);
         }
 
         switch (uMsg) {
@@ -264,6 +456,46 @@ private:
             dialog->nativePostMouseMove(x, y);
             return 0;
         }
+        case WM_MOUSEWHEEL: {
+            int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+            bool ctrlPressed = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            bool shiftPressed = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            bool altPressed = (GetKeyState(VK_MENU) & 0x8000) != 0;
+            POINT pt = { LOWORD(lParam), HIWORD(lParam) };
+            ScreenToClient(hwnd, &pt);
+            dialog->nativePostMouseWheel(pt.x, pt.y, delta, ctrlPressed, shiftPressed, altPressed);
+            return 0;
+        }
+        case WM_MOUSEHWHEEL: {
+            const int delta = -GET_WHEEL_DELTA_WPARAM(wParam);
+            const bool ctrlPressed = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            const bool shiftPressed = true;
+            const bool altPressed = (GetKeyState(VK_MENU) & 0x8000) != 0;
+            POINT pt = { LOWORD(lParam), HIWORD(lParam) };
+            ScreenToClient(hwnd, &pt);
+            dialog->nativePostMouseWheel(pt.x, pt.y, delta, ctrlPressed, shiftPressed, altPressed);
+            return 0;
+        }
+        case WM_POINTERWHEEL: {
+            const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+            const bool ctrlPressed = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            const bool shiftPressed = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            const bool altPressed = (GetKeyState(VK_MENU) & 0x8000) != 0;
+            POINT pt = { static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam)) };
+            ScreenToClient(hwnd, &pt);
+            dialog->nativePostMouseWheel(pt.x, pt.y, delta, ctrlPressed, shiftPressed, altPressed);
+            return 0;
+        }
+        case WM_POINTERHWHEEL: {
+            const int delta = -GET_WHEEL_DELTA_WPARAM(wParam);
+            const bool ctrlPressed = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            const bool shiftPressed = true;
+            const bool altPressed = (GetKeyState(VK_MENU) & 0x8000) != 0;
+            POINT pt = { static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam)) };
+            ScreenToClient(hwnd, &pt);
+            dialog->nativePostMouseWheel(pt.x, pt.y, delta, ctrlPressed, shiftPressed, altPressed);
+            return 0;
+        }
         case WM_KEYDOWN: {
             int keyCode = static_cast<int>(wParam);
             bool ctrlPressed = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
@@ -278,10 +510,10 @@ private:
         }
         case WM_NCDESTROY: {
             SetWindowLongPtr(hwnd, GWLP_USERDATA, 0);
-            return DefWindowProc(hwnd, uMsg, wParam, lParam);
+            return DefWindowProcW(hwnd, uMsg, wParam, lParam);
         }
         default:
-            return DefWindowProc(hwnd, uMsg, wParam, lParam);
+            return DefWindowProcW(hwnd, uMsg, wParam, lParam);
         }
     }
 
@@ -291,7 +523,7 @@ private:
 
         if (m_activePresentation != Presentation::NativeWindow) {
             m_originalParent = parent();
-            m_originalRect = getRect();
+            m_originalRect = frameGeometry();
         }
 
         ensureNativeDialogWindowClassRegistered();
@@ -352,6 +584,11 @@ private:
         show();
         update();
 
+        if (m_nativeIcon) {
+            SendMessage(m_nativeHwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(m_nativeIcon));
+            SendMessage(m_nativeHwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(m_nativeIcon));
+        }
+
         ShowWindow(m_nativeHwnd, SW_SHOW);
         UpdateWindow(m_nativeHwnd);
 
@@ -360,8 +597,10 @@ private:
     }
 
     void closeNativeWindow() {
+        HWND ownerToRestore = nullptr;
         if (m_modal && m_nativeOwnerHwnd && m_nativeOwnerWasEnabled) {
             EnableWindow(m_nativeOwnerHwnd, TRUE);
+            ownerToRestore = m_nativeOwnerHwnd;
         }
         m_nativeOwnerWasEnabled = false;
         m_nativeOwnerHwnd = nullptr;
@@ -371,6 +610,10 @@ private:
             m_nativeHwnd = nullptr;
             SetWindowLongPtr(hwndToDestroy, GWLP_USERDATA, 0);
             DestroyWindow(hwndToDestroy);
+        }
+
+        if (ownerToRestore) {
+            SetForegroundWindow(ownerToRestore);
         }
     }
 
@@ -476,6 +719,16 @@ private:
         nativeDispatchMouseMove(x, y);
     }
 
+    void nativePostMouseWheel(int x, int y, int delta, bool ctrlPressed, bool shiftPressed, bool altPressed) {
+        if (auto* app = SwCoreApplication::instance(false)) {
+            app->postEvent([this, x, y, delta, ctrlPressed, shiftPressed, altPressed]() {
+                nativeDispatchMouseWheel(x, y, delta, ctrlPressed, shiftPressed, altPressed);
+            });
+            return;
+        }
+        nativeDispatchMouseWheel(x, y, delta, ctrlPressed, shiftPressed, altPressed);
+    }
+
     void nativePostKeyPress(int keyCode, bool ctrlPressed, bool shiftPressed, bool altPressed) {
         if (auto* app = SwCoreApplication::instance(false)) {
             app->postEvent([this, keyCode, ctrlPressed, shiftPressed, altPressed]() {
@@ -517,6 +770,21 @@ private:
         SwToolTip::handleMouseMove(this, x, y);
     }
 
+    void nativeDispatchMouseWheel(int x, int y, int delta, bool ctrlPressed, bool shiftPressed, bool altPressed) {
+        WheelEvent wheelEvent(x, y, delta, ctrlPressed, shiftPressed, altPressed);
+        SwWidget* target = getChildUnderCursor(x, y);
+        SwWidget* current = target ? target : this;
+        while (current) {
+            WheelEvent localEvent = mapWheelEventToChild_(wheelEvent, this, current);
+            current->wheelEvent(&localEvent);
+            if (localEvent.isAccepted()) {
+                wheelEvent.accept();
+                return;
+            }
+            current = dynamic_cast<SwWidget*>(current->parent());
+        }
+    }
+
     void nativeDispatchKeyPress(int keyCode, bool ctrlPressed, bool shiftPressed, bool altPressed) {
         SwToolTip::handleKeyPress();
         KeyEvent keyEvent(keyCode, ctrlPressed, shiftPressed, altPressed);
@@ -527,10 +795,166 @@ private:
     }
 #endif
 
+#if defined(__linux__)
+    void openNativeWindowX11() {
+        SwGuiApplication* guiApp = SwGuiApplication::instance(false);
+        if (!guiApp) {
+            return;
+        }
+        m_x11Integration = dynamic_cast<SwX11PlatformIntegration*>(guiApp->platformIntegration());
+        if (!m_x11Integration) {
+            return;
+        }
+
+        if (m_activePresentation != Presentation::NativeWindow) {
+            m_originalParent = parent();
+            m_originalRect = frameGeometry();
+        }
+        if (parent() != nullptr) {
+            setParent(nullptr);
+        }
+        m_activePresentation = Presentation::NativeWindow;
+
+        const int w = std::max(1, width());
+        const int h = std::max(1, height());
+        const std::string title = m_title.toStdString();
+
+        SwWindowCallbacks callbacks;
+        callbacks.paintRequestHandler = [this]() {
+            x11HandlePaintRequest();
+        };
+        callbacks.deleteHandler = [this]() {
+            if (auto* app = SwCoreApplication::instance(false)) {
+                app->postEvent([this]() { reject(); });
+            } else {
+                reject();
+            }
+        };
+        callbacks.resizeHandler = [this](const SwPlatformSize& size) {
+            move(0, 0);
+            SwWidget::resize(size.width, size.height);
+        };
+        callbacks.mousePressHandler = [this](const SwMouseEvent& evt) {
+            x11PostEvent([this, evt]() {
+                SwToolTip::handleMousePress();
+                MouseEvent e(EventType::MousePressEvent, evt.position.x, evt.position.y, evt.button);
+                SwWidget::mousePressEvent(&e);
+            });
+        };
+        callbacks.mouseDoubleClickHandler = [this](const SwMouseEvent& evt) {
+            x11PostEvent([this, evt]() {
+                MouseEvent e(EventType::MouseDoubleClickEvent, evt.position.x, evt.position.y, evt.button);
+                SwWidget::mouseDoubleClickEvent(&e);
+            });
+        };
+        callbacks.mouseReleaseHandler = [this](const SwMouseEvent& evt) {
+            x11PostEvent([this, evt]() {
+                MouseEvent e(EventType::MouseReleaseEvent, evt.position.x, evt.position.y, evt.button);
+                SwWidget::mouseReleaseEvent(&e);
+            });
+        };
+        callbacks.mouseMoveHandler = [this](const SwMouseEvent& evt) {
+            x11PostEvent([this, evt]() {
+                MouseEvent e(EventType::MouseMoveEvent, evt.position.x, evt.position.y);
+                SwWidgetPlatformAdapter::setCursor(CursorType::Arrow);
+                SwWidget::mouseMoveEvent(&e);
+                SwToolTip::handleMouseMove(this, evt.position.x, evt.position.y);
+            });
+        };
+        callbacks.mouseWheelHandler = [this](const SwMouseEvent& evt) {
+            x11PostEvent([this, evt]() {
+                WheelEvent wheelEvent(evt.position.x, evt.position.y, evt.wheelDelta, evt.ctrl, evt.shift, evt.alt);
+                SwWidget* target = getChildUnderCursor(evt.position.x, evt.position.y);
+                SwWidget* current = target ? target : this;
+                while (current) {
+                    WheelEvent localEvent = mapWheelEventToChild_(wheelEvent, this, current);
+                    current->wheelEvent(&localEvent);
+                    if (localEvent.isAccepted()) {
+                        wheelEvent.accept();
+                        return;
+                    }
+                    current = dynamic_cast<SwWidget*>(current->parent());
+                }
+            });
+        };
+        callbacks.keyPressHandler = [this](const SwKeyEvent& evt) {
+            x11PostEvent([this, evt]() {
+                SwToolTip::handleKeyPress();
+                KeyEvent e(evt.keyCode, evt.ctrl, evt.shift, evt.alt);
+                if (SwShortcut::dispatch(this, &e)) {
+                    return;
+                }
+                SwWidget::keyPressEvent(&e);
+            });
+        };
+
+        m_x11PlatformWindow = m_x11Integration->createWindow(title.empty() ? "Dialog" : title, w, h, callbacks);
+        if (!m_x11PlatformWindow) {
+            return;
+        }
+
+        auto* x11Window = dynamic_cast<SwX11PlatformWindow*>(m_x11PlatformWindow.get());
+        if (!x11Window) {
+            m_x11PlatformWindow.reset();
+            return;
+        }
+
+        setNativeWindowHandleRecursive(SwWidgetPlatformAdapter::fromNativeHandle(
+            reinterpret_cast<void*>(static_cast<std::uintptr_t>(x11Window->handle())),
+            m_x11Integration->display()));
+
+        move(0, 0);
+        SwWidget::resize(w, h);
+        show();
+        update();
+        m_x11PlatformWindow->show();
+        setFocus(true);
+        shown();
+    }
+
+    void closeNativeWindowX11() {
+        m_x11PlatformWindow.reset();
+        m_x11Integration = nullptr;
+    }
+
+    void x11HandlePaintRequest() {
+        if (!m_x11Integration || !m_x11PlatformWindow) {
+            return;
+        }
+        auto* x11Window = dynamic_cast<SwX11PlatformWindow*>(m_x11PlatformWindow.get());
+        if (!x11Window) {
+            return;
+        }
+        const int w = std::max(1, width());
+        const int h = std::max(1, height());
+        SwX11Painter painter(m_x11Integration->display(), x11Window->handle(), w, h);
+        painter.clear(SwColor{241, 245, 249});
+        PaintEvent paintEvent(&painter, SwRect{0, 0, w, h});
+        this->paintEvent(&paintEvent);
+        painter.finalize();
+    }
+
+    template<typename F>
+    void x11PostEvent(F&& fn) {
+        if (auto* app = SwCoreApplication::instance(false)) {
+            app->postEvent(std::forward<F>(fn));
+        } else {
+            fn();
+        }
+    }
+#endif
+
     class ModalOverlay final : public SwWidget {
         SW_OBJECT(ModalOverlay, SwWidget)
 
     public:
+        /**
+         * @brief Performs the `ModalOverlay` operation.
+         * @param owner Value passed to the method.
+         * @param root Value passed to the method.
+         * @param parent Optional parent object that owns this instance.
+         * @param root Value passed to the method.
+         */
         ModalOverlay(SwDialog* owner, SwWidget* root, SwWidget* parent = nullptr)
             : SwWidget(parent)
             , m_owner(owner)
@@ -545,6 +969,12 @@ private:
             )");
         }
 
+        /**
+         * @brief Handles the mouse Press Event forwarded by the framework.
+         * @param event Event object forwarded by the framework.
+         *
+         * @details Override this hook when the default framework behavior needs to be extended or replaced.
+         */
         void mousePressEvent(MouseEvent* event) override {
             if (!event) {
                 return;
@@ -553,6 +983,12 @@ private:
             event->accept();
         }
 
+        /**
+         * @brief Handles the key Press Event forwarded by the framework.
+         * @param event Event object forwarded by the framework.
+         *
+         * @details Override this hook when the default framework behavior needs to be extended or replaced.
+         */
         void keyPressEvent(KeyEvent* event) override {
             if (!event || !m_owner) {
                 return;
@@ -581,7 +1017,7 @@ private:
     }
 
     enum class Presentation {
-        None,
+        Embedded,
         Overlay,
         NativeWindow
     };
@@ -611,6 +1047,7 @@ private:
             SwLabel { background-color: rgba(0,0,0,0); border-width: 0px; color: rgb(24, 28, 36); font-size: 16px; }
         )");
         m_titleLabel->setAlignment(DrawTextFormats(DrawTextFormat::Left | DrawTextFormat::VCenter | DrawTextFormat::SingleLine));
+        m_titleLabel->setVisible(false);
 
         m_content = new SwWidget(this);
         m_content->setStyleSheet("SwWidget { background-color: rgba(0,0,0,0); border-width: 0px; }");
@@ -625,20 +1062,23 @@ private:
         if (!m_titleLabel || !m_content || !m_buttonBar) {
             return;
         }
-        const SwRect r = getRect();
+        const SwRect r = rect();
         const int pad = 18;
-        const int titleH = 44;
+        const bool showTitle = m_titleLabel->getVisible();
+        const int titleH = showTitle ? 44 : 0;
         const int barH = 56;
 
-        m_titleLabel->move(r.x + pad, r.y + 10);
-        m_titleLabel->resize(std::max(0, r.width - 2 * pad), titleH);
+        if (showTitle) {
+            m_titleLabel->move(pad, 10);
+            m_titleLabel->resize(std::max(0, r.width - 2 * pad), titleH);
+        }
 
-        m_buttonBar->move(r.x + pad, r.y + r.height - barH);
+        m_buttonBar->move(pad, r.height - barH);
         m_buttonBar->resize(std::max(0, r.width - 2 * pad), barH - 10);
 
-        const int contentY = r.y + titleH;
-        const int contentH = std::max(0, r.height - titleH - barH);
-        m_content->move(r.x + pad, contentY);
+        const int contentY = showTitle ? titleH : pad;
+        const int contentH = std::max(0, r.height - (showTitle ? titleH : pad) - barH);
+        m_content->move(pad, contentY);
         m_content->resize(std::max(0, r.width - 2 * pad), contentH);
     }
 
@@ -657,7 +1097,7 @@ private:
         }
         if (parent() != m_overlay) {
             m_originalParent = parent();
-            m_originalRect = getRect();
+            m_originalRect = frameGeometry();
             setParent(m_overlay);
             m_activePresentation = Presentation::Overlay;
         }
@@ -699,7 +1139,7 @@ private:
             resize(m_originalRect.width, m_originalRect.height);
             setNativeWindowHandleRecursive(nativeWindowHandle());
         }
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__linux__)
         if (m_originalParent && m_activePresentation == Presentation::NativeWindow && parent() == nullptr) {
             setParent(m_originalParent);
             move(m_originalRect.x, m_originalRect.y);
@@ -707,14 +1147,14 @@ private:
             setNativeWindowHandleRecursive(nativeWindowHandle());
         }
 #endif
-        m_activePresentation = Presentation::None;
+        m_activePresentation = Presentation::Embedded;
         m_originalParent = nullptr;
         m_originalRect = SwRect{};
     }
 
     SwString m_title;
     bool m_modal{true};
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__linux__)
     bool m_useNativeWindow{true};
 #else
     bool m_useNativeWindow{false};
@@ -726,15 +1166,20 @@ private:
     SwWidget* m_overlayRootConnected{nullptr};
     SwObject* m_originalParent{nullptr};
     SwRect m_originalRect{};
-    Presentation m_activePresentation{Presentation::None};
+    Presentation m_activePresentation{Presentation::Embedded};
 
 #if defined(_WIN32)
     HWND m_nativeHwnd{nullptr};
     HWND m_nativeOwnerHwnd{nullptr};
     bool m_nativeOwnerWasEnabled{false};
+    HICON m_nativeIcon{nullptr};
+#elif defined(__linux__)
+    std::unique_ptr<SwPlatformWindow> m_x11PlatformWindow;
+    SwX11PlatformIntegration* m_x11Integration{nullptr};
 #endif
 
     SwLabel* m_titleLabel{nullptr};
     SwWidget* m_content{nullptr};
     SwWidget* m_buttonBar{nullptr};
 };
+

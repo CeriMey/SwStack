@@ -1,4 +1,28 @@
 #pragma once
+
+/**
+ * @file src/core/io/SwIODescriptor.h
+ * @ingroup core_io
+ * @brief Declares the public interface exposed by SwIODescriptor in the CoreSw IO layer.
+ *
+ * This header belongs to the CoreSw IO layer. It defines files, sockets, servers, descriptors,
+ * processes, and network helpers that sit directly at operating-system boundaries.
+ *
+ * Within that layer, this file focuses on the IO descriptor interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are SwIODescriptor.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * IO-facing declarations here usually manage handles, readiness state, buffering, and error
+ * propagation while presenting a portable framework API.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -41,9 +65,21 @@ class SwIODescriptor {
 public:
     using Descriptor = HANDLE;
 
+    /**
+     * @brief Constructs a `SwIODescriptor` instance.
+     * @param hFile Value passed to the method.
+     * @param descriptorName Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwIODescriptor(HANDLE hFile, std::string descriptorName = "")
         : handle(hFile), m_descriptorName(std::move(descriptorName)) {}
 
+    /**
+     * @brief Destroys the `SwIODescriptor` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     virtual ~SwIODescriptor() {
         if (handle != INVALID_HANDLE_VALUE) {
             CloseHandle(handle);
@@ -51,6 +87,15 @@ public:
         }
     }
 
+    /**
+     * @brief Handles the wait For Event forwarded by the framework.
+     * @param readyToRead Value passed to the method.
+     * @param readyToWrite Value passed to the method.
+     * @param timeoutMs Timeout expressed in milliseconds.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     bool waitForEvent(bool& readyToRead, bool& readyToWrite, int timeoutMs = -1) {
         (void)timeoutMs;
         DWORD bytesAvailable = 0;
@@ -67,6 +112,12 @@ public:
         return true;
     }
 
+    /**
+     * @brief Returns the current read.
+     * @return The current read.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     virtual std::string read() {
         DWORD bytesAvailable = 0;
         if (!PeekNamedPipe(handle, NULL, 0, NULL, &bytesAvailable, NULL)) {
@@ -97,6 +148,11 @@ public:
         return "";
     }
 
+    /**
+     * @brief Performs the `write` operation on the associated resource.
+     * @param data Value passed to the method.
+     * @return The requested write.
+     */
     virtual bool write(const std::string& data) {
         DWORD bytesWritten;
         BOOL success = WriteFile(handle, data.c_str(), static_cast<DWORD>(data.size()), &bytesWritten, nullptr);
@@ -105,8 +161,20 @@ public:
 
     HANDLE descriptor() const { return handle; }
 
+    /**
+     * @brief Sets the descriptor Name.
+     * @param name Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setDescriptorName(const std::string& name) { m_descriptorName = name; }
 
+    /**
+     * @brief Returns the current descriptor Name.
+     * @return The current descriptor Name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     std::string descriptorName() const { return m_descriptorName; }
 
 protected:
@@ -125,6 +193,13 @@ class SwIODescriptor {
 public:
     using Descriptor = int;
 
+    /**
+     * @brief Constructs a `SwIODescriptor` instance.
+     * @param fd Value passed to the method.
+     * @param descriptorName Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwIODescriptor(int fd = -1, std::string descriptorName = "")
         : handle(fd), m_descriptorName(std::move(descriptorName)) {
         if (handle >= 0) {
@@ -135,6 +210,11 @@ public:
         }
     }
 
+    /**
+     * @brief Destroys the `SwIODescriptor` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     virtual ~SwIODescriptor() {
         if (handle >= 0) {
             close(handle);
@@ -142,6 +222,15 @@ public:
         }
     }
 
+    /**
+     * @brief Handles the wait For Event forwarded by the framework.
+     * @param readyToRead Value passed to the method.
+     * @param readyToWrite Value passed to the method.
+     * @param timeoutMs Timeout expressed in milliseconds.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     bool waitForEvent(bool& readyToRead, bool& readyToWrite, int timeoutMs = -1) {
         if (handle < 0) {
             return false;
@@ -165,6 +254,12 @@ public:
         return true;
     }
 
+    /**
+     * @brief Returns the current read.
+     * @return The current read.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     virtual std::string read() {
         if (handle < 0) {
             return "";
@@ -183,6 +278,11 @@ public:
         return "";
     }
 
+    /**
+     * @brief Performs the `write` operation on the associated resource.
+     * @param data Value passed to the method.
+     * @return The requested write.
+     */
     virtual bool write(const std::string& data) {
         if (handle < 0) {
             return false;
@@ -192,10 +292,28 @@ public:
         return written == static_cast<ssize_t>(data.size());
     }
 
+    /**
+     * @brief Returns the current descriptor.
+     * @return The current descriptor.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int descriptor() const { return handle; }
 
+    /**
+     * @brief Sets the descriptor Name.
+     * @param name Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setDescriptorName(const std::string& name) { m_descriptorName = name; }
 
+    /**
+     * @brief Returns the current descriptor Name.
+     * @return The current descriptor Name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     std::string descriptorName() const { return m_descriptorName; }
 
 protected:

@@ -1,4 +1,4 @@
-#include "WaIconButton.h"
+﻿#include "WaIconButton.h"
 
 #include "SwFont.h"
 #include "SwPainter.h"
@@ -49,7 +49,7 @@ void WaIconButton::paintEvent(PaintEvent* event) {
         return;
     }
 
-    const SwRect r = getRect();
+    const SwRect r = rect();
     const int radius = (r.width < r.height ? r.width : r.height) / 2;
 
     const bool pressed = m_pressed;
@@ -220,7 +220,7 @@ void WaIconButton::paintIcon_(SwPainter* painter, const SwRect& r, Kind kind, co
         painter->drawLine(cx - 4, cy + 8, cx - 10, cy + 12, color, stroke);
         break;
     }
-    case static_cast<int>(Kind::Status): {
+    case static_cast<int>(Kind::StatusTab): {
         const int rad = s / 5;
         SwRect ring{cx - rad, cy - rad, rad * 2, rad * 2};
         painter->drawEllipse(ring, color, stroke);
@@ -247,3 +247,4 @@ void WaIconButton::paintIcon_(SwPainter* painter, const SwRect& r, Kind kind, co
     }
     }
 }
+

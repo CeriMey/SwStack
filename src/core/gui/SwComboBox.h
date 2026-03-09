@@ -1,4 +1,4 @@
-/***************************************************************************************************
+﻿/***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
  * Copyright (C) 2025 Ariya Consulting
@@ -22,8 +22,32 @@
 
 #pragma once
 
+/**
+ * @file src/core/gui/SwComboBox.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwComboBox in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the combo box interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwComboBox.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
 /***************************************************************************************************
- * SwComboBox - Qt-like combo box widget (≈ QComboBox).
+ * SwComboBox - combo box widget.
  *
  * Focus:
  * - Same core API (addItem, count, currentIndex/currentText, signals).
@@ -33,17 +57,50 @@
 #include "SwWidget.h"
 #include "core/types/SwVector.h"
 
+#if defined(_WIN32)
+#include "platform/win/SwWin32Painter.h"
+#include "core/runtime/SwCoreApplication.h"
+#endif
+
 class SwComboBox : public SwWidget {
     SW_OBJECT(SwComboBox, SwWidget)
 
 public:
+    /**
+     * @brief Constructs a `SwComboBox` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwComboBox(SwWidget* parent = nullptr)
         : SwWidget(parent) {
         initDefaults();
     }
 
+    /**
+     * @brief Destroys the `SwComboBox` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
+    ~SwComboBox() {
+#if defined(_WIN32)
+        if (m_nativePopupHwnd) {
+            SetWindowLongPtr(m_nativePopupHwnd, GWLP_USERDATA, 0);
+            DestroyWindow(m_nativePopupHwnd);
+            m_nativePopupHwnd = nullptr;
+        }
+#endif
+    }
+
+    /**
+     * @brief Performs the `count` operation.
+     * @return The current count value.
+     */
     int count() const { return m_items.size(); }
 
+    /**
+     * @brief Clears the current object state.
+     */
     void clear() {
         m_items.clear();
         setCurrentIndex(-1);
@@ -51,6 +108,10 @@ public:
         update();
     }
 
+    /**
+     * @brief Adds the specified item.
+     * @param text Value passed to the method.
+     */
     void addItem(const SwString& text) {
         m_items.push_back(text);
         if (m_currentIndex < 0) {
@@ -60,6 +121,11 @@ public:
         update();
     }
 
+    /**
+     * @brief Performs the `insertItem` operation.
+     * @param index Value passed to the method.
+     * @param text Value passed to the method.
+     */
     void insertItem(int index, const SwString& text) {
         const int n = m_items.size();
         if (index < 0) {
@@ -91,6 +157,11 @@ public:
         updatePopupGeometry();
     }
 
+    /**
+     * @brief Performs the `itemText` operation.
+     * @param index Value passed to the method.
+     * @return The requested item Text.
+     */
     SwString itemText(int index) const {
         if (index < 0 || index >= m_items.size()) {
             return {};
@@ -98,8 +169,20 @@ public:
         return m_items[index];
     }
 
+    /**
+     * @brief Returns the current current Index.
+     * @return The current current Index.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int currentIndex() const { return m_currentIndex; }
 
+    /**
+     * @brief Returns the current current Text.
+     * @return The current current Text.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString currentText() const {
         if (m_currentIndex < 0 || m_currentIndex >= m_items.size()) {
             return {};
@@ -107,6 +190,12 @@ public:
         return m_items[m_currentIndex];
     }
 
+    /**
+     * @brief Sets the current Index.
+     * @param index Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setCurrentIndex(int index) {
         if (index < -1) {
             index = -1;
@@ -126,6 +215,12 @@ public:
         update();
     }
 
+    /**
+     * @brief Sets the max Visible Items.
+     * @param count Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setMaxVisibleItems(int count) {
         m_maxVisibleItems = std::max(1, count);
         if (m_popupVisible) {
@@ -137,17 +232,49 @@ public:
         updatePopupGeometry();
     }
 
+    /**
+     * @brief Returns the current max Visible Items.
+     * @return The current max Visible Items.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int maxVisibleItems() const { return m_maxVisibleItems; }
 
+    /**
+     * @brief Sets the accent Color.
+     * @param color Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setAccentColor(const SwColor& color) {
         m_accent = clampColor(color);
         update();
     }
 
+    /**
+     * @brief Returns the current accent Color.
+     * @return The current accent Color.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwColor accentColor() const { return m_accent; }
 
+    /**
+     * @brief Performs the `showPopup` operation.
+     * @param true Value passed to the method.
+     */
     void showPopup() { setPopupVisible(true); }
+    /**
+     * @brief Performs the `hidePopup` operation.
+     * @param false Value passed to the method.
+     */
     void hidePopup() { setPopupVisible(false); }
+    /**
+     * @brief Returns whether the object reports popup Visible.
+     * @return `true` when the object reports popup Visible; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isPopupVisible() const { return m_popupVisible; }
 
     DECLARE_SIGNAL(currentIndexChanged, int);
@@ -158,13 +285,19 @@ public:
 protected:
     CUSTOM_PROPERTY(bool, Pressed, false) { update(); }
 
+    /**
+     * @brief Handles the paint Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void paintEvent(PaintEvent* event) override {
         SwPainter* painter = event ? event->painter() : nullptr;
         if (!painter) {
             return;
         }
 
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
 
         SwColor bg{255, 255, 255};
         SwColor border{172, 172, 172};
@@ -176,30 +309,23 @@ protected:
         SwColor focusColor = m_accent;
 
         const StyleSheet* sheet = getToolSheet();
-        std::vector<SwString> selectors = classHierarchy(); // most-derived first
-        bool hasSwWidgetSelector = false;
-        for (const SwString& selector : selectors) {
-            if (selector == "SwWidget") {
-                hasSwWidgetSelector = true;
-                break;
-            }
-        }
-        if (!hasSwWidgetSelector) {
-            selectors.emplace_back("SwWidget");
+        auto selectors = classHierarchy(); // most-derived first
+        if (!selectors.contains("SwWidget")) {
+            selectors.append("SwWidget");
         }
 
         if (sheet) {
             const SwString bw = getStyleValue_(sheet, selectors, "border-width");
             if (!bw.isEmpty()) {
-                borderWidth = clampInt(parsePixelValue_(bw, borderWidth), 0, 20);
+                borderWidth = clampInt(parsePixelValue(bw, borderWidth), 0, 20);
             }
 
             const SwString br = getStyleValue_(sheet, selectors, "border-radius");
             if (!br.isEmpty()) {
-                radius = clampInt(parsePixelValue_(br, radius), 0, 32);
+                radius = clampInt(parsePixelValue(br, radius), 0, 32);
             }
 
-            // Optional focus customization (non-Qt but stylesheet-friendly).
+            // Optional focus customization (stylesheet-friendly).
             SwString fc = getStyleValue_(sheet, selectors, "focus-border-color");
             if (fc.isEmpty()) {
                 fc = getStyleValue_(sheet, selectors, "focus-color");
@@ -222,12 +348,27 @@ protected:
             border = SwColor{150, 150, 150};
         }
 
-        // Match Qt-ish behaviour: focus changes the border color, preserving border-radius.
+        // Match the usual behaviour: focus changes the border color while preserving border-radius.
         if (getFocus() && getEnable()) {
             border = focusColor;
         }
 
-        painter->fillRoundedRect(bounds, radius, bg, border, borderWidth);
+        // Dynamic continuity: when popup is open with square top corners and 0 offset,
+        // flatten the combobox bottom corners to create visual continuity.
+        if (m_popupVisible) {
+            const auto pr = popupBorderRadii_();
+            const int gap = popupOffset_();
+            int blR = radius, brR = radius;
+            if (pr.tl == 0 && gap == 0) { blR = 0; }
+            if (pr.tr == 0 && gap == 0) { brR = 0; }
+            if (blR != radius || brR != radius) {
+                painter->fillRoundedRect(bounds, radius, radius, brR, blR, bg, border, borderWidth);
+            } else {
+                painter->fillRoundedRect(bounds, radius, bg, border, borderWidth);
+            }
+        } else {
+            painter->fillRoundedRect(bounds, radius, bg, border, borderWidth);
+        }
 
         const int padL = 12;
         const int padR = 30;
@@ -248,6 +389,12 @@ protected:
         painter->drawLine(cx, cy + 2, cx + 4, cy - 2, arrow, 2);
     }
 
+    /**
+     * @brief Handles the mouse Press Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mousePressEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -260,6 +407,12 @@ protected:
         event->accept();
     }
 
+    /**
+     * @brief Handles the mouse Release Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseReleaseEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -269,6 +422,14 @@ protected:
         setPressed(false);
 
         if (wasPressed && isPointInside(event->x(), event->y())) {
+#if defined(_WIN32)
+            // Guard: don't reopen if the native popup just closed (e.g. user clicked the combobox
+            // while popup was open â†’ WM_ACTIVATE closes it, then this release fires).
+            if (GetTickCount64() - m_lastNativePopupCloseMs < 300) {
+                event->accept();
+                return;
+            }
+#endif
             setPopupVisible(!m_popupVisible);
             event->accept();
             return;
@@ -277,6 +438,12 @@ protected:
         SwWidget::mouseReleaseEvent(event);
     }
 
+    /**
+     * @brief Handles the key Press Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void keyPressEvent(KeyEvent* event) override {
         if (!event) {
             return;
@@ -327,18 +494,20 @@ protected:
                 return;
             }
 
-            // Simple type-ahead (single character) to match the next item starting with it.
-            char ch = '\0';
-            const bool caps = SwWidgetPlatformAdapter::isCapsLockKey(key);
-            if (SwWidgetPlatformAdapter::translateCharacter(key, event->isShiftPressed(), caps, ch)) {
-                if (ch != '\r' && ch != '\n' && ch != '\t') {
-                    const int from = (m_popupHighlightedIndex >= 0) ? (m_popupHighlightedIndex + 1) : 0;
-                    const int found = findNextByFirstChar_(ch, from);
-                    if (found >= 0) {
-                        setPopupHighlightedIndex_(found);
-                        event->accept();
-                        return;
-                    }
+            // Simple type-ahead: use ASCII codepoint only (type-ahead matching is ASCII).
+            const wchar_t wc = event->text();
+            char ch = (wc > 0 && wc < 0x80) ? static_cast<char>(wc) : '\0';
+            if (ch == '\0' && !event->isTextProvided()) {
+                const bool caps = SwWidgetPlatformAdapter::isCapsLockKey(key);
+                SwWidgetPlatformAdapter::translateCharacter(key, event->isShiftPressed(), caps, ch);
+            }
+            if (ch && ch != '\r' && ch != '\n' && ch != '\t') {
+                const int from = (m_popupHighlightedIndex >= 0) ? (m_popupHighlightedIndex + 1) : 0;
+                const int found = findNextByFirstChar_(ch, from);
+                if (found >= 0) {
+                    setPopupHighlightedIndex_(found);
+                    event->accept();
+                    return;
                 }
             }
 
@@ -379,27 +548,42 @@ protected:
 
         // Simple type-ahead (single character) on the closed combobox.
         char ch = '\0';
-        const bool caps = SwWidgetPlatformAdapter::isCapsLockKey(key);
-        if (SwWidgetPlatformAdapter::translateCharacter(key, event->isShiftPressed(), caps, ch)) {
-            if (ch != '\r' && ch != '\n' && ch != '\t') {
-                const int from = (m_currentIndex >= 0) ? (m_currentIndex + 1) : 0;
-                const int found = findNextByFirstChar_(ch, from);
-                if (found >= 0) {
-                    setCurrentIndex(found);
-                    event->accept();
-                    return;
-                }
+        const wchar_t typedChar = event->text();
+        if (typedChar != L'\0' && typedChar <= 0xFF) {
+            ch = static_cast<char>(typedChar);
+        }
+        if (!ch) {
+            const bool caps = SwWidgetPlatformAdapter::isCapsLockKey(key);
+            SwWidgetPlatformAdapter::translateCharacter(key, event->isShiftPressed(), caps, ch);
+        }
+        if (ch && ch != '\r' && ch != '\n' && ch != '\t') {
+            const int from = (m_currentIndex >= 0) ? (m_currentIndex + 1) : 0;
+            const int found = findNextByFirstChar_(ch, from);
+            if (found >= 0) {
+                setCurrentIndex(found);
+                event->accept();
+                return;
             }
         }
 
         SwWidget::keyPressEvent(event);
     }
 
+    /**
+     * @brief Handles the wheel Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void wheelEvent(WheelEvent* event) override {
         if (!event) {
             return;
         }
         if (!getEnable()) {
+            SwWidget::wheelEvent(event);
+            return;
+        }
+        if (event->isShiftPressed()) {
             SwWidget::wheelEvent(event);
             return;
         }
@@ -420,6 +604,12 @@ protected:
         event->accept();
     }
 
+    /**
+     * @brief Handles the resize Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void resizeEvent(ResizeEvent* event) override {
         SwWidget::resizeEvent(event);
         updatePopupGeometry();
@@ -432,6 +622,15 @@ private:
         SW_OBJECT(PopupOverlay, SwWidget)
 
     public:
+        /**
+         * @brief Constructs a `PopupOverlay` instance.
+         * @param owner Value passed to the method.
+         * @param root Value passed to the method.
+         * @param parent Optional parent object that owns this instance.
+         * @param root Value passed to the method.
+         *
+         * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+         */
         PopupOverlay(SwComboBox* owner, SwWidget* root, SwWidget* parent = nullptr)
             : SwWidget(parent)
             , m_owner(owner)
@@ -439,8 +638,20 @@ private:
             setStyleSheet("SwWidget { background-color: rgba(0,0,0,0); border-width: 0px; }");
         }
 
+        /**
+         * @brief Sets the list.
+         * @param list Value passed to the method.
+         *
+         * @details Call this method to replace the currently stored value with the caller-provided one.
+         */
         void setList(PopupList* list) { m_list = list; }
 
+        /**
+         * @brief Handles the mouse Press Event forwarded by the framework.
+         * @param event Event object forwarded by the framework.
+         *
+         * @details Override this hook when the default framework behavior needs to be extended or replaced.
+         */
         void mousePressEvent(MouseEvent* event) override {
             if (!event || !m_owner) {
                 return;
@@ -448,9 +659,10 @@ private:
 
             // If click is outside the list, close the popup.
             if (m_list) {
-                const SwRect listRect = m_list->getRect();
+                const SwRect listRect = m_list->geometry();
                 if (!containsPoint(listRect, event->x(), event->y())) {
-                    const SwRect ownerRect = m_owner->getRect();
+                    const SwPoint ownerPos = m_owner->mapTo(m_root, SwPoint{0, 0});
+                    const SwRect ownerRect{ownerPos.x, ownerPos.y, m_owner->width(), m_owner->height()};
                     m_owner->hidePopup();
 
                     // Forward the click to the underlying widgets unless user clicked the anchor.
@@ -486,6 +698,14 @@ private:
         SW_OBJECT(PopupList, SwWidget)
 
     public:
+        /**
+         * @brief Constructs a `PopupList` instance.
+         * @param owner Value passed to the method.
+         * @param parent Optional parent object that owns this instance.
+         * @param owner Value passed to the method.
+         *
+         * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+         */
         explicit PopupList(SwComboBox* owner, SwWidget* parent = nullptr)
             : SwWidget(parent)
             , m_owner(owner) {
@@ -493,13 +713,19 @@ private:
             setStyleSheet("SwWidget { background-color: rgba(0,0,0,0); border-width: 0px; }");
         }
 
+        /**
+         * @brief Handles the paint Event forwarded by the framework.
+         * @param event Event object forwarded by the framework.
+         *
+         * @details Override this hook when the default framework behavior needs to be extended or replaced.
+         */
         void paintEvent(PaintEvent* event) override {
             SwPainter* painter = event ? event->painter() : nullptr;
             if (!painter || !m_owner) {
                 return;
             }
 
-            const SwRect bounds = getRect();
+            const SwRect bounds = rect();
             painter->fillRoundedRect(bounds, 12, SwColor{255, 255, 255}, SwColor{200, 200, 200}, 1);
 
             const int n = m_owner->count();
@@ -540,6 +766,12 @@ private:
             }
         }
 
+        /**
+         * @brief Handles the mouse Move Event forwarded by the framework.
+         * @param event Event object forwarded by the framework.
+         *
+         * @details Override this hook when the default framework behavior needs to be extended or replaced.
+         */
         void mouseMoveEvent(MouseEvent* event) override {
             if (!event || !m_owner) {
                 return;
@@ -552,6 +784,12 @@ private:
             event->accept();
         }
 
+        /**
+         * @brief Handles the mouse Press Event forwarded by the framework.
+         * @param event Event object forwarded by the framework.
+         *
+         * @details Override this hook when the default framework behavior needs to be extended or replaced.
+         */
         void mousePressEvent(MouseEvent* event) override {
             if (!event || !m_owner) {
                 return;
@@ -566,8 +804,18 @@ private:
             SwWidget::mousePressEvent(event);
         }
 
+        /**
+         * @brief Handles the wheel Event forwarded by the framework.
+         * @param event Event object forwarded by the framework.
+         *
+         * @details Override this hook when the default framework behavior needs to be extended or replaced.
+         */
         void wheelEvent(WheelEvent* event) override {
             if (!event || !m_owner) {
+                return;
+            }
+            if (event->isShiftPressed()) {
+                SwWidget::wheelEvent(event);
                 return;
             }
             const int steps = SwComboBox::wheelSteps_(event->delta());
@@ -580,7 +828,7 @@ private:
 
     private:
         int indexAt(int px, int py) const {
-            const SwRect bounds = getRect();
+            const SwRect bounds = rect();
             const int pad = m_owner->m_popupPadding;
             const int itemH = m_owner->m_itemHeight;
             const int y0 = bounds.y + pad;
@@ -613,33 +861,12 @@ private:
         return steps;
     }
 
-    static int clampInt(int value, int minValue, int maxValue) {
-        if (value < minValue) return minValue;
-        if (value > maxValue) return maxValue;
-        return value;
-    }
-
-    static SwColor clampColor(const SwColor& c) {
-        return SwColor{clampInt(c.r, 0, 255), clampInt(c.g, 0, 255), clampInt(c.b, 0, 255)};
-    }
-
-    static int parsePixelValue_(const SwString& value, int defaultValue) {
-        if (value.isEmpty()) {
-            return defaultValue;
-        }
-        SwString cleaned = value;
-        cleaned.replace("px", "");
-        bool ok = false;
-        const int v = cleaned.toInt(&ok);
-        return ok ? v : defaultValue;
-    }
-
     static bool tryParseColor_(const StyleSheet* sheet, const SwString& value, SwColor& outColor) {
         if (!sheet || value.isEmpty()) {
             return false;
         }
         try {
-            outColor = clampColor(const_cast<StyleSheet*>(sheet)->parseColor(value.toStdString(), nullptr));
+            outColor = clampColor(const_cast<StyleSheet*>(sheet)->parseColor(value, nullptr));
             return true;
         } catch (...) {
             return false;
@@ -647,7 +874,7 @@ private:
     }
 
     static SwString getStyleValue_(const StyleSheet* sheet,
-                                  const std::vector<SwString>& hierarchy,
+                                  const SwList<SwString>& hierarchy,
                                   const char* propertyName) {
         if (!sheet || !propertyName) {
             return SwString();
@@ -659,7 +886,7 @@ private:
             if (selector.isEmpty()) {
                 continue;
             }
-            SwString v = sheet->getStyleProperty(selector.toStdString(), propertyName);
+            SwString v = sheet->getStyleProperty(selector, propertyName);
             if (!v.isEmpty()) {
                 out = v;
             }
@@ -828,8 +1055,15 @@ private:
 
         m_popupVisible = on;
         if (m_popupVisible) {
-            ensurePopup();
             syncPopupToCurrentIndex_();
+#if defined(_WIN32)
+            if (openNativePopup_()) {
+                update();
+                return;
+            }
+#endif
+            // Fallback: in-widget overlay popup (non-Windows or no native HWND).
+            ensurePopup();
             updatePopupGeometry();
             if (m_overlay) {
                 m_overlay->show();
@@ -840,6 +1074,9 @@ private:
                 m_list->update();
             }
         } else {
+#if defined(_WIN32)
+            closeNativePopup_();
+#endif
             if (m_list) {
                 m_list->hide();
             }
@@ -850,6 +1087,11 @@ private:
             m_popupHighlightedIndex = -1;
         }
         update();
+        if (!m_popupVisible) {
+            if (auto* p = dynamic_cast<SwWidget*>(parent())) {
+                p->update();
+            }
+        }
     }
 
     void ensurePopup() {
@@ -884,7 +1126,8 @@ private:
         m_overlay->move(0, 0);
         m_overlay->resize(root->width(), root->height());
 
-        const SwRect anchor = getRect();
+        const SwPoint anchorPos = mapTo(root, SwPoint{0, 0});
+        const SwRect anchor{anchorPos.x, anchorPos.y, width(), height()};
         const int n = count();
         const int visible = std::min(n, m_maxVisibleItems);
         const int h = m_popupPadding * 2 + visible * m_itemHeight;
@@ -903,6 +1146,432 @@ private:
         m_list->resize(w, h);
     }
 
+    struct PopupRadii { int tl, tr, br, bl; };
+
+    PopupRadii popupBorderRadii_() {
+        int defRadius = 10;
+        const StyleSheet* sheet = getToolSheet();
+        if (!sheet) {
+            return {defRadius, defRadius, defRadius, defRadius};
+        }
+        auto selectors = classHierarchy();
+        if (!selectors.contains("SwWidget")) {
+            selectors.append("SwWidget");
+        }
+        // Global border-radius as default.
+        const SwString br = getStyleValue_(sheet, selectors, "border-radius");
+        if (!br.isEmpty()) {
+            defRadius = clampInt(parsePixelValue(br, defRadius), 0, 32);
+        }
+        // Per-corner overrides (popup-specific or standard CSS names).
+        auto readCorner = [&](const char* popupProp, const char* cssProp, int def) -> int {
+            SwString v = getStyleValue_(sheet, selectors, popupProp);
+            if (v.isEmpty()) {
+                v = getStyleValue_(sheet, selectors, cssProp);
+            }
+            if (v.isEmpty()) {
+                return def;
+            }
+            return clampInt(parsePixelValue(v, def), 0, 32);
+        };
+        int tl = readCorner("popup-border-top-left-radius", "border-top-left-radius", defRadius);
+        int tr = readCorner("popup-border-top-right-radius", "border-top-right-radius", defRadius);
+        int brr = readCorner("popup-border-bottom-right-radius", "border-bottom-right-radius", defRadius);
+        int bl = readCorner("popup-border-bottom-left-radius", "border-bottom-left-radius", defRadius);
+        return {tl, tr, brr, bl};
+    }
+
+    int popupOffset_() {
+        int offset = 4;
+        const StyleSheet* sheet = getToolSheet();
+        if (sheet) {
+            auto selectors = classHierarchy();
+            if (!selectors.contains("SwWidget")) {
+                selectors.append("SwWidget");
+            }
+            const SwString v = getStyleValue_(sheet, selectors, "popup-offset");
+            if (!v.isEmpty()) {
+                offset = clampInt(parsePixelValue(v, offset), 0, 20);
+            }
+        }
+        return offset;
+    }
+
+    SwColor popupBorderColor_() {
+        const StyleSheet* sheet = getToolSheet();
+        if (sheet) {
+            auto selectors = classHierarchy();
+            if (!selectors.contains("SwWidget")) { selectors.append("SwWidget"); }
+            SwString v = getStyleValue_(sheet, selectors, "popup-border-color");
+            if (!v.isEmpty()) {
+                SwColor c{200, 200, 200};
+                tryParseColor_(sheet, v, c);
+                return c;
+            }
+        }
+        // Fallback: resolved border color of the combobox (accounts for focus/hover/pressed state).
+        return resolvedBorderColor_();
+    }
+
+    SwColor resolvedBorderColor_() {
+        SwColor border{172, 172, 172};
+        SwColor focusColor = m_accent;
+        const StyleSheet* sheet = getToolSheet();
+        if (sheet) {
+            auto selectors = classHierarchy();
+            if (!selectors.contains("SwWidget")) { selectors.append("SwWidget"); }
+            SwString v = getStyleValue_(sheet, selectors, "border-color");
+            if (!v.isEmpty()) { tryParseColor_(sheet, v, border); }
+            SwString fc = getStyleValue_(sheet, selectors, "focus-border-color");
+            if (fc.isEmpty()) { fc = getStyleValue_(sheet, selectors, "focus-color"); }
+            if (!fc.isEmpty()) { tryParseColor_(sheet, fc, focusColor); }
+        }
+        if (!getEnable()) {
+            border = SwColor{210, 210, 210};
+        } else if (getPressed() || m_popupVisible) {
+            border = SwColor{140, 140, 140};
+        } else if (getHover()) {
+            border = SwColor{150, 150, 150};
+        }
+        if (getFocus() && getEnable()) {
+            border = focusColor;
+        }
+        return border;
+    }
+
+    SwColor popupBackgroundColor_() {
+        SwColor def{255, 255, 255};
+        const StyleSheet* sheet = getToolSheet();
+        if (sheet) {
+            auto selectors = classHierarchy();
+            if (!selectors.contains("SwWidget")) { selectors.append("SwWidget"); }
+            SwString v = getStyleValue_(sheet, selectors, "popup-background-color");
+            if (v.isEmpty()) { v = getStyleValue_(sheet, selectors, "background-color"); }
+            if (!v.isEmpty()) { tryParseColor_(sheet, v, def); }
+        }
+        return def;
+    }
+
+    int popupBorderWidth_() {
+        int def = 1;
+        const StyleSheet* sheet = getToolSheet();
+        if (sheet) {
+            auto selectors = classHierarchy();
+            if (!selectors.contains("SwWidget")) { selectors.append("SwWidget"); }
+            SwString v = getStyleValue_(sheet, selectors, "popup-border-width");
+            if (v.isEmpty()) { v = getStyleValue_(sheet, selectors, "border-width"); }
+            if (!v.isEmpty()) { def = clampInt(parsePixelValue(v, def), 0, 10); }
+        }
+        return def;
+    }
+
+    // â”€â”€ Native popup window (Windows) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+#if defined(_WIN32)
+    static constexpr const wchar_t* popupClassName_() { return L"SwComboBoxPopup"; }
+
+    static void ensurePopupClassRegistered_() {
+        static bool done = false;
+        if (done) {
+            return;
+        }
+        done = true;
+        WNDCLASSEXW wc = {};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = popupWndProc_;
+        wc.hInstance = GetModuleHandle(nullptr);
+        wc.lpszClassName = popupClassName_();
+        wc.style = CS_DROPSHADOW;
+        RegisterClassExW(&wc);
+    }
+
+    static LRESULT CALLBACK popupWndProc_(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+        auto* self = reinterpret_cast<SwComboBox*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+        if (msg == WM_NCCREATE) {
+            auto* cs = reinterpret_cast<CREATESTRUCTW*>(lp);
+            self = reinterpret_cast<SwComboBox*>(cs ? cs->lpCreateParams : nullptr);
+            SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+            return DefWindowProcW(hwnd, msg, wp, lp);
+        }
+        if (!self) {
+            return DefWindowProcW(hwnd, msg, wp, lp);
+        }
+        switch (msg) {
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hwnd, &ps);
+            self->nativePopupPaint_(hdc);
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_MOUSEMOVE: {
+            self->nativePopupMouseMove_(static_cast<short>(LOWORD(lp)),
+                                        static_cast<short>(HIWORD(lp)));
+            return 0;
+        }
+        case WM_LBUTTONDOWN: {
+            const int idx = self->nativePopupIndexAt_(static_cast<short>(HIWORD(lp)));
+            if (idx >= 0 && idx < self->count()) {
+                self->m_popupHighlightedIndex = idx;
+                // Post to avoid DestroyWindow from inside WndProc.
+                if (auto* app = SwCoreApplication::instance(false)) {
+                    app->postEvent([self]() { self->commitPopupHighlighted_(); });
+                }
+            }
+            return 0;
+        }
+        case WM_MOUSEWHEEL: {
+            const int delta = GET_WHEEL_DELTA_WPARAM(wp);
+            const int steps = wheelSteps_(delta);
+            if (steps != 0) {
+                self->movePopupHighlightBy_(-steps);
+                if (self->m_nativePopupHwnd) {
+                    InvalidateRect(self->m_nativePopupHwnd, nullptr, FALSE);
+                }
+            }
+            return 0;
+        }
+        case WM_KEYDOWN: {
+            const int key = static_cast<int>(wp);
+            if (key == VK_ESCAPE) {
+                if (auto* app = SwCoreApplication::instance(false)) {
+                    app->postEvent([self]() { self->hidePopup(); });
+                }
+                return 0;
+            }
+            if (key == VK_RETURN) {
+                if (auto* app = SwCoreApplication::instance(false)) {
+                    app->postEvent([self]() { self->commitPopupHighlighted_(); });
+                }
+                return 0;
+            }
+            if (key == VK_UP) {
+                self->movePopupHighlightBy_(-1);
+                if (self->m_nativePopupHwnd) InvalidateRect(self->m_nativePopupHwnd, nullptr, FALSE);
+                return 0;
+            }
+            if (key == VK_DOWN) {
+                self->movePopupHighlightBy_(+1);
+                if (self->m_nativePopupHwnd) InvalidateRect(self->m_nativePopupHwnd, nullptr, FALSE);
+                return 0;
+            }
+            if (key == VK_HOME && self->count() > 0) {
+                self->setPopupHighlightedIndex_(0);
+                if (self->m_nativePopupHwnd) InvalidateRect(self->m_nativePopupHwnd, nullptr, FALSE);
+                return 0;
+            }
+            if (key == VK_END && self->count() > 0) {
+                self->setPopupHighlightedIndex_(self->count() - 1);
+                if (self->m_nativePopupHwnd) InvalidateRect(self->m_nativePopupHwnd, nullptr, FALSE);
+                return 0;
+            }
+            return DefWindowProcW(hwnd, msg, wp, lp);
+        }
+        case WM_ACTIVATE: {
+            if (LOWORD(wp) == WA_INACTIVE) {
+                self->m_lastNativePopupCloseMs = GetTickCount64();
+                if (auto* app = SwCoreApplication::instance(false)) {
+                    app->postEvent([self]() { self->hidePopup(); });
+                } else {
+                    self->hidePopup();
+                }
+            }
+            return 0;
+        }
+        case WM_NCDESTROY: {
+            SetWindowLongPtr(hwnd, GWLP_USERDATA, 0);
+            return DefWindowProcW(hwnd, msg, wp, lp);
+        }
+        default:
+            return DefWindowProcW(hwnd, msg, wp, lp);
+        }
+    }
+
+    void nativePopupPaint_(HDC hdc) {
+        if (!hdc || !m_nativePopupHwnd) {
+            return;
+        }
+        RECT cr;
+        GetClientRect(m_nativePopupHwnd, &cr);
+        const int cw = cr.right - cr.left;
+        const int ch = cr.bottom - cr.top;
+        if (cw <= 0 || ch <= 0) {
+            return;
+        }
+
+        HDC memDC = CreateCompatibleDC(hdc);
+        HBITMAP memBmp = CreateCompatibleBitmap(hdc, cw, ch);
+        HBITMAP oldBmp = static_cast<HBITMAP>(SelectObject(memDC, memBmp));
+
+        SwWin32Painter painter(memDC);
+        painter.clear(SwColor{0, 0, 0});
+        const int bw = m_nativePopupBorderWidth;
+        SwRect bounds{0, 0, cw, ch};
+        const auto& rr = m_nativePopupRadii;
+        painter.fillRoundedRect(bounds, rr.tl, rr.tr, rr.br, rr.bl,
+                                m_nativePopupBg, m_nativePopupBorderColor, bw);
+
+        const int n = count();
+        const int visible = std::min(n, m_maxVisibleItems);
+        const int itemH = m_itemHeight;
+        const int pad = m_popupPadding;
+
+        for (int i = 0; i < visible; ++i) {
+            const int index = m_popupFirstIndex + i;
+            if (index < 0 || index >= n) {
+                continue;
+            }
+            SwRect row{pad, pad + i * itemH, std::max(0, cw - 2 * pad), itemH};
+
+            const bool hovered = (index == m_popupHighlightedIndex);
+            const bool selected = (index == m_currentIndex);
+
+            if (hovered) {
+                painter.fillRoundedRect(row, 8, SwColor{244, 246, 250}, SwColor{244, 246, 250}, 0);
+            }
+
+            const bool hasSelection = (m_currentIndex >= 0);
+            const int textPadL = hasSelection ? 16 : 8;
+            SwColor textColor = selected ? SwColor{24, 28, 36} : SwColor{30, 30, 30};
+            SwRect textRect{row.x + textPadL, row.y, std::max(0, row.width - textPadL), row.height};
+            painter.drawText(textRect, itemText(index),
+                             DrawTextFormats(DrawTextFormat::Left | DrawTextFormat::VCenter | DrawTextFormat::SingleLine),
+                             textColor, getFont());
+
+            if (selected) {
+                SwRect pill{row.x + 4, row.y + 6, 3, std::max(0, row.height - 12)};
+                painter.fillRoundedRect(pill, 2, m_accent, m_accent, 0);
+            }
+        }
+
+        BitBlt(hdc, 0, 0, cw, ch, memDC, 0, 0, SRCCOPY);
+        SelectObject(memDC, oldBmp);
+        DeleteObject(memBmp);
+        DeleteDC(memDC);
+    }
+
+    int nativePopupIndexAt_(int y) const {
+        const int pad = m_popupPadding;
+        if (y < pad) {
+            return -1;
+        }
+        const int idx = (y - pad) / std::max(1, m_itemHeight);
+        const int visible = std::min(count(), m_maxVisibleItems);
+        if (idx < 0 || idx >= visible) {
+            return -1;
+        }
+        const int absolute = m_popupFirstIndex + idx;
+        return (absolute >= 0 && absolute < count()) ? absolute : -1;
+    }
+
+    void nativePopupMouseMove_(int /*x*/, int y) {
+        const int idx = nativePopupIndexAt_(y);
+        if (idx >= 0 && idx != m_popupHighlightedIndex) {
+            m_popupHighlightedIndex = idx;
+            ensurePopupHighlightVisible_();
+            highlighted(m_popupHighlightedIndex);
+            if (m_nativePopupHwnd) {
+                InvalidateRect(m_nativePopupHwnd, nullptr, FALSE);
+            }
+        }
+    }
+
+    bool openNativePopup_() {
+        HWND parentHwnd = SwWidgetPlatformAdapter::nativeHandleAs<HWND>(platformHandle());
+        if (!parentHwnd) {
+            return false;
+        }
+        ensurePopupClassRegistered_();
+
+        const SwRect anchor{0, 0, width(), height()};
+        const SwPoint popupOrigin = mapToGlobal(SwPoint{0, height()});
+        POINT screenPt = {static_cast<LONG>(popupOrigin.x),
+                          static_cast<LONG>(popupOrigin.y)};
+
+        const int gap = popupOffset_();
+        const int n = count();
+        const int visible = std::min(n, m_maxVisibleItems);
+        const int popH = m_popupPadding * 2 + visible * m_itemHeight;
+        const int popW = anchor.width;
+
+        int popY = screenPt.y + gap;
+        // Open upward if not enough space below.
+        const int screenH = GetSystemMetrics(SM_CYSCREEN);
+        if (popY + popH > screenH) {
+            const SwPoint topOrigin = mapToGlobal(SwPoint{0, 0});
+            POINT topPt = {static_cast<LONG>(topOrigin.x), static_cast<LONG>(topOrigin.y)};
+            popY = topPt.y - popH - gap;
+            if (popY < 0) {
+                popY = 0;
+            }
+        }
+
+        m_nativePopupHwnd = CreateWindowExW(
+            WS_EX_TOOLWINDOW,
+            popupClassName_(),
+            L"",
+            WS_POPUP,
+            screenPt.x, popY, popW, popH,
+            parentHwnd,
+            nullptr,
+            GetModuleHandle(nullptr),
+            this);
+
+        if (!m_nativePopupHwnd) {
+            return false;
+        }
+
+        // Read popup style from stylesheet.
+        m_nativePopupRadii = popupBorderRadii_();
+        m_nativePopupBorderColor = popupBorderColor_();
+        m_nativePopupBg = popupBackgroundColor_();
+        m_nativePopupBorderWidth = popupBorderWidth_();
+        const int maxR = std::max({m_nativePopupRadii.tl, m_nativePopupRadii.tr,
+                                   m_nativePopupRadii.br, m_nativePopupRadii.bl});
+        if (maxR > 0) {
+            // Build a per-corner region using GDI path.
+            const auto& rr = m_nativePopupRadii;
+            HDC tmpDC = GetDC(nullptr);
+            Gdiplus::Graphics gfx(tmpDC);
+            Gdiplus::GraphicsPath path;
+            Gdiplus::REAL x = 0, y = 0;
+            Gdiplus::REAL w = static_cast<Gdiplus::REAL>(popW);
+            Gdiplus::REAL h = static_cast<Gdiplus::REAL>(popH);
+            path.StartFigure();
+            if (rr.tl > 0) { Gdiplus::REAL d = static_cast<Gdiplus::REAL>(rr.tl * 2); path.AddArc(x, y, d, d, 180.f, 90.f); }
+            else { path.AddLine(x, y, x, y); }
+            if (rr.tr > 0) { Gdiplus::REAL d = static_cast<Gdiplus::REAL>(rr.tr * 2); path.AddArc(w - d, y, d, d, 270.f, 90.f); }
+            else { path.AddLine(w, y, w, y); }
+            if (rr.br > 0) { Gdiplus::REAL d = static_cast<Gdiplus::REAL>(rr.br * 2); path.AddArc(w - d, h - d, d, d, 0.f, 90.f); }
+            else { path.AddLine(w, h, w, h); }
+            if (rr.bl > 0) { Gdiplus::REAL d = static_cast<Gdiplus::REAL>(rr.bl * 2); path.AddArc(x, h - d, d, d, 90.f, 90.f); }
+            else { path.AddLine(x, h, x, h); }
+            path.CloseFigure();
+            Gdiplus::Region gdipRegion(&path);
+            HRGN hRgn = gdipRegion.GetHRGN(&gfx);
+            if (hRgn) {
+                SetWindowRgn(m_nativePopupHwnd, hRgn, TRUE);
+            }
+            ReleaseDC(nullptr, tmpDC);
+        }
+
+        ShowWindow(m_nativePopupHwnd, SW_SHOW);
+        UpdateWindow(m_nativePopupHwnd);
+        SetFocus(m_nativePopupHwnd);
+        return true;
+    }
+
+    void closeNativePopup_() {
+        if (m_nativePopupHwnd) {
+            HWND h = m_nativePopupHwnd;
+            m_nativePopupHwnd = nullptr;
+            SetWindowLongPtr(h, GWLP_USERDATA, 0);
+            DestroyWindow(h);
+        }
+    }
+#endif
+
     void initDefaults() {
         resize(220, 34);
         setCursor(CursorType::Hand);
@@ -917,6 +1586,13 @@ private:
                 border-width: 1px;
                 font-size: 14px;
                 padding: 6px 10px;
+                popup-border-top-left-radius: 0px;
+                popup-border-top-right-radius: 0px;
+                popup-border-bottom-left-radius: 10px;
+                popup-border-bottom-right-radius: 10px;
+                popup-offset: 0px;
+                popup-background-color: rgb(255, 255, 255);
+                popup-border-width: 1px;
             }
         )");
     }
@@ -934,4 +1610,14 @@ private:
 
     PopupOverlay* m_overlay{nullptr};
     PopupList* m_list{nullptr};
+
+#if defined(_WIN32)
+    HWND m_nativePopupHwnd{nullptr};
+    ULONGLONG m_lastNativePopupCloseMs{0};
+    PopupRadii m_nativePopupRadii{10, 10, 10, 10};
+    SwColor m_nativePopupBorderColor{200, 200, 200};
+    SwColor m_nativePopupBg{255, 255, 255};
+    int m_nativePopupBorderWidth{1};
+#endif
 };
+

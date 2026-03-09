@@ -1,0 +1,584 @@
+
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Proxy Control Plane</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-0: #090c12;
+      --bg-1: #111a29;
+      --panel: rgba(16, 24, 39, 0.78);
+      --panel-2: rgba(15, 23, 42, 0.9);
+      --line: rgba(148, 163, 184, 0.27);
+      --text: #e8eefb;
+      --muted: #9bb0d6;
+      --teal: #31d0b9;
+      --amber: #f6b349;
+      --danger: #ff667d;
+      --ok: #5ef4a1;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Space Grotesk", "Segoe UI", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(1200px 700px at 10% -20%, #2f7a92 0%, rgba(47, 122, 146, 0) 60%),
+        radial-gradient(1000px 700px at 95% 0%, #78478f 0%, rgba(120, 71, 143, 0) 60%),
+        linear-gradient(160deg, var(--bg-0), var(--bg-1) 62%, #121822);
+      min-height: 100vh;
+    }
+    .gridfx::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image: linear-gradient(to right, rgba(255,255,255,0.03) 1px, transparent 1px), linear-gradient(to bottom, rgba(255,255,255,0.03) 1px, transparent 1px);
+      background-size: 34px 34px;
+      opacity: 0.32;
+    }
+    .wrap {
+      width: min(1320px, calc(100% - 2rem));
+      margin: 1rem auto 2rem;
+      position: relative;
+      z-index: 1;
+    }
+    .hero {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 1rem 1.1rem;
+      background: linear-gradient(120deg, rgba(21,31,53,0.85), rgba(15,23,42,0.78));
+      box-shadow: 0 26px 60px rgba(0, 0, 0, 0.32);
+      animation: rise 560ms ease both;
+    }
+    .hero h1 {
+      margin: 0;
+      font-size: clamp(1.45rem, 2.5vw, 2rem);
+      letter-spacing: 0.02em;
+    }
+    .hero p {
+      margin: 0.45rem 0 0;
+      color: var(--muted);
+    }
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.65rem;
+      margin-top: 0.95rem;
+      align-items: center;
+    }
+    .token {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      border: 1px solid var(--line);
+      background: rgba(15,23,42,0.7);
+      border-radius: 999px;
+      padding: 0.38rem 0.8rem;
+      color: var(--muted);
+    }
+    .token input {
+      width: 280px;
+      border: none;
+      outline: none;
+      background: transparent;
+      color: var(--text);
+      font: inherit;
+    }
+    .btn {
+      border: 1px solid var(--line);
+      background: linear-gradient(120deg, #202c42, #111827);
+      color: var(--text);
+      font: inherit;
+      padding: 0.5rem 0.8rem;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+    }
+    .btn:hover { transform: translateY(-1px); border-color: #9cc8ff; box-shadow: 0 12px 24px rgba(8,14,25,0.35); }
+    .btn.primary { border-color: #2ab89f; background: linear-gradient(125deg, #0f8f7e, #2760b5); }
+    .btn.warn { border-color: #f09b34; background: linear-gradient(125deg, #5c3714, #8e4e10); }
+    .btn.danger { border-color: #f06a80; background: linear-gradient(125deg, #5a1b30, #7f233f); }
+    .layout {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr;
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 0.9rem;
+      background: var(--panel);
+      backdrop-filter: blur(6px);
+      animation: rise 680ms ease both;
+    }
+    .card h2 {
+      margin: 0 0 0.55rem;
+      font-size: 1.05rem;
+      letter-spacing: 0.02em;
+    }
+    .muted { color: var(--muted); font-size: 0.9rem; }
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.6rem;
+    }
+    label { display: flex; flex-direction: column; gap: 0.28rem; font-size: 0.82rem; color: var(--muted); }
+    input, select, textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: rgba(15, 23, 42, 0.88);
+      color: var(--text);
+      font: inherit;
+      padding: 0.45rem 0.55rem;
+    }
+    textarea { min-height: 74px; resize: vertical; font-family: "IBM Plex Mono", monospace; }
+    .switches {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.55rem;
+      margin-top: 0.5rem;
+    }
+    .switch {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 0.28rem 0.58rem;
+      display: inline-flex;
+      gap: 0.4rem;
+      align-items: center;
+      color: var(--muted);
+      background: rgba(15,23,42,0.62);
+    }
+    .list {
+      display: grid;
+      gap: 0.65rem;
+      margin-top: 0.65rem;
+    }
+    .item {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--panel-2);
+      padding: 0.72rem;
+      animation: rise 520ms ease both;
+    }
+    .item-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0.45rem;
+    }
+    .item-head b { font-size: 0.9rem; }
+    .item .grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 0.5rem; }
+    .item .grid.two { grid-template-columns: repeat(2, minmax(0,1fr)); }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.28rem 0.54rem;
+      border-radius: 999px;
+      font-size: 0.74rem;
+      border: 1px solid var(--line);
+      background: rgba(25, 37, 63, 0.5);
+      color: #cde1ff;
+    }
+    .status {
+      margin-left: auto;
+      font-size: 0.83rem;
+      color: var(--muted);
+    }
+    .status.ok { color: var(--ok); }
+    .status.err { color: var(--danger); }
+    .preview {
+      height: min(75vh, 900px);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 0.7rem;
+      background: rgba(8, 11, 19, 0.85);
+      color: #d7e3ff;
+      font: 0.8rem/1.5 "IBM Plex Mono", ui-monospace, monospace;
+      overflow: auto;
+      white-space: pre;
+    }
+    @media (max-width: 980px) {
+      .layout { grid-template-columns: 1fr; }
+      .item .grid, .item .grid.two, .form-grid { grid-template-columns: 1fr; }
+      .token input { width: 210px; }
+    }
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(9px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+  </style>
+</head>
+<body class="gridfx">
+  <div class="wrap">
+    <section class="hero">
+      <div style="display:flex;align-items:center;gap:.7rem;flex-wrap:wrap;">
+        <h1>Proxy Control Plane</h1>
+        <span class="badge">Nginx Builder</span>
+        <span class="badge">Subdomain Router</span>
+        <span id="saveStatus" class="status">Ready</span>
+      </div>
+      <p>Configure un reverse proxy type Nginx via interface web: upstreams, subdomaines, policies, headers, timeouts et generation immediate du fichier <code>nginx.conf</code>.</p>
+      <div class="toolbar">
+        <label class="token">
+          <span>Bearer</span>
+          <input id="tokenInput" value="dev-admin-token" />
+        </label>
+        <button id="reloadBtn" class="btn">Reload</button>
+        <button id="saveBtn" class="btn primary">Save Config</button>
+        <button id="resetBtn" class="btn warn">Reset Defaults</button>
+        <button id="downloadBtn" class="btn">Download nginx.conf</button>
+      </div>
+    </section>
+
+    <section class="layout">
+      <div style="display:grid;gap:1rem;">
+        <article class="card">
+          <h2>Global Settings</h2>
+          <div class="form-grid">
+            <label>Worker Processes <input id="g_workerProcesses" /></label>
+            <label>HTTP Port <input id="g_httpPort" type="number" min="1" max="65535" /></label>
+            <label>HTTPS Port <input id="g_httpsPort" type="number" min="1" max="65535" /></label>
+            <label>Client Max Body (MB) <input id="g_clientMaxBodyMb" type="number" min="1" max="8192" /></label>
+          </div>
+          <div class="switches">
+            <label class="switch"><input id="g_enableHttp2" type="checkbox" />HTTP/2</label>
+            <label class="switch"><input id="g_enableGzip" type="checkbox" />Gzip</label>
+            <label class="switch"><input id="g_proxyBuffering" type="checkbox" />Proxy Buffering</label>
+          </div>
+        </article>
+
+        <article class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <h2 style="margin:0;">Upstreams</h2>
+            <button id="addUpstreamBtn" class="btn">+ Add Upstream</button>
+          </div>
+          <p class="muted">Un upstream = une cible applicative (host/port/protocol).</p>
+          <div id="upstreamsList" class="list"></div>
+        </article>
+
+        <article class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <h2 style="margin:0;">Subdomains & Routes</h2>
+            <button id="addSubdomainBtn" class="btn">+ Add Route</button>
+          </div>
+          <p class="muted">Associe un host (ex: <code>api.example.com</code>) + path prefix vers un upstream.</p>
+          <div id="subdomainsList" class="list"></div>
+        </article>
+      </div>
+
+      <aside class="card">
+        <h2>Nginx Preview</h2>
+        <p class="muted">Preview auto genere cote serveur apres chaque reload/save.</p>
+        <div id="nginxPreview" class="preview"></div>
+      </aside>
+    </section>
+  </div>
+
+  <script>
+    const state = {
+      config: { global: {}, upstreams: [], subdomains: [] },
+      nginxConf: ""
+    };
+
+    const el = (id) => document.getElementById(id);
+    const authHeader = () => ({ "Authorization": "Bearer " + (el("tokenInput").value || "").trim() });
+
+    const setStatus = (text, ok = true) => {
+      const node = el("saveStatus");
+      node.textContent = text;
+      node.className = "status " + (ok ? "ok" : "err");
+    };
+
+    const safeNum = (value, fallback) => {
+      const n = Number(value);
+      return Number.isFinite(n) ? n : fallback;
+    };
+
+    const parseHeadersText = (raw) => {
+      const lines = (raw || "").split(/\r?\n/);
+      const headers = [];
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        const idx = trimmed.indexOf(":");
+        if (idx <= 0) continue;
+        headers.push({ key: trimmed.slice(0, idx).trim(), value: trimmed.slice(idx + 1).trim() });
+      }
+      return headers;
+    };
+
+    const headersToText = (headers) => (headers || []).map(h => `${h.key}: ${h.value}`).join("\n");
+
+    const getCurrentConfigFromForm = () => {
+      const cfg = structuredClone(state.config);
+      cfg.global.workerProcesses = el("g_workerProcesses").value.trim() || "auto";
+      cfg.global.httpPort = safeNum(el("g_httpPort").value, 80);
+      cfg.global.httpsPort = safeNum(el("g_httpsPort").value, 443);
+      cfg.global.clientMaxBodyMb = safeNum(el("g_clientMaxBodyMb").value, 100);
+      cfg.global.enableHttp2 = el("g_enableHttp2").checked;
+      cfg.global.enableGzip = el("g_enableGzip").checked;
+      cfg.global.proxyBuffering = el("g_proxyBuffering").checked;
+
+      cfg.upstreams = Array.from(document.querySelectorAll("[data-upstream-item]")).map((node, idx) => ({
+        id: node.querySelector("[data-field='id']").value.trim() || `upstream_${idx + 1}`,
+        protocol: node.querySelector("[data-field='protocol']").value,
+        host: node.querySelector("[data-field='host']").value.trim() || "127.0.0.1",
+        port: safeNum(node.querySelector("[data-field='port']").value, 80),
+        connectTimeoutMs: safeNum(node.querySelector("[data-field='connectTimeoutMs']").value, 3000),
+        readTimeoutMs: safeNum(node.querySelector("[data-field='readTimeoutMs']").value, 30000),
+        active: node.querySelector("[data-field='active']").checked
+      }));
+
+      cfg.subdomains = Array.from(document.querySelectorAll("[data-subdomain-item]")).map(node => ({
+        host: node.querySelector("[data-field='host']").value.trim().toLowerCase(),
+        upstreamId: node.querySelector("[data-field='upstreamId']").value.trim(),
+        pathPrefix: node.querySelector("[data-field='pathPrefix']").value.trim() || "/",
+        tls: node.querySelector("[data-field='tls']").checked,
+        websocket: node.querySelector("[data-field='websocket']").checked,
+        forceHttps: node.querySelector("[data-field='forceHttps']").checked,
+        stripPrefix: node.querySelector("[data-field='stripPrefix']").checked,
+        rateLimitRpm: safeNum(node.querySelector("[data-field='rateLimitRpm']").value, 0),
+        accessPolicy: node.querySelector("[data-field='accessPolicy']").value,
+        headers: parseHeadersText(node.querySelector("[data-field='headers']").value)
+      }));
+
+      return cfg;
+    };
+
+    const fillGlobalForm = (cfg) => {
+      const g = cfg.global || {};
+      el("g_workerProcesses").value = g.workerProcesses ?? "auto";
+      el("g_httpPort").value = g.httpPort ?? 80;
+      el("g_httpsPort").value = g.httpsPort ?? 443;
+      el("g_clientMaxBodyMb").value = g.clientMaxBodyMb ?? 100;
+      el("g_enableHttp2").checked = !!g.enableHttp2;
+      el("g_enableGzip").checked = !!g.enableGzip;
+      el("g_proxyBuffering").checked = !!g.proxyBuffering;
+    };
+
+    const upstreamOptionsHtml = (selected = "") => {
+      return state.config.upstreams.map(up => `<option value="${up.id}" ${up.id === selected ? "selected" : ""}>${up.id}</option>`).join("");
+    };
+
+    const renderUpstreams = () => {
+      const root = el("upstreamsList");
+      root.innerHTML = "";
+      state.config.upstreams.forEach((upstream, idx) => {
+        const item = document.createElement("div");
+        item.className = "item";
+        item.dataset.upstreamItem = "1";
+        item.innerHTML = `
+          <div class="item-head">
+            <b>Upstream #${idx + 1}</b>
+            <button class="btn danger" data-remove-upstream="${idx}">Delete</button>
+          </div>
+          <div class="grid">
+            <label>ID <input data-field="id" value="${upstream.id ?? ""}" /></label>
+            <label>Protocol
+              <select data-field="protocol">
+                <option value="http" ${(upstream.protocol ?? "http") === "http" ? "selected" : ""}>http</option>
+                <option value="https" ${(upstream.protocol ?? "http") === "https" ? "selected" : ""}>https</option>
+              </select>
+            </label>
+            <label>Host <input data-field="host" value="${upstream.host ?? "127.0.0.1"}" /></label>
+            <label>Port <input data-field="port" type="number" value="${upstream.port ?? 80}" /></label>
+            <label>Connect Timeout (ms) <input data-field="connectTimeoutMs" type="number" value="${upstream.connectTimeoutMs ?? 3000}" /></label>
+            <label>Read Timeout (ms) <input data-field="readTimeoutMs" type="number" value="${upstream.readTimeoutMs ?? 30000}" /></label>
+          </div>
+          <div class="switches"><label class="switch"><input data-field="active" type="checkbox" ${upstream.active !== false ? "checked" : ""} />Active</label></div>
+        `;
+        root.appendChild(item);
+      });
+
+      root.querySelectorAll("[data-remove-upstream]").forEach(btn => {
+        btn.addEventListener("click", () => {
+          const idx = Number(btn.dataset.removeUpstream);
+          state.config.upstreams.splice(idx, 1);
+          renderAll();
+        });
+      });
+    };
+
+    const renderSubdomains = () => {
+      const root = el("subdomainsList");
+      root.innerHTML = "";
+      state.config.subdomains.forEach((route, idx) => {
+        const item = document.createElement("div");
+        item.className = "item";
+        item.dataset.subdomainItem = "1";
+        item.innerHTML = `
+          <div class="item-head">
+            <b>Route #${idx + 1}</b>
+            <button class="btn danger" data-remove-subdomain="${idx}">Delete</button>
+          </div>
+          <div class="grid two">
+            <label>Host/Subdomain <input data-field="host" value="${route.host ?? ""}" placeholder="api.example.com" /></label>
+            <label>Upstream
+              <select data-field="upstreamId">${upstreamOptionsHtml(route.upstreamId ?? "")}</select>
+            </label>
+          </div>
+          <div class="grid">
+            <label>Path Prefix <input data-field="pathPrefix" value="${route.pathPrefix ?? "/"}" /></label>
+            <label>Rate Limit (req/min) <input data-field="rateLimitRpm" type="number" min="0" value="${route.rateLimitRpm ?? 0}" /></label>
+            <label>Access Policy
+              <select data-field="accessPolicy">
+                <option value="public" ${(route.accessPolicy ?? "public") === "public" ? "selected" : ""}>public</option>
+                <option value="basic" ${(route.accessPolicy ?? "public") === "basic" ? "selected" : ""}>basic</option>
+                <option value="jwt" ${(route.accessPolicy ?? "public") === "jwt" ? "selected" : ""}>jwt (placeholder)</option>
+              </select>
+            </label>
+          </div>
+          <div class="switches">
+            <label class="switch"><input data-field="tls" type="checkbox" ${route.tls ? "checked" : ""} />TLS</label>
+            <label class="switch"><input data-field="forceHttps" type="checkbox" ${route.forceHttps ? "checked" : ""} />Force HTTPS</label>
+            <label class="switch"><input data-field="websocket" type="checkbox" ${route.websocket !== false ? "checked" : ""} />WebSocket</label>
+            <label class="switch"><input data-field="stripPrefix" type="checkbox" ${route.stripPrefix ? "checked" : ""} />Strip Prefix</label>
+          </div>
+          <label style="margin-top:.5rem;">Extra Proxy Headers (one per line: <code>Header: value</code>)
+            <textarea data-field="headers" placeholder="X-Request-Origin: proxy-control">${headersToText(route.headers)}</textarea>
+          </label>
+        `;
+        root.appendChild(item);
+      });
+
+      root.querySelectorAll("[data-remove-subdomain]").forEach(btn => {
+        btn.addEventListener("click", () => {
+          const idx = Number(btn.dataset.removeSubdomain);
+          state.config.subdomains.splice(idx, 1);
+          renderAll();
+        });
+      });
+    };
+
+    const renderPreview = () => {
+      el("nginxPreview").textContent = state.nginxConf || "# nginx preview unavailable";
+    };
+
+    const renderAll = () => {
+      fillGlobalForm(state.config);
+      renderUpstreams();
+      renderSubdomains();
+      renderPreview();
+    };
+
+    const fetchConfig = async () => {
+      setStatus("Loading...", true);
+      const response = await fetch("/api/v1/admin/proxy/config", { headers: authHeader() });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload = await response.json();
+      if (!payload.ok) throw new Error(payload.error || "Invalid server response");
+      state.config = payload.config;
+      state.nginxConf = payload.nginxConf || "";
+      renderAll();
+      setStatus("Loaded", true);
+    };
+
+    const saveConfig = async () => {
+      try {
+        setStatus("Saving...", true);
+        const config = getCurrentConfigFromForm();
+        const response = await fetch("/api/v1/admin/proxy/config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeader() },
+          body: JSON.stringify({ config })
+        });
+        const payload = await response.json();
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.error || `HTTP ${response.status}`);
+        }
+        state.config = payload.config;
+        state.nginxConf = payload.nginxConf || "";
+        renderAll();
+        setStatus("Saved", true);
+      } catch (error) {
+        setStatus(`Save failed: ${error.message}`, false);
+      }
+    };
+
+    const resetConfig = async () => {
+      try {
+        setStatus("Resetting...", true);
+        const response = await fetch("/api/v1/admin/proxy/reset", {
+          method: "POST",
+          headers: authHeader()
+        });
+        const payload = await response.json();
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.error || `HTTP ${response.status}`);
+        }
+        state.config = payload.config;
+        state.nginxConf = payload.nginxConf || "";
+        renderAll();
+        setStatus("Defaults restored", true);
+      } catch (error) {
+        setStatus(`Reset failed: ${error.message}`, false);
+      }
+    };
+
+    const downloadNginx = async () => {
+      try {
+        const response = await fetch("/api/v1/admin/proxy/nginx.conf", { headers: authHeader() });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const text = await response.text();
+        const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+        const href = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = href;
+        a.download = "nginx.generated.conf";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(href);
+      } catch (error) {
+        setStatus(`Download failed: ${error.message}`, false);
+      }
+    };
+
+    el("addUpstreamBtn").addEventListener("click", () => {
+      state.config.upstreams.push({
+        id: `upstream_${state.config.upstreams.length + 1}`,
+        protocol: "http",
+        host: "127.0.0.1",
+        port: 8080,
+        connectTimeoutMs: 3000,
+        readTimeoutMs: 30000,
+        active: true
+      });
+      renderAll();
+    });
+
+    el("addSubdomainBtn").addEventListener("click", () => {
+      const firstUpstream = state.config.upstreams[0]?.id || "";
+      state.config.subdomains.push({
+        host: "",
+        upstreamId: firstUpstream,
+        pathPrefix: "/",
+        tls: false,
+        websocket: true,
+        forceHttps: false,
+        stripPrefix: false,
+        rateLimitRpm: 0,
+        accessPolicy: "public",
+        headers: []
+      });
+      renderAll();
+    });
+
+    el("reloadBtn").addEventListener("click", () => fetchConfig().catch(err => setStatus(`Reload failed: ${err.message}`, false)));
+    el("saveBtn").addEventListener("click", saveConfig);
+    el("resetBtn").addEventListener("click", resetConfig);
+    el("downloadBtn").addEventListener("click", downloadNginx);
+
+    fetchConfig().catch(err => setStatus(`Initial load failed: ${err.message}`, false));
+  </script>
+</body>
+</html>

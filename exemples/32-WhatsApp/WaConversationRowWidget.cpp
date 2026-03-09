@@ -1,4 +1,4 @@
-#include "WaConversationRowWidget.h"
+﻿#include "WaConversationRowWidget.h"
 
 #include "SwFont.h"
 #include "SwLabel.h"
@@ -80,8 +80,12 @@ void WaConversationRowWidget::setUnreadCount(int unread) {
     m_badge->setText(SwString::number(unread));
 }
 
-SwRect WaConversationRowWidget::sizeHint() const {
-    return SwRect{0, 0, 10000, 72};
+SwSize WaConversationRowWidget::sizeHint() const {
+    return SwSize{10000, 72};
+}
+
+void WaConversationRowWidget::paintEvent(PaintEvent* event) {
+    SwWidget::paintEvent(event);
 }
 
 void WaConversationRowWidget::resizeEvent(ResizeEvent* event) {
@@ -96,7 +100,7 @@ int WaConversationRowWidget::clampInt_(int value, int minValue, int maxValue) {
 }
 
 void WaConversationRowWidget::updateLayout_() {
-    const SwRect r = getRect();
+    const SwRect r = rect();
     const int w = r.width;
     const int h = r.height;
 
@@ -104,34 +108,35 @@ void WaConversationRowWidget::updateLayout_() {
     const int avatarSize = 48;
 
     if (m_avatar) {
-        m_avatar->move(r.x + padX, r.y + (h - avatarSize) / 2);
+        m_avatar->move(padX, (h - avatarSize) / 2);
         m_avatar->resize(avatarSize, avatarSize);
     }
 
-    int right = r.x + w - padX;
+    int right = w - padX;
 
     const int timeW = 66;
     if (m_time) {
-        m_time->move(right - timeW, r.y + 12);
+        m_time->move(right - timeW, 12);
         m_time->resize(timeW, 18);
     }
 
     if (m_badge) {
         const int badgeW = 22;
         const int badgeH = 20;
-        m_badge->move(right - badgeW, r.y + h - 12 - badgeH);
+        m_badge->move(right - badgeW, h - 12 - badgeH);
         m_badge->resize(badgeW, badgeH);
     }
 
-    const int leftText = r.x + padX + avatarSize + 12;
+    const int leftText = padX + avatarSize + 12;
     const int textW = clampInt_((right - timeW - 12) - leftText, 0, 10000);
 
     if (m_title) {
-        m_title->move(leftText, r.y + 10);
+        m_title->move(leftText, 10);
         m_title->resize(textW, 22);
     }
     if (m_preview) {
-        m_preview->move(leftText, r.y + 34);
+        m_preview->move(leftText, 34);
         m_preview->resize(textW, 18);
     }
 }
+

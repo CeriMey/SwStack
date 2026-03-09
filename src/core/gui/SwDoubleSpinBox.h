@@ -1,4 +1,4 @@
-/***************************************************************************************************
+﻿/***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
  * Copyright (C) 2025 Ariya Consulting
@@ -22,8 +22,32 @@
 
 #pragma once
 
+/**
+ * @file src/core/gui/SwDoubleSpinBox.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwDoubleSpinBox in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the double spin box interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are SwDoubleSpinBox.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
 /***************************************************************************************************
- * SwDoubleSpinBox - Qt-like floating-point spin box (≈ QDoubleSpinBox).
+ * SwDoubleSpinBox - floating-point spin box.
  *
  * Notes:
  * - Uses an internal SwLineEdit for text editing.
@@ -43,6 +67,12 @@ class SwDoubleSpinBox : public SwFrame {
     SW_OBJECT(SwDoubleSpinBox, SwFrame)
 
 public:
+    /**
+     * @brief Constructs a `SwDoubleSpinBox` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwDoubleSpinBox(SwWidget* parent = nullptr)
         : SwFrame(parent) {
         initDefaults();
@@ -51,6 +81,13 @@ public:
         updateLayout();
     }
 
+    /**
+     * @brief Sets the range.
+     * @param minimum Value passed to the method.
+     * @param maximum Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setRange(double minimum, double maximum) {
         if (minimum > maximum) {
             const double tmp = minimum;
@@ -62,20 +99,62 @@ public:
         setValue(m_value);
     }
 
+    /**
+     * @brief Sets the minimum.
+     * @param m_maximum Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setMinimum(double minimum) { setRange(minimum, m_maximum); }
+    /**
+     * @brief Sets the maximum.
+     * @param maximum Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setMaximum(double maximum) { setRange(m_minimum, maximum); }
 
+    /**
+     * @brief Returns the current minimum.
+     * @return The current minimum.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     double minimum() const { return m_minimum; }
+    /**
+     * @brief Returns the current maximum.
+     * @return The current maximum.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     double maximum() const { return m_maximum; }
 
+    /**
+     * @brief Sets the decimals.
+     * @param decimals Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setDecimals(int decimals) {
         m_decimals = clampInt(decimals, 0, 8);
         updateTextFromValue();
         update();
     }
 
+    /**
+     * @brief Returns the current decimals.
+     * @return The current decimals.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int decimals() const { return m_decimals; }
 
+    /**
+     * @brief Sets the single Step.
+     * @param step Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setSingleStep(double step) {
         if (step <= 0.0) {
             step = 0.1;
@@ -83,8 +162,20 @@ public:
         m_singleStep = step;
     }
 
+    /**
+     * @brief Returns the current single Step.
+     * @return The current single Step.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     double singleStep() const { return m_singleStep; }
 
+    /**
+     * @brief Sets the value.
+     * @param value Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setValue(double value) {
         const double clamped = clampDouble(value, m_minimum, m_maximum);
         if (std::abs(m_value - clamped) < 1e-12) {
@@ -97,18 +188,42 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the current value.
+     * @return The current value.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     double value() const { return m_value; }
 
+    /**
+     * @brief Returns the current line Edit.
+     * @return The current line Edit.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwLineEdit* lineEdit() const { return m_edit; }
 
     DECLARE_SIGNAL(valueChanged, double);
 
 protected:
+    /**
+     * @brief Handles the resize Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void resizeEvent(ResizeEvent* event) override {
         SwFrame::resizeEvent(event);
         updateLayout();
     }
 
+    /**
+     * @brief Handles the paint Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void paintEvent(PaintEvent* event) override {
         if (!isVisibleInHierarchy()) {
             return;
@@ -118,7 +233,7 @@ protected:
             return;
         }
 
-        const SwRect rect = getRect();
+        const SwRect rect = this->rect();
         StyleSheet* sheet = getToolSheet();
 
         SwColor bg{255, 255, 255};
@@ -155,7 +270,7 @@ protected:
             SwString value = sheet->getStyleProperty("SwDoubleSpinBox", "divider-color");
             if (!value.isEmpty()) {
                 try {
-                    divider = sheet->parseColor(value.toStdString(), nullptr);
+                    divider = sheet->parseColor(value, nullptr);
                 } catch (...) {
                 }
             }
@@ -174,6 +289,12 @@ protected:
         painter->finalize();
     }
 
+    /**
+     * @brief Handles the key Press Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void keyPressEvent(KeyEvent* event) override {
         if (!event) {
             return;
@@ -207,6 +328,12 @@ private:
     public:
         enum class Direction { Up, Down };
 
+        /**
+         * @brief Performs the `ArrowButton` operation.
+         * @param dir Value passed to the method.
+         * @param parent Optional parent object that owns this instance.
+         * @return The requested arrow Button.
+         */
         explicit ArrowButton(Direction dir, SwWidget* parent = nullptr)
             : SwWidget(parent)
             , m_dir(dir)
@@ -221,13 +348,19 @@ private:
     protected:
         CUSTOM_PROPERTY(bool, Pressed, false) { update(); }
 
+        /**
+         * @brief Handles the paint Event forwarded by the framework.
+         * @param event Event object forwarded by the framework.
+         *
+         * @details Override this hook when the default framework behavior needs to be extended or replaced.
+         */
         void paintEvent(PaintEvent* event) override {
             SwPainter* painter = event ? event->painter() : nullptr;
             if (!painter) {
                 return;
             }
 
-            const SwRect r = getRect();
+            const SwRect r = rect();
 
             StyleSheet* sheet = m_owner ? m_owner->getToolSheet() : getToolSheet();
             auto parseOwnerColor = [&](const char* propName, const SwColor& fallback, float* alphaOut = nullptr) -> SwColor {
@@ -246,7 +379,7 @@ private:
                 }
                 float a = 1.0f;
                 try {
-                    SwColor c = sheet->parseColor(value.toStdString(), &a);
+                    SwColor c = sheet->parseColor(value, &a);
                     if (alphaOut) {
                         *alphaOut = a;
                     }
@@ -307,6 +440,12 @@ private:
             }
         }
 
+        /**
+         * @brief Handles the mouse Press Event forwarded by the framework.
+         * @param event Event object forwarded by the framework.
+         *
+         * @details Override this hook when the default framework behavior needs to be extended or replaced.
+         */
         void mousePressEvent(MouseEvent* event) override {
             if (!event) {
                 return;
@@ -319,6 +458,12 @@ private:
             event->accept();
         }
 
+        /**
+         * @brief Handles the mouse Release Event forwarded by the framework.
+         * @param event Event object forwarded by the framework.
+         *
+         * @details Override this hook when the default framework behavior needs to be extended or replaced.
+         */
         void mouseReleaseEvent(MouseEvent* event) override {
             if (!event) {
                 return;
@@ -340,18 +485,6 @@ private:
         Direction m_dir{Direction::Up};
         SwDoubleSpinBox* m_owner{nullptr};
     };
-
-    static int clampInt(int value, int minValue, int maxValue) {
-        if (value < minValue) return minValue;
-        if (value > maxValue) return maxValue;
-        return value;
-    }
-
-    static double clampDouble(double value, double minValue, double maxValue) {
-        if (value < minValue) return minValue;
-        if (value > maxValue) return maxValue;
-        return value;
-    }
 
     int arrowColumnWidth() const {
         return clampInt(m_arrowWidth, 18, 34);
@@ -390,7 +523,7 @@ private:
     }
 
     void updateLayout() {
-        const SwRect r = getRect();
+        const SwRect r = rect();
         int bw = 1;
         int radius = 0;
         SwColor border{0, 0, 0};
@@ -527,3 +660,4 @@ private:
     bool m_internalTextUpdate{false};
     SwColor m_focusAccent{59, 130, 246};
 };
+

@@ -22,6 +22,30 @@
 
 #pragma once
 
+/**
+ * @file src/fireBD/FireBDTypes.h
+ * @ingroup firebd
+ * @brief Declares the public interface exposed by FireBDTypes in the FireBD service layer.
+ *
+ * This header belongs to the FireBD service layer. It declares application-facing clients,
+ * service types, and data models used to communicate with the FireBD backend.
+ *
+ * Within that layer, this file focuses on the fire bd types interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are FireBDMessageStatus, FireBDMessage, and
+ * FireBDStatusEvent.
+ *
+ * Type-oriented declarations here establish shared vocabulary for the surrounding subsystem so
+ * multiple components can exchange data and configuration without ad-hoc conventions.
+ *
+ * The contracts in this area mainly describe request and response shapes, client composition, and
+ * higher-level service boundaries.
+ *
+ */
+
+
 /***************************************************************************************************
  * fireBD - Firebase RTDB low-level types for chat-like use-cases.
  *
@@ -34,7 +58,7 @@
 #include <cstdint>
 
 enum class FireBDMessageStatus {
-    None = 0,
+    Unset = 0,  // was "None" — renamed to avoid conflict with X11 "#define None 0L"
     Sent,
     Delivered,
     Read
@@ -58,7 +82,7 @@ inline FireBDMessageStatus fireBdStatusFromString(const SwString& status) {
     if (s == "sent") return FireBDMessageStatus::Sent;
     if (s == "delivered") return FireBDMessageStatus::Delivered;
     if (s == "read") return FireBDMessageStatus::Read;
-    return FireBDMessageStatus::None;
+    return FireBDMessageStatus::Unset;
 }
 
 struct FireBDMessage {
@@ -82,7 +106,6 @@ struct FireBDStatusEvent {
     SwString conversationId;
     SwString fromUserId;
     SwString toUserId;
-    FireBDMessageStatus status{FireBDMessageStatus::None};
+    FireBDMessageStatus status{FireBDMessageStatus::Unset};
     std::int64_t atMs{0};
 };
-

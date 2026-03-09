@@ -22,6 +22,31 @@
 
 #pragma once
 
+/**
+ * @file src/platform/win/SwWin32Painter.h
+ * @ingroup platform_backends
+ * @brief Declares the public interface exposed by SwWin32Painter in the CoreSw Win32 platform
+ * integration layer.
+ *
+ * This header belongs to the CoreSw Win32 platform integration layer. It binds portable framework
+ * abstractions to concrete Win32 windowing, painting, and input services.
+ *
+ * Within that layer, this file focuses on the win32 painter interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are SwWin32Painter.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * Types here define the seam between portable APIs and the native event and rendering loop on
+ * Windows.
+ *
+ */
+
+
 #if defined(_WIN32)
 
 #include "platform/win/SwWindows.h"
@@ -53,9 +78,19 @@
 
 class SwWin32Painter : public SwPainter {
 public:
+    /**
+     * @brief Constructs a `SwWin32Painter` instance.
+     * @param dc Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     explicit SwWin32Painter(HDC dc)
         : m_hdc(dc) {}
 
+    /**
+     * @brief Clears the current object state.
+     * @param color Value passed to the method.
+     */
     void clear(const SwColor& color) override {
         RECT rect;
         GetClipBox(m_hdc, &rect);
@@ -64,6 +99,13 @@ public:
         DeleteObject(brush);
     }
 
+    /**
+     * @brief Performs the `fillRect` operation.
+     * @param rect Rectangle used by the operation.
+     * @param fillColor Value passed to the method.
+     * @param borderColor Value passed to the method.
+     * @param borderWidth Value passed to the method.
+     */
     void fillRect(const SwRect& rect,
                   const SwColor& fillColor,
                   const SwColor& borderColor,
@@ -83,6 +125,14 @@ public:
         }
     }
 
+    /**
+     * @brief Performs the `fillRoundedRect` operation.
+     * @param rect Rectangle used by the operation.
+     * @param radius Value passed to the method.
+     * @param fillColor Value passed to the method.
+     * @param borderColor Value passed to the method.
+     * @param borderWidth Value passed to the method.
+     */
     void fillRoundedRect(const SwRect& rect,
                          int radius,
                          const SwColor& fillColor,
@@ -157,6 +207,114 @@ public:
         }
     }
 
+    // Per-corner rounded rect: TL, TR, BR, BL radii.
+    /**
+     * @brief Performs the `fillRoundedRect` operation.
+     * @param rect Rectangle used by the operation.
+     * @param radiusTL Value passed to the method.
+     * @param radiusTR Value passed to the method.
+     * @param radiusBR Value passed to the method.
+     * @param radiusBL Value passed to the method.
+     * @param fillColor Value passed to the method.
+     * @param borderColor Value passed to the method.
+     * @param borderWidth Value passed to the method.
+     */
+    void fillRoundedRect(const SwRect& rect,
+                         int radiusTL, int radiusTR, int radiusBR, int radiusBL,
+                         const SwColor& fillColor,
+                         const SwColor& borderColor,
+                         int borderWidth) override {
+        if (!m_hdc) {
+            return;
+        }
+        // If all radii are the same, use the uniform version.
+        if (radiusTL == radiusTR && radiusTR == radiusBR && radiusBR == radiusBL) {
+            fillRoundedRect(rect, radiusTL, fillColor, borderColor, borderWidth);
+            return;
+        }
+        if (radiusTL <= 0 && radiusTR <= 0 && radiusBR <= 0 && radiusBL <= 0) {
+            fillRect(rect, fillColor, borderColor, borderWidth);
+            return;
+        }
+
+        const RECT r = toRect(rect);
+        const int w = std::max(0, static_cast<int>(r.right - r.left));
+        const int h = std::max(0, static_cast<int>(r.bottom - r.top));
+        if (w <= 0 || h <= 0) {
+            return;
+        }
+
+        Gdiplus::Graphics graphics(m_hdc);
+        if (graphics.GetLastStatus() != Gdiplus::Ok) {
+            fillRoundedRect(rect, std::max({radiusTL, radiusTR, radiusBR, radiusBL}),
+                            fillColor, borderColor, borderWidth);
+            return;
+        }
+
+        graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+        graphics.SetCompositingQuality(Gdiplus::CompositingQualityHighQuality);
+
+        const int maxRad = std::max(0, std::min(w, h) / 2);
+        auto clamp = [maxRad](int rad) -> Gdiplus::REAL {
+            return static_cast<Gdiplus::REAL>(std::max(0, std::min(rad, maxRad)));
+        };
+
+        const Gdiplus::REAL rTL = clamp(radiusTL);
+        const Gdiplus::REAL rTR = clamp(radiusTR);
+        const Gdiplus::REAL rBR = clamp(radiusBR);
+        const Gdiplus::REAL rBL = clamp(radiusBL);
+        const Gdiplus::REAL x = static_cast<Gdiplus::REAL>(r.left);
+        const Gdiplus::REAL y = static_cast<Gdiplus::REAL>(r.top);
+        const Gdiplus::REAL rw = static_cast<Gdiplus::REAL>(w);
+        const Gdiplus::REAL rh = static_cast<Gdiplus::REAL>(h);
+
+        Gdiplus::GraphicsPath path;
+        path.StartFigure();
+        // Top-left
+        if (rTL > 0) {
+            path.AddArc(x, y, rTL * 2, rTL * 2, 180.0f, 90.0f);
+        } else {
+            path.AddLine(x, y, x, y);
+        }
+        // Top-right
+        if (rTR > 0) {
+            path.AddArc(x + rw - rTR * 2, y, rTR * 2, rTR * 2, 270.0f, 90.0f);
+        } else {
+            path.AddLine(x + rw, y, x + rw, y);
+        }
+        // Bottom-right
+        if (rBR > 0) {
+            path.AddArc(x + rw - rBR * 2, y + rh - rBR * 2, rBR * 2, rBR * 2, 0.0f, 90.0f);
+        } else {
+            path.AddLine(x + rw, y + rh, x + rw, y + rh);
+        }
+        // Bottom-left
+        if (rBL > 0) {
+            path.AddArc(x, y + rh - rBL * 2, rBL * 2, rBL * 2, 90.0f, 90.0f);
+        } else {
+            path.AddLine(x, y + rh, x, y + rh);
+        }
+        path.CloseFigure();
+
+        Gdiplus::SolidBrush brush(Gdiplus::Color(255, fillColor.r, fillColor.g, fillColor.b));
+        graphics.FillPath(&brush, &path);
+
+        if (borderWidth > 0) {
+            Gdiplus::Pen pen(Gdiplus::Color(255, borderColor.r, borderColor.g, borderColor.b),
+                             static_cast<Gdiplus::REAL>(borderWidth));
+            pen.SetAlignment(Gdiplus::PenAlignmentInset);
+            pen.SetLineJoin(Gdiplus::LineJoinRound);
+            graphics.DrawPath(&pen, &path);
+        }
+    }
+
+    /**
+     * @brief Performs the `drawRect` operation.
+     * @param rect Rectangle used by the operation.
+     * @param borderColor Value passed to the method.
+     * @param borderWidth Value passed to the method.
+     */
     void drawRect(const SwRect& rect,
                   const SwColor& borderColor,
                   int borderWidth) override {
@@ -170,6 +328,44 @@ public:
         DeleteObject(pen);
     }
 
+    /**
+     * @brief Performs the `drawDashedRect` operation.
+     * @param rect Rectangle used by the operation.
+     * @param color Value passed to the method.
+     * @param borderWidth Value passed to the method.
+     * @param int Value passed to the method.
+     * @param int Value passed to the method.
+     */
+    void drawDashedRect(const SwRect& rect,
+                        const SwColor& color,
+                        int borderWidth,
+                        int /*dashLen*/,
+                        int /*gapLen*/) override {
+        if (rect.width <= 0 || rect.height <= 0) return;
+        const int bw = borderWidth > 0 ? borderWidth : 1;
+        LOGBRUSH lb{BS_SOLID, toColorRef(color), 0};
+        HPEN pen = ExtCreatePen(PS_GEOMETRIC | PS_DASH | PS_ENDCAP_FLAT | PS_JOIN_MITER,
+                                static_cast<DWORD>(bw), &lb, 0, nullptr);
+        if (!pen) { drawRect(rect, color, bw); return; }
+        HPEN oldPen = (HPEN)SelectObject(m_hdc, pen);
+        HBRUSH oldBrush = (HBRUSH)SelectObject(m_hdc, GetStockObject(HOLLOW_BRUSH));
+        const int oldBkMode = SetBkMode(m_hdc, TRANSPARENT);
+        Rectangle(m_hdc, rect.x, rect.y, rect.x + rect.width, rect.y + rect.height);
+        SetBkMode(m_hdc, oldBkMode);
+        SelectObject(m_hdc, oldPen);
+        SelectObject(m_hdc, oldBrush);
+        DeleteObject(pen);
+    }
+
+    /**
+     * @brief Performs the `drawLine` operation.
+     * @param x1 Value passed to the method.
+     * @param y1 Value passed to the method.
+     * @param x2 Value passed to the method.
+     * @param y2 Value passed to the method.
+     * @param color Value passed to the method.
+     * @param width Width value.
+     */
     void drawLine(int x1,
                   int y1,
                   int x2,
@@ -215,6 +411,14 @@ public:
         DeleteObject(pen);
     }
 
+    /**
+     * @brief Performs the `fillPolygon` operation.
+     * @param points Value passed to the method.
+     * @param count Value passed to the method.
+     * @param fillColor Value passed to the method.
+     * @param borderColor Value passed to the method.
+     * @param borderWidth Value passed to the method.
+     */
     void fillPolygon(const SwPoint* points,
                      int count,
                      const SwColor& fillColor,
@@ -279,6 +483,10 @@ public:
         }
     }
 
+    /**
+     * @brief Performs the `pushClipRect` operation.
+     * @param rect Rectangle used by the operation.
+     */
     void pushClipRect(const SwRect& rect) override {
         if (!m_hdc) {
             return;
@@ -292,6 +500,9 @@ public:
                           rect.y + rect.height);
     }
 
+    /**
+     * @brief Performs the `popClipRect` operation.
+     */
     void popClipRect() override {
         if (!m_hdc) {
             return;
@@ -303,6 +514,14 @@ public:
         --m_clipDepth;
     }
 
+    /**
+     * @brief Performs the `drawText` operation.
+     * @param rect Rectangle used by the operation.
+     * @param text Value passed to the method.
+     * @param alignment Value passed to the method.
+     * @param color Value passed to the method.
+     * @param font Font value used by the operation.
+     */
     void drawText(const SwRect& rect,
                   const SwString& text,
                   DrawTextFormats alignment,
@@ -345,6 +564,13 @@ public:
         SelectObject(m_hdc, oldFont);
     }
 
+    /**
+     * @brief Performs the `fillEllipse` operation.
+     * @param rect Rectangle used by the operation.
+     * @param fillColor Value passed to the method.
+     * @param borderColor Value passed to the method.
+     * @param borderWidth Value passed to the method.
+     */
     void fillEllipse(const SwRect& rect,
                      const SwColor& fillColor,
                      const SwColor& borderColor,
@@ -387,6 +613,12 @@ public:
         }
     }
 
+    /**
+     * @brief Performs the `drawEllipse` operation.
+     * @param rect Rectangle used by the operation.
+     * @param borderColor Value passed to the method.
+     * @param borderWidth Value passed to the method.
+     */
     void drawEllipse(const SwRect& rect,
                      const SwColor& borderColor,
                      int borderWidth) override {
@@ -424,6 +656,12 @@ public:
         graphics.DrawEllipse(&pen, x, y, rw, rh);
     }
 
+    /**
+     * @brief Performs the `drawImage` operation.
+     * @param targetRect Value passed to the method.
+     * @param image Value passed to the method.
+     * @param sourceRect Value passed to the method.
+     */
     void drawImage(const SwRect& targetRect,
                    const SwImage& image,
                    const SwRect* sourceRect = nullptr) override {
@@ -493,6 +731,12 @@ public:
                            Gdiplus::UnitPixel);
     }
 
+    /**
+     * @brief Returns the current native Handle.
+     * @return The current native Handle.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     void* nativeHandle() override {
         return m_hdc;
     }
@@ -749,6 +993,14 @@ private:
 
     class BitmapColorTextRenderer final : public IDWriteTextRenderer {
     public:
+        /**
+         * @brief Performs the `BitmapColorTextRenderer` operation.
+         * @param target Value passed to the method.
+         * @param factory8 Value passed to the method.
+         * @param renderingParams Value passed to the method.
+         * @param textColor Value passed to the method.
+         * @param colorPaletteIndex Value passed to the method.
+         */
         BitmapColorTextRenderer(IDWriteBitmapRenderTarget3* target,
                                 IDWriteFactory8* factory8,
                                 IDWriteRenderingParams* renderingParams,
@@ -764,6 +1016,11 @@ private:
             if (m_renderingParams) m_renderingParams->AddRef();
         }
 
+        /**
+         * @brief Destroys the `final` instance.
+         *
+         * @details Use this hook to release any resources that remain associated with the instance.
+         */
         ~BitmapColorTextRenderer() {
             if (m_target) m_target->Release();
             if (m_factory8) m_factory8->Release();
@@ -1091,6 +1348,11 @@ private:
         UINT16 glyphId{0};
         UINT32 requestedPixelsPerEm{0};
 
+        /**
+         * @brief Performs the `operator==` operation.
+         * @param other Value passed to the method.
+         * @return `true` on success; otherwise `false`.
+         */
         bool operator==(const PngGlyphCacheKey& other) const {
             return fontFacePtr == other.fontFacePtr &&
                    glyphId == other.glyphId &&
@@ -1099,6 +1361,11 @@ private:
     };
 
     struct PngGlyphCacheKeyHash {
+        /**
+         * @brief Performs the `operator` operation.
+         * @param key Value passed to the method.
+         * @return The requested operator.
+         */
         std::size_t operator()(const PngGlyphCacheKey& key) const noexcept {
             std::size_t h = static_cast<std::size_t>(key.fontFacePtr);
             h ^= static_cast<std::size_t>(key.glyphId) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
@@ -1358,6 +1625,14 @@ private:
 
     class ColorTextRenderer final : public IDWriteTextRenderer {
     public:
+        /**
+         * @brief Performs the `ColorTextRenderer` operation.
+         * @param owner Value passed to the method.
+         * @param target Value passed to the method.
+         * @param factory4 Value passed to the method.
+         * @param factory2 Value passed to the method.
+         * @param fallbackBrush Value passed to the method.
+         */
         ColorTextRenderer(SwWin32Painter* owner,
                           ID2D1RenderTarget* target,
                           IDWriteFactory4* factory4,
@@ -1374,6 +1649,11 @@ private:
             if (m_fallbackBrush) m_fallbackBrush->AddRef();
         }
 
+        /**
+         * @brief Destroys the `final` instance.
+         *
+         * @details Use this hook to release any resources that remain associated with the instance.
+         */
         ~ColorTextRenderer() {
             if (m_target) m_target->Release();
             if (m_factory4) m_factory4->Release();

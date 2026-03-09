@@ -1,5 +1,28 @@
 #ifndef SWSTANDARDPATHS_H
 #define SWSTANDARDPATHS_H
+
+/**
+ * @file src/core/fs/SwStandardPaths.h
+ * @ingroup core_fs
+ * @brief Declares the public interface exposed by SwStandardPaths in the CoreSw filesystem layer.
+ *
+ * This header belongs to the CoreSw filesystem layer. It wraps platform-specific path, directory,
+ * settings, and related utility services behind framework-native types.
+ *
+ * Within that layer, this file focuses on the standard paths interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are SwStandardPaths.
+ *
+ * Directory and path declarations here usually define normalization, lookup, traversal, and
+ * platform-neutral path manipulation rules that other modules can depend on.
+ *
+ * Filesystem declarations in this area are meant to keep file and path behavior predictable
+ * across platforms while staying inside the Sw* type system.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -64,11 +87,21 @@ public:
     };
     using LocateOptions = SwFlagSet<LocateOption>;
 
+    /**
+     * @brief Performs the `writableLocation` operation.
+     * @param type Value passed to the method.
+     * @return The requested writable Location.
+     */
     static SwString writableLocation(StandardLocation type) {
         SwList<SwString> locations = writableLocations(type);
         return locations.isEmpty() ? SwString() : locations[0];
     }
 
+    /**
+     * @brief Performs the `writableLocations` operation.
+     * @param type Value passed to the method.
+     * @return The requested writable Locations.
+     */
     static SwList<SwString> writableLocations(StandardLocation type) {
         SwList<SwString> results;
         if (isTestModeEnabled()) {
@@ -94,6 +127,11 @@ public:
         return results;
     }
 
+    /**
+     * @brief Performs the `standardLocations` operation.
+     * @param type Value passed to the method.
+     * @return The requested standard Locations.
+     */
     static SwList<SwString> standardLocations(StandardLocation type) {
         SwList<SwString> results = writableLocations(type);
         if (results.isEmpty()) {
@@ -105,6 +143,11 @@ public:
         return results;
     }
 
+    /**
+     * @brief Performs the `displayName` operation.
+     * @param type Value passed to the method.
+     * @return The requested display Name.
+     */
     static SwString displayName(StandardLocation type) {
         switch (type) {
         case DesktopLocation: return SwString("Desktop");
@@ -128,6 +171,13 @@ public:
         }
     }
 
+    /**
+     * @brief Sets the test Mode Enabled.
+     * @param enabled Value passed to the method.
+     * @return The requested test Mode Enabled.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     static void setTestModeEnabled(bool enabled) {
         bool& flag = testModeEnabledFlag();
         if (flag == enabled) {
@@ -139,10 +189,22 @@ public:
         }
     }
 
+    /**
+     * @brief Returns whether the object reports test Mode Enabled.
+     * @return The current test Mode Enabled.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static bool isTestModeEnabled() {
         return testModeEnabledFlag();
     }
 
+    /**
+     * @brief Performs the `findExecutable` operation.
+     * @param executableName Value passed to the method.
+     * @param searchPaths Value passed to the method.
+     * @return The requested find Executable.
+     */
     static SwString findExecutable(const SwString& executableName,
                                    const SwList<SwString>& searchPaths = SwList<SwString>()) {
         if (executableName.isEmpty()) {
@@ -191,6 +253,13 @@ public:
         return SwString();
     }
 
+    /**
+     * @brief Performs the `locate` operation.
+     * @param type Value passed to the method.
+     * @param fileName Value passed to the method.
+     * @param options Option set controlling the operation.
+     * @return The requested locate.
+     */
     static SwString locate(StandardLocation type,
                            const SwString& fileName,
                            LocateOptions options = LocateFile) {
@@ -210,6 +279,13 @@ public:
         return SwString();
     }
 
+    /**
+     * @brief Performs the `locateAll` operation.
+     * @param type Value passed to the method.
+     * @param fileName Value passed to the method.
+     * @param options Option set controlling the operation.
+     * @return The requested locate All.
+     */
     static SwList<SwString> locateAll(StandardLocation type,
                                       const SwString& fileName,
                                       LocateOptions options = LocateFile) {
@@ -233,6 +309,25 @@ public:
     }
 
 private:
+    static SwString envValue_(const char* name) {
+        if (!name || !*name) {
+            return SwString();
+        }
+#if defined(_WIN32)
+        char* value = nullptr;
+        size_t len = 0;
+        if (_dupenv_s(&value, &len, name) != 0 || !value) {
+            return SwString();
+        }
+        SwString result(value);
+        std::free(value);
+        return result;
+#else
+        const char* value = std::getenv(name);
+        return value ? SwString(value) : SwString();
+#endif
+    }
+
     static SwString resolveLocation(StandardLocation type) {
         if (isTestModeEnabled()) {
             return joinPath(testRootPath(), displayName(type));
@@ -370,8 +465,8 @@ private:
 
     static SwList<SwString> environmentPaths() {
         SwList<SwString> paths;
-        const char* envPath = std::getenv("PATH");
-        if (!envPath) {
+        SwString raw = envValue_("PATH");
+        if (raw.isEmpty()) {
             return paths;
         }
 #ifdef _WIN32
@@ -379,7 +474,6 @@ private:
 #else
         const char delimiter = ':';
 #endif
-        SwString raw(envPath);
         SwList<SwString> parts = raw.split(delimiter);
         for (int i = 0; i < parts.size(); ++i) {
             SwString entry = parts[i].trimmed();

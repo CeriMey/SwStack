@@ -1,4 +1,28 @@
-#pragma once
+﻿#pragma once
+
+/**
+ * @file src/core/gui/SwTabWidget.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwTabWidget in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the tab widget interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwTabWidget.
+ *
+ * Widget-oriented declarations here usually capture persistent UI state, input handling, layout
+ * participation, and paint-time behavior while keeping platform-specific rendering details behind
+ * lower layers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -45,6 +69,12 @@ public:
         Pills
     };
 
+    /**
+     * @brief Constructs a `SwTabWidget` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     SwTabWidget(SwWidget* parent = nullptr)
         : SwWidget(parent) {
         resize(560, 360);
@@ -59,6 +89,10 @@ public:
 
 public:
 
+    /**
+     * @brief Performs the `tabsClosable` operation.
+     * @return `true` on success; otherwise `false`.
+     */
     bool tabsClosable() const { return getTabsClosable(); }
 
     CUSTOM_PROPERTY(bool, Movable, false) {
@@ -68,9 +102,25 @@ public:
 
 public:
 
+    /**
+     * @brief Performs the `movable` operation.
+     * @return `true` on success; otherwise `false`.
+     */
     bool movable() const { return getMovable(); }
+    /**
+     * @brief Returns whether the object reports movable.
+     * @return `true` when the object reports movable; otherwise `false`.
+     *
+     * @details This query does not modify the object state.
+     */
     bool isMovable() const { return getMovable(); }
 
+    /**
+     * @brief Adds the specified tab.
+     * @param page Value passed to the method.
+     * @param label Value passed to the method.
+     * @return The requested tab.
+     */
     int addTab(SwWidget* page, const SwString& label) {
         if (!page) {
             return -1;
@@ -98,6 +148,11 @@ public:
         return m_tabs.size() - 1;
     }
 
+    /**
+     * @brief Performs the `widget` operation.
+     * @param index Value passed to the method.
+     * @return The requested widget.
+     */
     SwWidget* widget(int index) const {
         if (index < 0 || index >= m_tabs.size()) {
             return nullptr;
@@ -105,6 +160,11 @@ public:
         return m_tabs[index].page;
     }
 
+    /**
+     * @brief Performs the `tabText` operation.
+     * @param index Value passed to the method.
+     * @return The requested tab Text.
+     */
     SwString tabText(int index) const {
         if (index < 0 || index >= m_tabs.size()) {
             return {};
@@ -112,6 +172,13 @@ public:
         return m_tabs[index].text;
     }
 
+    /**
+     * @brief Sets the tab Text.
+     * @param index Value passed to the method.
+     * @param text Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setTabText(int index, const SwString& text) {
         if (index < 0 || index >= m_tabs.size()) {
             return;
@@ -121,6 +188,10 @@ public:
         update();
     }
 
+    /**
+     * @brief Removes the specified tab.
+     * @param index Value passed to the method.
+     */
     void removeTab(int index) {
         if (index < 0 || index >= m_tabs.size()) {
             return;
@@ -155,6 +226,9 @@ public:
         update();
     }
 
+    /**
+     * @brief Clears the current object state.
+     */
     void clear() {
         // The tab widget owns its pages (parented to this), so clearing deletes them.
         for (int i = 0; i < m_tabs.size(); ++i) {
@@ -184,6 +258,12 @@ public:
         update();
     }
 
+    /**
+     * @brief Sets the tab Position.
+     * @param position Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setTabPosition(TabPosition position) {
         if (m_tabPosition == position) {
             return;
@@ -193,10 +273,22 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the current tab Position.
+     * @return The current tab Position.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     TabPosition tabPosition() const {
         return m_tabPosition;
     }
 
+    /**
+     * @brief Sets the tab Style.
+     * @param style Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setTabStyle(TabStyle style) {
         if (m_tabStyle == style) {
             return;
@@ -215,19 +307,43 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the current tab Style.
+     * @return The current tab Style.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     TabStyle tabStyle() const {
         return m_tabStyle;
     }
 
+    /**
+     * @brief Sets the accent Color.
+     * @param color Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setAccentColor(const SwColor& color) {
         m_accentColor = color;
         update();
     }
 
+    /**
+     * @brief Returns the current accent Color.
+     * @return The current accent Color.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwColor accentColor() const {
         return m_accentColor;
     }
 
+    /**
+     * @brief Sets the tabs Fill Space.
+     * @param on Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setTabsFillSpace(bool on) {
         if (m_tabsFillSpace == on) {
             return;
@@ -237,10 +353,22 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the current tabs Fill Space.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool tabsFillSpace() const {
         return m_tabsFillSpace;
     }
 
+    /**
+     * @brief Sets the uses Scroll Buttons.
+     * @param on Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setUsesScrollButtons(bool on) {
         if (m_usesScrollButtons == on) {
             return;
@@ -253,18 +381,42 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the current uses Scroll Buttons.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool usesScrollButtons() const {
         return m_usesScrollButtons;
     }
 
+    /**
+     * @brief Returns the current count.
+     * @return The current count.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int count() const {
         return m_tabs.size();
     }
 
+    /**
+     * @brief Returns the current current Index.
+     * @return The current current Index.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int currentIndex() const {
         return m_currentIndex;
     }
 
+    /**
+     * @brief Returns the current current Widget.
+     * @return The current current Widget.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwWidget* currentWidget() const {
         if (m_currentIndex < 0 || m_currentIndex >= m_tabs.size()) {
             return nullptr;
@@ -272,6 +424,12 @@ public:
         return m_tabs[m_currentIndex].page;
     }
 
+    /**
+     * @brief Sets the current Index.
+     * @param index Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setCurrentIndex(int index) {
         if (index < 0 || index >= m_tabs.size()) {
             return;
@@ -297,6 +455,12 @@ public:
     }
 
 protected:
+    /**
+     * @brief Handles the paint Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void paintEvent(PaintEvent* event) override {
         if (!isVisibleInHierarchy()) {
             return;
@@ -311,28 +475,34 @@ protected:
             updateLayout();
         }
 
-        SwRect rect = getRect();
-        recalcTabRects(rect);
+        const SwRect localRect = this->rect();
+        recalcTabRects(localRect);
 
-        paintContainer(painter, rect);
+        paintContainer(painter, localRect);
 
         // Paint current page (and its children) first; tabs render on top.
         if (SwWidget* page = currentWidget()) {
-            SwRect clip = contentClipRect(rect);
+            const SwRect clip = contentClipRect(localRect);
             painter->pushClipRect(clip);
-            static_cast<SwWidgetInterface*>(page)->paintEvent(event);
+            paintChild_(event, page);
             painter->popClipRect();
         }
 
-        paintTabs(painter, rect);
+        paintTabs(painter, localRect);
     }
 
+    /**
+     * @brief Handles the wheel Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void wheelEvent(WheelEvent* event) override {
         if (!event) {
             return;
         }
 
-        SwRect rect = getRect();
+        SwRect rect = this->rect();
         recalcTabRects(rect);
         SwRect bar = tabBarRect(rect);
         if (containsPoint(bar, event->x(), event->y()) && m_scrollButtonsVisible && m_tabScrollMax > 0) {
@@ -346,12 +516,18 @@ protected:
         SwWidget::wheelEvent(event);
     }
 
+    /**
+     * @brief Handles the mouse Press Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mousePressEvent(MouseEvent* event) override {
         if (!event) {
             return;
         }
 
-        SwRect rect = getRect();
+        SwRect rect = this->rect();
         recalcTabRects(rect);
         SwRect bar = tabBarRect(rect);
         if (containsPoint(bar, event->x(), event->y())) {
@@ -396,6 +572,12 @@ protected:
         SwWidget::mousePressEvent(event);
     }
 
+    /**
+     * @brief Handles the mouse Release Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseReleaseEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -411,7 +593,7 @@ protected:
             m_closePressedIndex = -1;
             changed = true;
 
-            SwRect rect = getRect();
+            SwRect rect = this->rect();
             recalcTabRects(rect);
             if (idx >= 0 && idx < m_tabs.size() && tabsClosable() &&
                 containsPoint(tabCloseRect_(m_tabs[idx].rect), event->x(), event->y())) {
@@ -440,12 +622,18 @@ protected:
         SwWidget::mouseReleaseEvent(event);
     }
 
+    /**
+     * @brief Handles the mouse Move Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseMoveEvent(MouseEvent* event) override {
         if (!event) {
             return;
         }
 
-        SwRect rect = getRect();
+        SwRect rect = this->rect();
         recalcTabRects(rect);
         SwRect bar = tabBarRect(rect);
 
@@ -551,6 +739,12 @@ protected:
         SwWidget::mouseMoveEvent(event);
     }
 
+    /**
+     * @brief Handles the resize Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void resizeEvent(ResizeEvent* event) override {
         SwWidget::resizeEvent(event);
         updateLayout();
@@ -562,16 +756,6 @@ private:
         SwWidget* page{nullptr};
         SwRect rect;
     };
-
-    static int clampInt(int value, int minValue, int maxValue) {
-        if (value < minValue) return minValue;
-        if (value > maxValue) return maxValue;
-        return value;
-    }
-
-    static SwColor clampColor(const SwColor& c) {
-        return SwColor{clampInt(c.r, 0, 255), clampInt(c.g, 0, 255), clampInt(c.b, 0, 255)};
-    }
 
     static SwColor mix(const SwColor& a, const SwColor& b, int t0_100) {
         int t = clampInt(t0_100, 0, 100);
@@ -629,12 +813,12 @@ private:
             return {};
         }
 
-        const std::vector<SwString> selectors = classHierarchy(); // most-derived first
+        const auto selectors = classHierarchy(); // most-derived first
         for (const SwString& selector : selectors) {
             if (selector.isEmpty()) {
                 continue;
             }
-            SwString v = sheet->getStyleProperty(selector.toStdString(), propName);
+            SwString v = sheet->getStyleProperty(selector, propName);
             if (!v.isEmpty()) {
                 return v;
             }
@@ -799,8 +983,12 @@ private:
         return content;
     }
 
+    SwRect mapLocalRectToAbsolute_(const SwRect& localRect) const {
+        return localRect;
+    }
+
     void updateLayout() {
-        SwRect rect = getRect();
+        SwRect rect = this->rect();
 
         SwRect pageRect = pageRectForLayout(rect);
         for (int i = 0; i < m_tabs.size(); ++i) {
@@ -956,6 +1144,10 @@ private:
 
     SwFont fontForTab(bool selected) const {
         SwFont f = getFont();
+        const SwString family = SwString::fromWString(f.getFamily());
+        if (family.contains("emoji", Sw::CaseInsensitive)) {
+            return f;
+        }
         f.setWeight(selected ? SemiBold : Medium);
         return f;
     }
@@ -1025,10 +1217,13 @@ private:
             return;
         }
 
-        SwRect bar = tabBarRect(widgetRect);
-        SwRect area = insetRect(bar, m_barPadding, m_barPadding);
-        if (area.width < 0) area.width = 0;
-        if (area.height < 0) area.height = 0;
+        const SwRect barLocal = tabBarRect(widgetRect);
+        SwRect areaLocal = insetRect(barLocal, m_barPadding, m_barPadding);
+        if (areaLocal.width < 0) areaLocal.width = 0;
+        if (areaLocal.height < 0) areaLocal.height = 0;
+
+        const SwRect bar = mapLocalRectToAbsolute_(barLocal);
+        const SwRect area = mapLocalRectToAbsolute_(areaLocal);
 
         const SwColor onSurface = SwColor{17, 24, 39};
         const SwColor muted = SwColor{107, 114, 128};
@@ -1038,7 +1233,7 @@ private:
         const int barRadius = clampInt(m_tabBarRadius, 0, roundRadiusForRect(bar));
         const int itemRadius = clampInt(m_tabItemRadius, 0, roundRadiusForRect(area));
 
-        const SwRect viewport = m_tabViewportRect;
+        const SwRect viewport = mapLocalRectToAbsolute_(m_tabViewportRect);
         const bool doClip = m_scrollButtonsVisible;
 
         if (m_tabStyle == TabStyle::Segmented) {
@@ -1048,7 +1243,7 @@ private:
                 if (doClip) {
                     painter->pushClipRect(viewport);
                 }
-                SwRect active = m_tabs[m_currentIndex].rect;
+                SwRect active = mapLocalRectToAbsolute_(m_tabs[m_currentIndex].rect);
                 SwRect selector = insetRect(active, 2, 2);
                 if (selector.width < 0) selector.width = 0;
                 if (selector.height < 0) selector.height = 0;
@@ -1095,7 +1290,7 @@ private:
             for (int i = 0; i < tabCount; ++i) {
                 const bool selected = (i == m_currentIndex);
                 const bool hovered = (i == m_hoverIndex);
-                SwRect tabRect = m_tabs[i].rect;
+                SwRect tabRect = mapLocalRectToAbsolute_(m_tabs[i].rect);
 
                 if (!selected && hovered) {
                     SwRect hoverRect = insetRect(tabRect, 2, 2);
@@ -1143,7 +1338,7 @@ private:
             for (int i = 0; i < tabCount; ++i) {
                 const bool selected = (i == m_currentIndex);
                 const bool hovered = (i == m_hoverIndex);
-                SwRect tabRect = m_tabs[i].rect;
+                SwRect tabRect = mapLocalRectToAbsolute_(m_tabs[i].rect);
 
                 if (hovered && !selected) {
                     painter->fillRoundedRect(insetRect(tabRect, 2, 2), itemRadius, hoverBg, hoverBg, 0);
@@ -1194,7 +1389,7 @@ private:
         for (int i = 0; i < tabCount; ++i) {
             const bool selected = (i == m_currentIndex);
             const bool hovered = (i == m_hoverIndex);
-            SwRect tabRect = m_tabs[i].rect;
+            SwRect tabRect = mapLocalRectToAbsolute_(m_tabs[i].rect);
 
             SwColor fill = selected ? accent : (hovered ? hoverBg : mix(m_tabBarColor, m_surfaceColor, 35));
             SwColor border = selected ? accent : m_borderColor;
@@ -1239,7 +1434,7 @@ private:
             return;
         }
 
-        const SwRect r = tabCloseRect_(m_tabs[tabIndex].rect);
+        const SwRect r = mapLocalRectToAbsolute_(tabCloseRect_(m_tabs[tabIndex].rect));
         const bool hovered = (m_closeHoverIndex == tabIndex);
         const bool pressed = (m_closePressedIndex == tabIndex);
         const bool enabled = tabsClosable();
@@ -1282,7 +1477,8 @@ private:
         const bool nextEnabled = (m_tabScrollOffset < m_tabScrollMax);
 
         auto paintButton = [&](const SwRect& r, const SwString& glyph, bool enabled, bool hovered, bool pressed) {
-            SwRect pad = insetRect(r, 2, 2);
+            const SwRect absR = mapLocalRectToAbsolute_(r);
+            SwRect pad = insetRect(absR, 2, 2);
             if (pad.width < 0) pad.width = 0;
             if (pad.height < 0) pad.height = 0;
             const int radius = clampInt(roundRadiusForRect(pad), 0, 999);
@@ -1303,7 +1499,7 @@ private:
             SwFont f = getFont();
             f.setWeight(SemiBold);
             f.setPointSize(f.getPointSize() + 2);
-            painter->drawText(r,
+            painter->drawText(absR,
                               glyph,
                               DrawTextFormats(DrawTextFormat::Center | DrawTextFormat::VCenter | DrawTextFormat::SingleLine),
                               enabled ? onSurface : muted,
@@ -1342,7 +1538,7 @@ private:
             return;
         }
 
-        SwRect rect = getRect();
+        SwRect rect = this->rect();
         recalcTabRects(rect);
         if (!m_scrollButtonsVisible || m_tabScrollMax <= 0) {
             return;
@@ -1476,3 +1672,4 @@ private:
     bool m_scrollPrevPressed{false};
     bool m_scrollNextPressed{false};
 };
+

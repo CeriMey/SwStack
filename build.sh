@@ -9,6 +9,17 @@ BUILD_TYPE="${BUILD_TYPE:-Release}"
 CMAKE_BIN="${CMAKE_BIN:-cmake}"
 BUILD_TARGET="${BUILD_TARGET:-}"
 
+# Options CMake supplementaires :
+#   - arguments passes au script (ex: ./build.sh -DSW_BUILD_ALL_EXAMPLES=ON)
+#   - variable d'environnement SW_BUILD_ALL_EXAMPLES=ON/OFF
+CONFIGURE_ARGS=("-DCMAKE_BUILD_TYPE=$BUILD_TYPE")
+if [[ -n "${SW_BUILD_ALL_EXAMPLES:-}" ]]; then
+    CONFIGURE_ARGS+=("-DSW_BUILD_ALL_EXAMPLES=$SW_BUILD_ALL_EXAMPLES")
+fi
+if [[ "$#" -gt 0 ]]; then
+    CONFIGURE_ARGS+=("$@")
+fi
+
 if ! command -v "$CMAKE_BIN" >/dev/null 2>&1; then
     echo "Erreur: impossible de trouver l'executable CMake \"$CMAKE_BIN\". Ajustez la variable d'environnement CMAKE_BIN."
     exit 1
@@ -28,7 +39,10 @@ fi
 
 echo "[Info] Build directory: $BUILD_DIR"
 echo "[CMake] Configuration..."
-"$CMAKE_BIN" -S "$ROOT_DIR" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE="$BUILD_TYPE"
+if [[ "${#CONFIGURE_ARGS[@]}" -gt 1 ]]; then
+    echo "[CMake] Options: ${CONFIGURE_ARGS[*]}"
+fi
+"$CMAKE_BIN" -S "$ROOT_DIR" -B "$BUILD_DIR" "${CONFIGURE_ARGS[@]}"
 
 echo "[CMake] Compilation $BUILD_TYPE..."
 if [[ -n "$BUILD_TARGET" ]]; then

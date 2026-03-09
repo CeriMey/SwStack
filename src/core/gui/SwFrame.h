@@ -1,4 +1,4 @@
-/***************************************************************************************************
+﻿/***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
  * Copyright (C) 2025 Ariya Consulting
@@ -22,8 +22,32 @@
 
 #pragma once
 
+/**
+ * @file src/core/gui/SwFrame.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwFrame in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the frame interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwFrame.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
 /***************************************************************************************************
- * SwFrame - Qt-like frame/container widget (≈ QFrame).
+ * SwFrame - frame/container widget.
  **************************************************************************************************/
 
 #include "SwWidget.h"
@@ -47,11 +71,23 @@ public:
         Sunken
     };
 
+    /**
+     * @brief Constructs a `SwFrame` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwFrame(SwWidget* parent = nullptr)
         : SwWidget(parent) {
         initDefaults();
     }
 
+    /**
+     * @brief Sets the frame Shape.
+     * @param shape Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setFrameShape(Shape shape) {
         if (m_shape == shape) {
             return;
@@ -60,8 +96,20 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the current frame Shape.
+     * @return The current frame Shape.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     Shape frameShape() const { return m_shape; }
 
+    /**
+     * @brief Sets the frame Shadow.
+     * @param shadow Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setFrameShadow(Shadow shadow) {
         if (m_shadow == shadow) {
             return;
@@ -70,36 +118,91 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the current frame Shadow.
+     * @return The current frame Shadow.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     Shadow frameShadow() const { return m_shadow; }
 
+    /**
+     * @brief Sets the line Width.
+     * @param width Width value.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setLineWidth(int width) {
         m_lineWidth = clampInt(width, 0, 20);
         update();
     }
 
+    /**
+     * @brief Returns the current line Width.
+     * @return The current line Width.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int lineWidth() const { return m_lineWidth; }
 
+    /**
+     * @brief Sets the mid Line Width.
+     * @param width Width value.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setMidLineWidth(int width) {
         m_midLineWidth = clampInt(width, 0, 20);
         update();
     }
 
+    /**
+     * @brief Returns the current mid Line Width.
+     * @return The current mid Line Width.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int midLineWidth() const { return m_midLineWidth; }
 
+    /**
+     * @brief Returns the current frame Width.
+     * @return The current frame Width.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int frameWidth() const { return m_lineWidth + m_midLineWidth; }
 
 protected:
+    /**
+     * @brief Handles the paint Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void paintEvent(PaintEvent* event) override {
         if (!isVisibleInHierarchy()) {
             return;
         }
 
-        SwPainter* painter = event ? event->painter() : nullptr;
+        NormalizedPaintEvent_ normalized = normalizePaintEvent_(event);
+        SwPainter* painter = normalized.painter;
         if (!painter) {
             return;
         }
+        PaintEvent effectiveEvent(painter, normalized.paintRect);
+        PaintEvent* localEvent = event;
+        const bool needsSyntheticEvent =
+            !event ||
+            normalized.painter != event->painter() ||
+            normalized.paintRect.x != event->paintRect().x ||
+            normalized.paintRect.y != event->paintRect().y ||
+            normalized.paintRect.width != event->paintRect().width ||
+            normalized.paintRect.height != event->paintRect().height;
+        if (needsSyntheticEvent) {
+            localEvent = &effectiveEvent;
+        }
 
-        const SwRect rect = getRect();
+        const SwRect rect = this->rect();
         const StyleSheet* sheet = getToolSheet();
         SwColor bg{255, 255, 255};
         float bgAlpha = 1.0f;
@@ -118,7 +221,7 @@ protected:
         resolveBorderCornerRadii(sheet, tl, tr, br, bl);
 
         if (m_shape == Shape::NoFrame) {
-            paintChildren(event);
+            paintChildren(localEvent);
             return;
         }
 
@@ -144,10 +247,23 @@ protected:
             painter->drawRect(rect, border, borderWidth);
         }
 
-        paintChildren(event);
+        paintChildren(localEvent);
     }
 
 protected:
+    /**
+     * @brief Performs the `paintRoundedRectWithCorners` operation.
+     * @param painter Value passed to the method.
+     * @param rect Rectangle used by the operation.
+     * @param tl Value passed to the method.
+     * @param tr Value passed to the method.
+     * @param br Value passed to the method.
+     * @param bl Value passed to the method.
+     * @param fill Value passed to the method.
+     * @param border Value passed to the method.
+     * @param borderWidth Value passed to the method.
+     * @return The requested paint Rounded Rect With Corners.
+     */
     static void paintRoundedRectWithCorners(SwPainter* painter,
                                            const SwRect& rect,
                                            int tl,
@@ -232,177 +348,24 @@ protected:
         }
     }
 
-    static int clampInt(int value, int minValue, int maxValue) {
-        if (value < minValue) return minValue;
-        if (value > maxValue) return maxValue;
-        return value;
-    }
+    // clampInt, clampColor, parsePixelValue, resolveBackground, resolveBorder,
+    // resolveBorderCornerRadii â€” inherited from SwWidget
 
-    static SwColor clampColor(const SwColor& c) {
-        return SwColor{clampInt(c.r, 0, 255), clampInt(c.g, 0, 255), clampInt(c.b, 0, 255)};
-    }
-
-    static int parsePixelValue(const SwString& value, int defaultValue) {
-        if (value.isEmpty()) {
-            return defaultValue;
-        }
-        SwString cleaned = value;
-        cleaned.replace("px", "");
-        bool ok = false;
-        int v = cleaned.toInt(&ok);
-        return ok ? v : defaultValue;
-    }
-
-    void resolveBackground(const StyleSheet* sheet,
-                           SwColor& outColor,
-                           float& outAlpha,
-                           bool& outPaint) const {
-        if (!sheet) {
-            return;
-        }
-
-        auto selectors = classHierarchy();
-        bool hasSwWidgetSelector = false;
-        for (const SwString& selector : selectors) {
-            if (selector == "SwWidget") {
-                hasSwWidgetSelector = true;
-                break;
-            }
-        }
-        if (!hasSwWidgetSelector) {
-            selectors.emplace_back("SwWidget");
-        }
-
-        for (int i = static_cast<int>(selectors.size()) - 1; i >= 0; --i) {
-            const SwString& selector = selectors[i];
-            if (selector.isEmpty()) {
-                continue;
-            }
-            SwString value = sheet->getStyleProperty(selector.toStdString(), "background-color");
-            if (value.isEmpty()) {
-                continue;
-            }
-            float alpha = 1.0f;
-            try {
-                SwColor resolved = const_cast<StyleSheet*>(sheet)->parseColor(value.toStdString(), &alpha);
-                if (alpha <= 0.0f) {
-                    outPaint = false;
-                } else {
-                    outColor = clampColor(resolved);
-                    outPaint = true;
-                }
-                outAlpha = alpha;
-            } catch (...) {
-                // ignore invalid colors
-            }
-            return;
-        }
-    }
-
-    void resolveBorder(const StyleSheet* sheet,
-                       SwColor& outColor,
-                       int& outWidth,
-                       int& outRadius) const {
-        if (!sheet) {
-            return;
-        }
-
-        auto selectors = classHierarchy();
-        bool hasSwWidgetSelector = false;
-        for (const SwString& selector : selectors) {
-            if (selector == "SwWidget") {
-                hasSwWidgetSelector = true;
-                break;
-            }
-        }
-        if (!hasSwWidgetSelector) {
-            selectors.emplace_back("SwWidget");
-        }
-
-        for (int i = static_cast<int>(selectors.size()) - 1; i >= 0; --i) {
-            const SwString& selector = selectors[i];
-            if (selector.isEmpty()) {
-                continue;
-            }
-
-            SwString borderColor = sheet->getStyleProperty(selector.toStdString(), "border-color");
-            if (!borderColor.isEmpty()) {
-                try {
-                    SwColor resolved = const_cast<StyleSheet*>(sheet)->parseColor(borderColor.toStdString(), nullptr);
-                    outColor = clampColor(resolved);
-                } catch (...) {
-                }
-            }
-
-            SwString borderWidth = sheet->getStyleProperty(selector.toStdString(), "border-width");
-            if (!borderWidth.isEmpty()) {
-                outWidth = clampInt(parsePixelValue(borderWidth, outWidth), 0, 20);
-            }
-
-            SwString borderRadius = sheet->getStyleProperty(selector.toStdString(), "border-radius");
-            if (!borderRadius.isEmpty()) {
-                outRadius = clampInt(parsePixelValue(borderRadius, outRadius), 0, 32);
-            }
-        }
-    }
-
-    void resolveBorderCornerRadii(const StyleSheet* sheet,
-                                  int& outTopLeft,
-                                  int& outTopRight,
-                                  int& outBottomRight,
-                                  int& outBottomLeft) const {
-        if (!sheet) {
-            return;
-        }
-
-        auto selectors = classHierarchy();
-        bool hasSwWidgetSelector = false;
-        for (const SwString& selector : selectors) {
-            if (selector == "SwWidget") {
-                hasSwWidgetSelector = true;
-                break;
-            }
-        }
-        if (!hasSwWidgetSelector) {
-            selectors.emplace_back("SwWidget");
-        }
-
-        for (int i = static_cast<int>(selectors.size()) - 1; i >= 0; --i) {
-            const SwString& selector = selectors[i];
-            if (selector.isEmpty()) {
-                continue;
-            }
-
-            SwString v = sheet->getStyleProperty(selector.toStdString(), "border-top-left-radius");
-            if (!v.isEmpty()) {
-                outTopLeft = clampInt(parsePixelValue(v, outTopLeft), 0, 32);
-            }
-            v = sheet->getStyleProperty(selector.toStdString(), "border-top-right-radius");
-            if (!v.isEmpty()) {
-                outTopRight = clampInt(parsePixelValue(v, outTopRight), 0, 32);
-            }
-            v = sheet->getStyleProperty(selector.toStdString(), "border-bottom-right-radius");
-            if (!v.isEmpty()) {
-                outBottomRight = clampInt(parsePixelValue(v, outBottomRight), 0, 32);
-            }
-            v = sheet->getStyleProperty(selector.toStdString(), "border-bottom-left-radius");
-            if (!v.isEmpty()) {
-                outBottomLeft = clampInt(parsePixelValue(v, outBottomLeft), 0, 32);
-            }
-        }
-    }
-
+    /**
+     * @brief Performs the `paintChildren` operation.
+     * @param event Event object forwarded by the framework.
+     */
     void paintChildren(PaintEvent* event) {
         const SwRect& paintRect = event->paintRect();
-        const std::vector<SwObject*>& directChildren = getChildren();
+        const auto& directChildren = children();
         for (SwObject* objChild : directChildren) {
             auto* child = dynamic_cast<SwWidget*>(objChild);
             if (!child || !child->isVisibleInHierarchy()) {
                 continue;
             }
-            const SwRect childRect = child->getRect();
+            const SwRect childRect = child->geometry();
             if (rectsIntersect(paintRect, childRect)) {
-                static_cast<SwWidgetInterface*>(child)->paintEvent(event);
+                paintChild_(event, child);
             }
         }
     }
@@ -428,3 +391,4 @@ private:
     int m_lineWidth{1};
     int m_midLineWidth{0};
 };
+

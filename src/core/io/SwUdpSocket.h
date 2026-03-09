@@ -1,4 +1,27 @@
 #pragma once
+
+/**
+ * @file src/core/io/SwUdpSocket.h
+ * @ingroup core_io
+ * @brief Declares the public interface exposed by SwUdpSocket in the CoreSw IO layer.
+ *
+ * This header belongs to the CoreSw IO layer. It defines files, sockets, servers, descriptors,
+ * processes, and network helpers that sit directly at operating-system boundaries.
+ *
+ * Within that layer, this file focuses on the UDP socket interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwUdpSocket.
+ *
+ * Socket-oriented declarations here abstract OS-level descriptors and expose the read, write,
+ * connection, and readiness semantics that higher layers build upon.
+ *
+ * IO-facing declarations here usually manage handles, readiness state, buffering, and error
+ * propagation while presenting a portable framework API.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -26,13 +49,12 @@
 #include "SwTimer.h"
 #include "SwByteArray.h"
 #include "SwDebug.h"
+#include "SwMutex.h"
+#include "SwList.h"
+#include "SwPair.h"
 
 #include <atomic>
-#include <deque>
 #include <cstring>
-#include <mutex>
-#include <string>
-#include <vector>
 #include <utility>
 #include <cstdint>
 #include <algorithm>
@@ -81,6 +103,12 @@ public:
     };
     using BindMode = uint32_t;
 
+    /**
+     * @brief Constructs a `SwUdpSocket` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     SwUdpSocket(SwObject* parent = nullptr)
         : SwIODevice(parent)
     {
@@ -100,6 +128,11 @@ public:
         m_pollTimer->start(5);
     }
 
+    /**
+     * @brief Destroys the `SwUdpSocket` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~SwUdpSocket() override {
         close();
         if (m_pollTimer) {
@@ -110,15 +143,52 @@ public:
 #endif
     }
 
+    /**
+     * @brief Returns the current state.
+     * @return The current state.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SocketState state() const { return m_state; }
+    /**
+     * @brief Returns the current error.
+     * @return The current error.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SocketError error() const { return m_error; }
+    /**
+     * @brief Returns the current error String.
+     * @return The current error String.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString errorString() const { return m_errorString; }
+    /**
+     * @brief Returns the current system Error.
+     * @return The current system Error.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int systemError() const { return m_lastSystemError; }
 
+    /**
+     * @brief Performs the `bind` operation.
+     * @param port Local port used by the operation.
+     * @param mode Mode value that controls the operation.
+     * @return `true` on success; otherwise `false`.
+     */
     bool bind(uint16_t port, BindMode mode = DefaultForPlatform) {
         return bind(SwString(), port, mode);
     }
 
+    /**
+     * @brief Performs the `bind` operation.
+     * @param localAddress Value passed to the method.
+     * @param port Local port used by the operation.
+     * @param mode Mode value that controls the operation.
+     * @return `true` on success; otherwise `false`.
+     */
     bool bind(const SwString& localAddress, uint16_t port, BindMode mode = DefaultForPlatform) {
         ensureSocket();
         if (!isSocketValid()) {
@@ -147,6 +217,12 @@ public:
         return true;
     }
 
+    /**
+     * @brief Performs the `connectToHost` operation.
+     * @param host Value passed to the method.
+     * @param port Local port used by the operation.
+     * @return `true` on success; otherwise `false`.
+     */
     bool connectToHost(const SwString& host, uint16_t port) {
         ensureSocket();
         if (!isSocketValid()) {
@@ -172,6 +248,9 @@ public:
         return true;
     }
 
+    /**
+     * @brief Performs the `disconnectFromHost` operation.
+     */
     void disconnectFromHost() {
         m_remoteSet = false;
         m_remoteAddress.clear();
@@ -181,8 +260,19 @@ public:
         }
     }
 
+    /**
+     * @brief Performs the `abort` operation.
+     */
     void abort() { close(); }
 
+    /**
+     * @brief Performs the `writeDatagram` operation on the associated resource.
+     * @param data Value passed to the method.
+     * @param size Size value used by the operation.
+     * @param host Value passed to the method.
+     * @param port Local port used by the operation.
+     * @return The requested datagram.
+     */
     int64_t writeDatagram(const char* data, int64_t size, const SwString& host, uint16_t port) {
         if (!data || size <= 0) {
             return -1;
@@ -199,14 +289,30 @@ public:
         return sendDatagram(data, static_cast<size_t>(size), target);
     }
 
+    /**
+     * @brief Performs the `writeDatagram` operation on the associated resource.
+     * @param payload Value passed to the method.
+     * @return The requested datagram.
+     */
     int64_t writeDatagram(const SwByteArray& payload) {
         return writeDatagram(payload.constData(), static_cast<int64_t>(payload.size()));
     }
 
+    /**
+     * @brief Performs the `writeDatagram` operation on the associated resource.
+     * @param payload Value passed to the method.
+     * @return The requested datagram.
+     */
     int64_t writeDatagram(const SwString& payload) {
         return writeDatagram(payload.data(), static_cast<int64_t>(payload.size()));
     }
 
+    /**
+     * @brief Performs the `writeDatagram` operation on the associated resource.
+     * @param data Value passed to the method.
+     * @param size Size value used by the operation.
+     * @return The requested datagram.
+     */
     int64_t writeDatagram(const char* data, int64_t size) {
         if (!m_remoteSet) {
             setSocketError(SocketError::OperationError, SwString("No remote host set"));
@@ -215,40 +321,59 @@ public:
         return sendDatagram(data, static_cast<size_t>(size), m_remoteAddr);
     }
 
+    /**
+     * @brief Performs the `write` operation on the associated resource.
+     * @param data Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool write(const SwString& data) override {
         return writeDatagram(data) >= 0;
     }
 
+    /**
+     * @brief Performs the `read` operation on the associated resource.
+     * @param maxSize Value passed to the method.
+     * @return The resulting read.
+     */
     SwString read(int64_t maxSize = 0) override {
         if (!hasPendingDatagrams()) {
             return SwString();
         }
         const int sizeHint = pendingDatagramSize();
-        std::string buffer(static_cast<size_t>((maxSize > 0) ? maxSize : sizeHint), '\0');
-        char* raw = buffer.empty() ? nullptr : &buffer[0];
+        SwByteArray buffer;
+        buffer.resize(static_cast<size_t>((maxSize > 0) ? maxSize : sizeHint));
+        char* raw = buffer.isEmpty() ? nullptr : buffer.data();
         const int64_t bytes = readDatagram(raw, static_cast<int64_t>(buffer.size()));
         if (bytes <= 0) {
             return SwString();
         }
         buffer.resize(static_cast<size_t>(bytes));
-        return SwString(buffer);
+        return SwString(buffer.constData());
     }
 
+    /**
+     * @brief Performs the `readDatagram` operation on the associated resource.
+     * @param data Value passed to the method.
+     * @param maxSize Value passed to the method.
+     * @param sender Value passed to the method.
+     * @param senderPort Value passed to the method.
+     * @return The resulting datagram.
+     */
     int64_t readDatagram(char* data, int64_t maxSize, SwString* sender = nullptr, uint16_t* senderPort = nullptr) {
-        std::lock_guard<std::mutex> lock(m_queueMutex);
-        if (m_pending.empty()) {
+        SwMutexLocker lock(m_queueMutex);
+        if (m_pending.isEmpty()) {
             return -1;
         }
 
-        auto packet = std::move(m_pending.front());
-        m_pending.pop_front();
+        auto packet = std::move(m_pending.firstRef());
+        m_pending.removeAt(0);
 
         SwString sourceAddress;
         uint16_t sourcePort = 0;
-        if (!m_senderQueue.empty()) {
-            sourceAddress = m_senderQueue.front().first;
-            sourcePort = m_senderQueue.front().second;
-            m_senderQueue.pop_front();
+        if (!m_senderQueue.isEmpty()) {
+            sourceAddress = m_senderQueue.firstRef().first;
+            sourcePort = m_senderQueue.firstRef().second;
+            m_senderQueue.removeAt(0);
         }
         if (sender) {
             *sender = sourceAddress;
@@ -266,43 +391,91 @@ public:
         return static_cast<int64_t>(bytesToCopy);
     }
 
+    /**
+     * @brief Performs the `receiveDatagram` operation.
+     * @param sender Value passed to the method.
+     * @param senderPort Value passed to the method.
+     * @return The requested receive Datagram.
+     */
     SwByteArray receiveDatagram(SwString* sender = nullptr, uint16_t* senderPort = nullptr) {
-        std::lock_guard<std::mutex> lock(m_queueMutex);
-        if (m_pending.empty()) {
+        SwMutexLocker lock(m_queueMutex);
+        if (m_pending.isEmpty()) {
             return SwByteArray();
         }
 
-        auto packet = std::move(m_pending.front());
-        m_pending.pop_front();
+        auto packet = std::move(m_pending.firstRef());
+        m_pending.removeAt(0);
 
-        if (sender && !m_senderQueue.empty()) {
-            *sender = m_senderQueue.front().first;
+        if (sender && !m_senderQueue.isEmpty()) {
+            *sender = m_senderQueue.firstRef().first;
         }
-        if (senderPort && !m_senderQueue.empty()) {
-            *senderPort = m_senderQueue.front().second;
+        if (senderPort && !m_senderQueue.isEmpty()) {
+            *senderPort = m_senderQueue.firstRef().second;
         }
-        if (!m_senderQueue.empty()) {
-            m_senderQueue.pop_front();
+        if (!m_senderQueue.isEmpty()) {
+            m_senderQueue.removeAt(0);
         }
 
-        return SwByteArray(packet.data(), static_cast<int>(packet.size()));
+        return packet;
     }
 
+    /**
+     * @brief Returns whether the object reports pending Datagrams.
+     * @return `true` when the object reports pending Datagrams; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool hasPendingDatagrams() const {
-        std::lock_guard<std::mutex> lock(m_queueMutex);
-        return !m_pending.empty();
+        SwMutexLocker lock(m_queueMutex);
+        return !m_pending.isEmpty();
     }
 
+    /**
+     * @brief Returns the current pending Datagram Size.
+     * @return The current pending Datagram Size.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int pendingDatagramSize() const {
-        std::lock_guard<std::mutex> lock(m_queueMutex);
-        return m_pending.empty() ? 0 : static_cast<int>(m_pending.front().size());
+        SwMutexLocker lock(m_queueMutex);
+        return m_pending.isEmpty() ? 0 : static_cast<int>(m_pending.firstRef().size());
     }
 
+    /**
+     * @brief Returns the current local Address.
+     * @return The current local Address.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString localAddress() const { return m_boundAddress; }
+    /**
+     * @brief Returns the current local Port.
+     * @return The current local Port.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     uint16_t localPort() const { return m_boundPort; }
+    /**
+     * @brief Returns the current peer Address.
+     * @return The current peer Address.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString peerAddress() const { return m_remoteAddress; }
+    /**
+     * @brief Returns the current peer Port.
+     * @return The current peer Port.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     uint16_t peerPort() const { return m_remotePort; }
 
+    /**
+     * @brief Sets the receive Buffer Size.
+     * @param bytes Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setReceiveBufferSize(int bytes) {
         if (bytes <= 0) {
             return;
@@ -313,6 +486,12 @@ public:
         }
     }
 
+    /**
+     * @brief Sets the max Datagram Size.
+     * @param bytes Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setMaxDatagramSize(size_t bytes) {
         if (bytes == 0) {
             return;
@@ -326,6 +505,12 @@ public:
         }
     }
 
+    /**
+     * @brief Sets the max Pending Datagrams.
+     * @param maxPackets Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setMaxPendingDatagrams(size_t maxPackets) {
         if (maxPackets == 0) {
             return;
@@ -333,6 +518,11 @@ public:
         m_maxPendingDatagrams = maxPackets;
     }
 
+    /**
+     * @brief Closes the underlying resource and stops active work.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     void close() override {
         if (!isSocketValid()) {
             return;
@@ -352,6 +542,12 @@ public:
         m_remotePort = 0;
     }
 
+    /**
+     * @brief Returns whether the object reports open.
+     * @return `true` when the object reports open; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isOpen() const override {
         return isSocketValid();
     }
@@ -471,7 +667,7 @@ private:
             if (selTick <= 20 || (selTick % 200) == 0) {
                 swCDebug(kSwLogCategory_SwUdpSocket) << "[SwUdpSocket] select ready=" << ready
                           << " bound=" << m_boundAddress.toStdString() << ":" << m_boundPort
-                          << (ready < 0 ? " err=" + std::to_string(lastErrorCode()) : "");
+                          << (ready < 0 ? (" err=" + SwString::number(lastErrorCode())).toStdString() : std::string());
             }
             return;
         }
@@ -503,14 +699,14 @@ private:
                 break;
             }
             {
-                std::lock_guard<std::mutex> lock(m_queueMutex);
-                m_pending.emplace_back(m_readBuffer.begin(), m_readBuffer.begin() + bytes);
-                m_senderQueue.emplace_back(senderToString(sender), ntohs(sender.sin_port));
+                SwMutexLocker lock(m_queueMutex);
+                m_pending.append(SwByteArray(m_readBuffer.data(), static_cast<size_t>(bytes)));
+                m_senderQueue.append(SwPair<SwString, uint16_t>(senderToString(sender), ntohs(sender.sin_port)));
                 if (m_pending.size() > m_maxPendingDatagrams) {
-                    size_t droppedBytes = m_pending.front().size();
-                    m_pending.pop_front();
-                    if (!m_senderQueue.empty()) {
-                        m_senderQueue.pop_front();
+                    size_t droppedBytes = m_pending.firstRef().size();
+                    m_pending.removeAt(0);
+                    if (!m_senderQueue.isEmpty()) {
+                        m_senderQueue.removeAt(0);
                     }
                     swCWarning(kSwLogCategory_SwUdpSocket) << "[SwUdpSocket] Dropping oldest datagram (" << droppedBytes
                                 << " bytes) due to queue pressure (limit=" << m_maxPendingDatagrams << ")";
@@ -586,9 +782,9 @@ private:
     sockaddr_in m_boundAddr{};
     bool m_remoteSet{false};
     SwTimer* m_pollTimer{nullptr};
-    mutable std::mutex m_queueMutex;
-    std::deque<std::vector<char>> m_pending;
-    std::deque<std::pair<SwString, uint16_t>> m_senderQueue;
+    mutable SwMutex m_queueMutex;
+    SwList<SwByteArray> m_pending;
+    SwList<SwPair<SwString, uint16_t>> m_senderQueue;
     SwString m_boundAddress;
     uint16_t m_boundPort{0};
     SwString m_remoteAddress;
@@ -602,5 +798,5 @@ private:
     int m_receiveBufferSize{0};
     size_t m_maxDatagramSize{2048};
     size_t m_maxPendingDatagrams{512};
-    std::vector<char> m_readBuffer;
+    SwByteArray m_readBuffer;
 };

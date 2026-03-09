@@ -1,4 +1,28 @@
-#pragma once
+﻿#pragma once
+
+/**
+ * @file src/core/gui/SwTreeView.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwTreeView in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the tree view interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwTreeView.
+ *
+ * View-oriented declarations here mainly describe how underlying state is projected into a visual
+ * or interactive surface, including how refresh, selection, or presentation concerns are exposed
+ * at the API boundary.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -39,11 +63,23 @@ class SwTreeView : public SwWidget {
     SW_OBJECT(SwTreeView, SwWidget)
 
 public:
+    /**
+     * @brief Constructs a `SwTreeView` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwTreeView(SwWidget* parent = nullptr)
         : SwWidget(parent) {
         initDefaults();
     }
 
+    /**
+     * @brief Sets the model.
+     * @param model Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setModel(SwAbstractItemModel* model) {
         if (m_model == model) {
             rebuildVisible();
@@ -116,8 +152,20 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the current model.
+     * @return The current model.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwAbstractItemModel* model() const { return m_model; }
 
+    /**
+     * @brief Sets the selection Model.
+     * @param selectionModel Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setSelectionModel(SwItemSelectionModel* selectionModel) {
         if (m_selectionModel == selectionModel) {
             return;
@@ -133,8 +181,20 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the current selection Model.
+     * @return The current selection Model.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwItemSelectionModel* selectionModel() const { return m_selectionModel; }
 
+    /**
+     * @brief Sets the drag Enabled.
+     * @param on Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setDragEnabled(bool on) {
         if (m_dragEnabled == on) {
             return;
@@ -145,8 +205,20 @@ public:
             update();
         }
     }
+    /**
+     * @brief Returns the current drag Enabled.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool dragEnabled() const { return m_dragEnabled; }
 
+    /**
+     * @brief Sets the accept Drops.
+     * @param on Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setAcceptDrops(bool on) {
         if (m_acceptDrops == on) {
             return;
@@ -158,8 +230,20 @@ public:
             update();
         }
     }
+    /**
+     * @brief Returns the current accept Drops.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool acceptDrops() const { return m_acceptDrops; }
 
+    /**
+     * @brief Sets the drop Indicator Shown.
+     * @param on Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setDropIndicatorShown(bool on) {
         if (m_dropIndicatorShown == on) {
             return;
@@ -171,8 +255,21 @@ public:
             update();
         }
     }
+    /**
+     * @brief Returns the current drop Indicator Shown.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool dropIndicatorShown() const { return m_dropIndicatorShown; }
 
+    /**
+     * @brief Sets the index Widget.
+     * @param index Value passed to the method.
+     * @param widget Widget associated with the operation.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setIndexWidget(const SwModelIndex& index, SwWidget* widget) {
         if (!m_model || !index.isValid() || index.model() != m_model) {
             if (widget) {
@@ -222,6 +319,11 @@ public:
         update();
     }
 
+    /**
+     * @brief Performs the `indexWidget` operation.
+     * @param index Value passed to the method.
+     * @return The requested index Widget.
+     */
     SwWidget* indexWidget(const SwModelIndex& index) const {
         for (size_t i = 0; i < m_indexWidgets.size(); ++i) {
             if (m_indexWidgets[i].index == index) {
@@ -231,6 +333,9 @@ public:
         return nullptr;
     }
 
+    /**
+     * @brief Clears the current object state.
+     */
     void clearIndexWidgets() {
         for (size_t i = 0; i < m_indexWidgets.size(); ++i) {
             delete m_indexWidgets[i].widget;
@@ -240,12 +345,32 @@ public:
         update();
     }
 
+    /**
+     * @brief Sets the icon Size.
+     * @param m_iconSize Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
+    void setIconSize(int px) { m_iconSize = std::max(8, px); update(); }
+    /**
+     * @brief Returns the current icon Size.
+     * @return The current icon Size.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
+    int  iconSize() const { return m_iconSize; }
+
 signals:
+    DECLARE_SIGNAL(clicked, const SwModelIndex&);
     DECLARE_SIGNAL(contextMenuRequested, const SwModelIndex&, int, int);
     DECLARE_SIGNAL(dragStarted, const SwModelIndex&);
     DECLARE_SIGNAL(dragMoved, const SwModelIndex&, int, int);
     DECLARE_SIGNAL(dragDropped, const SwModelIndex&, const SwModelIndex&);
 
+    /**
+     * @brief Performs the `expand` operation.
+     * @param index Value passed to the method.
+     */
     void expand(const SwModelIndex& index) {
         if (!index.isValid()) {
             return;
@@ -253,6 +378,10 @@ signals:
         setExpandedInternal(index, true);
     }
 
+    /**
+     * @brief Performs the `collapse` operation.
+     * @param index Value passed to the method.
+     */
     void collapse(const SwModelIndex& index) {
         if (!index.isValid()) {
             return;
@@ -260,6 +389,13 @@ signals:
         setExpandedInternal(index, false);
     }
 
+    /**
+     * @brief Returns whether the object reports expanded.
+     * @param index Value passed to the method.
+     * @return `true` when the object reports expanded; otherwise `false`.
+     *
+     * @details This query does not modify the object state.
+     */
     bool isExpanded(const SwModelIndex& index) const {
         if (!index.isValid()) {
             return false;
@@ -267,13 +403,50 @@ signals:
         return isExpandedInternal(index);
     }
 
+    /**
+     * @brief Sets the indentation.
+     * @param px Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setIndentation(int px) {
         m_indent = std::max(10, px);
         update();
     }
 
+    /**
+     * @brief Returns the current indentation.
+     * @return The current indentation.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int indentation() const { return m_indent; }
 
+    // Override the fixed left padding before item text/icon (default 0 = use built-in toggle area size).
+    /**
+     * @brief Sets the content Left Pad.
+     * @param px Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
+    void setContentLeftPad(int px) {
+        m_itemContentLeftPad = std::max(0, px);
+        update();
+    }
+    /**
+     * @brief Returns the current content Left Pad.
+     * @return The current content Left Pad.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
+    int contentLeftPad() const { return m_itemContentLeftPad; }
+
+    /**
+     * @brief Sets the row Height.
+     * @param px Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setRowHeight(int px) {
         m_rowHeight = std::max(18, px);
         rebuildVisible();
@@ -281,8 +454,20 @@ signals:
         update();
     }
 
+    /**
+     * @brief Returns the current row Height.
+     * @return The current row Height.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int rowHeight() const { return m_rowHeight; }
 
+    /**
+     * @brief Sets the alternating Row Colors.
+     * @param on Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setAlternatingRowColors(bool on) {
         if (m_alternating == on) {
             return;
@@ -291,8 +476,40 @@ signals:
         update();
     }
 
+    /**
+     * @brief Returns the current alternating Row Colors.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool alternatingRowColors() const { return m_alternating; }
 
+    // If false, hide expand arrows even for items with children
+    /**
+     * @brief Sets the root Is Decorated.
+     * @param show Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
+    void setRootIsDecorated(bool show) {
+        if (m_rootIsDecorated == show) return;
+        m_rootIsDecorated = show;
+        update();
+    }
+    /**
+     * @brief Returns the current root Is Decorated.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
+    bool rootIsDecorated() const { return m_rootIsDecorated; }
+
+    /**
+     * @brief Sets the show Grid.
+     * @param on Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setShowGrid(bool on) {
         if (m_showGrid == on) {
             return;
@@ -304,8 +521,20 @@ signals:
         update();
     }
 
+    /**
+     * @brief Returns the current show Grid.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool showGrid() const { return m_showGrid; }
 
+    /**
+     * @brief Sets the horizontal Scroll Bar Policy.
+     * @param policy Policy value applied by the operation.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setHorizontalScrollBarPolicy(SwScrollBarPolicy policy) {
         if (m_hPolicy == policy) {
             return;
@@ -316,8 +545,20 @@ signals:
         update();
     }
 
+    /**
+     * @brief Returns the current horizontal Scroll Bar Policy.
+     * @return The current horizontal Scroll Bar Policy.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwScrollBarPolicy horizontalScrollBarPolicy() const { return m_hPolicy; }
 
+    /**
+     * @brief Sets the vertical Scroll Bar Policy.
+     * @param policy Policy value applied by the operation.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setVerticalScrollBarPolicy(SwScrollBarPolicy policy) {
         if (m_vPolicy == policy) {
             return;
@@ -328,8 +569,20 @@ signals:
         update();
     }
 
+    /**
+     * @brief Returns the current vertical Scroll Bar Policy.
+     * @return The current vertical Scroll Bar Policy.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwScrollBarPolicy verticalScrollBarPolicy() const { return m_vPolicy; }
 
+    /**
+     * @brief Sets the header Hidden.
+     * @param hidden Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setHeaderHidden(bool hidden) {
         if (m_headerHidden == hidden) {
             return;
@@ -340,8 +593,20 @@ signals:
         update();
     }
 
+    /**
+     * @brief Returns whether the object reports header Hidden.
+     * @return `true` when the object reports header Hidden; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isHeaderHidden() const { return m_headerHidden; }
 
+    /**
+     * @brief Sets the header Height.
+     * @param px Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setHeaderHeight(int px) {
         m_headerHeight = std::max(24, px);
         resetScrollBars();
@@ -349,11 +614,30 @@ signals:
         update();
     }
 
+    /**
+     * @brief Returns the current header Height.
+     * @return The current header Height.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int headerHeight() const { return m_headerHeight; }
 
-    // Qt-like accessor (≈ QTreeView::header()).
+    // Header accessor.
+    /**
+     * @brief Returns the current header.
+     * @return The current header.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwHeaderView* header() const { return m_header; }
 
+    /**
+     * @brief Sets the column Width.
+     * @param column Value passed to the method.
+     * @param px Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setColumnWidth(int column, int px) {
         if (!m_header) {
             return;
@@ -364,8 +648,19 @@ signals:
         update();
     }
 
+    /**
+     * @brief Performs the `columnWidth` operation.
+     * @param column Value passed to the method.
+     * @return The requested column Width.
+     */
     int columnWidth(int column) const { return columnWidthInternal(column); }
 
+    /**
+     * @brief Sets the columns Fit To Width.
+     * @param on Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setColumnsFitToWidth(bool on) {
         if (!m_header) {
             return;
@@ -379,8 +674,19 @@ signals:
         update();
     }
 
+    /**
+     * @brief Performs the `columnsFitToWidth` operation.
+     * @return `true` on success; otherwise `false`.
+     */
     bool columnsFitToWidth() const { return m_header ? m_header->sectionsFitToWidth() : false; }
 
+    /**
+     * @brief Sets the column Stretch.
+     * @param column Value passed to the method.
+     * @param stretch Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setColumnStretch(int column, int stretch) {
         if (!m_header || column < 0) {
             return;
@@ -403,6 +709,11 @@ signals:
         }
     }
 
+    /**
+     * @brief Performs the `columnStretch` operation.
+     * @param column Value passed to the method.
+     * @return The requested column Stretch.
+     */
     int columnStretch(int column) const {
         if (!m_header || column < 0) {
             return 0;
@@ -415,6 +726,12 @@ signals:
         return stretches[idx];
     }
 
+    /**
+     * @brief Sets the column Stretches.
+     * @param stretches Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setColumnStretches(const SwList<int>& stretches) {
         if (!m_header) {
             return;
@@ -427,6 +744,10 @@ signals:
         }
     }
 
+    /**
+     * @brief Performs the `resizeColumnToContents` operation.
+     * @param column Value passed to the method.
+     */
     void resizeColumnToContents(int column) {
         if (!m_model || column < 0 || column >= columnCount()) {
             return;
@@ -454,7 +775,7 @@ signals:
 
             int needed = 0;
             if (SwWidget* w = indexWidget(idx)) {
-                needed = std::max(0, w->getRect().width) + 16;
+                needed = std::max(0, w->frameGeometry().width) + 16;
             } else {
                 SwAny v = m_model->data(idx, SwItemDataRole::DisplayRole);
                 SwString text = v.toString();
@@ -473,6 +794,9 @@ signals:
         setColumnWidth(column, maxW);
     }
 
+    /**
+     * @brief Performs the `resizeColumnsToContents` operation.
+     */
     void resizeColumnsToContents() {
         const int cols = columnCount();
         for (int c = 0; c < cols; ++c) {
@@ -480,7 +804,19 @@ signals:
         }
     }
 
+    /**
+     * @brief Returns the current vertical Scroll Bar.
+     * @return The current vertical Scroll Bar.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwScrollBar* verticalScrollBar() const { return m_vBar; }
+    /**
+     * @brief Returns the current horizontal Scroll Bar.
+     * @return The current horizontal Scroll Bar.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwScrollBar* horizontalScrollBar() const { return m_hBar; }
 
 private:
@@ -489,6 +825,12 @@ private:
     int m_rowResizeStartHeight{0};
 
 protected:
+    /**
+     * @brief Handles the resize Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void resizeEvent(ResizeEvent* event) override {
         SwWidget::resizeEvent(event);
         resetScrollBars();
@@ -496,12 +838,18 @@ protected:
         updateIndexWidgetsGeometry();
     }
 
+    /**
+     * @brief Handles the paint Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void paintEvent(PaintEvent* event) override {
         if (!event || !event->painter() || !isVisibleInHierarchy()) {
             return;
         }
         SwPainter* painter = event->painter();
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
 
         painter->fillRoundedRect(bounds, 12, SwColor{255, 255, 255}, SwColor{220, 224, 232}, 1);
 
@@ -533,15 +881,21 @@ protected:
         updateIndexWidgetsGeometry();
 
         // Paint child widgets (scrollbars) on top.
-        for (SwObject* objChild : getChildren()) {
+        for (SwObject* objChild : children()) {
             auto* child = dynamic_cast<SwWidget*>(objChild);
             if (!child || !child->isVisibleInHierarchy()) {
                 continue;
             }
-            static_cast<SwWidgetInterface*>(child)->paintEvent(event);
+            paintChild_(event, child);
         }
     }
 
+    /**
+     * @brief Handles the mouse Press Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mousePressEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -554,8 +908,10 @@ protected:
         resetDragDropState_(true);
 
         if (SwWidget* childWidget = getChildUnderCursor(event->x(), event->y())) {
-            static_cast<SwWidgetInterface*>(childWidget)->mousePressEvent(event);
-            if (event->isAccepted()) {
+            MouseEvent childEvent = mapMouseEventToChild_(*event, this, childWidget);
+            static_cast<SwWidgetInterface*>(childWidget)->mousePressEvent(&childEvent);
+            if (childEvent.isAccepted()) {
+                event->accept();
                 return;
             }
         }
@@ -565,7 +921,7 @@ protected:
             return;
         }
 
-        const SwRect viewport = contentViewportRect(getRect());
+        const SwRect viewport = contentViewportRect(rect());
         if (!containsPoint(viewport, event->x(), event->y())) {
             SwWidget::mousePressEvent(event);
             return;
@@ -603,24 +959,24 @@ protected:
         const int col = columnAtX(localX);
 
         const SwModelIndex parentIndex = m_model->parent(vr.index);
-        SwModelIndex clicked = (col <= 0) ? vr.index : m_model->index(vr.index.row(), col, parentIndex);
-        if (!clicked.isValid()) {
-            clicked = vr.index;
+        SwModelIndex clickedIdx = (col <= 0) ? vr.index : m_model->index(vr.index.row(), col, parentIndex);
+        if (!clickedIdx.isValid()) {
+            clickedIdx = vr.index;
         }
 
         if (event->button() == SwMouseButton::Right) {
             if (m_selectionModel->isSelected(vr.index)) {
-                m_selectionModel->setCurrentIndex(clicked, false, false);
+                m_selectionModel->setCurrentIndex(clickedIdx, false, false);
             } else {
                 SwList<SwModelIndex> selection;
                 selection.append(vr.index);
                 m_selectionModel->setSelectedIndexes(selection);
-                m_selectionModel->setCurrentIndex(clicked, false, false);
+                m_selectionModel->setCurrentIndex(clickedIdx, false, false);
                 m_selectionModel->setAnchorIndex(vr.index);
             }
             ensureRowVisible(row);
             update();
-            contextMenuRequested(clicked, event->x(), event->y());
+            contextMenuRequested(clickedIdx, event->x(), event->y());
             event->accept();
             return;
         }
@@ -637,7 +993,7 @@ protected:
             const int toggleX0 = toggleStart + togglePad;
             const int toggleX1 = toggleX0 + toggleSize;
 
-            if (vr.hasChildren && localX >= toggleX0 && localX <= toggleX1) {
+            if (vr.hasChildren && (m_rootIsDecorated || vr.depth > 0) && localX >= toggleX0 && localX <= toggleX1) {
                 toggleExpanded(vr.index);
                 event->accept();
                 return;
@@ -679,16 +1035,16 @@ protected:
             }
 
             m_selectionModel->setSelectedIndexes(selection);
-            m_selectionModel->setCurrentIndex(clicked, false, false);
+            m_selectionModel->setCurrentIndex(clickedIdx, false, false);
         } else if (ctrl) {
             m_selectionModel->toggle(vr.index);
-            m_selectionModel->setCurrentIndex(clicked, false, false);
+            m_selectionModel->setCurrentIndex(clickedIdx, false, false);
             m_selectionModel->setAnchorIndex(vr.index);
         } else {
             SwList<SwModelIndex> selection;
             selection.append(vr.index);
             m_selectionModel->setSelectedIndexes(selection);
-            m_selectionModel->setCurrentIndex(clicked, false, false);
+            m_selectionModel->setCurrentIndex(clickedIdx, false, false);
             m_selectionModel->setAnchorIndex(vr.index);
         }
         ensureRowVisible(row);
@@ -700,10 +1056,17 @@ protected:
         m_dragIndex = SwModelIndex();
         m_dropIndex = SwModelIndex();
         m_dropVisibleRow = -1;
+        emit clicked(clickedIdx);
         event->accept();
         update();
     }
 
+    /**
+     * @brief Handles the mouse Move Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseMoveEvent(MouseEvent* event) override {
         SwWidget::mouseMoveEvent(event);
         if (!event) {
@@ -727,7 +1090,7 @@ protected:
 
         if (!m_dragEnabled || !m_pressed) {
             if (m_header && !m_headerHidden && m_header->isVisibleInHierarchy() &&
-                containsPoint(m_header->getRect(), event->x(), event->y())) {
+                containsPoint(m_header->geometry(), event->x(), event->y())) {
                 setToolTips(SwString());
                 return;
             }
@@ -736,7 +1099,7 @@ protected:
                 const int row = visibleRowAt_(event->x(), event->y());
                 SwModelIndex hover;
                 if (row >= 0 && row < static_cast<int>(m_visible.size())) {
-                    const SwRect viewport = contentViewportRect(getRect());
+                    const SwRect viewport = contentViewportRect(rect());
                     const int offsetX = m_hBar ? m_hBar->value() : 0;
                     const int localX = event->x() - viewport.x + offsetX;
                     const int col = columnAtX(localX);
@@ -753,10 +1116,14 @@ protected:
                     m_hoverIndex = hover;
                     SwString tip = hover.isValid() ? m_model->data(hover, SwItemDataRole::ToolTipRole).toString() : SwString();
                     setToolTips(tip);
+                    update();
                 }
             } else {
-                m_hoverIndex = SwModelIndex();
-                setToolTips(SwString());
+                if (m_hoverIndex.isValid()) {
+                    m_hoverIndex = SwModelIndex();
+                    setToolTips(SwString());
+                    update();
+                }
             }
 
             if (hitRowResizeHandle_(event->x(), event->y())) {
@@ -813,6 +1180,12 @@ protected:
         }
     }
 
+    /**
+     * @brief Handles the mouse Release Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseReleaseEvent(MouseEvent* event) override {
         SwWidget::mouseReleaseEvent(event);
         if (!event) {
@@ -847,6 +1220,12 @@ protected:
         }
     }
 
+    /**
+     * @brief Handles the wheel Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void wheelEvent(WheelEvent* event) override {
         if (!event) {
             return;
@@ -867,6 +1246,7 @@ protected:
 
         const int stepY = std::max(1, std::max(m_rowHeight, (m_vBar ? (m_vBar->pageStep() / 10) : 0)));
         const int stepX = std::max(1, std::max(24, (m_hBar ? (m_hBar->pageStep() / 10) : 0)));
+        const bool horizontalRequest = event->isShiftPressed();
 
         auto scrollBy = [&](SwScrollBar* bar, int stepPx) -> bool {
             if (!bar || stepPx <= 0) {
@@ -878,11 +1258,9 @@ protected:
         };
 
         bool scrolled = false;
-        if (event->isShiftPressed()) {
+        if (horizontalRequest) {
             if (m_hBar && m_hBar->getVisible()) {
                 scrolled = scrollBy(m_hBar, stepX);
-            } else if (m_vBar && m_vBar->getVisible()) {
-                scrolled = scrollBy(m_vBar, stepY);
             }
         } else {
             if (m_vBar && m_vBar->getVisible()) {
@@ -900,6 +1278,12 @@ protected:
         SwWidget::wheelEvent(event);
     }
 
+    /**
+     * @brief Handles the key Press Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void keyPressEvent(KeyEvent* event) override {
         if (!event) {
             return;
@@ -1107,11 +1491,11 @@ private:
         if (!m_header) {
             return;
         }
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
         const SwRect viewport = contentViewportRect(bounds);
         const int headerH = m_headerHidden ? 0 : std::min(m_headerHeight, viewport.height);
 
-        m_header->move(viewport.x, viewport.y);
+        m_header->move(viewport.x - bounds.x, viewport.y - bounds.y);
         m_header->resize(viewport.width, headerH);
         m_header->setViewportLength(std::max(0, viewport.width));
         m_header->setOffset(m_hBar ? m_hBar->value() : 0);
@@ -1129,7 +1513,7 @@ private:
         if (m_rowHeight <= 0) {
             return false;
         }
-        const SwRect viewport = contentViewportRect(getRect());
+        const SwRect viewport = contentViewportRect(rect());
         if (!containsPoint(viewport, px, py)) {
             return false;
         }
@@ -1159,7 +1543,7 @@ private:
         if (!m_model) {
             return -1;
         }
-        const SwRect viewport = contentViewportRect(getRect());
+        const SwRect viewport = contentViewportRect(rect());
         if (!containsPoint(viewport, px, py)) {
             return -1;
         }
@@ -1272,7 +1656,7 @@ private:
     }
 
     void updateLayout() {
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
         SwRect viewport = viewportRect(bounds);
         const int thickness = m_scrollBarThickness;
 
@@ -1300,7 +1684,7 @@ private:
 
         if (showH) {
             m_hBar->show();
-            m_hBar->move(viewport.x, viewport.y + viewportH);
+            m_hBar->move(viewport.x - bounds.x, viewport.y + viewportH - bounds.y);
             m_hBar->resize(viewportW, thickness);
         } else {
             m_hBar->hide();
@@ -1309,7 +1693,7 @@ private:
 
         if (showV) {
             m_vBar->show();
-            m_vBar->move(viewport.x + viewportW, viewport.y);
+            m_vBar->move(viewport.x + viewportW - bounds.x, viewport.y - bounds.y);
             m_vBar->resize(thickness, viewportH);
         } else {
             m_vBar->hide();
@@ -1320,21 +1704,21 @@ private:
     void resetScrollBars() {
         updateLayout();
         if (m_header) {
-            const SwRect bounds = getRect();
+            const SwRect bounds = rect();
             const SwRect viewport = contentViewportRect(bounds);
             m_header->setViewportLength(std::max(0, viewport.width));
             m_header->setOffset(m_hBar ? m_hBar->value() : 0);
         }
         if (m_header && m_header->sectionsFitToWidth()) {
             updateLayout();
-            const SwRect bounds = getRect();
+            const SwRect bounds = rect();
             const SwRect viewport = contentViewportRect(bounds);
             m_header->setViewportLength(std::max(0, viewport.width));
         }
 
         updateHeaderGeometry_();
 
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
         SwRect viewport = viewportRect(bounds);
         const int thickness = m_scrollBarThickness;
 
@@ -1476,11 +1860,12 @@ private:
 
         int y = dataArea.y - yWithin;
 
-        const SwColor altFill{248, 250, 252};
-        const SwColor selFill{219, 234, 254};
-        const SwColor selBorder{147, 197, 253};
-        const SwColor textColor{30, 41, 59};
-        const SwColor toggleStroke{100, 116, 139};
+        const SwColor altFill{249, 249, 249};
+        const SwColor selFill{204, 228, 247};
+        const SwColor selBorder{0, 103, 192};
+        const SwColor hoverFill{229, 229, 229};
+        const SwColor textColor{32, 32, 32};
+        const SwColor toggleStroke{96, 96, 96};
         const SwColor gridColor{226, 232, 240};
         const SwFont font(L"Segoe UI", 9, Normal);
 
@@ -1492,15 +1877,45 @@ private:
                 painter->fillRect(rowRect, altFill, altFill, 0);
             }
 
+            // Separator / section-header rows: special rendering
+            if (vr.index.isValid()) {
+                SwAny sepTip = m_model->data(vr.index, SwItemDataRole::ToolTipRole);
+                const SwString tipStr = sepTip.toString();
+                if (tipStr == "__separator__") {
+                    const int lineY = y + m_rowHeight / 2;
+                    painter->drawLine(dataArea.x + 8, lineY, dataArea.x + dataArea.width - 8, lineY,
+                                      gridColor, 1);
+                    y += m_rowHeight;
+                    continue;
+                }
+                if (tipStr == "__section__") {
+                    SwAny v = m_model->data(vr.index, SwItemDataRole::DisplayRole);
+                    SwRect sectionRect{dataArea.x + 10, y, std::max(0, dataArea.width - 10), m_rowHeight};
+                    painter->drawText(sectionRect,
+                                      v.toString(),
+                                      DrawTextFormats(DrawTextFormat::Left | DrawTextFormat::VCenter | DrawTextFormat::SingleLine),
+                                      SwColor{128, 128, 128},
+                                      SwFont(L"Segoe UI", 8, Normal));
+                    y += m_rowHeight;
+                    continue;
+                }
+            }
+
             const bool selected = m_selectionModel && vr.index.isValid() && m_selectionModel->isSelected(vr.index);
+            const bool hovered = !selected && m_hoverIndex.isValid() && m_hoverIndex == vr.index;
             if (selected) {
                 SwRect highlight{rowRect.x + 2, rowRect.y + 2, std::max(0, rowRect.width - 4), std::max(0, rowRect.height - 4)};
-                painter->fillRoundedRect(highlight, 8, selFill, selBorder, 1);
+                painter->fillRoundedRect(highlight, 6, selFill, selBorder, 1);
+            } else if (hovered) {
+                SwRect hi{rowRect.x + 2, rowRect.y + 2, std::max(0, rowRect.width - 4), std::max(0, rowRect.height - 4)};
+                painter->fillRoundedRect(hi, 6, hoverFill, hoverFill, 0);
             }
 
             const int indentX = vr.depth * m_indent;
             const int toggleSize = 12;
             const int togglePad = 8;
+            // If a custom left pad is set, use it instead of the standard toggle area width
+            const int itemBasePad = (m_itemContentLeftPad > 0) ? m_itemContentLeftPad : (togglePad + toggleSize + 8);
             const int toggleX = dataArea.x + indentX + togglePad - offsetX;
             const int toggleY = y + (m_rowHeight - toggleSize) / 2;
 
@@ -1520,7 +1935,7 @@ private:
 
                 if (!hasWidget) {
                     if (c == 0) {
-                        if (vr.hasChildren) {
+                        if (vr.hasChildren && (m_rootIsDecorated || vr.depth > 0)) {
                             const bool expanded = isExpandedInternal(vr.index);
                             if (expanded) {
                                 painter->drawLine(toggleX + 2, toggleY + 4, toggleX + toggleSize - 2, toggleY + 4, toggleStroke, 2);
@@ -1536,7 +1951,20 @@ private:
                         SwAny v = m_model->data(vr.index, SwItemDataRole::DisplayRole);
                         SwString text = v.toString();
 
-                        const int textX = cell.x + indentX + togglePad + toggleSize + 8;
+                        int iconShift = 0;
+                        SwAny decoData = m_model->data(vr.index, SwItemDataRole::DecorationRole);
+                        if (decoData.canConvert<SwImage>()) {
+                            const SwImage& ico = decoData.get<SwImage>();
+                            if (!ico.isNull()) {
+                                const int iSz = m_iconSize;
+                                const int ix = cell.x + indentX + itemBasePad;
+                                const int iy = y + (m_rowHeight - iSz) / 2;
+                                painter->drawImage(SwRect{ix, iy, iSz, iSz}, ico, nullptr);
+                                iconShift = iSz + 4;
+                            }
+                        }
+
+                        const int textX = cell.x + indentX + itemBasePad + iconShift;
                         SwRect textRect{textX, y, std::max(0, cell.width - (textX - cell.x) - 10), m_rowHeight};
                         painter->drawText(textRect,
                                           text,
@@ -1570,7 +1998,7 @@ private:
         if (!m_vBar) {
             return;
         }
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
         const SwRect viewport = contentViewportRect(bounds);
         const int thickness = m_scrollBarThickness;
         const bool showH = m_hBar && m_hBar->getVisible();
@@ -1598,7 +2026,7 @@ private:
             return;
         }
 
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
         const SwRect viewport = contentViewportRect(bounds);
         if (viewport.width <= 0 || viewport.height <= 0) {
             return;
@@ -1675,7 +2103,7 @@ private:
 
             const int maxW = insetW;
             const int maxH = std::max(0, cell.height - padY * 2);
-            const SwRect hint = m_indexWidgets[i].hint;
+            const SwSize hint = m_indexWidgets[i].hint;
             int newW = std::max(0, maxW);
             int newH = hint.height > 0 ? std::min(hint.height, maxH) : maxH;
             if (newH < 0) newH = 0;
@@ -1740,7 +2168,7 @@ private:
     struct IndexWidgetEntry {
         SwModelIndex index;
         SwWidget* widget{nullptr};
-        SwRect hint;
+        SwSize hint;
     };
 
     void resetDragDropState_(bool endVisual) {
@@ -1763,6 +2191,9 @@ private:
 
     int m_rowHeight{28};
     int m_indent{22};
+    int m_iconSize{16};
+    int m_itemContentLeftPad{0};
+    bool m_rootIsDecorated{true};
     bool m_alternating{true};
     bool m_showGrid{true};
     SwScrollBarPolicy m_hPolicy{SwScrollBarPolicy::ScrollBarAsNeeded};
@@ -1788,3 +2219,4 @@ private:
     SwList<int> m_expanded;
     SwList<IndexWidgetEntry> m_indexWidgets;
 };
+

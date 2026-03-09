@@ -1,4 +1,4 @@
-#include "WaChatWallpaper.h"
+﻿#include "WaChatWallpaper.h"
 
 #include "SwPainter.h"
 
@@ -17,7 +17,7 @@ void WaChatWallpaper::paintEvent(PaintEvent* event) {
         return;
     }
 
-    const SwRect rect = getRect();
+    const SwRect rect = this->rect();
     painter->pushClipRect(rect);
     const SwColor bg{239, 234, 226};
     painter->fillRect(rect, bg, bg, 0);
@@ -37,15 +37,16 @@ void WaChatWallpaper::paintEvent(PaintEvent* event) {
 
     // Paint children on top of the wallpaper.
     const SwRect& paintRect = event->paintRect();
-    for (SwObject* objChild : getChildren()) {
+    for (SwObject* objChild : children()) {
         auto* child = dynamic_cast<SwWidget*>(objChild);
         if (!child) {
             continue;
         }
-        const SwRect childRect = child->getRect();
+        const SwRect childRect = child->geometry();
         if (child->isVisibleInHierarchy() && rectsIntersect(paintRect, childRect)) {
-            static_cast<SwWidgetInterface*>(child)->paintEvent(event);
+            paintChild_(event, child);
         }
     }
     painter->popClipRect();
 }
+

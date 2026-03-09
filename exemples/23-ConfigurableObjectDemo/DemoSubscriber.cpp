@@ -83,8 +83,8 @@ static void printTargetRegistry(const SwString& sysName, const SwString& objectF
 
     for (size_t i = 0; i < all.size(); ++i) {
         const SwJsonValue v = all[i];
-        if (!v.isObject() || !v.toObject()) continue;
-        const SwJsonObject o(*v.toObject());
+        if (!v.isObject()) continue;
+        const SwJsonObject o(v.toObject());
 
         if (SwString(o["domain"].toString()) != sysName) continue;
         if (SwString(o["object"].toString()) != objectFqn) continue;

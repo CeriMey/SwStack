@@ -8,6 +8,14 @@
 #include <memory>
 #include <string>
 
+struct RtspDumpFileCloser {
+    void operator()(FILE* file) const {
+        if (file) {
+            std::fclose(file);
+        }
+    }
+};
+
 int main(int argc, char** argv) {
     SwCoreApplication app(argc, argv);
 
@@ -33,8 +41,15 @@ int main(int argc, char** argv) {
     std::cout << "[RtspUdpClient] Connecting to " << url << std::endl;
     std::cout << "[RtspUdpClient] Writing raw H264 to " << dumpPath << std::endl;
 
-    FILE* raw = std::fopen(dumpPath.c_str(), "wb");
-    auto outFile = std::unique_ptr<FILE, decltype(&std::fclose)>(raw, &std::fclose);
+    FILE* raw = nullptr;
+#if defined(_WIN32)
+    if (fopen_s(&raw, dumpPath.c_str(), "wb") != 0) {
+        raw = nullptr;
+    }
+#else
+    raw = std::fopen(dumpPath.c_str(), "wb");
+#endif
+    std::unique_ptr<FILE, RtspDumpFileCloser> outFile(raw);
     if (!raw) {
         std::cerr << "[RtspUdpClient] Warning: failed to open output file, dump disabled." << std::endl;
     }

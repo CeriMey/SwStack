@@ -1,4 +1,4 @@
-#include "WhatsAppWidget.h"
+﻿#include "WhatsAppWidget.h"
 
 #include "SwButton.h"
 #include "SwFrame.h"
@@ -296,16 +296,16 @@ void WhatsAppWidget::mousePressEvent(MouseEvent* event) {
         };
 
         if (isEmojiPopupVisible_()) {
-            const bool insidePopup = m_emojiPopup ? contains(m_emojiPopup->getRect(), event->x(), event->y()) : false;
-            const bool insideEmojiBtn = m_emoji ? contains(m_emoji->getRect(), event->x(), event->y()) : false;
+            const bool insidePopup = m_emojiPopup ? contains(m_emojiPopup->geometry(), event->x(), event->y()) : false;
+            const bool insideEmojiBtn = m_emoji ? contains(m_emoji->geometry(), event->x(), event->y()) : false;
             if (!insidePopup && !insideEmojiBtn) {
                 setEmojiPopupVisible_(false);
             }
         }
 
         if (isAttachPopupVisible_()) {
-            const bool insidePopup = m_attachPopup ? contains(m_attachPopup->getRect(), event->x(), event->y()) : false;
-            const bool insidePlusBtn = m_plus ? contains(m_plus->getRect(), event->x(), event->y()) : false;
+            const bool insidePopup = m_attachPopup ? contains(m_attachPopup->geometry(), event->x(), event->y()) : false;
+            const bool insidePlusBtn = m_plus ? contains(m_plus->geometry(), event->x(), event->y()) : false;
             if (!insidePopup && !insidePlusBtn) {
                 setAttachPopupVisible_(false);
             }
@@ -358,7 +358,7 @@ void WhatsAppWidget::buildUi_() {
     m_navChats->setBadgeCount(6);
 
     m_navCalls = new WaIconButton(WaIconButton::Kind::Phone, m_nav);
-    m_navStatus = new WaIconButton(WaIconButton::Kind::Status, m_nav);
+    m_navStatus = new WaIconButton(WaIconButton::Kind::StatusTab, m_nav);
 
     m_navProfile = new WaAvatarCircle("M", SwColor{82, 196, 26}, m_nav);
     m_navSettings = new WaIconButton(WaIconButton::Kind::Settings, m_nav);
@@ -377,7 +377,7 @@ void WhatsAppWidget::buildUi_() {
     SwObject::connect(m_newChat, &WaIconButton::clicked, [this]() { openNewChat_(); });
     SwObject::connect(m_menu, &WaIconButton::clicked, [this]() { logout_(); });
 
-    m_search = new SwLineEdit("Rechercher ou démarrer une discussion", m_leftTop);
+    m_search = new SwLineEdit("Rechercher ou dÃ©marrer une discussion", m_leftTop);
     m_search->setStyleSheet(R"(
         SwLineEdit {
             background-color: rgb(255, 255, 255);
@@ -552,9 +552,9 @@ void WhatsAppWidget::buildUi_() {
         if (action == "media") {
             const SwString file = SwFileDialog::getOpenFileName(
                 this,
-                "Choisir un média",
+                "Choisir un mÃ©dia",
                 SwString(),
-                "Images (*.png *.jpg *.jpeg *.bmp);;Vidéos (*.mp4 *.mov *.avi *.mkv);;Tous (*.*)");
+                "Images (*.png *.jpg *.jpeg *.bmp);;VidÃ©os (*.mp4 *.mov *.avi *.mkv);;Tous (*.*)");
 
             if (!file.isEmpty()) {
                 SwFileInfo info(file.toStdString());
@@ -783,7 +783,7 @@ void WhatsAppWidget::buildThread_() {
             } else if (status == "read") {
                 msg.status = SwChatMessageStatus::Read;
             } else {
-                msg.status = SwChatMessageStatus::None;
+                msg.status = SwChatMessageStatus::Unset;
             }
         }
 
@@ -807,9 +807,10 @@ void WhatsAppWidget::updateEmojiPopupLayout_() {
         return;
     }
 
-    const SwRect rightR = m_right->getRect();
-    const SwRect inputR = m_input->getRect();
-    const SwRect chatR = m_chatBg ? m_chatBg->getRect() : rightR;
+    const SwRect r = rect();
+    const SwRect rightR = m_right->geometry();
+    const SwRect inputR = m_input->geometry();
+    const SwRect chatR = m_chatBg ? m_chatBg->geometry() : rightR;
 
     const int pad = 10;
     const int gap = 10;
@@ -823,8 +824,8 @@ void WhatsAppWidget::updateEmojiPopupLayout_() {
         popupW = availW;
     }
 
-    const int minY = chatR.y + gap;
-    const int maxH = inputR.y - gap - minY;
+    const int minY = (chatR.y - r.y) + gap;
+    const int maxH = (inputR.y - r.y) - gap - minY;
     if (maxH <= 0 || popupW <= 0) {
         setEmojiPopupVisible_(false);
         return;
@@ -838,16 +839,16 @@ void WhatsAppWidget::updateEmojiPopupLayout_() {
         return;
     }
 
-    int x = inputR.x + pad;
-    const int minX = rightR.x + gap;
-    const int maxX = rightR.x + rightR.width - gap - popupW;
+    int x = (inputR.x - r.x) + pad;
+    const int minX = (rightR.x - r.x) + gap;
+    const int maxX = (rightR.x - r.x) + rightR.width - gap - popupW;
     if (maxX >= minX) {
         x = clampInt_(x, minX, maxX);
     } else {
         x = minX;
     }
 
-    int y = inputR.y - gap - popupH;
+    int y = (inputR.y - r.y) - gap - popupH;
     if (y < minY) {
         y = minY;
     }
@@ -894,10 +895,11 @@ void WhatsAppWidget::updateAttachPopupLayout_() {
         return;
     }
 
-    const SwRect rightR = m_right->getRect();
-    const SwRect inputR = m_input->getRect();
-    const SwRect chatR = m_chatBg ? m_chatBg->getRect() : rightR;
-    const SwRect plusR = m_plus->getRect();
+    const SwRect r = rect();
+    const SwRect rightR = m_right->geometry();
+    const SwRect inputR = m_input->geometry();
+    const SwRect chatR = m_chatBg ? m_chatBg->geometry() : rightR;
+    const SwRect plusR = m_plus->geometry();
 
     const int pad = 10;
     const int gap = 10;
@@ -911,8 +913,8 @@ void WhatsAppWidget::updateAttachPopupLayout_() {
         popupW = availW;
     }
 
-    const int minY = chatR.y + gap;
-    const int maxH = inputR.y - gap - minY;
+    const int minY = (chatR.y - r.y) + gap;
+    const int maxH = (inputR.y - r.y) - gap - minY;
     if (maxH <= 0 || popupW <= 0) {
         setAttachPopupVisible_(false);
         return;
@@ -923,16 +925,16 @@ void WhatsAppWidget::updateAttachPopupLayout_() {
         return;
     }
 
-    int x = plusR.x;
-    const int minX = rightR.x + gap;
-    const int maxX = rightR.x + rightR.width - gap - popupW;
+    int x = plusR.x - r.x;
+    const int minX = (rightR.x - r.x) + gap;
+    const int maxX = (rightR.x - r.x) + rightR.width - gap - popupW;
     if (maxX >= minX) {
         x = clampInt_(x, minX, maxX);
     } else {
         x = minX;
     }
 
-    int y = inputR.y - gap - popupH;
+    int y = (inputR.y - r.y) - gap - popupH;
     if (y < minY) {
         y = minY;
     }
@@ -1242,13 +1244,10 @@ int WhatsAppWidget::rowForConversationId_(const SwString& conversationId) const 
     return -1;
 }
 
-void WhatsAppWidget::updateLayout_() {
-    const SwRect r = getRect();
-    const int w = r.width;
-    const int h = r.height;
-
-    const int baseX = r.x;
-    const int baseY = r.y;
+ void WhatsAppWidget::updateLayout_() {
+     const SwRect r = rect();
+     const int w = r.width;
+     const int h = r.height;
 
     const int navW = 64;
     const int sepW = 1;
@@ -1262,70 +1261,64 @@ void WhatsAppWidget::updateLayout_() {
     }
     leftW = clampInt_(leftW, minLeftW, maxLeftW);
 
-    const int leftX = baseX + navW + sepW;
-    const int rightX = baseX + navW + sepW + leftW + sepW;
-    const int rightW = w - (rightX - baseX);
+    const int leftX = navW + sepW;
+    const int rightX = navW + sepW + leftW + sepW;
+    const int rightW = w - rightX;
 
     // Root panes.
     if (m_nav) {
-        m_nav->move(baseX, baseY);
         m_nav->resize(navW, h);
     }
     if (m_sepNav) {
-        m_sepNav->move(baseX + navW, baseY);
+        m_sepNav->move(navW, 0);
         m_sepNav->resize(sepW, h);
     }
     if (m_left) {
-        m_left->move(leftX, baseY);
+        m_left->move(leftX, 0);
         m_left->resize(leftW, h);
     }
     if (m_sepMid) {
-        m_sepMid->move(leftX + leftW, baseY);
+        m_sepMid->move(leftX + leftW, 0);
         m_sepMid->resize(sepW, h);
     }
     if (m_right) {
-        m_right->move(rightX, baseY);
+        m_right->move(rightX, 0);
         m_right->resize(rightW, h);
     }
 
     // Nav rail.
     if (m_nav) {
-        const SwRect navR = m_nav->getRect();
-        if (m_navChats) { m_navChats->move(navR.x + 12, navR.y + 12); m_navChats->resize(40, 40); }
-        if (m_navCalls) { m_navCalls->move(navR.x + 12, navR.y + 60); m_navCalls->resize(40, 40); }
-        if (m_navStatus) { m_navStatus->move(navR.x + 12, navR.y + 108); m_navStatus->resize(40, 40); }
-        if (m_navProfile) { m_navProfile->move(navR.x + 12, navR.y + h - 100); m_navProfile->resize(40, 40); }
-        if (m_navSettings) { m_navSettings->move(navR.x + 12, navR.y + h - 52); m_navSettings->resize(40, 40); }
+        if (m_navChats) { m_navChats->move(12, 12); m_navChats->resize(40, 40); }
+        if (m_navCalls) { m_navCalls->move(12, 60); m_navCalls->resize(40, 40); }
+        if (m_navStatus) { m_navStatus->move(12, 108); m_navStatus->resize(40, 40); }
+        if (m_navProfile) { m_navProfile->move(12, h - 100); m_navProfile->resize(40, 40); }
+        if (m_navSettings) { m_navSettings->move(12, h - 52); m_navSettings->resize(40, 40); }
     }
 
     // Left: top area + conversation list.
     const int leftTopH = 152;
     if (m_leftTop && m_left) {
-        const SwRect leftR = m_left->getRect();
-        m_leftTop->move(leftR.x, leftR.y);
         m_leftTop->resize(leftW, leftTopH);
 
-        const SwRect topR = m_leftTop->getRect();
-
         if (m_title) {
-            m_title->move(topR.x + 16, topR.y + 12);
+            m_title->move(16, 12);
             m_title->resize(leftW - 120, 28);
         }
 
-        if (m_newChat) { m_newChat->move(topR.x + leftW - 88, topR.y + 10); m_newChat->resize(36, 36); }
-        if (m_menu) { m_menu->move(topR.x + leftW - 48, topR.y + 10); m_menu->resize(36, 36); }
+        if (m_newChat) { m_newChat->move(leftW - 88, 10); m_newChat->resize(36, 36); }
+        if (m_menu) { m_menu->move(leftW - 48, 10); m_menu->resize(36, 36); }
 
         if (m_search) {
-            m_search->move(topR.x + 12, topR.y + 56);
+            m_search->move(12, 56);
             m_search->resize(leftW - 24, 36);
         }
         if (m_searchIcon) {
-            m_searchIcon->move(topR.x + 18, topR.y + 58);
+            m_searchIcon->move(18, 58);
             m_searchIcon->resize(32, 32);
         }
 
-        int chipY = topR.y + 104;
-        int chipX = topR.x + 12;
+        int chipY = 104;
+        int chipX = 12;
 
         if (m_chipAll) { m_chipAll->move(chipX, chipY); m_chipAll->resize(76, 28); chipX += 76 + 8; }
         if (m_chipUnread) { m_chipUnread->move(chipX, chipY); m_chipUnread->resize(86, 28); chipX += 86 + 8; }
@@ -1334,8 +1327,7 @@ void WhatsAppWidget::updateLayout_() {
     }
 
     if (m_convoList && m_left) {
-        const SwRect leftR = m_left->getRect();
-        m_convoList->move(leftR.x, leftR.y + leftTopH);
+        m_convoList->move(0, leftTopH);
         m_convoList->resize(leftW, h - leftTopH);
     }
 
@@ -1349,7 +1341,7 @@ void WhatsAppWidget::updateLayout_() {
     const int composerRightPad = 54;
     const int composerW = std::max(0, rightW - composerX - composerRightPad);
     if (m_msgEdit && composerW > 0) {
-        const SwRect mr = m_msgEdit->getRect();
+        const SwRect mr = m_msgEdit->geometry();
         if (mr.width != composerW) {
             m_msgEdit->resize(composerW, mr.height);
         }
@@ -1360,51 +1352,42 @@ void WhatsAppWidget::updateLayout_() {
     const int chatH = std::max(0, h - headerH - inputH);
 
     if (m_header && m_right) {
-        const SwRect rightR = m_right->getRect();
-        m_header->move(rightR.x, rightR.y);
         m_header->resize(rightW, headerH);
 
-        const SwRect headerR = m_header->getRect();
-        if (m_headerAvatar) { m_headerAvatar->move(headerR.x + 16, headerR.y + 10); m_headerAvatar->resize(40, 40); }
-        if (m_headerName) { m_headerName->move(headerR.x + 64, headerR.y + 10); m_headerName->resize(320, 22); }
-        if (m_headerStatus) { m_headerStatus->move(headerR.x + 64, headerR.y + 30); m_headerStatus->resize(320, 18); }
+        if (m_headerAvatar) { m_headerAvatar->move(16, 10); m_headerAvatar->resize(40, 40); }
+        if (m_headerName) { m_headerName->move(64, 10); m_headerName->resize(320, 22); }
+        if (m_headerStatus) { m_headerStatus->move(64, 30); m_headerStatus->resize(320, 18); }
 
-        if (m_btnVideo) { m_btnVideo->move(headerR.x + rightW - 172, headerR.y + 12); m_btnVideo->resize(36, 36); }
-        if (m_btnPhone) { m_btnPhone->move(headerR.x + rightW - 132, headerR.y + 12); m_btnPhone->resize(36, 36); }
-        if (m_btnSearch) { m_btnSearch->move(headerR.x + rightW - 92, headerR.y + 12); m_btnSearch->resize(36, 36); }
-        if (m_btnMore) { m_btnMore->move(headerR.x + rightW - 52, headerR.y + 12); m_btnMore->resize(36, 36); }
+        if (m_btnVideo) { m_btnVideo->move(rightW - 172, 12); m_btnVideo->resize(36, 36); }
+        if (m_btnPhone) { m_btnPhone->move(rightW - 132, 12); m_btnPhone->resize(36, 36); }
+        if (m_btnSearch) { m_btnSearch->move(rightW - 92, 12); m_btnSearch->resize(36, 36); }
+        if (m_btnMore) { m_btnMore->move(rightW - 52, 12); m_btnMore->resize(36, 36); }
     }
 
     if (m_chatBg && m_right) {
-        const SwRect rightR = m_right->getRect();
-        m_chatBg->move(rightR.x, rightR.y + headerH);
+        m_chatBg->move(0, headerH);
         m_chatBg->resize(rightW, chatH);
     }
 
     if (m_threadView && m_chatBg) {
-        const SwRect chatR = m_chatBg->getRect();
-        m_threadView->move(chatR.x, chatR.y);
         m_threadView->resize(rightW, chatH);
     }
 
     if (m_input && m_right) {
-        const SwRect rightR = m_right->getRect();
-        m_input->move(rightR.x, rightR.y + h - inputH);
+        m_input->move(0, h - inputH);
         m_input->resize(rightW, inputH);
 
-        const SwRect inputR = m_input->getRect();
-        const int iconY = inputR.y + inputR.height - inputPadY - 36;
-        if (m_plus) { m_plus->move(inputR.x + 16, iconY); m_plus->resize(36, 36); }
-        if (m_emoji) { m_emoji->move(inputR.x + 56, iconY); m_emoji->resize(36, 36); }
-        if (m_msgEdit) { m_msgEdit->move(inputR.x + 98, inputR.y + inputPadY); m_msgEdit->resize(composerW, composerH); }
-        if (m_mic) { m_mic->move(inputR.x + rightW - 46, iconY); m_mic->resize(36, 36); }
+        const int iconY = inputH - inputPadY - 36;
+        if (m_plus) { m_plus->move(16, iconY); m_plus->resize(36, 36); }
+        if (m_emoji) { m_emoji->move(56, iconY); m_emoji->resize(36, 36); }
+        if (m_msgEdit) { m_msgEdit->move(98, inputPadY); m_msgEdit->resize(composerW, composerH); }
+        if (m_mic) { m_mic->move(rightW - 46, iconY); m_mic->resize(36, 36); }
     }
 
     updateEmojiPopupLayout_();
     updateAttachPopupLayout_();
 
     if (m_loginPage) {
-        m_loginPage->move(baseX, baseY);
         m_loginPage->resize(w, h);
     }
 }
@@ -1589,7 +1572,7 @@ void WhatsAppWidget::onAuthLoginRequested_(const SwString& idOrPhone, const SwSt
     persistFireConfigFromLoginPage_();
     if (!ensureUserService_() || !m_userService) {
         if (m_loginPage) {
-            m_loginPage->setErrorText("Firebase non configuré (URL manquante).");
+            m_loginPage->setErrorText("Firebase non configurÃ© (URL manquante).");
         }
         return;
     }
@@ -1607,7 +1590,7 @@ void WhatsAppWidget::onAuthSignUpRequested_(const SwString& firstName,
     persistFireConfigFromLoginPage_();
     if (!ensureUserService_() || !m_userService) {
         if (m_loginPage) {
-            m_loginPage->setErrorText("Firebase non configuré (URL manquante).");
+            m_loginPage->setErrorText("Firebase non configurÃ© (URL manquante).");
         }
         return;
     }
@@ -1625,7 +1608,7 @@ void WhatsAppWidget::onUserLoginFinished_(bool ok, const FireBDUser& user, const
     const SwString phone = normalizePhone_(user.phone);
     if (phone.isEmpty()) {
         if (m_loginPage) {
-            m_loginPage->setErrorText("Compte invalide (téléphone).");
+            m_loginPage->setErrorText("Compte invalide (tÃ©lÃ©phone).");
         }
         return;
     }
@@ -1665,7 +1648,7 @@ void WhatsAppWidget::onUserLoginFinished_(bool ok, const FireBDUser& user, const
 void WhatsAppWidget::onUserSignUpFinished_(bool ok, const FireBDUser& user, const SwString& error) {
     if (!ok) {
         if (m_loginPage) {
-            m_loginPage->setErrorText(error.isEmpty() ? SwString("Création de compte impossible.") : error);
+            m_loginPage->setErrorText(error.isEmpty() ? SwString("CrÃ©ation de compte impossible.") : error);
         }
         return;
     }
@@ -1717,7 +1700,7 @@ void WhatsAppWidget::openNewChat_() {
     dlg->setWindowTitle("Nouvelle discussion");
     SwObject::connect(dlg, &SwDialog::finished, [dlg](int) { delete dlg; });
 
-    SwLineEdit* phoneEdit = new SwLineEdit("Téléphone du contact", dlg->contentWidget());
+    SwLineEdit* phoneEdit = new SwLineEdit("TÃ©lÃ©phone du contact", dlg->contentWidget());
     phoneEdit->setStyleSheet(R"(
         SwLineEdit {
             background-color: rgb(255, 255, 255);
@@ -1735,7 +1718,7 @@ void WhatsAppWidget::openNewChat_() {
     err->setVisible(false);
 
     SwButton* cancel = new SwButton("Annuler", dlg->buttonBarWidget());
-    SwButton* create = new SwButton("Créer", dlg->buttonBarWidget());
+    SwButton* create = new SwButton("CrÃ©er", dlg->buttonBarWidget());
     create->setStyleSheet(R"(
         SwButton {
             background-color: rgb(0, 168, 132);
@@ -1753,22 +1736,22 @@ void WhatsAppWidget::openNewChat_() {
         if (!dlg || !phoneEdit || !err || !cancel || !create) {
             return;
         }
-        const SwRect cr = dlg->contentWidget() ? dlg->contentWidget()->getRect() : SwRect{};
-        const SwRect br = dlg->buttonBarWidget() ? dlg->buttonBarWidget()->getRect() : SwRect{};
+        const SwRect cr = dlg->contentWidget() ? dlg->contentWidget()->frameGeometry() : SwRect{};
+        const SwRect br = dlg->buttonBarWidget() ? dlg->buttonBarWidget()->frameGeometry() : SwRect{};
 
         const int fieldH = 40;
         const int pad = 0;
-        phoneEdit->move(cr.x + pad, cr.y + pad);
+        phoneEdit->move(pad, pad);
         phoneEdit->resize(std::max(0, cr.width - 2 * pad), fieldH);
 
-        err->move(cr.x + pad, cr.y + pad + fieldH + 8);
+        err->move(pad, pad + fieldH + 8);
         err->resize(std::max(0, cr.width - 2 * pad), 18);
 
         const int btnH = 40;
         const int btnW = 120;
-        cancel->move(br.x, br.y + (br.height - btnH) / 2);
+        cancel->move(0, (br.height - btnH) / 2);
         cancel->resize(btnW, btnH);
-        create->move(br.x + std::max(0, br.width - btnW), br.y + (br.height - btnH) / 2);
+        create->move(std::max(0, br.width - btnW), (br.height - btnH) / 2);
         create->resize(btnW, btnH);
     };
 
@@ -1804,7 +1787,7 @@ void WhatsAppWidget::openNewChat_() {
 
                           if (!ok) {
                               create->setVisible(true);
-                              err->setText(lookupErr == "NOT_FOUND" ? SwString("Utilisateur introuvable.") : (lookupErr.isEmpty() ? SwString("Erreur réseau.") : lookupErr));
+                              err->setText(lookupErr == "NOT_FOUND" ? SwString("Utilisateur introuvable.") : (lookupErr.isEmpty() ? SwString("Erreur rÃ©seau.") : lookupErr));
                               err->setVisible(true);
                               return;
                           }
@@ -1836,7 +1819,7 @@ void WhatsAppWidget::openNewChat_() {
         const SwString raw = phoneEdit->getText().trimmed();
         const SwString phone = normalizePhone_(raw);
         if (phone.isEmpty()) {
-            err->setText("Téléphone invalide.");
+            err->setText("TÃ©lÃ©phone invalide.");
             err->setVisible(true);
             phoneEdit->setFocus(true);
             return;
@@ -2018,3 +2001,4 @@ void WhatsAppWidget::sendReadAcksForConversation_(const SwString& conversationId
         m_store->save();
     }
 }
+

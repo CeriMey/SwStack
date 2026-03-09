@@ -1,4 +1,4 @@
-/***************************************************************************************************
+﻿/***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
  * Copyright (C) 2025 Ariya Consulting
@@ -22,6 +22,30 @@
 
 #pragma once
 
+/**
+ * @file src/core/gui/SwSlider.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwSlider in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the slider interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwSlider.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
 /***************************************************************************************************
  * Simple cross-platform slider widget for SwCore.
  *
@@ -43,6 +67,13 @@ public:
         Vertical
     };
 
+    /**
+     * @brief Constructs a `SwSlider` instance.
+     * @param orientation Value passed to the method.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwSlider(Orientation orientation = Orientation::Horizontal, SwWidget* parent = nullptr)
         : SwWidget(parent)
         , m_orientation(orientation)
@@ -60,6 +91,12 @@ public:
         setCursor(CursorType::Hand);
     }
 
+    /**
+     * @brief Sets the orientation.
+     * @param orientation Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setOrientation(Orientation orientation) {
         if (m_orientation == orientation) {
             return;
@@ -73,8 +110,21 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the current orientation.
+     * @return The current orientation.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     Orientation orientation() const { return m_orientation; }
 
+    /**
+     * @brief Sets the range.
+     * @param minimum Value passed to the method.
+     * @param maximum Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setRange(int minimum, int maximum) {
         if (minimum > maximum) {
             std::swap(minimum, maximum);
@@ -84,18 +134,60 @@ public:
         setValue(m_value);
     }
 
+    /**
+     * @brief Sets the minimum.
+     * @param m_maximum Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setMinimum(int minimum) { setRange(minimum, m_maximum); }
+    /**
+     * @brief Sets the maximum.
+     * @param maximum Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setMaximum(int maximum) { setRange(m_minimum, maximum); }
 
+    /**
+     * @brief Returns the current minimum.
+     * @return The current minimum.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int minimum() const { return m_minimum; }
+    /**
+     * @brief Returns the current maximum.
+     * @return The current maximum.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int maximum() const { return m_maximum; }
 
+    /**
+     * @brief Sets the step.
+     * @param step Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setStep(int step) {
         m_step = std::max(1, step);
     }
 
+    /**
+     * @brief Returns the current step.
+     * @return The current step.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int step() const { return m_step; }
 
+    /**
+     * @brief Sets the value.
+     * @param value Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setValue(int value) {
         int clamped = clampValue(value);
         if (clamped == m_value) {
@@ -106,18 +198,30 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the current value.
+     * @return The current value.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int value() const { return m_value; }
 
     DECLARE_SIGNAL(valueChanged, int);
 
 protected:
+    /**
+     * @brief Handles the paint Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void paintEvent(PaintEvent* event) override {
         SwPainter* painter = event->painter();
         if (!painter) {
             return;
         }
 
-        SwRect bounds = getRect();
+        SwRect bounds = rect();
         SwColor background{28, 32, 48};
         SwColor grooveColor{54, 62, 86};
         SwColor accent{88, 140, 255};
@@ -131,6 +235,12 @@ protected:
         painter->fillRoundedRect(handle, handle.width / 2, accent, SwColor{16, 18, 32}, 1);
     }
 
+    /**
+     * @brief Handles the mouse Press Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mousePressEvent(MouseEvent* event) override {
         if (!isPointInside(event->x(), event->y())) {
             SwWidget::mousePressEvent(event);
@@ -142,6 +252,12 @@ protected:
         event->accept();
     }
 
+    /**
+     * @brief Handles the mouse Move Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseMoveEvent(MouseEvent* event) override {
         if (m_dragging) {
             updateValueFromPosition(event->x(), event->y());
@@ -150,6 +266,12 @@ protected:
         SwWidget::mouseMoveEvent(event);
     }
 
+    /**
+     * @brief Handles the mouse Release Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseReleaseEvent(MouseEvent* event) override {
         if (m_dragging) {
             m_dragging = false;
@@ -197,7 +319,7 @@ private:
     }
 
     SwRect grooveRect() const {
-        SwRect bounds = getRect();
+        SwRect bounds = rect();
         const int padding = 18;
         if (m_orientation == Orientation::Horizontal) {
             int grooveHeight = std::max(6, bounds.height / 4);
@@ -218,7 +340,7 @@ private:
 
     SwRect handleRect() const {
         SwRect groove = grooveRect();
-        SwRect bounds = getRect();
+        SwRect bounds = rect();
         if (m_orientation == Orientation::Horizontal) {
             float ratio = (m_maximum == m_minimum)
                               ? 0.0f
@@ -244,3 +366,4 @@ private:
     bool m_dragging;
     int m_handleSize;
 };
+

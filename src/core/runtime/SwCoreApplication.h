@@ -1,5 +1,29 @@
 #pragma once
 
+/**
+ * @file src/core/runtime/SwCoreApplication.h
+ * @ingroup core_runtime
+ * @brief Declares the public interface exposed by SwCoreApplication in the CoreSw runtime layer.
+ *
+ * This header belongs to the CoreSw runtime layer. It coordinates application lifetime, event
+ * delivery, timers, threads, crash handling, and other process-level services consumed by the
+ * rest of the stack.
+ *
+ * Within that layer, this file focuses on the core application interface. The declarations
+ * exposed here define the stable surface that adjacent code can rely on while the implementation
+ * remains free to evolve behind the header.
+ *
+ * The main declarations in this header are _T and SwCoreApplication.
+ *
+ * Application-oriented declarations here define the top-level lifecycle surface for startup,
+ * shutdown, event processing, and integration with the rest of the framework.
+ *
+ * Runtime declarations in this area define lifecycle and threading contracts that higher-level
+ * modules depend on for safe execution and orderly shutdown.
+ *
+ */
+
+
 #ifndef SW_CORE_RUNTIME_SWCOREAPPLICATION_H
 #define SW_CORE_RUNTIME_SWCOREAPPLICATION_H
 /***************************************************************************************************
@@ -77,12 +101,15 @@ static constexpr const char* kSwLogCategory_SwCoreApplication = "sw.core.runtime
 #include <pthread.h>
 #include <poll.h>
 #include <sys/eventfd.h>
+#include <sys/timerfd.h>
 #include <unistd.h>
 #include "linux_fiber.h"
 #endif
 
 #include "SwMap.h"
 #include "SwString.h"
+#include "SwList.h"
+#include "SwMutex.h"
 #include <thread>
 
 
@@ -409,6 +436,12 @@ public:
     // On Windows, the ConsoleCtrlHandler can run on a dedicated system thread, so `instance(false)`
     // (thread-local) may return nullptr. We keep a registry of known instances per thread and can
     // request a clean shutdown from any thread.
+    /**
+     * @brief Returns the current request Quit All Instances.
+     * @return The current request Quit All Instances.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static bool requestQuitAllInstances() {
         bool requested = false;
         {
@@ -422,6 +455,11 @@ public:
         return requested;
     }
 
+    /**
+     * @brief Performs the `activeWatchDog` operation.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     void activeWatchDog() {
         // Si le watchdog n'est pas déjà actif
         bool expected = false;
@@ -431,6 +469,9 @@ public:
     }
 
     // Méthode pour désactiver le watchdog
+    /**
+     * @brief Performs the `desactiveWatchDog` operation.
+     */
     void desactiveWatchDog() {
         // Si le watchdog est actif
         if (watchdogRunning.exchange(false, std::memory_order_acq_rel)) {
@@ -441,6 +482,12 @@ public:
     }
 
 
+    /**
+     * @brief Returns the current load Percentage.
+     * @return The current load Percentage.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     double getLoadPercentage() const {
         if (totalTimeMicroseconds == 0) {
             return 0.0;
@@ -448,6 +495,12 @@ public:
         return 100.0 * (double)totalBusyTimeMicroseconds / (double)totalTimeMicroseconds;
     }
 
+    /**
+     * @brief Returns the current last Second Load Percentage.
+     * @return The current last Second Load Percentage.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     double getLastSecondLoadPercentage() {
         auto now = std::chrono::steady_clock::now();
         auto oneSecondAgo = now - std::chrono::seconds(1);
@@ -466,6 +519,26 @@ public:
 
         if (sumTotal == 0) return 0.0;
         return 100.0 * (double)sumBusy / (double)sumTotal;
+    }
+
+    /**
+     * @brief Sets the event Fiber Stack Size.
+     * @param stackSizeBytes Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
+    void setEventFiberStackSize(unsigned int stackSizeBytes) {
+        eventFiberStackSize_.store(stackSizeBytes, std::memory_order_relaxed);
+    }
+
+    /**
+     * @brief Returns the current event Fiber Stack Size.
+     * @return The current event Fiber Stack Size.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
+    unsigned int eventFiberStackSize() const {
+        return eventFiberStackSize_.load(std::memory_order_relaxed);
     }
 
     /**
@@ -519,7 +592,7 @@ public:
      */
     int addTimer(std::function<void()> callback, int interval, bool singleShot = false) {
         int timerId = nextTimerId++;
-        timers.emplace(timerId, new _T(callback, interval, singleShot));
+        timers.insert(timerId, new _T(callback, interval, singleShot));
         signalWakeup_();
         return timerId;
     }
@@ -711,7 +784,7 @@ public:
 
         // If fibers are still queued, don't sleep.
         {
-            std::lock_guard<std::mutex> lk(getReadyMutex());
+            SwMutexLocker lk(getReadyMutex());
             if (!getReadyFibersHi().empty() || !getReadyFibers().empty()) {
                 return 0;
             }
@@ -754,10 +827,18 @@ public:
 protected:
     // Derived event loops (e.g. SwGuiApplication) sometimes need to integrate OS waitables (HANDLE/fd)
     // with their own platform message pumps. This helper provides access to the core waitables wait.
+    /**
+     * @brief Performs the `waitForWork` operation.
+     * @param timeoutUs Value passed to the method.
+     */
     void waitForWork(int timeoutUs) { waitForWork_(timeoutUs); }
 
 #if defined(_WIN32)
     // Windows GUI-friendly wait: wakes on either waitables OR pending Win32 messages.
+    /**
+     * @brief Performs the `waitForWorkGui` operation.
+     * @param timeoutUs Value passed to the method.
+     */
     void waitForWorkGui(int timeoutUs) {
         if (!running) return;
 
@@ -770,7 +851,7 @@ protected:
         callbacks.push_back(std::function<void()>{});
 
         {
-            std::lock_guard<std::mutex> lk(waitablesMutex_);
+            SwMutexLocker lk(waitablesMutex_);
             for (auto& kv : waitHandles_) {
                 handles.push_back(kv.second.handle);
                 callbacks.push_back(kv.second.cb);
@@ -812,18 +893,30 @@ protected:
     // ---------------------------------------------------------------------
 public:
 #if defined(_WIN32)
+    /**
+     * @brief Adds the specified wait Handle.
+     * @param h Height value.
+     * @param onSignaled Value passed to the method.
+     * @return The requested wait Handle.
+     */
     size_t addWaitHandle(HANDLE h, std::function<void()> onSignaled) {
         if (!h) return 0;
-        std::lock_guard<std::mutex> lk(waitablesMutex_);
+        SwMutexLocker lk(waitablesMutex_);
         const size_t id = nextWaitableId_++;
         waitHandles_[id] = WaitHandleEntry{h, std::move(onSignaled)};
         signalWakeup_();
         return id;
     }
 #else
+    /**
+     * @brief Adds the specified wait Fd.
+     * @param fd Value passed to the method.
+     * @param onReadable Value passed to the method.
+     * @return The requested wait Fd.
+     */
     size_t addWaitFd(int fd, std::function<void()> onReadable) {
         if (fd < 0) return 0;
-        std::lock_guard<std::mutex> lk(waitablesMutex_);
+        SwMutexLocker lk(waitablesMutex_);
         const size_t id = nextWaitableId_++;
         waitFds_[id] = WaitFdEntry{fd, std::move(onReadable)};
         signalWakeup_();
@@ -831,13 +924,17 @@ public:
     }
 #endif
 
+    /**
+     * @brief Removes the specified waitable.
+     * @param id Value passed to the method.
+     */
     void removeWaitable(size_t id) {
         if (!id) return;
-        std::lock_guard<std::mutex> lk(waitablesMutex_);
+        SwMutexLocker lk(waitablesMutex_);
 #if defined(_WIN32)
-        waitHandles_.erase(id);
+        waitHandles_.remove(id);
 #else
-        waitFds_.erase(id);
+        waitFds_.remove(id);
 #endif
         signalWakeup_();
     }
@@ -875,7 +972,7 @@ public:
             return;
         }
         {
-            std::lock_guard<std::mutex> lock(getReadyMutex());
+            SwMutexLocker lock(getReadyMutex());
             getReadyFibers().push(current);
         }
 
@@ -885,6 +982,12 @@ public:
         SwitchToFiber(app->mainFiber);
     }
 
+    /**
+     * @brief Returns the current generate Yield Id.
+     * @return The current generate Yield Id.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static int generateYieldId() {
         static std::atomic<int> s_nextYieldCounter{0};
         int value = s_nextYieldCounter.fetch_add(1, std::memory_order_relaxed);
@@ -927,7 +1030,7 @@ public:
         }
         // Store the current fiber in the yielded fibers map
         {
-            std::lock_guard<std::mutex> lock(getYieldMutex());
+            SwMutexLocker lock(getYieldMutex());
             getYieldedFibers()[id] = current;
         }
 
@@ -970,7 +1073,7 @@ public:
     static void unYieldFiber(int id) {
         LPVOID fiber = nullptr;
         {
-            std::lock_guard<std::mutex> lock(getYieldMutex());
+            SwMutexLocker lock(getYieldMutex());
             auto it = getYieldedFibers().find(id);
             if (it != getYieldedFibers().end()) {
                 fiber = it->second;
@@ -979,7 +1082,7 @@ public:
         }
 
         if (fiber) {
-            std::lock_guard<std::mutex> lock(getReadyMutex());
+            SwMutexLocker lock(getReadyMutex());
             getReadyFibers().push(fiber);
         }
     }
@@ -992,7 +1095,7 @@ public:
     static void unYieldFiberHighPriority(int id) {
         LPVOID fiber = nullptr;
         {
-            std::lock_guard<std::mutex> lock(getYieldMutex());
+            SwMutexLocker lock(getYieldMutex());
             auto it = getYieldedFibers().find(id);
             if (it != getYieldedFibers().end()) {
                 fiber = it->second;
@@ -1001,7 +1104,7 @@ public:
         }
 
         if (fiber) {
-            std::lock_guard<std::mutex> lock(getReadyMutex());
+            SwMutexLocker lock(getReadyMutex());
             getReadyFibersHi().push(fiber);
         }
     }
@@ -1155,42 +1258,85 @@ protected:
 
     // Fibers are thread-affine on Windows: a fiber created on one OS thread must only be resumed on that same thread.
     // These queues/maps are therefore per-thread (thread_local). This also avoids cross-thread contention.
-    static std::mutex& getYieldMutex() {
-         static thread_local std::mutex s_yieldMutex;
+    /**
+     * @brief Returns the current yield Mutex.
+     * @return The current yield Mutex.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
+    static SwMutex& getYieldMutex() {
+         static thread_local SwMutex s_yieldMutex;
          return s_yieldMutex;
      }
 
+     /**
+      * @brief Returns the current yielded Fibers.
+      * @return The current yielded Fibers.
+      *
+      * @details The returned value reflects the state currently stored by the instance.
+      */
      static std::map<int, LPVOID>& getYieldedFibers() {
          static thread_local std::map<int, LPVOID> s_yieldedFibers;
          return s_yieldedFibers;
      }
 
-     static std::mutex& getReadyMutex() {
-         static thread_local std::mutex s_readyMutex;
+     /**
+      * @brief Returns the current ready Mutex.
+      * @return The current ready Mutex.
+      *
+      * @details The returned value reflects the state currently stored by the instance.
+      */
+     static SwMutex& getReadyMutex() {
+         static thread_local SwMutex s_readyMutex;
          return s_readyMutex;
      }
 
+     /**
+      * @brief Returns the current ready Fibers.
+      * @return The current ready Fibers.
+      *
+      * @details The returned value reflects the state currently stored by the instance.
+      */
      static std::queue<LPVOID>& getReadyFibers() {
          static thread_local std::queue<LPVOID> s_readyFibers;
          return s_readyFibers;
      }
 
+     /**
+      * @brief Returns the current ready Fibers Hi.
+      * @return The current ready Fibers Hi.
+      *
+      * @details The returned value reflects the state currently stored by the instance.
+      */
      static std::queue<LPVOID>& getReadyFibersHi() {
          static thread_local std::queue<LPVOID> s_readyFibersHi;
          return s_readyFibersHi;
      }
 
     #if defined(_WIN32)
+    /**
+     * @brief Returns the current trampoline Function.
+     * @return The current trampoline Function.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static void __stdcall trampolineFunction() {
-        instance()->m_runningFiber = nullptr;
-        SwitchToFiber(instance()->mainFiber);
+        SwCoreApplication* app = instance(false);
+        if (!app) {
+            return;
+        }
+        app->m_runningFiber = nullptr;
+        SwitchToFiber(app->mainFiber);
         // Ne jamais revenir ici
     }
 
 
 
+    /**
+     * @brief Performs the `forceBackToMainFiber` operation.
+     */
     void forceBackToMainFiber() {
-        HANDLE hMainThread = OpenThread(THREAD_ALL_ACCESS, FALSE, instance()->mainThreadId);
+        HANDLE hMainThread = OpenThread(THREAD_ALL_ACCESS, FALSE, mainThreadId);
         if (!hMainThread) {
             swCError(kSwLogCategory_SwCoreApplication) << "OpenThread failed";
             return;
@@ -1211,11 +1357,16 @@ protected:
             return;
         }
 
-        // Assurez-vous que ctx.Rsp pointe vers une zone valide, souvent le contexte original contient déjà une valeur de Rsp
-        // On ne modifie que Rip ici par simplicité
+        // Emulate a normal function call frame before redirecting execution to the
+        // trampoline. A plain RIP/EIP patch is not enough: the redirected function
+        // expects a valid return slot on the stack and the Windows ABI alignment rules.
         #if defined(_M_X64) || defined(_WIN64)
+            ctx.Rsp -= static_cast<DWORD64>(sizeof(std::uintptr_t));
+            *reinterpret_cast<std::uintptr_t*>(static_cast<std::uintptr_t>(ctx.Rsp)) = 0;
             ctx.Rip = (DWORD64)&SwCoreApplication::trampolineFunction;
         #elif defined(_M_IX86)
+            ctx.Esp -= static_cast<DWORD>(sizeof(std::uintptr_t));
+            *reinterpret_cast<std::uintptr_t*>(static_cast<std::uintptr_t>(ctx.Esp)) = 0;
             ctx.Eip = (DWORD)&SwCoreApplication::trampolineFunction;
         #else
             // Ajouter la gestion d'une autre architecture si besoin 
@@ -1235,6 +1386,9 @@ protected:
         CloseHandle(hMainThread);
     }
 #else
+    /**
+     * @brief Performs the `forceBackToMainFiber` operation.
+     */
     void forceBackToMainFiber() {
         // Best-effort async yield using a per-thread signal (see unixWatchdogPreemptSignalHandler_).
         (void)pthread_kill(mainThreadPthread_, unixWatchdogSignalNumber_());
@@ -1242,6 +1396,9 @@ protected:
 #endif
 
 
+    /**
+     * @brief Performs the `watchdogLoop` operation.
+     */
     void watchdogLoop() {
         using namespace std::chrono;
         while (watchdogRunning.load(std::memory_order_relaxed)) {
@@ -1439,7 +1596,8 @@ protected:
     void runEventInFiber(const std::function<void()>& event) {
         auto startBusy = std::chrono::steady_clock::now();
         std::function<void()>* cbPtr = new std::function<void()>(event);
-        LPVOID newFiber = CreateFiber(0, FiberProc, cbPtr);
+        const SIZE_T configuredStackSize = static_cast<SIZE_T>(eventFiberStackSize_.load(std::memory_order_relaxed));
+        LPVOID newFiber = CreateFiber(configuredStackSize, FiberProc, cbPtr);
         if (!newFiber) {
 #if defined(_WIN32)
             swCError(kSwLogCategory_SwCoreApplication) << "Failed to create fiber. Error: " << GetLastError();
@@ -1492,7 +1650,7 @@ protected:
              LPVOID fiber = nullptr;
              bool fromHi = false;
             {
-                std::lock_guard<std::mutex> lock(getReadyMutex());
+                SwMutexLocker lock(getReadyMutex());
                 if (!getReadyFibersHi().empty()) {
                     fiber = getReadyFibersHi().front();
                     getReadyFibersHi().pop();
@@ -1509,7 +1667,7 @@ protected:
             if (resumedThisCycle.find(fiber) != resumedThisCycle.end()) {
                 // Fiber has already been executed this cycle, requeue it for later
                 {
-                    std::lock_guard<std::mutex> lock(getReadyMutex());
+                    SwMutexLocker lock(getReadyMutex());
                     if (fromHi) getReadyFibersHi().push(fiber);
                     else getReadyFibers().push(fiber);
                 }
@@ -1525,6 +1683,10 @@ protected:
         busyElapsedIteration += (uint64_t)busyElapsed;
     }
 
+    /**
+     * @brief Performs the `safeRunningFiber` operation.
+     * @param _fiber Value passed to the method.
+     */
     void safeRunningFiber(LPVOID _fiber)
     {
         if (!_fiber) {
@@ -1540,10 +1702,19 @@ protected:
         // Back in the main fiber after the target fiber finishes, yields, or gets preempted by the watchdog.
         m_runningFiber.store(nullptr, std::memory_order_release);
         fiberStartTimeNs_.store(0, std::memory_order_release);
-        if (fireWatchDog.exchange(false, std::memory_order_acq_rel))
-        {
-            std::lock_guard<std::mutex> lock(getReadyMutex());
+        if (fireWatchDog.exchange(false, std::memory_order_acq_rel)) {
+#if defined(_WIN32)
+            // On Windows the watchdog gets back to the main fiber by hijacking the
+            // interrupted thread context to run trampolineFunction(). That path does
+            // not preserve a resumable instruction pointer for the interrupted fiber,
+            // so re-queueing it would resume into the trampoline frame and hang or
+            // jump to garbage. Drop the fiber instead and let the event loop keep running.
+            swCWarning(kSwLogCategory_SwCoreApplication)
+                << "Watchdog preempted a blocking fiber on Windows; dropping the fiber.";
+#else
+            SwMutexLocker lock(getReadyMutex());
             instance()->getReadyFibers().push(_fiber);
+#endif
         }
         // Back here after the fiber finishes or yields again
         // Check if the fiber needs to be deleted
@@ -1582,8 +1753,15 @@ protected:
     }
 
 
+    /**
+     * @brief Returns whether the object reports fiber Yielded.
+     * @param fiber Value passed to the method.
+     * @return `true` when the object reports fiber Yielded; otherwise `false`.
+     *
+     * @details This query does not modify the object state.
+     */
     bool isFiberYielded(LPVOID fiber) {
-        std::lock_guard<std::mutex> lock(getYieldMutex());
+        SwMutexLocker lock(getYieldMutex());
         for (auto &kv : getYieldedFibers()) {
             if (kv.second == fiber) {
                 return true;
@@ -1592,8 +1770,15 @@ protected:
         return false;
     }
 
+    /**
+     * @brief Returns whether the object reports fiber Ready.
+     * @param fiber Value passed to the method.
+     * @return `true` when the object reports fiber Ready; otherwise `false`.
+     *
+     * @details This query does not modify the object state.
+     */
     bool isFiberReady(LPVOID fiber) {
-        std::lock_guard<std::mutex> lock(getReadyMutex());
+        SwMutexLocker lock(getReadyMutex());
         std::queue<LPVOID> tempHi = getReadyFibersHi();
         while (!tempHi.empty()) {
             LPVOID f = tempHi.front();
@@ -1675,7 +1860,7 @@ protected:
             }
         }
 
-        if (--processingTimersDepth_ == 0 && !pendingTimerDeletes_.empty()) {
+        if (--processingTimersDepth_ == 0 && !pendingTimerDeletes_.isEmpty()) {
             for (size_t i = 0; i < pendingTimerDeletes_.size(); ++i) {
                 delete pendingTimerDeletes_[i];
             }
@@ -1709,7 +1894,19 @@ protected:
     std::atomic<bool> fireWatchDog{ false };
     std::atomic<int64_t> fiberStartTimeNs_{0};
 
+    /**
+     * @brief Returns the current function<void.
+     * @return The current function<void.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     std::queue<std::function<void()>> eventQueue; ///< Queue of events to process.
+    /**
+     * @brief Returns the current function<void.
+     * @return The current function<void.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     std::queue<std::function<void()>> priorityEventQueue; ///< High-priority event queue.
     std::mutex eventQueueMutex; ///< Mutex protecting access to the event queue.
     std::condition_variable cv; ///< Condition variable for event waiting.
@@ -1728,12 +1925,13 @@ protected:
     // Cette variable sera mise à jour dans runEventInFiber et resumeReadyFibers
     // pour accumuler le temps occupé dans la fibre sur l'itération en cours.
     uint64_t busyElapsedIteration = 0;
+    std::atomic<unsigned int> eventFiberStackSize_{0};
 
     int nextTimerId = 0; ///< Identifier for the next timer to be created.
-    std::map<int, _T*> timers; ///< Map associating timer IDs with their respective _T objects.
+    SwMap<int, _T*> timers; ///< Map associating timer IDs with their respective _T objects.
 
     int processingTimersDepth_ = 0;
-    std::vector<_T*> pendingTimerDeletes_;
+    SwList<_T*> pendingTimerDeletes_;
     SwMap<SwString, SwString> parsedArguments; ///< Parsed command-line arguments.
 
     std::atomic<LPVOID> m_runningFiber{nullptr}; ///< Pointer to the currently running fiber.
@@ -1746,14 +1944,14 @@ private:
         // Without this, long-lived runtimes can leave fibers allocated until process exit.
         std::vector<LPVOID> toDelete;
         {
-            std::lock_guard<std::mutex> lk(getYieldMutex());
+            SwMutexLocker lk(getYieldMutex());
             for (auto& kv : getYieldedFibers()) {
                 if (kv.second && kv.second != mainFiber) toDelete.push_back(kv.second);
             }
             getYieldedFibers().clear();
         }
         {
-            std::lock_guard<std::mutex> lk(getReadyMutex());
+            SwMutexLocker lk(getReadyMutex());
             while (!getReadyFibersHi().empty()) {
                 LPVOID f = getReadyFibersHi().front();
                 getReadyFibersHi().pop();
@@ -1819,7 +2017,7 @@ private:
         callbacks.push_back(std::function<void()>{});
 
         {
-            std::lock_guard<std::mutex> lk(waitablesMutex_);
+            SwMutexLocker lk(waitablesMutex_);
             for (auto& kv : waitHandles_) {
                 handles.push_back(kv.second.handle);
                 callbacks.push_back(kv.second.cb);
@@ -1878,7 +2076,7 @@ private:
         }
 
         {
-            std::lock_guard<std::mutex> lk(waitablesMutex_);
+            SwMutexLocker lk(waitablesMutex_);
             for (auto& kv : waitFds_) {
                 pollfd p;
                 p.fd = kv.second.fd;
@@ -1889,8 +2087,37 @@ private:
             }
         }
 
-        const int timeoutMs = (timeoutUs < 0) ? -1 : static_cast<int>((timeoutUs + 999) / 1000);
-        const int r = ::poll(fds.data(), static_cast<nfds_t>(fds.size()), timeoutMs);
+        // Use timerfd for high-resolution sleep (hrtimer, ~1ms granularity)
+        // instead of poll() timeout which depends on CONFIG_HZ (often 10ms).
+        int timerFd = -1;
+        if (timeoutUs >= 0) {
+            timerFd = ::timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+            if (timerFd >= 0) {
+                struct itimerspec its{};
+                its.it_value.tv_sec  = timeoutUs / 1000000;
+                its.it_value.tv_nsec = (timeoutUs % 1000000) * 1000L;
+                if (its.it_value.tv_sec == 0 && its.it_value.tv_nsec == 0)
+                    its.it_value.tv_nsec = 1; // 0,0 would disarm the timer
+                ::timerfd_settime(timerFd, 0, &its, nullptr);
+                pollfd tpfd;
+                tpfd.fd = timerFd;
+                tpfd.events = POLLIN;
+                tpfd.revents = 0;
+                fds.push_back(tpfd);
+                callbacks.push_back(std::function<void()>{});
+            }
+        }
+
+        // If timerfd was created, poll indefinitely (timerfd handles the timeout).
+        // Otherwise fall back to poll() timeout (lower resolution but functional).
+        const int pollTimeout = (timerFd >= 0) ? -1
+                              : (timeoutUs < 0) ? -1
+                              : static_cast<int>((timeoutUs + 999) / 1000);
+        const int r = ::poll(fds.data(), static_cast<nfds_t>(fds.size()), pollTimeout);
+
+        // Close the one-shot timerfd now that poll() has returned.
+        if (timerFd >= 0) ::close(timerFd);
+
         if (r <= 0) return;
 
         // Drain wake eventfd if needed.
@@ -1934,29 +2161,63 @@ private:
 #if defined(_WIN32)
     struct WaitHandleEntry {
         HANDLE handle{NULL};
+        /**
+         * @brief Returns the current function<void.
+         * @return The current function<void.
+         *
+         * @details The returned value reflects the state currently stored by the instance.
+         */
         std::function<void()> cb;
 
+        /**
+         * @brief Constructs a `WaitHandleEntry` instance.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
         WaitHandleEntry() = default;
+        /**
+         * @brief Constructs a `WaitHandleEntry` instance.
+         * @param h Height value.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
         WaitHandleEntry(HANDLE h, std::function<void()> cb_) : handle(h), cb(std::move(cb_)) {}
     };
 #endif
     struct WaitFdEntry {
         int fd{-1};
+        /**
+         * @brief Returns the current function<void.
+         * @return The current function<void.
+         *
+         * @details The returned value reflects the state currently stored by the instance.
+         */
         std::function<void()> cb;
 
+        /**
+         * @brief Constructs a `WaitFdEntry` instance.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
         WaitFdEntry() = default;
+        /**
+         * @brief Constructs a `WaitFdEntry` instance.
+         * @param fd_ Value passed to the method.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
         WaitFdEntry(int fd_, std::function<void()> cb_) : fd(fd_), cb(std::move(cb_)) {}
     };
 
-    std::mutex waitablesMutex_;
+    SwMutex waitablesMutex_;
     size_t nextWaitableId_{1};
 
 #if defined(_WIN32)
     HANDLE wakeEvent_{NULL};
-    std::map<size_t, WaitHandleEntry> waitHandles_;
+    SwMap<size_t, WaitHandleEntry> waitHandles_;
 #else
     int wakeEventFd_{-1};
-    std::map<size_t, WaitFdEntry> waitFds_;
+    SwMap<size_t, WaitFdEntry> waitFds_;
 #endif
 };
 

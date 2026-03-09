@@ -1,4 +1,30 @@
 #pragma once
+
+/**
+ * @file src/core/object/SwObject.h
+ * @ingroup core_object
+ * @brief Declares the public interface exposed by SwObject in the CoreSw object model layer.
+ *
+ * This header belongs to the CoreSw object model layer. It defines parent and child ownership,
+ * runtime typing, and the signal-slot machinery that many other modules build upon.
+ *
+ * Within that layer, this file focuses on the object interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are ConnectionType, ISlot, SlotMember,
+ * SlotFunctionReceiver, SlotFunction, function_traits, slot_factory, and
+ * slot_factory_with_receiver, plus related helper declarations.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * Object-model declarations here establish how instances are identified, connected, owned, and
+ * moved across execution contexts.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -39,6 +65,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <memory>
+#include <unordered_set>
 #include <cstring>
 #include <string>
 static constexpr const char* kSwLogCategory_SwObject = "sw.core.object.swobject";
@@ -313,9 +340,9 @@ public:                                                                         
     virtual SwString className() const override {                               \
         return DerivedClass::staticClassName();                                 \
     }                                                                           \
-    virtual std::vector<SwString> classHierarchy() const override {             \
-        std::vector<SwString> hierarchy = BaseClass::classHierarchy();          \
-        hierarchy.insert(hierarchy.begin(), DerivedClass::staticClassName());   \
+    virtual SwList<SwString> classHierarchy() const override {                  \
+        SwList<SwString> hierarchy = BaseClass::classHierarchy();               \
+        hierarchy.prepend(DerivedClass::staticClassName());                     \
         return hierarchy;                                                       \
     }
 
@@ -333,8 +360,25 @@ enum ConnectionType {
 template<typename T, typename... Args>
 class ISlot {
 public:
+    /**
+     * @brief Destroys the `ISlot` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     virtual ~ISlot() {}
+    /**
+     * @brief Performs the `invoke` operation.
+     * @param instance Value passed to the method.
+     * @param args Value passed to the method.
+     * @return The requested invoke.
+     */
     virtual void invoke(T* instance, Args... args) = 0;
+    /**
+     * @brief Returns the current receiveur.
+     * @return The current receiveur.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     virtual T* receiveur() = 0;
 };
 
@@ -342,16 +386,37 @@ public:
 template <typename T, typename... Args>
 class SlotMember : public ISlot<T, Args...> {
 public:
+    /**
+     * @brief Constructs a `SlotMember` instance.
+     * @param instance Value passed to the method.
+     * @param method HTTP method involved in the operation.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SlotMember(T* instance, void (T::* method)(Args...)) : instance(instance), method(method) {}
 
+    /**
+     * @brief Performs the `invoke` operation.
+     * @param instance Value passed to the method.
+     * @param args Value passed to the method.
+     */
     void invoke(T* instance, Args... args) override {
         (instance->*method)(args...);
     }
 
+    /**
+     * @brief Returns the current receiveur.
+     * @return The current receiveur.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     T* receiveur() override {
         return instance;
     }
 
+    /**
+     * @brief Performs the `void` operation.
+     */
     void (T::*methodPtr() const)(Args...) {
         return method;
     }
@@ -365,13 +430,29 @@ private:
 template <typename T, typename... Args>
 class SlotFunctionReceiver : public ISlot<T, Args...> {
 public:
+    /**
+     * @brief Constructs a `SlotFunctionReceiver` instance.
+     * @param receiver Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SlotFunctionReceiver(T* receiver, std::function<void(Args...)> func)
         : receiver_(receiver), func_(std::move(func)) {}
 
+    /**
+     * @brief Performs the `invoke` operation.
+     * @param args Value passed to the method.
+     */
     void invoke(T*, Args... args) override {
         func_(args...);
     }
 
+    /**
+     * @brief Returns the current receiveur.
+     * @return The current receiveur.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     T* receiveur() override {
         return receiver_;
     }
@@ -385,12 +466,27 @@ private:
 template <typename... Args>
 class SlotFunction : public ISlot<void, Args...> {
 public:
+    /**
+     * @brief Constructs a `SlotFunction` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     explicit SlotFunction(std::function<void(Args...)> func) : func(std::move(func)) {}
 
+    /**
+     * @brief Performs the `invoke` operation.
+     * @param args Value passed to the method.
+     */
     void invoke(void*, Args... args) override {
         func(args...);
     }
 
+    /**
+     * @brief Returns the current receiveur.
+     * @return The current receiveur.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     void* receiveur() override {
         return nullptr;
     }
@@ -461,10 +557,19 @@ auto apply_tuple(Tuple&& t, F&& f) -> decltype(
 template<class Func>
 struct slot_factory {
     Func func;
+    /**
+     * @brief Constructs a `slot_factory` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     slot_factory(Func&& f) : func(std::forward<Func>(f)) {}
 
     // Operator() template qui va être appelé par apply_tuple avec Args...
     template<typename... A>
+    /**
+     * @brief Performs the `operator` operation.
+     * @return The requested operator.
+     */
     ISlot<void, A...>* operator()() {
         using Fn = std::function<void(A...)>;
         Fn f(func); // Conversion implicite vers std::function
@@ -477,9 +582,19 @@ struct slot_factory_with_receiver {
     ReceiverType* receiver;
     Func func;
 
+    /**
+     * @brief Constructs a `slot_factory_with_receiver` instance.
+     * @param r Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     slot_factory_with_receiver(ReceiverType* r, Func&& f) : receiver(r), func(std::forward<Func>(f)) {}
 
     template<typename... A>
+    /**
+     * @brief Performs the `operator` operation.
+     * @return The requested operator.
+     */
     ISlot<ReceiverType, A...>* operator()() {
         using Fn = std::function<void(A...)>;
         Fn f(func); // Conversion en std::function
@@ -491,6 +606,14 @@ struct slot_factory_with_receiver {
 
 class SwObject {
 protected:
+    /**
+     * @brief Returns whether the object reports same Thread Handle.
+     * @param a Value passed to the method.
+     * @param b Value passed to the method.
+     * @return The requested same Thread Handle.
+     *
+     * @details This query does not modify the object state.
+     */
     static bool isSameThreadHandle_(ThreadHandle* a, ThreadHandle* b) {
         if (a == b) return true;
         if (!a || !b) return false;
@@ -505,10 +628,26 @@ protected:
         std::type_index typeIndex;
         std::string data;
 
+        /**
+         * @brief Constructs a `SignalKey` instance.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
         SignalKey() : typeIndex(typeid(void)) {}
+        /**
+         * @brief Constructs a `SignalKey` instance.
+         * @param idx Value passed to the method.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
         SignalKey(std::type_index idx, std::string bytes)
             : typeIndex(idx), data(std::move(bytes)) {}
 
+        /**
+         * @brief Performs the `operator<` operation.
+         * @param other Value passed to the method.
+         * @return `true` on success; otherwise `false`.
+         */
         bool operator<(const SignalKey& other) const {
             if (typeIndex != other.typeIndex) {
                 return typeIndex < other.typeIndex;
@@ -518,6 +657,11 @@ protected:
     };
 
     template <typename SignalPtr>
+    /**
+     * @brief Creates the requested signal Key.
+     * @param signal Value passed to the method.
+     * @return The resulting signal Key.
+     */
     static SignalKey createSignalKey(SignalPtr signal) {
         static_assert(std::is_member_function_pointer<SignalPtr>::value, "Signal pointer attendu");
         return SignalKey(
@@ -526,15 +670,25 @@ protected:
         );
     }
 
-    std::map<std::string, void*> __nameToFunction__;
-    std::map<SwString, std::function<void(void*)>> propertySetterMap;
-    std::map<SwString, std::function<void*()>> propertyGetterMap;
-    std::map<SwString, SwString> propertyArgumentTypeNameMap;
-    std::map<SwString, SwString> propertyOwnerClassMap;
+    SwMap<SwString, void*> __nameToFunction__;
+    /**
+     * @brief Performs the `function<void` operation.
+     * @return The requested function<void.
+     */
+    SwMap<SwString, std::function<void(void*)>> propertySetterMap;
+    /**
+     * @brief Returns the current function<void*.
+     * @return The current function<void*.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
+    SwMap<SwString, std::function<void*()>> propertyGetterMap;
+    SwMap<SwString, SwString> propertyArgumentTypeNameMap;
+    SwMap<SwString, SwString> propertyOwnerClassMap;
 
-    // Qt-like dynamic properties (designer/tooling oriented).
-    std::map<SwString, SwAny> dynamicPropertyMap;
-    std::map<SwString, SwString> dynamicPropertyTypeNameMap;
+    // Dynamic properties for designer/tooling scenarios.
+    SwMap<SwString, SwAny> dynamicPropertyMap;
+    SwMap<SwString, SwString> dynamicPropertyTypeNameMap;
 
     PROPERTY(SwString, ObjectName, "")
 
@@ -548,11 +702,40 @@ public:
      *
      * @param parent Pointer to the parent Object. Defaults to nullptr if no parent is specified.
      */
+    // Returns true if the given pointer refers to a live SwObject instance.
+    // Safe to call with any pointer (even freed memory) — checks an external registry.
+    /**
+     * @brief Returns whether the object reports live.
+     * @param ptr Value passed to the method.
+     * @return The requested live.
+     *
+     * @details This query does not modify the object state.
+     */
+    static bool isLive(const void* ptr) {
+        if (!ptr) return false;
+        std::lock_guard<std::mutex> lk(s_liveObjectsMutex_());
+        return s_liveObjects_().count(ptr) > 0;
+    }
+
+    /**
+     * @brief Constructs a `SwObject` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     SwObject(SwObject* parent = nullptr) :
+          /**
+           * @brief Performs the `m_parent` operation.
+           * @param nullptr Value passed to the method.
+           */
           m_parent(nullptr)
     {
+        { std::lock_guard<std::mutex> lk(s_liveObjectsMutex_()); s_liveObjects_().insert(this); }
         setParent(parent);
         ThreadHandle* currentThread = ThreadHandle::currentThread();
+        if (!currentThread) {
+            currentThread = ThreadHandle::sharedFallbackThread();
+        }
         if (currentThread) {
             m_threadAffinity = currentThread;
             currentThread->attachObject(this);
@@ -567,8 +750,9 @@ public:
      * and deleting child objects if necessary (commented out here for customization).
      */
     virtual ~SwObject() {
-        auto localChildren = children;
-        children.clear();
+        { std::lock_guard<std::mutex> lk(s_liveObjectsMutex_()); s_liveObjects_().erase(this); }
+        auto localChildren = m_children;
+        m_children.clear();
         for (auto* child : localChildren) {
             if (!child) {
                 continue;
@@ -602,15 +786,32 @@ public:
      * @return true if the SwObject is of type Base or derived from it, false otherwise.
      */
     template <typename Base, typename Derived>
+    /**
+     * @brief Performs the `inherits` operation.
+     * @param obj Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool inherits(const Derived* obj) {
         return dynamic_cast<const Base*>(obj) != nullptr;
     }
 
+    /**
+     * @brief Returns the current static Class Name.
+     * @return The current static Class Name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static SwString staticClassName() {
         static SwString kClassName = SwDemangleClassName(typeid(SwObject).name());
         return kClassName;
     }
 
+    /**
+     * @brief Returns the current class Name.
+     * @return The current class Name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     virtual SwString className() const {
         return staticClassName();
     }
@@ -622,16 +823,25 @@ public:
         return m_threadAffinity;
     }
 
+    /**
+     * @brief Returns the current thread.
+     * @return The current thread.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwThread* thread() const;
 
     /**
-     * @brief Moves this object to another thread, similar to Qt's QObject::moveToThread.
+     * @brief Moves this object to another thread.
      *
      * @param targetThread Destination thread. If nullptr, the current thread wrapper is used.
      */
     void moveToThread(ThreadHandle* targetThread) {
         if (!targetThread) {
             targetThread = ThreadHandle::currentThread();
+            if (!targetThread) {
+                targetThread = ThreadHandle::sharedFallbackThread();
+            }
         }
         if (!targetThread || isSameThreadHandle_(targetThread, m_threadAffinity)) {
             return;
@@ -643,12 +853,16 @@ public:
 
         m_threadAffinity = targetThread;
         m_threadAffinity->attachObject(this);
-        for (auto* child : children) {
+        for (auto* child : m_children) {
             if (child) child->moveToThread(targetThread);
         }
         onThreadChanged(targetThread);
     }
 
+    /**
+     * @brief Performs the `moveToThread` operation.
+     * @param targetThread Value passed to the method.
+     */
     void moveToThread(SwThread* targetThread);
 
 
@@ -659,7 +873,7 @@ public:
      *
      * @return SwString The name of the class.
      */
-    virtual std::vector<SwString> classHierarchy() const {
+    virtual SwList<SwString> classHierarchy() const {
         return { staticClassName() };
     }
 
@@ -672,6 +886,20 @@ public:
      */
     void deleteLater() {
         SwObject* meAsDurtyToClean = this;
+        ThreadHandle* targetThread = this->threadHandle();
+        if (!targetThread) {
+            targetThread = ThreadHandle::currentThread();
+            if (!targetThread) {
+                targetThread = ThreadHandle::sharedFallbackThread();
+            }
+        }
+        if (targetThread) {
+            targetThread->postTask([meAsDurtyToClean]() {
+                delete meAsDurtyToClean;
+            });
+            return;
+        }
+
         SwCoreApplication::instance()->postEvent([meAsDurtyToClean]() {
             delete meAsDurtyToClean;
         });
@@ -684,6 +912,11 @@ public:
      * @param _refPtr A reference to the pointer to be deleted. After deletion, it will be set to nullptr.
      */
     template <typename T>
+    /**
+     * @brief Performs the `safeDelete` operation.
+     * @param _refPtr Value passed to the method.
+     * @return The requested safe Delete.
+     */
     static void safeDelete(T*& _refPtr) {
         if (_refPtr) {
             delete _refPtr;
@@ -719,6 +952,12 @@ public:
      */
     SwObject *parent() { return m_parent; }
 
+    /**
+     * @brief Returns the current *parent.
+     * @return The current *parent.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwObject *parent() const { return m_parent; }
 
     /**
@@ -730,7 +969,7 @@ public:
      * @param child The child SwObject to add.
      */
     virtual void addChild(SwObject* child) {
-        children.push_back(child);
+        m_children.push_back(child);
         emit childAdded(child);
         addChildEvent(child);
     }
@@ -744,7 +983,7 @@ public:
      * @param child The child SwObject to remove.
      */
     virtual void removeChild(SwObject* child) {
-        children.erase(std::remove(children.begin(), children.end(), child), children.end());
+        m_children.removeAll(child);
         emit childRemoved(child);
         removedChildEvent(child);
     }
@@ -759,9 +998,15 @@ public:
      * @return A vector of pointers to all child objects of type `T`.
      */
     template <typename T>
-    std::vector<T*> findChildren() const {
-        std::vector<T*> result;
-        for (auto child : children) {
+    /**
+     * @brief Returns the current find Children.
+     * @return The current find Children.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
+    SwList<T*> findChildren() const {
+        SwList<T*> result;
+        for (auto child : m_children) {
             // Utiliser dynamic_cast pour vérifier si l'enfant est du type T
             if (T* castedChild = dynamic_cast<T*>(child)) {
                 result.push_back(castedChild);
@@ -770,8 +1015,8 @@ public:
             // Si l'enfant est un Object, on effectue la recherche récursive
             if (auto objectChild = dynamic_cast<SwObject*>(child)) {
                 // Recherche récursive dans les enfants de l'enfant
-                std::vector<T*> nestedResults = objectChild->findChildren<T>();
-                result.insert(result.end(), nestedResults.begin(), nestedResults.end());
+                SwList<T*> nestedResults = objectChild->findChildren<T>();
+                result.append(nestedResults);
             }
         }
         return result;
@@ -780,13 +1025,44 @@ public:
     /**
      * @brief Retrieves all direct child objects of the current SwObject.
      *
-     * This method returns a constant reference to the vector containing the direct children
-     * of the current SwObject. The vector does not include nested children.
+     * This method returns a constant reference to the list containing the direct children
+     * of the current SwObject. The list does not include nested children.
      *
-     * @return A constant reference to the vector of child objects.
+     * @return A constant reference to the list of child objects.
      */
-    const std::vector<SwObject*>& getChildren() const {
-        return children;
+    const SwList<SwObject*>& children() const {
+        return m_children;
+    }
+
+    /**
+     * @brief Finds the first child object of a specific type, optionally filtered by name.
+     *
+     * Searches recursively through children. Returns nullptr if not found.
+     *
+     * @tparam T The type of object to find.
+     * @param name Optional object name to match (empty = any name).
+     * @return Pointer to the first matching child, or nullptr.
+     */
+    template <typename T>
+    /**
+     * @brief Performs the `findChild` operation.
+     * @param name Value passed to the method.
+     * @return The requested find Child.
+     */
+    T* findChild(const SwString& name = SwString()) const {
+        for (auto* child : m_children) {
+            if (T* casted = dynamic_cast<T*>(child)) {
+                if (name.isEmpty() || casted->getObjectName() == name) {
+                    return casted;
+                }
+            }
+            if (auto* objChild = dynamic_cast<SwObject*>(child)) {
+                if (T* found = objChild->findChild<T>(name)) {
+                    return found;
+                }
+            }
+        }
+        return nullptr;
     }
 
     /**
@@ -822,6 +1098,14 @@ public:
      * @param type Type of connection (e.g., DirectConnection, QueuedConnection, BlockingQueuedConnection). Default is DirectConnection.
      */
     template<typename Sender, typename Receiver, typename... Args>
+    /**
+     * @brief Performs the `connect` operation.
+     * @param sender Value passed to the method.
+     * @param signalName Value passed to the method.
+     * @param receiver Value passed to the method.
+     * @param type Value passed to the method.
+     * @return The requested connect.
+     */
     static void connect(Sender* sender, const SwString& signalName, Receiver* receiver, void (Receiver::* slot)(Args...), ConnectionType type = AutoConnection) {
         static_assert(std::is_base_of<SwObject, Sender>::value, "Sender must derive from SwObject");
         ISlot<Receiver, Args...>* newSlot = new SlotMember<Receiver, Args...>(receiver, slot);
@@ -841,6 +1125,14 @@ public:
      * @param type Type of connection (e.g., DirectConnection, QueuedConnection, BlockingQueuedConnection). Default is DirectConnection.
      */
     template<typename Sender, typename... Args>
+    /**
+     * @brief Performs the `connect` operation.
+     * @param sender Value passed to the method.
+     * @param signalName Value passed to the method.
+     * @param func Value passed to the method.
+     * @param type Value passed to the method.
+     * @return The requested connect.
+     */
     static void connect(Sender* sender, const SwString& signalName, std::function<void(Args...)> func, ConnectionType type = AutoConnection) {
         static_assert(std::is_base_of<SwObject, Sender>::value, "Sender must derive from SwObject");
         ISlot<void, Args...>* newSlot = new SlotFunction<Args...>(func);
@@ -861,6 +1153,14 @@ public:
      *             Default is DirectConnection.
      */
     template <typename SenderType, typename Func>
+    /**
+     * @brief Performs the `connect` operation.
+     * @param sender Value passed to the method.
+     * @param signalName Value passed to the method.
+     * @param func Value passed to the method.
+     * @param type Value passed to the method.
+     * @return The requested connect.
+     */
     static void connect(SenderType* sender, const SwString& signalName, Func&& func, ConnectionType type = AutoConnection) {
         static_assert(std::is_base_of<SwObject, SenderType>::value, "Sender must derive from SwObject");
         using traits = function_traits<typename std::decay<Func>::type>;
@@ -876,6 +1176,15 @@ public:
     }
 
     template <typename SenderType, typename ReceiverType, typename Func>
+    /**
+     * @brief Performs the `connect` operation.
+     * @param sender Value passed to the method.
+     * @param signalName Value passed to the method.
+     * @param receiver Value passed to the method.
+     * @param func Value passed to the method.
+     * @param type Value passed to the method.
+     * @return The requested connect.
+     */
     static void connect(SenderType* sender, const SwString& signalName, ReceiverType* receiver, Func&& func, ConnectionType type = AutoConnection) {
         static_assert(std::is_base_of<SwObject, SenderType>::value, "Sender must derive from SwObject");
         using traits = function_traits<typename std::decay<Func>::type>;
@@ -891,6 +1200,14 @@ public:
     }
 
     template <typename SenderType, typename ReceiverType, typename Func>
+    /**
+     * @brief Performs the `connect` operation.
+     * @param sender Value passed to the method.
+     * @param receiver Value passed to the method.
+     * @param func Value passed to the method.
+     * @param type Value passed to the method.
+     * @return The requested connect.
+     */
     static void connect(SenderType* sender, const SwString& (*signalAccessor)(), ReceiverType* receiver, Func&& func, ConnectionType type = AutoConnection) {
         connect(sender, signalAccessor(), receiver, std::forward<Func>(func), type);
     }
@@ -917,6 +1234,13 @@ public:
      *       cases where Sender or Receiver are derived classes or when argument types do not match exactly.
      */
     template<typename Sender, typename SignalOwner, typename Receiver, typename... SignalArgs, typename... SlotArgs>
+    /**
+     * @brief Performs the `connect` operation.
+     * @param sender Value passed to the method.
+     * @param receiver Value passed to the method.
+     * @param type Value passed to the method.
+     * @return The requested connect.
+     */
     static void connect(
         Sender* sender,
         void (SignalOwner::*signal)(SignalArgs...),
@@ -938,6 +1262,13 @@ public:
     }
 
     template<typename Sender, typename SignalOwner, typename... SignalArgs>
+    /**
+     * @brief Performs the `connect` operation.
+     * @param sender Value passed to the method.
+     * @param func Value passed to the method.
+     * @param type Value passed to the method.
+     * @return The requested connect.
+     */
     static void connect(
         Sender* sender,
         void (SignalOwner::*signal)(SignalArgs...),
@@ -947,8 +1278,9 @@ public:
         static_assert(std::is_base_of<SignalOwner, Sender>::value, "Sender must derive from SignalOwner");
 
         using Fn = std::function<void(swcore_compat::decay_t<SignalArgs>...)>;
-        Fn wrapper = [func = std::move(func)](swcore_compat::decay_t<SignalArgs>... args) mutable {
-            func(args...);
+        Fn movedFunc = std::move(func);
+        Fn wrapper = [movedFunc](swcore_compat::decay_t<SignalArgs>... args) mutable {
+            movedFunc(args...);
         };
 
         ISlot<void, swcore_compat::decay_t<SignalArgs>...>* newSlot =
@@ -957,6 +1289,13 @@ public:
     }
 
     template<typename Sender, typename SignalOwner, typename Func, typename... SignalArgs>
+    /**
+     * @brief Performs the `connect` operation.
+     * @param sender Value passed to the method.
+     * @param func Value passed to the method.
+     * @param type Value passed to the method.
+     * @return The requested connect.
+     */
     static void connect(
         Sender* sender,
         void (SignalOwner::*signal)(SignalArgs...),
@@ -972,6 +1311,14 @@ public:
     }
 
     template<typename Sender, typename SignalOwner, typename Receiver, typename Func, typename... SignalArgs>
+    /**
+     * @brief Performs the `connect` operation.
+     * @param sender Value passed to the method.
+     * @param receiver Value passed to the method.
+     * @param func Value passed to the method.
+     * @param type Value passed to the method.
+     * @return The requested connect.
+     */
     static void connect(
         Sender* sender,
         void (SignalOwner::*signal)(SignalArgs...),
@@ -999,6 +1346,13 @@ public:
      * @param slot The specific slot of the receiver to disconnect.
      */
     template<typename Sender, typename Receiver>
+    /**
+     * @brief Performs the `disconnect` operation.
+     * @param sender Value passed to the method.
+     * @param signalName Value passed to the method.
+     * @param receiver Value passed to the method.
+     * @return The requested disconnect.
+     */
     static void disconnect(Sender* sender, const SwString& signalName, Receiver* receiver, void (Receiver::*slot)()) {
         // Vérifie si le signal existe
         if (sender->connections.find(signalName) != sender->connections.end()) {
@@ -1016,12 +1370,18 @@ public:
 
             // Si plus de slots, supprime l'entrée pour le signal
             if (slotsConnetion.empty()) {
-                sender->connections.erase(signalName);
+                sender->connections.remove(signalName);
             }
         }
     }
 
     template<typename Sender, typename Receiver, typename... SignalArgs>
+    /**
+     * @brief Performs the `disconnect` operation.
+     * @param sender Value passed to the method.
+     * @param receiver Value passed to the method.
+     * @return The requested disconnect.
+     */
     static void disconnect(Sender* sender, void (Sender::*signal)(SignalArgs...), Receiver* receiver, void (Receiver::*slot)(SignalArgs...)) {
         auto key = createSignalKey(signal);
         auto it = sender->typedConnections.find(key);
@@ -1055,6 +1415,12 @@ public:
      * @param receiver Pointer to the receiver SwObject whose slots are being disconnected.
      */
     template<typename Sender, typename Receiver>
+    /**
+     * @brief Performs the `disconnect` operation.
+     * @param sender Value passed to the method.
+     * @param receiver Value passed to the method.
+     * @return The requested disconnect.
+     */
     static void disconnect(Sender* sender, Receiver* receiver) {
         // Parcourt tous les signaux et déconnecte ceux associés au receiver
         for (auto it = sender->connections.begin(); it != sender->connections.end(); ) {
@@ -1107,6 +1473,12 @@ public:
      * @param type The type of connection (e.g., DirectConnection, QueuedConnection).
      */
     template<typename... Args>
+    /**
+     * @brief Adds the specified connection.
+     * @param signalName Value passed to the method.
+     * @param slot Value passed to the method.
+     * @param type Value passed to the method.
+     */
     void addConnection(const SwString& signalName, ISlot<Args...>* slot, ConnectionType type) {
         if (connections.find(signalName) == connections.end()) {
             connections[signalName] = std::vector<std::pair<void*, ConnectionType>>();
@@ -1115,6 +1487,12 @@ public:
     }
 
     template<typename... Args>
+    /**
+     * @brief Adds the specified connection.
+     * @param key Value passed to the method.
+     * @param slot Value passed to the method.
+     * @param type Value passed to the method.
+     */
     void addConnection(const SignalKey& key, ISlot<Args...>* slot, ConnectionType type) {
         typedConnections[key].push_back(std::make_pair(static_cast<void*>(slot), type));
     }
@@ -1171,6 +1549,10 @@ public:
      * Logs a message indicating that all slots linked to the receiver have been disconnected.
      */
     template <typename Receiver>
+    /**
+     * @brief Performs the `disconnectReceiver` operation.
+     * @param receiver Value passed to the method.
+     */
     void disconnectReceiver(Receiver* receiver) {
         for (auto it = connections.begin(); it != connections.end(); ++it) {
             std::vector<std::pair<void*, ConnectionType>>& currentSlots = it->second;
@@ -1345,10 +1727,24 @@ public:
         return SwString();
     }
 
+    /**
+     * @brief Returns whether the object reports dynamic Property.
+     * @param propertyName Value passed to the method.
+     * @return `true` when the object reports dynamic Property; otherwise `false`.
+     *
+     * @details This query does not modify the object state.
+     */
     bool isDynamicProperty(const SwString& propertyName) const {
         return dynamicPropertyMap.find(propertyName) != dynamicPropertyMap.end();
     }
 
+    /**
+     * @brief Sets the dynamic Property.
+     * @param propertyName Value passed to the method.
+     * @param value Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setDynamicProperty(const SwString& propertyName, SwAny value) {
         if (propertySetterMap.find(propertyName) != propertySetterMap.end()) {
             setProperty(propertyName, value);
@@ -1358,16 +1754,27 @@ public:
         dynamicPropertyTypeNameMap[propertyName] = SwString(value.typeName());
     }
 
+    /**
+     * @brief Removes the specified dynamic Property.
+     * @param propertyName Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool removeDynamicProperty(const SwString& propertyName) {
         auto it = dynamicPropertyMap.find(propertyName);
         if (it == dynamicPropertyMap.end()) {
             return false;
         }
         dynamicPropertyMap.erase(it);
-        dynamicPropertyTypeNameMap.erase(propertyName);
+        dynamicPropertyTypeNameMap.remove(propertyName);
         return true;
     }
 
+    /**
+     * @brief Returns the current dynamic Property Names.
+     * @return The current dynamic Property Names.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwStringList dynamicPropertyNames() const {
         SwStringList names;
         names.reserve(dynamicPropertyMap.size());
@@ -1412,6 +1819,11 @@ protected:
      *       handle demangling or mapping to human-readable names.
      */
     template <typename Signal>
+    /**
+     * @brief Performs the `signalNameFromPointer` operation.
+     * @param signal Value passed to the method.
+     * @return The requested signal Name From Pointer.
+     */
     static SwString signalNameFromPointer(Signal signal) {
         // Extraire le nom de la méthode membre
         std::string fullName = typeid(signal).name();
@@ -1435,6 +1847,11 @@ protected:
      * - BlockingQueuedConnection: The current thread is blocked until the slot is executed.
      */
     template<typename... Args>
+    /**
+     * @brief Performs the `emitSignal` operation.
+     * @param signalName Value passed to the method.
+     * @param args Value passed to the method.
+     */
     void emitSignal(const SwString& signalName, Args... args) {
         auto it = connections.find(signalName);
         if (it != connections.end()) {
@@ -1443,6 +1860,11 @@ protected:
     }
 
     template<typename... Args>
+    /**
+     * @brief Performs the `emitSignal` operation.
+     * @param key Value passed to the method.
+     * @param args Value passed to the method.
+     */
     void emitSignal(const SignalKey& key, Args... args) {
         auto it = typedConnections.find(key);
         if (it != typedConnections.end()) {
@@ -1451,6 +1873,11 @@ protected:
     }
 
     template<typename... Args>
+    /**
+     * @brief Performs the `dispatchSlots` operation.
+     * @param slotList Value passed to the method.
+     * @param args Value passed to the method.
+     */
     void dispatchSlots(std::vector<std::pair<void*, ConnectionType>>& slotList, Args... args) {
         SwObject* senderObject = this;
         ThreadHandle* senderThread = this->threadHandle();
@@ -1463,6 +1890,11 @@ protected:
             auto type = connection.second;
             ISlot<void, Args...>* slot = static_cast<ISlot<void, Args...>*>(slotPtr);
             void* receiverRaw = slot ? slot->receiveur() : nullptr;
+            // Guard against a receiver that was destroyed after connect() but before this dispatch.
+            // isLive() checks an external registry — safe to call on freed pointers.
+            if (receiverRaw && !isLive(receiverRaw)) {
+                continue;
+            }
             SwObject* receiverObject = receiverRaw ? static_cast<SwObject*>(receiverRaw) : nullptr;
             ThreadHandle* receiverThread = receiverObject ? receiverObject->threadHandle() : nullptr;
 
@@ -1495,6 +1927,11 @@ protected:
         }
     }
 
+    /**
+     * @brief Performs the `postTaskToThread` operation.
+     * @param targetThread Value passed to the method.
+     * @param task Value passed to the method.
+     */
     void postTaskToThread(ThreadHandle* targetThread, std::function<void()> task) {
         if (!task) {
             return;
@@ -1502,10 +1939,24 @@ protected:
         if (targetThread) {
             targetThread->postTask(std::move(task));
         } else {
+            ThreadHandle* fallbackThread = ThreadHandle::currentThread();
+            if (!fallbackThread) {
+                fallbackThread = ThreadHandle::sharedFallbackThread();
+            }
+            if (fallbackThread) {
+                fallbackThread->postTask(std::move(task));
+                return;
+            }
+
             SwCoreApplication::instance()->postEvent(std::move(task));
         }
     }
 
+    /**
+     * @brief Performs the `executeBlockingOnThread` operation.
+     * @param targetThread Value passed to the method.
+     * @param task Value passed to the method.
+     */
     void executeBlockingOnThread(ThreadHandle* targetThread, std::function<void()> task) {
         ThreadHandle* senderThread = this->threadHandle();
         if (!senderThread) {
@@ -1541,6 +1992,11 @@ protected:
 
     // Conversion générique pointeur de fonction membre -> void*
     template<typename T>
+    /**
+     * @brief Performs the `toVoidPtr` operation.
+     * @param func Value passed to the method.
+     * @return The requested to Void Ptr.
+     */
     static void* toVoidPtr(T func) {
         // static_assert(sizeof(T) == sizeof(void*), "Pointeur de fonction membre et void* tailles différentes.");
         void* ptr = nullptr;
@@ -1550,6 +2006,11 @@ protected:
 
     // Conversion inverse void* -> pointeur de fonction membre
     template<typename T>
+    /**
+     * @brief Performs the `fromVoidPtr` operation.
+     * @param ptr Value passed to the method.
+     * @return The requested from Void Ptr.
+     */
     static T fromVoidPtr(void* ptr) {
         static_assert(sizeof(T) == sizeof(void*), "Pointeur de fonction membre et void* tailles différentes.");
         T func;
@@ -1564,11 +2025,20 @@ signals:
 
 private:
     SwObject* m_parent = nullptr;
-    std::vector<SwObject*> children;
+    SwList<SwObject*> m_children;
     SwString objectName;
-    std::map<SwString, SwString> properties;
-    std::map<SwString, std::vector<std::pair<void*, ConnectionType>>> connections;
-    std::map<SignalKey, std::vector<std::pair<void*, ConnectionType>>> typedConnections;
+
+    static std::unordered_set<const void*>& s_liveObjects_() {
+        static std::unordered_set<const void*> s;
+        return s;
+    }
+    static std::mutex& s_liveObjectsMutex_() {
+        static std::mutex m;
+        return m;
+    }
+    SwMap<SwString, SwString> properties;
+    SwMap<SwString, std::vector<std::pair<void*, ConnectionType>>> connections;
+    SwMap<SignalKey, std::vector<std::pair<void*, ConnectionType>>> typedConnections;
     SwObject* currentSender = nullptr;
     ThreadHandle* m_threadAffinity = nullptr;
 };

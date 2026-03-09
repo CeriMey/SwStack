@@ -1,4 +1,28 @@
 #pragma once
+
+/**
+ * @file src/core/io/SwWebSocketServer.h
+ * @ingroup core_io
+ * @brief Declares the public interface exposed by SwWebSocketServer in the CoreSw IO layer.
+ *
+ * This header belongs to the CoreSw IO layer. It defines files, sockets, servers, descriptors,
+ * processes, and network helpers that sit directly at operating-system boundaries.
+ *
+ * Within that layer, this file focuses on the web socket server interface. The declarations
+ * exposed here define the stable surface that adjacent code can rely on while the implementation
+ * remains free to evolve behind the header.
+ *
+ * The main declarations in this header are SwWebSocketServer.
+ *
+ * Server-oriented declarations here usually coordinate listener setup, connection or session
+ * lifetime, dispatch boundaries, and integration points for higher-level request or protocol
+ * logic.
+ *
+ * IO-facing declarations here usually manage handles, readiness state, buffering, and error
+ * propagation while presenting a portable framework API.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -30,7 +54,7 @@
 static constexpr const char* kSwLogCategory_SwWebSocketServer = "sw.core.io.swwebsocketserver";
 
 /**
- * @brief Minimal QWebSocketServer-like wrapper built on SwTcpServer + SwWebSocket (ServerRole).
+ * @brief Minimal WebSocket server wrapper built on SwTcpServer + SwWebSocket (ServerRole).
  *
  * - Accepts TCP connections, performs the WebSocket server handshake, and queues ready sockets.
  * - Use nextPendingConnection() to retrieve accepted SwWebSocket instances.
@@ -39,16 +63,34 @@ class SwWebSocketServer : public SwObject {
     SW_OBJECT(SwWebSocketServer, SwObject)
 
 public:
+    /**
+     * @brief Constructs a `SwWebSocketServer` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwWebSocketServer(SwObject* parent = nullptr)
         : SwObject(parent) {
         m_tcpServer = new SwTcpServer(this);
-        connect(m_tcpServer, SIGNAL(newConnection), this, &SwWebSocketServer::onNewTcpConnection_);
+        connect(m_tcpServer, &SwTcpServer::newConnection, this, &SwWebSocketServer::onNewTcpConnection_);
     }
 
+    /**
+     * @brief Destroys the `SwWebSocketServer` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~SwWebSocketServer() override {
         close();
     }
 
+    /**
+     * @brief Starts listening for incoming traffic.
+     * @param port Local port used by the operation.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     bool listen(uint16_t port) {
         if (!m_tcpServer) {
             return false;
@@ -56,20 +98,43 @@ public:
         return m_tcpServer->listen(port);
     }
 
+    /**
+     * @brief Closes the underlying resource and stops active work.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     void close() {
         if (m_tcpServer) {
             m_tcpServer->close();
         }
     }
 
+    /**
+     * @brief Sets the supported Subprotocols.
+     * @param subprotocols Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setSupportedSubprotocols(const SwList<SwString>& subprotocols) {
         m_supportedSubprotocols = subprotocols;
     }
 
+    /**
+     * @brief Returns the current supported Subprotocols.
+     * @return The current supported Subprotocols.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwList<SwString>& supportedSubprotocols() const {
         return m_supportedSubprotocols;
     }
 
+    /**
+     * @brief Returns the current next Pending Connection.
+     * @return The current next Pending Connection.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwWebSocket* nextPendingConnection() {
         if (m_pendingSockets.isEmpty()) {
             return nullptr;
@@ -83,6 +148,9 @@ signals:
     DECLARE_SIGNAL_VOID(newConnection)
 
 private slots:
+    /**
+     * @brief Performs the `onNewTcpConnection_` operation.
+     */
     void onNewTcpConnection_() {
         if (!m_tcpServer) {
             return;
@@ -93,20 +161,20 @@ private slots:
             ws->setSupportedSubprotocols(m_supportedSubprotocols);
             m_handshakeComplete[ws] = false;
 
-            connect(ws, SIGNAL(connected), this, [this, ws]() {
+            connect(ws, &SwWebSocket::connected, this, [this, ws]() {
                 m_handshakeComplete[ws] = true;
                 m_pendingSockets.append(ws);
                 emit newConnection();
             });
 
-            connect(ws, SIGNAL(errorOccurred), this, [this, ws](int) {
+            connect(ws, &SwWebSocket::errorOccurred, this, [this, ws](int) {
                 if (!m_handshakeComplete.value(ws, false)) {
                     m_handshakeComplete.remove(ws);
                     ws->deleteLater();
                 }
             });
 
-            connect(ws, SIGNAL(disconnected), this, [this, ws]() {
+            connect(ws, &SwWebSocket::disconnected, this, [this, ws]() {
                 if (!m_handshakeComplete.value(ws, false)) {
                     m_handshakeComplete.remove(ws);
                     ws->deleteLater();
@@ -123,4 +191,3 @@ private:
     SwList<SwWebSocket*> m_pendingSockets;
     SwMap<SwWebSocket*, bool> m_handshakeComplete;
 };
-

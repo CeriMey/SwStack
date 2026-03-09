@@ -1,5 +1,29 @@
 #pragma once
 
+/**
+ * @file src/core/gui/SwizioNodes/internal/NodeStyle.hpp
+ * @ingroup core_swizio_nodes
+ * @brief Declares the public interface exposed by NodeStyle in the CoreSw node-editor layer.
+ *
+ * This header belongs to the CoreSw node-editor layer. It contains the graph, geometry, style,
+ * and scene infrastructure used by the embedded node editor.
+ *
+ * Within that layer, this file focuses on the node style interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * This header mainly contributes module-level utilities, helper declarations, or namespaced types
+ * that are consumed by the surrounding subsystem.
+ *
+ * Style-oriented declarations here capture reusable visual parameters so rendering code can stay
+ * deterministic while still allowing higher-level customization.
+ *
+ * Most declarations here are extension points or internal contracts that coordinate graph
+ * editing, visualization, and interaction.
+ *
+ */
+
+
 #include "Export.hpp"
 #include "Style.hpp"
 
@@ -13,22 +37,67 @@ namespace SwizioNodes {
 class SWIZIO_NODES_PUBLIC NodeStyle : public Style
 {
 public:
+    /**
+     * @brief Constructs a `NodeStyle` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     NodeStyle();
 
+    /**
+     * @brief Constructs a `NodeStyle` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     explicit NodeStyle(SwString jsonText) { loadJsonText(std::move(jsonText)); }
 
+    /**
+     * @brief Constructs a `NodeStyle` instance.
+     * @param json Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     explicit NodeStyle(SwJsonObject const& json) { loadJson(json); }
 
+    /**
+     * @brief Destroys the `NodeStyle` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~NodeStyle() override = default;
 
 public:
+    /**
+     * @brief Sets the node Style.
+     * @param jsonText Value passed to the method.
+     * @return The requested node Style.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     static void setNodeStyle(SwString jsonText);
 
+    /**
+     * @brief Sets the widget Style.
+     * @param jsonText Value passed to the method.
+     * @return The requested widget Style.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     static void setWidgetStyle(SwString jsonText);
 
 public:
+    /**
+     * @brief Performs the `loadJson` operation on the associated resource.
+     * @param json Value passed to the method.
+     */
     void loadJson(SwJsonObject const& json) override;
 
+    /**
+     * @brief Returns the current to Json.
+     * @return The current to Json.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwJsonObject toJson() const override;
 
 public:
@@ -83,8 +152,8 @@ inline NodeStyle::NodeStyle()
 
 inline void NodeStyle::loadJson(SwJsonObject const& json)
 {
-    SwJsonObject obj = json.contains("NodeStyle") && json["NodeStyle"].isObject() && json["NodeStyle"].toObject()
-                           ? SwJsonObject(json["NodeStyle"].toObject())
+    SwJsonObject obj = json.contains("NodeStyle") && json["NodeStyle"].isObject()
+                           ? json["NodeStyle"].toObject()
                            : json;
 
     auto readColor = [&](const char* key, SwColor& target) {

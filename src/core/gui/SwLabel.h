@@ -1,4 +1,17 @@
-#pragma once
+﻿#pragma once
+
+/**
+ * @file
+ * @ingroup core_gui
+ * @brief Declares `SwLabel`, the basic text and image display widget.
+ *
+ * `SwLabel` is the lightweight presentation widget used for static captions, status text,
+ * and simple rich display content inside layouts and dialogs. It focuses on rendering and
+ * size hinting rather than editing, making it the passive text primitive of the GUI stack.
+ */
+
+
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -37,29 +50,49 @@ class SwLabel : public SwWidget {
     }
 
 public:
+    /**
+     * @brief Constructs a `SwLabel` instance.
+     * @param text Value passed to the method.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     SwLabel(const SwString& text, SwWidget* parent = nullptr)
         : SwWidget(parent) {
-        resize(200, 30);  // Dimensions par défaut
+        resize(200, 30);  // Dimensions par dÃ©faut
 
-        // Définition d'un style CSS pour le Label
+        // DÃ©finition d'un style CSS pour le Label
         this->setFocusPolicy(FocusPolicyEnum::NoFocus);
         this->setText(text);
     }
 
+    /**
+     * @brief Constructs a `SwLabel` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     SwLabel(SwWidget* parent = nullptr)
         : SwWidget(parent) {
-        resize(200, 30);  // Dimensions par défaut
+        resize(200, 30);  // Dimensions par dÃ©faut
         this->setFocusPolicy(FocusPolicyEnum::NoFocus);
     }
 
-    // Surcharge de la méthode paintEvent pour dessiner le Label
+    // Surcharge de la mÃ©thode paintEvent pour dessiner le Label
+    /**
+     * @brief Handles the paint Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     * @return The requested paint Event.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     virtual void paintEvent(PaintEvent* event) override {
         SwPainter* painter = event->painter();
         if (!painter) {
             return;
         }
 
-        SwRect rect = getRect();
+        SwRect rect = this->rect();
 
         WidgetState state = WidgetState::Normal;
         //if (getHover()) {
@@ -69,33 +102,61 @@ public:
         //    state = WidgetStateHelper::setState(state, WidgetState::Focused);
         //}
 
-        // Dessiner le label avec le style CSS et l'état défini
+        // Dessiner le label avec le style CSS et l'Ã©tat dÃ©fini
         m_style->drawControl(WidgetStyle::LabelStyle, rect, painter, this, WidgetState::Normal);
     }
 
+    /**
+     * @brief Handles the mouse Move Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     * @return The requested mouse Move Event.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     virtual void mouseMoveEvent(MouseEvent* event) override {
         SwWidget::mouseMoveEvent(event);
     }
 
+    /**
+     * @brief Handles the mouse Press Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     * @return The requested mouse Press Event.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     virtual void mousePressEvent(MouseEvent* event) override {
         SwWidget::mousePressEvent(event);
     }
 
+    /**
+     * @brief Handles the mouse Release Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     * @return The requested mouse Release Event.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     virtual void mouseReleaseEvent(MouseEvent* event) override {
         SwWidget::mouseReleaseEvent(event);
     }
 
-    virtual SwRect sizeHint() const override {
-        SwRect rect = getRect();
-        rect.width = width();
-        rect.height = height();
-        return rect;
+    /**
+     * @brief Returns the current size Hint.
+     * @return The current size Hint.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
+    virtual SwSize sizeHint() const override {
+        return SwSize{width(), height()};
     }
 
-    virtual SwRect minimumSizeHint() const override {
-        SwRect rect = sizeHint();
-        rect.width = width();
-        rect.height = height();
-        return rect;
+    /**
+     * @brief Returns the current minimum Size Hint.
+     * @return The current minimum Size Hint.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
+    virtual SwSize minimumSizeHint() const override {
+        return sizeHint();
     }
 };
+

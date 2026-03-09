@@ -1,5 +1,28 @@
 #ifndef SWSETTINGS_H
 #define SWSETTINGS_H
+
+/**
+ * @file src/core/fs/SwSettings.h
+ * @ingroup core_fs
+ * @brief Declares the public interface exposed by SwSettings in the CoreSw filesystem layer.
+ *
+ * This header belongs to the CoreSw filesystem layer. It wraps platform-specific path, directory,
+ * settings, and related utility services behind framework-native types.
+ *
+ * Within that layer, this file focuses on the settings interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwSettings.
+ *
+ * Settings-oriented declarations here describe how named configuration values are grouped,
+ * persisted, and retrieved in a way that remains portable across storage backends.
+ *
+ * Filesystem declarations in this area are meant to keep file and path behavior predictable
+ * across platforms while staying inside the Sw* type system.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -23,6 +46,8 @@
  ***************************************************************************************************/
 
 #include "SwAny.h"
+#include "SwMap.h"
+#include "SwList.h"
 #include "SwString.h"
 #include "SwStandardPaths.h"
 #include "SwJsonValue.h"
@@ -32,11 +57,17 @@
 #include "SwFile.h"
 #include "SwFileInfo.h"
 
-#include <map>
-#include <vector>
 
 class SwSettings {
 public:
+    /**
+     * @brief Constructs a `SwSettings` instance.
+     * @param organization Value passed to the method.
+     * @param application Value passed to the method.
+     * @param false Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwSettings(const SwString& organization = SwString(),
                const SwString& application = SwString())
         : organization_(organization),
@@ -46,10 +77,22 @@ public:
         loadFromDisk();
     }
 
+    /**
+     * @brief Destroys the `SwSettings` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~SwSettings() {
         sync();
     }
 
+    /**
+     * @brief Sets the value.
+     * @param key Value passed to the method.
+     * @param value Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setValue(const SwString& key, const SwAny& value) {
         if (key.isEmpty()) {
             return;
@@ -59,6 +102,12 @@ public:
         dirty_ = true;
     }
 
+    /**
+     * @brief Performs the `value` operation.
+     * @param key Value passed to the method.
+     * @param defaultValue Value passed to the method.
+     * @return The requested value.
+     */
     SwAny value(const SwString& key, const SwAny& defaultValue = SwAny()) const {
         if (key.isEmpty()) {
             return defaultValue;
@@ -71,6 +120,11 @@ public:
         return jsonToAny(it->second);
     }
 
+    /**
+     * @brief Performs the `contains` operation.
+     * @param key Value passed to the method.
+     * @return `true` when the object reports contains; otherwise `false`.
+     */
     bool contains(const SwString& key) const {
         if (key.isEmpty()) {
             return false;
@@ -78,33 +132,43 @@ public:
         return values_.find(canonicalKey(key)) != values_.end();
     }
 
+    /**
+     * @brief Removes the specified remove.
+     * @param key Value passed to the method.
+     */
     void remove(const SwString& key) {
         if (key.isEmpty()) {
             return;
         }
         SwString fullKey = canonicalKey(key);
-        std::vector<SwString> toErase;
+        SwList<SwString> toErase;
         for (const auto& entry : values_) {
             if (entry.first == fullKey || entry.first.startsWith(fullKey + "/")) {
-                toErase.push_back(entry.first);
+                toErase.append(entry.first);
             }
         }
         for (const SwString& k : toErase) {
-            values_.erase(k);
+            values_.remove(k);
         }
-        if (!toErase.empty()) {
+        if (!toErase.isEmpty()) {
             dirty_ = true;
         }
     }
 
+    /**
+     * @brief Clears the current object state.
+     */
     void clear() {
-        if (values_.empty()) {
+        if (values_.isEmpty()) {
             return;
         }
         values_.clear();
         dirty_ = true;
     }
 
+    /**
+     * @brief Performs the `sync` operation.
+     */
     void sync() {
         if (!dirty_) {
             return;
@@ -112,23 +176,42 @@ public:
         saveToDisk();
     }
 
+    /**
+     * @brief Returns whether the object reports dirty.
+     * @return `true` when the object reports dirty; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isDirty() const {
         return dirty_;
     }
 
+    /**
+     * @brief Performs the `beginGroup` operation.
+     * @param prefix Prefix used by the operation.
+     */
     void beginGroup(const SwString& prefix) {
         SwString clean = prefix.trimmed();
         if (!clean.isEmpty()) {
-            groupStack_.push_back(clean);
+            groupStack_.append(clean);
         }
     }
 
+    /**
+     * @brief Performs the `endGroup` operation.
+     */
     void endGroup() {
-        if (!groupStack_.empty()) {
-            groupStack_.pop_back();
+        if (!groupStack_.isEmpty()) {
+            groupStack_.removeLast();
         }
     }
 
+    /**
+     * @brief Returns the current group.
+     * @return The current group.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString group() const {
         SwString result;
         for (size_t i = 0; i < groupStack_.size(); ++i) {
@@ -141,7 +224,7 @@ public:
     }
 
 private:
-    using ValueMap = std::map<SwString, SwJsonValue>;
+    using ValueMap = SwMap<SwString, SwJsonValue>;
 
     void initializePaths() {
         SwString base = SwStandardPaths::writableLocation(SwStandardPaths::AppConfigLocation);
@@ -274,10 +357,10 @@ private:
             return SwAny::from(value.toDouble());
         }
         if (value.isObject()) {
-            return SwAny::from(*value.toObject());
+            return SwAny::from(value.toObject());
         }
         if (value.isArray()) {
-            return SwAny::from(*value.toArray());
+            return SwAny::from(value.toArray());
         }
         return SwAny::from(value.toString());
     }
@@ -299,7 +382,7 @@ private:
                 if (!node.isObject()) {
                     node = SwJsonObject();
                 }
-                current = node.toObject().get();
+                current = node.toObjectPtr().get();
             }
         }
     }
@@ -307,7 +390,7 @@ private:
     static void flattenJson(const SwString& prefix, const SwJsonValue& value, ValueMap& out) {
         if (value.isObject()) {
             auto object = value.toObject();
-            auto data = object->data();
+            auto data = object.data();
             for (const auto& entry : data) {
                 SwString key(entry.first);
                 SwString fullKey = prefix.isEmpty() ? key : prefix + "/" + key;
@@ -426,7 +509,7 @@ private:
     SwString application_;
     SwString filePath_;
     ValueMap values_;
-    std::vector<SwString> groupStack_;
+    SwList<SwString> groupStack_;
     bool dirty_;
 };
 

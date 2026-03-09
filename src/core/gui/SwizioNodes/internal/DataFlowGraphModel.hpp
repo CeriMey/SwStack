@@ -1,5 +1,31 @@
 #pragma once
 
+/**
+ * @file src/core/gui/SwizioNodes/internal/DataFlowGraphModel.hpp
+ * @ingroup core_swizio_nodes
+ * @brief Declares the public interface exposed by DataFlowGraphModel in the CoreSw node-editor
+ * layer.
+ *
+ * This header belongs to the CoreSw node-editor layer. It contains the graph, geometry, style,
+ * and scene infrastructure used by the embedded node editor.
+ *
+ * Within that layer, this file focuses on the data flow graph model interface. The declarations
+ * exposed here define the stable surface that adjacent code can rely on while the implementation
+ * remains free to evolve behind the header.
+ *
+ * This header mainly contributes module-level utilities, helper declarations, or namespaced types
+ * that are consumed by the surrounding subsystem.
+ *
+ * Model-oriented declarations here define the data contract consumed by views, delegates, or
+ * algorithms, with an emphasis on stable roles, ownership, and update flow rather than on
+ * presentation details.
+ *
+ * Most declarations here are extension points or internal contracts that coordinate graph
+ * editing, visualization, and interaction.
+ *
+ */
+
+
 #include "AbstractGraphModel.hpp"
 #include "ConnectionIdUtils.hpp"
 #include "NodeDelegateModelRegistry.hpp"
@@ -37,58 +63,185 @@ public:
     };
 
 public:
+    /**
+     * @brief Constructs a `DataFlowGraphModel` instance.
+     * @param context Value passed to the method.
+     * @param registry Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     DataFlowGraphModel(const SwString& context, std::shared_ptr<NodeDelegateModelRegistry> registry);
 
+    /**
+     * @brief Destroys the `DataFlowGraphModel` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~DataFlowGraphModel() override = default;
 
+    /**
+     * @brief Returns the current data Model Registry.
+     * @return The current data Model Registry.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     std::shared_ptr<NodeDelegateModelRegistry> dataModelRegistry() { return m_registry; }
 
 public:
+    /**
+     * @brief Returns the current all Node Ids.
+     * @return The current all Node Ids.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     std::unordered_set<NodeId> allNodeIds() const override;
 
+    /**
+     * @brief Performs the `allConnectionIds` operation.
+     * @param nodeId Value passed to the method.
+     * @return The requested all Connection Ids.
+     */
     std::unordered_set<ConnectionId> allConnectionIds(NodeId const nodeId) const override;
 
+    /**
+     * @brief Performs the `connections` operation.
+     * @param nodeId Value passed to the method.
+     * @param portType Value passed to the method.
+     * @param portIndex Value passed to the method.
+     * @return The requested connections.
+     */
     std::unordered_set<ConnectionId> connections(NodeId nodeId,
                                                  PortType portType,
                                                  PortIndex portIndex) const override;
 
+    /**
+     * @brief Performs the `connectionExists` operation.
+     * @param connectionId Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool connectionExists(ConnectionId const connectionId) const override;
 
+    /**
+     * @brief Adds the specified node.
+     * @param nodeType Value passed to the method.
+     * @return The requested node.
+     */
     NodeId addNode(SwString const nodeType) override;
 
+    /**
+     * @brief Performs the `connectionPossible` operation.
+     * @param connectionId Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool connectionPossible(ConnectionId const connectionId) const override;
 
+    /**
+     * @brief Adds the specified connection.
+     * @param connectionId Value passed to the method.
+     */
     void addConnection(ConnectionId const connectionId) override;
 
+    /**
+     * @brief Performs the `nodeExists` operation.
+     * @param nodeId Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool nodeExists(NodeId const nodeId) const override;
 
+    /**
+     * @brief Performs the `nodeData` operation.
+     * @param nodeId Value passed to the method.
+     * @param role Value passed to the method.
+     * @return The requested node Data.
+     */
     SwAny nodeData(NodeId nodeId, NodeRole role) const override;
 
+    /**
+     * @brief Performs the `nodeFlags` operation.
+     * @param nodeId Value passed to the method.
+     * @return The requested node Flags.
+     */
     NodeFlags nodeFlags(NodeId nodeId) const override;
 
+    /**
+     * @brief Sets the node Data.
+     * @param nodeId Value passed to the method.
+     * @param role Value passed to the method.
+     * @param value Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     bool setNodeData(NodeId nodeId, NodeRole role, SwAny value) override;
 
+    /**
+     * @brief Performs the `portData` operation.
+     * @param nodeId Value passed to the method.
+     * @param portType Value passed to the method.
+     * @param portIndex Value passed to the method.
+     * @param role Value passed to the method.
+     * @return The requested port Data.
+     */
     SwAny portData(NodeId nodeId,
                    PortType portType,
                    PortIndex portIndex,
                    PortRole role) const override;
 
+    /**
+     * @brief Sets the port Data.
+     * @param nodeId Value passed to the method.
+     * @param portType Value passed to the method.
+     * @param portIndex Value passed to the method.
+     * @param value Value passed to the method.
+     * @param role Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     bool setPortData(NodeId nodeId,
                      PortType portType,
                      PortIndex portIndex,
                      SwAny const& value,
                      PortRole role = PortRole::Data) override;
 
+    /**
+     * @brief Performs the `deleteConnection` operation.
+     * @param connectionId Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool deleteConnection(ConnectionId const connectionId) override;
 
+    /**
+     * @brief Performs the `deleteNode` operation.
+     * @param nodeId Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool deleteNode(NodeId const nodeId) override;
 
+    /**
+     * @brief Performs the `saveNode` operation on the associated resource.
+     * @return The requested node.
+     */
     SwJsonObject saveNode(NodeId const) const override;
 
+    /**
+     * @brief Returns the current save.
+     * @return The current save.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwJsonObject save() const override;
 
+    /**
+     * @brief Performs the `loadNode` operation on the associated resource.
+     * @param nodeJson Value passed to the method.
+     */
     void loadNode(SwJsonObject const& nodeJson) override;
 
+    /**
+     * @brief Performs the `load` operation on the associated resource.
+     * @param json Value passed to the method.
+     */
     void load(SwJsonObject const& json) override;
 
     /**
@@ -96,6 +249,11 @@ public:
      * stored pointer to the given type.
      */
     template<typename NodeDelegateModelType>
+    /**
+     * @brief Performs the `delegateModel` operation.
+     * @param nodeId Value passed to the method.
+     * @return The requested delegate Model.
+     */
     NodeDelegateModelType* delegateModel(NodeId const nodeId)
     {
         auto it = m_models.find(nodeId);
@@ -105,6 +263,11 @@ public:
         return dynamic_cast<NodeDelegateModelType*>(it->second.get());
     }
 
+    /**
+     * @brief Performs the `delegateModel` operation.
+     * @param nodeId Value passed to the method.
+     * @return The requested delegate Model.
+     */
     NodeDelegateModel* delegateModel(NodeId const nodeId)
     {
         auto it = m_models.find(nodeId);
@@ -114,6 +277,11 @@ public:
         return it->second.get();
     }
 
+    /**
+     * @brief Performs the `delegateModel` operation.
+     * @param nodeId Value passed to the method.
+     * @return The requested delegate Model.
+     */
     NodeDelegateModel const* delegateModel(NodeId const nodeId) const
     {
         auto it = m_models.find(nodeId);
@@ -123,6 +291,12 @@ public:
         return it->second.get();
     }
 
+    /**
+     * @brief Sets the registry.
+     * @param newRegistry Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setRegistry(const std::shared_ptr<NodeDelegateModelRegistry>& newRegistry);
 
 signals:
@@ -617,7 +791,7 @@ inline void DataFlowGraphModel::loadNode(SwJsonObject const& nodeJson)
     m_nextNodeId = std::max(m_nextNodeId, restoredNodeId + 1);
 
     SwJsonObject internalDataJson;
-    if (nodeJson.contains("internal-data") && nodeJson["internal-data"].isObject() && nodeJson["internal-data"].toObject()) {
+    if (nodeJson.contains("internal-data") && nodeJson["internal-data"].isObject()) {
         internalDataJson = SwJsonObject(nodeJson["internal-data"].toObject());
     }
 
@@ -660,7 +834,7 @@ inline void DataFlowGraphModel::loadNode(SwJsonObject const& nodeJson)
 
     nodeCreated(restoredNodeId);
 
-    if (nodeJson.contains("position") && nodeJson["position"].isObject() && nodeJson["position"].toObject()) {
+    if (nodeJson.contains("position") && nodeJson["position"].isObject()) {
         SwJsonObject posJson(nodeJson["position"].toObject());
         SwPointF pos;
         pos.x = posJson.contains("x") ? posJson["x"].toDouble() : 0.0;
@@ -673,19 +847,19 @@ inline void DataFlowGraphModel::loadNode(SwJsonObject const& nodeJson)
 
 inline void DataFlowGraphModel::load(SwJsonObject const& jsonDocument)
 {
-    if (jsonDocument.contains("nodes") && jsonDocument["nodes"].isArray() && jsonDocument["nodes"].toArray()) {
-        const SwJsonArray nodesJsonArray = *jsonDocument["nodes"].toArray();
+    if (jsonDocument.contains("nodes") && jsonDocument["nodes"].isArray()) {
+        const SwJsonArray nodesJsonArray = jsonDocument["nodes"].toArray();
         for (auto const& nodeVal : nodesJsonArray.data()) {
-            if (nodeVal.isObject() && nodeVal.toObject()) {
+            if (nodeVal.isObject()) {
                 loadNode(SwJsonObject(nodeVal.toObject()));
             }
         }
     }
 
-    if (jsonDocument.contains("connections") && jsonDocument["connections"].isArray() && jsonDocument["connections"].toArray()) {
-        const SwJsonArray connJsonArray = *jsonDocument["connections"].toArray();
+    if (jsonDocument.contains("connections") && jsonDocument["connections"].isArray()) {
+        const SwJsonArray connJsonArray = jsonDocument["connections"].toArray();
         for (auto const& connVal : connJsonArray.data()) {
-            if (connVal.isObject() && connVal.toObject()) {
+            if (connVal.isObject()) {
                 ConnectionId connId = fromJson(SwJsonObject(connVal.toObject()));
                 addConnection(connId);
             }

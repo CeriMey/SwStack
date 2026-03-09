@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -23,9 +23,9 @@
 
 #include "SwWidgetInterface.h"
 #include "SwLayout.h"
-#include <iostream>
 #include <vector>
 #include <algorithm>
+#include <memory>
 #include <limits>
 #include <exception>
 #include "SwFont.h"
@@ -41,7 +41,7 @@ class SwStyle;
 
 
 
-// Enum pour les types d'événements
+// Enum pour les types d'Ã©vÃ©nements
 enum class EventType {
     Paint,
     Resize,
@@ -56,29 +56,29 @@ enum class EventType {
     Hide
 };
 
-// Classe de base pour un événement
+// Classe de base pour un Ã©vÃ©nement
 class Event {
 public:
     Event(EventType type) : eventType(type), accepted(false) {}
 
     EventType type() const { return eventType; }
 
-    // Marquer l'événement comme accepté
+    // Marquer l'Ã©vÃ©nement comme acceptÃ©
     void accept() { accepted = true; }
 
-    // Marquer l'événement comme refusé
+    // Marquer l'Ã©vÃ©nement comme refusÃ©
     void ignore() { accepted = false; }
 
-    // Vérifier si l'événement a été accepté
+    // VÃ©rifier si l'Ã©vÃ©nement a Ã©tÃ© acceptÃ©
     bool isAccepted() const { return accepted; }
 
 private:
     EventType eventType;
-    bool accepted;  // Nouveau membre pour suivre si l'événement est accepté ou non
+    bool accepted;  // Nouveau membre pour suivre si l'Ã©vÃ©nement est acceptÃ© ou non
 };
 
 
-// Classe pour l'événement de redimensionnement
+// Classe pour l'Ã©vÃ©nement de redimensionnement
 class ResizeEvent : public Event {
 public:
     ResizeEvent(int w, int h) : Event(EventType::Resize), newWidth(w), newHeight(h) {}
@@ -90,7 +90,7 @@ private:
     int newWidth, newHeight;
 };
 
-// Classe pour l'événement de dessin
+// Classe pour l'Ã©vÃ©nement de dessin
 class PaintEvent : public Event {
 public:
     PaintEvent(SwPainter* painter, const SwRect& paintRect)
@@ -121,6 +121,8 @@ public:
         , ctrlPressed(ctrl)
         , shiftPressed(shift)
         , altPressed(alt)
+        , globalXPosition(xPos)
+        , globalYPosition(yPos)
         , deltaX(0)
         , deltaY(0)
         , speedX(0)
@@ -128,8 +130,22 @@ public:
 
     int x() const { return xPosition; }
     int y() const { return yPosition; }
+    SwPoint pos() const { return SwPoint{xPosition, yPosition}; }
     void setX(int xPos) { xPosition = xPos; }
     void setY(int yPos) { yPosition = yPos; }
+    void setPos(const SwPoint& p) {
+        xPosition = p.x;
+        yPosition = p.y;
+    }
+    int globalX() const { return globalXPosition; }
+    int globalY() const { return globalYPosition; }
+    SwPoint globalPos() const { return SwPoint{globalXPosition, globalYPosition}; }
+    void setGlobalX(int xPos) { globalXPosition = xPos; }
+    void setGlobalY(int yPos) { globalYPosition = yPos; }
+    void setGlobalPos(const SwPoint& p) {
+        globalXPosition = p.x;
+        globalYPosition = p.y;
+    }
     SwMouseButton button() const { return m_button; }
     void setButton(SwMouseButton button) { m_button = button; }
     int getDeltaX() const { return deltaX; }
@@ -155,11 +171,13 @@ private:
     bool ctrlPressed{false};
     bool shiftPressed{false};
     bool altPressed{false};
+    int globalXPosition{0};
+    int globalYPosition{0};
     int deltaX, deltaY;
     double speedX, speedY;
 };
 
-// Classe pour un événement de clavier
+// Classe pour un Ã©vÃ©nement de clavier
 class WheelEvent : public Event {
 public:
     WheelEvent(int xPos,
@@ -171,6 +189,8 @@ public:
         : Event(EventType::WheelEvent)
         , xPosition(xPos)
         , yPosition(yPos)
+        , globalXPosition(xPos)
+        , globalYPosition(yPos)
         , wheelDelta(delta)
         , ctrlPressed(ctrl)
         , shiftPressed(shift)
@@ -178,6 +198,22 @@ public:
 
     int x() const { return xPosition; }
     int y() const { return yPosition; }
+    SwPoint pos() const { return SwPoint{xPosition, yPosition}; }
+    void setX(int xPos) { xPosition = xPos; }
+    void setY(int yPos) { yPosition = yPos; }
+    void setPos(const SwPoint& p) {
+        xPosition = p.x;
+        yPosition = p.y;
+    }
+    int globalX() const { return globalXPosition; }
+    int globalY() const { return globalYPosition; }
+    SwPoint globalPos() const { return SwPoint{globalXPosition, globalYPosition}; }
+    void setGlobalX(int xPos) { globalXPosition = xPos; }
+    void setGlobalY(int yPos) { globalYPosition = yPos; }
+    void setGlobalPos(const SwPoint& p) {
+        globalXPosition = p.x;
+        globalYPosition = p.y;
+    }
     int delta() const { return wheelDelta; }
 
     bool isCtrlPressed() const { return ctrlPressed; }
@@ -187,6 +223,8 @@ public:
 private:
     int xPosition{0};
     int yPosition{0};
+    int globalXPosition{0};
+    int globalYPosition{0};
     int wheelDelta{0};
     bool ctrlPressed{false};
     bool shiftPressed{false};
@@ -195,24 +233,37 @@ private:
 
 class KeyEvent : public Event {
 public:
-    KeyEvent(int keyCode, bool ctrl = false, bool shift = false, bool alt = false)
-        : Event(EventType::KeyPressEvent), keyPressed(keyCode), ctrlPressed(ctrl), shiftPressed(shift), altPressed(alt) {}
+    KeyEvent(int keyCode, bool ctrl = false, bool shift = false, bool alt = false,
+             wchar_t textChar = L'\0', bool textProvided = false)
+        : Event(EventType::KeyPressEvent)
+        , keyPressed(keyCode), ctrlPressed(ctrl), shiftPressed(shift), altPressed(alt)
+        , textChar(textChar), textProvidedFlag(textProvided) {}
 
     int key() const { return keyPressed; }
     bool isCtrlPressed() const { return ctrlPressed; }
     bool isShiftPressed() const { return shiftPressed; }
     bool isAltPressed() const { return altPressed; }
 
+    // Unicode character translated by the platform for the active keyboard layout (AZERTY, etc.).
+    // L'\0' for dead keys (first press), control keys, or keys without a character output.
+    wchar_t text() const { return textChar; }
+
+    // True when the platform performed the key-to-char translation (e.g. Win32 WM_CHAR path).
+    // Widgets must NOT call translateCharacter() when this is true, even when text() == L'\0'.
+    bool isTextProvided() const { return textProvidedFlag; }
+
 private:
     int keyPressed;
     bool ctrlPressed;
     bool shiftPressed;
     bool altPressed;
+    wchar_t textChar{L'\0'};
+    bool textProvidedFlag{false};
 };
 
 
 
-// Classe SwWidget héritant de SwObject, simulant QWidget
+// Classe SwWidget hÃ©ritant de SwObject, representant un widget de base
 class SwWidget : public SwWidgetInterface {
 
     /**
@@ -325,7 +376,7 @@ class SwWidget : public SwWidgetInterface {
         if (!processed.contains("{")) {
             processed = SwString("%1 { %2 }").arg(className()).arg(processed);
         }
-        m_ComplexSheet.parseStyleSheet(processed.toStdString());
+        m_ComplexSheet.parseStyleSheet(processed);
         update();
     }
 
@@ -342,8 +393,8 @@ public:
     SwWidget(SwWidget* parent = nullptr)
         : SwWidgetInterface(parent),
           m_layout(nullptr),
-          x(0),
-          y(0),
+          m_absX(0),
+          m_absY(0),
           m_minWidth(0),
           m_minHeight(0),
           m_maxWidth(std::numeric_limits<int>::max()),
@@ -444,8 +495,8 @@ public:
             }
         }
 
-        // Propagation de l'événement de dessin aux enfants
-        for (SwObject* objChild : getChildren()) {
+        // Propagation de l'Ã©vÃ©nement de dessin aux enfants
+        for (SwObject* objChild : children()) {
             auto* child = dynamic_cast<SwWidget*>(objChild);
             if (!child) {
                 continue;
@@ -463,40 +514,20 @@ public:
      * @param newX The new X-coordinate of the SwWidget.
      * @param newY The new Y-coordinate of the SwWidget.
      */
+    // move() takes coordinates relative to the parent's top-left corner.
+    // Internally converts to absolute window coordinates and propagates to children.
     virtual void move(int newX, int newY) override {
-        if (x == newX && y == newY) {
-            return;
+        int absX = newX;
+        int absY = newY;
+        if (auto* pw = dynamic_cast<SwWidget*>(SwObject::parent())) {
+            absX += pw->m_absX;
+            absY += pw->m_absY;
         }
-        const SwRect oldRect = getRect();
-        auto inflate = [](SwRect rect, int margin) {
-            rect.x -= margin;
-            rect.y -= margin;
-            rect.width = std::max(0, rect.width + margin * 2);
-            rect.height = std::max(0, rect.height + margin * 2);
-            return rect;
-        };
-        int deltaX = newX - x;
-        int deltaY = newY - y;
-        x = newX;
-        y = newY;
-        emit moved(x, y);
-        if (isVisibleInHierarchy()) {
-            // Invalidate both the old and new geometry so the previous pixels are cleared.
-            constexpr int kInvalidateMargin = 8;
-            SwWidgetPlatformAdapter::invalidateRect(m_nativeWindowHandle, inflate(oldRect, kInvalidateMargin));
-            SwWidgetPlatformAdapter::invalidateRect(m_nativeWindowHandle, inflate(getRect(), kInvalidateMargin));
-            // Wake the GUI message loop so invalidations are processed promptly.
-            if (auto* guiApp = SwGuiApplication::instance(false)) {
-                if (auto* integration = guiApp->platformIntegration()) {
-                    integration->wakeUpGuiThread();
-                }
-            }
-        }
-        for (SwObject* objChild : getChildren()) {
-            if (auto* childWidget = dynamic_cast<SwWidget*>(objChild)) {
-                childWidget->move(childWidget->x + deltaX, childWidget->y + deltaY);
-            }
-        }
+        setAbsolutePos_(absX, absY);
+    }
+
+    void move(const SwPoint& point) {
+        move(point.x, point.y);
     }
 
     /**
@@ -509,7 +540,7 @@ public:
      * @param newHeight The new height of the SwWidget.
      */
     virtual void resize(int newWidth, int newHeight) override {
-        const SwRect oldRect = getRect();
+        const SwRect oldRect = absoluteRect_();
         newWidth = std::max(m_minWidth, std::min(m_maxWidth, newWidth));
         newHeight = std::max(m_minHeight, std::min(m_maxHeight, newHeight));
         if (m_width == newWidth && m_height == newHeight) {
@@ -528,11 +559,15 @@ public:
                 return rect;
             };
             SwWidgetPlatformAdapter::invalidateRect(m_nativeWindowHandle, inflate(oldRect, kInvalidateMargin));
-            SwWidgetPlatformAdapter::invalidateRect(m_nativeWindowHandle, inflate(getRect(), kInvalidateMargin));
+            SwWidgetPlatformAdapter::invalidateRect(m_nativeWindowHandle, inflate(absoluteRect_(), kInvalidateMargin));
         }
         ResizeEvent event(m_width, m_height);
         resizeEvent(&event);
         emit resized(m_width, m_height);
+    }
+
+    void resize(const SwSize& sizeVal) {
+        resize(sizeVal.width, sizeVal.height);
     }
 
     /**
@@ -547,6 +582,18 @@ public:
      */
     int height() const {
         return m_height;
+    }
+
+    int x() const {
+        return pos().x;
+    }
+
+    int y() const {
+        return pos().y;
+    }
+
+    SwSize size() const {
+        return SwSize{m_width, m_height};
     }
 
     void setMinimumSize(int minW, int minH) {
@@ -573,20 +620,158 @@ public:
         resize(std::min(m_width, m_maxWidth), std::min(m_height, m_maxHeight));
     }
 
+    SwSize minimumSize() const {
+        return SwSize{m_minWidth, m_minHeight};
+    }
+
+    SwSize maximumSize() const {
+        return SwSize{m_maxWidth, m_maxHeight};
+    }
+
+    void setGeometry(int newX, int newY, int newWidth, int newHeight) {
+        move(newX, newY);
+        resize(newWidth, newHeight);
+    }
+
+    void setGeometry(const SwRect& geometryRect) {
+        setGeometry(geometryRect.x, geometryRect.y, geometryRect.width, geometryRect.height);
+    }
+
     /**
-     * @brief Retrieves the current rectangle representing the SwWidget's position and size.
-     *
-     * Computes and returns a `RECT` structure with the SwWidget's coordinates and dimensions.
-     *
-     * @return A `RECT` structure containing the SwWidget's position (left, top) and size (right, bottom).
+     * @brief Returns the widget frame geometry, matching QWidget::frameGeometry().
      */
-    SwRect getRect() const override {
-        SwRect rectVal;
-        rectVal.x = x;
-        rectVal.y = y;
-        rectVal.width = m_width;
-        rectVal.height = m_height;
-        return rectVal;
+    SwRect frameGeometry() const override {
+        if (dynamic_cast<SwWidget*>(SwObject::parent())) {
+            return geometry();
+        }
+        if (m_nativeWindowHandle) {
+            const SwRect nativeFrame = SwWidgetPlatformAdapter::windowFrameRect(m_nativeWindowHandle);
+            if (nativeFrame.width > 0 && nativeFrame.height > 0) {
+                return nativeFrame;
+            }
+        }
+        const SwPoint topLeft = topLevelFramePosOnScreen_();
+        return SwRect{topLeft.x, topLeft.y, m_width, m_height};
+    }
+
+    /**
+     * @brief Returns the widget's client area dimensions (excluding frame borders).
+     */
+    SwSize clientSize() const override {
+        return SwSize{m_width, m_height};
+    }
+
+    /**
+     * @brief Returns the widget-local rectangle, matching QWidget::rect().
+     */
+    SwRect rect() const {
+        return SwRect{0, 0, m_width, m_height};
+    }
+
+    /**
+     * @brief Returns the widget geometry relative to its parent (Qt-compatible).
+     *
+     * geometry() returns coordinates relative to the parent widget, matching QWidget::geometry().
+     */
+    SwRect geometry() const {
+        SwRect g;
+        if (auto* pw = dynamic_cast<SwWidget*>(SwObject::parent())) {
+            g.x = m_absX - pw->m_absX;
+            g.y = m_absY - pw->m_absY;
+        } else {
+            const SwPoint topLeft = topLevelClientPosOnScreen_();
+            g.x = topLeft.x;
+            g.y = topLeft.y;
+        }
+        g.width = m_width;
+        g.height = m_height;
+        return g;
+    }
+
+    /**
+     * @brief Returns the widget position relative to its parent (Qt-compatible).
+     */
+    SwPoint pos() const {
+        if (auto* pw = dynamic_cast<SwWidget*>(SwObject::parent())) {
+            return {m_absX - pw->m_absX, m_absY - pw->m_absY};
+        }
+        return topLevelFramePosOnScreen_();
+    }
+
+    SwRect contentsRect() const {
+        return rect();
+    }
+
+    SwSize frameSize() const {
+        const SwRect fg = frameGeometry();
+        return SwSize{fg.width, fg.height};
+    }
+
+    SwRect normalGeometry() const {
+        if (dynamic_cast<SwWidget*>(SwObject::parent())) {
+            return SwRect{};
+        }
+        return geometry();
+    }
+
+    /**
+     * @brief Converts a point from widget-local coordinates to screen coordinates.
+     *
+     * Matches QWidget::mapToGlobal().
+     */
+    SwPoint mapToGlobal(const SwPoint& localPt) const {
+        const SwPoint rootOrigin = rootClientOriginOnScreen_();
+        return {rootOrigin.x + m_absX + localPt.x, rootOrigin.y + m_absY + localPt.y};
+    }
+
+    /**
+     * @brief Converts a point from screen coordinates to widget-local coordinates.
+     *
+     * Matches QWidget::mapFromGlobal().
+     */
+    SwPoint mapFromGlobal(const SwPoint& globalPt) const {
+        const SwPoint rootOrigin = rootClientOriginOnScreen_();
+        return {globalPt.x - rootOrigin.x - m_absX, globalPt.y - rootOrigin.y - m_absY};
+    }
+
+    /**
+     * @brief Converts a point from widget-local coordinates to parent coordinates, matching QWidget::mapToParent().
+     */
+    SwPoint mapToParent(const SwPoint& localPt) const {
+        if (!dynamic_cast<SwWidget*>(SwObject::parent())) {
+            return mapToGlobal(localPt);
+        }
+        SwPoint p = pos();
+        return {p.x + localPt.x, p.y + localPt.y};
+    }
+
+    /**
+     * @brief Converts a point from parent coordinates to widget-local coordinates, matching QWidget::mapFromParent().
+     */
+    SwPoint mapFromParent(const SwPoint& parentPt) const {
+        if (!dynamic_cast<SwWidget*>(SwObject::parent())) {
+            return mapFromGlobal(parentPt);
+        }
+        SwPoint p = pos();
+        return {parentPt.x - p.x, parentPt.y - p.y};
+    }
+
+    /**
+     * @brief Converts a point from this widget's coordinate space to another widget's.
+     *
+     * Matches QWidget::mapTo().
+     */
+    SwPoint mapTo(const SwWidget* target, const SwPoint& localPt) const {
+        SwPoint global = mapToGlobal(localPt);
+        return target ? target->mapFromGlobal(global) : global;
+    }
+
+    /**
+     * @brief Converts a point from another widget's coordinates to this widget's, matching QWidget::mapFrom().
+     */
+    SwPoint mapFrom(const SwWidget* source, const SwPoint& sourcePt) const {
+        SwPoint global = source ? source->mapToGlobal(sourcePt) : sourcePt;
+        return mapFromGlobal(global);
     }
 
     SwWidgetPlatformHandle platformHandle() const {
@@ -609,12 +794,25 @@ public:
         return true;
     }
 
-    virtual SwRect sizeHint() const {
-        return SwRect{x, y, m_width, m_height};
+    virtual SwSize sizeHint() const override {
+        SwSize hint = m_layout ? m_layout->sizeHint() : SwSize{m_width, m_height};
+        hint.width = std::max(hint.width, m_minWidth);
+        hint.height = std::max(hint.height, m_minHeight);
+        hint.width = std::min(hint.width, m_maxWidth);
+        hint.height = std::min(hint.height, m_maxHeight);
+        return hint;
     }
 
-    virtual SwRect minimumSizeHint() const {
-        return SwRect{x, y, m_minWidth, m_minHeight};
+    virtual SwSize minimumSizeHint() const override {
+        SwSize hint{m_minWidth, m_minHeight};
+        if (m_layout) {
+            const SwSize layoutHint = m_layout->minimumSizeHint();
+            hint.width = std::max(hint.width, layoutHint.width);
+            hint.height = std::max(hint.height, layoutHint.height);
+        }
+        hint.width = std::min(hint.width, m_maxWidth);
+        hint.height = std::min(hint.height, m_maxHeight);
+        return hint;
     }
 
     /**
@@ -630,33 +828,41 @@ public:
     SwWidget* getChildUnderCursor(int x, int y, SwWidget* ignore = nullptr) {
         SwWidget* deepestWidget = nullptr;
 
-        // Parcourir tous les enfants (ordre d'empilement: dernier ajoutÃ© = au-dessus).
-        for (int i = static_cast<int>(getChildren().size()) - 1; i >= 0; --i) {
-            SwWidget* child = dynamic_cast<SwWidget*>(getChildren()[static_cast<size_t>(i)]);
+        // Coordinates are relative to this widget, matching QWidget::childAt().
+        for (int i = static_cast<int>(children().size()) - 1; i >= 0; --i) {
+            SwWidget* child = dynamic_cast<SwWidget*>(children()[static_cast<size_t>(i)]);
             if (!child) {
                 continue;
             }
             if (child == ignore) {
                 continue;
             }
-            // Vérifier si le pointeur est à l'intérieur de l'enfant
+            // VÃ©rifier si le pointeur est Ã  l'intÃ©rieur de l'enfant
             if (!child->isVisibleInHierarchy()) {
                 continue;
             }
-            if (child->isPointInside(x, y)) {
-                // Appeler récursivement getChildUnderCursor pour trouver l'enfant le plus profond
-                SwWidget* deepChild = child->getChildUnderCursor(x, y, ignore);
+            const SwPoint childLocal = child->mapFromParent(SwPoint{x, y});
+            if (child->isPointInside(childLocal.x, childLocal.y)) {
+                SwWidget* deepChild = child->getChildUnderCursor(childLocal.x, childLocal.y, ignore);
                 if (deepChild) {
-                    deepestWidget = deepChild;  // Si on trouve un enfant plus profond, on le garde
+                    deepestWidget = deepChild;
                 }
                 else {
-                    deepestWidget = child;  // Sinon, on garde cet enfant
+                    deepestWidget = child;
                 }
                 break;
             }
         }
 
         return deepestWidget;
+    }
+
+    SwWidget* childAt(int x, int y) {
+        return getChildUnderCursor(x, y);
+    }
+
+    const SwWidget* childAt(int x, int y) const {
+        return const_cast<SwWidget*>(this)->getChildUnderCursor(x, y);
     }
 
     /**
@@ -711,9 +917,88 @@ protected:
     virtual void newParentEvent(SwObject* parent) override {
         SwWidget *ui = dynamic_cast<SwWidget*>(parent);
         if (ui) {
-            setNativeWindowHandle(ui->nativeWindowHandle());
+            setNativeWindowHandleRecursive(ui->nativeWindowHandle());
+
+            // Preserve the widget's existing local coordinates while translating the whole
+            // subtree into the new parent's absolute coordinate space.
+            const int localX = m_absX;
+            const int localY = m_absY;
+            setAbsolutePos_(ui->m_absX + localX, ui->m_absY + localY);
         }
         SwObject::newParentEvent(parent);
+    }
+
+    // Internal: set absolute window position and propagate delta to all children.
+    void setAbsolutePos_(int absX, int absY) {
+        if (m_absX == absX && m_absY == absY) {
+            return;
+        }
+        const SwRect oldRect = absoluteRect_();
+        auto inflate = [](SwRect rect, int margin) {
+            rect.x -= margin;
+            rect.y -= margin;
+            rect.width = std::max(0, rect.width + margin * 2);
+            rect.height = std::max(0, rect.height + margin * 2);
+            return rect;
+        };
+        int deltaX = absX - m_absX;
+        int deltaY = absY - m_absY;
+        m_absX = absX;
+        m_absY = absY;
+        emit moved(pos().x, pos().y);
+        if (isVisibleInHierarchy()) {
+            constexpr int kInvalidateMargin = 8;
+            SwWidgetPlatformAdapter::invalidateRect(m_nativeWindowHandle, inflate(oldRect, kInvalidateMargin));
+            SwWidgetPlatformAdapter::invalidateRect(m_nativeWindowHandle, inflate(absoluteRect_(), kInvalidateMargin));
+            if (auto* guiApp = SwGuiApplication::instance(false)) {
+                if (auto* integration = guiApp->platformIntegration()) {
+                    integration->wakeUpGuiThread();
+                }
+            }
+        }
+        for (SwObject* objChild : children()) {
+            if (auto* childWidget = dynamic_cast<SwWidget*>(objChild)) {
+                childWidget->setAbsolutePos_(childWidget->m_absX + deltaX, childWidget->m_absY + deltaY);
+            }
+        }
+    }
+
+    SwPoint rootClientOriginOnScreen_() const {
+        const SwWidget* root = this;
+        while (const auto* parentWidget = dynamic_cast<const SwWidget*>(root->parent())) {
+            root = parentWidget;
+        }
+        if (!root) {
+            return SwPoint{0, 0};
+        }
+        return SwWidgetPlatformAdapter::clientOriginOnScreen(root->m_nativeWindowHandle);
+    }
+
+    SwPoint topLevelClientPosOnScreen_() const {
+        if (dynamic_cast<SwWidget*>(SwObject::parent())) {
+            return SwPoint{m_absX, m_absY};
+        }
+        if (m_nativeWindowHandle) {
+            return SwWidgetPlatformAdapter::clientOriginOnScreen(m_nativeWindowHandle);
+        }
+        return SwPoint{m_absX, m_absY};
+    }
+
+    SwPoint topLevelFramePosOnScreen_() const {
+        if (dynamic_cast<SwWidget*>(SwObject::parent())) {
+            return SwPoint{m_absX, m_absY};
+        }
+        if (m_nativeWindowHandle) {
+            const SwRect nativeFrame = SwWidgetPlatformAdapter::windowFrameRect(m_nativeWindowHandle);
+            if (nativeFrame.width > 0 && nativeFrame.height > 0) {
+                return SwPoint{nativeFrame.x, nativeFrame.y};
+            }
+        }
+        return topLevelClientPosOnScreen_();
+    }
+
+    SwRect absoluteRect_() const {
+        return SwRect{m_absX, m_absY, m_width, m_height};
     }
 
     /**
@@ -729,34 +1014,42 @@ protected:
             return;
         }
 
-        SwPainter* painter = event->painter();
+        NormalizedPaintEvent_ normalized = normalizePaintEvent_(event);
+        SwPainter* painter = normalized.painter;
         if (!painter) {
             return;
         }
-
-        SwRect rect = getRect();
-        SwColor bgColor = {100, 149, 237};
-        bool paintBackground = true;
-        std::vector<SwString> selectors = classHierarchy();
-        bool hasSwWidgetSelector = false;
-        for (const SwString& selector : selectors) {
-            if (selector == "SwWidget") {
-                hasSwWidgetSelector = true;
-                break;
-            }
+        PaintEvent effectiveEvent(painter, normalized.paintRect);
+        PaintEvent* localEvent = event;
+        const bool needsSyntheticEvent =
+            !event ||
+            normalized.painter != event->painter() ||
+            normalized.paintRect.x != event->paintRect().x ||
+            normalized.paintRect.y != event->paintRect().y ||
+            normalized.paintRect.width != event->paintRect().width ||
+            normalized.paintRect.height != event->paintRect().height;
+        if (needsSyntheticEvent) {
+            localEvent = &effectiveEvent;
         }
-        if (!hasSwWidgetSelector) {
-            selectors.emplace_back("SwWidget");
+
+        const SwRect rect = this->rect();
+        SwColor bgColor = {249, 249, 249};  // Windows 11 default surface
+        // Top-level widgets (no parent widget) paint background by default, like Qt.
+        // Child widgets are transparent by default.
+        bool paintBackground = (dynamic_cast<SwWidget*>(SwObject::parent()) == nullptr);
+        auto selectors = classHierarchy();
+        if (!selectors.contains("SwWidget")) {
+            selectors.append("SwWidget");
         }
         for (const SwString& selector : selectors) {
             if (selector.isEmpty()) {
                 continue;
             }
-            SwString value = m_ComplexSheet.getStyleProperty(selector.toStdString(), "background-color");
+            SwString value = m_ComplexSheet.getStyleProperty(selector, "background-color");
             if (!value.isEmpty()) {
                 float alpha = 1.0f;
                 try {
-                    SwColor resolved = m_ComplexSheet.parseColor(value.toStdString(), &alpha);
+                    SwColor resolved = m_ComplexSheet.parseColor(value, &alpha);
                     if (alpha <= 0.0f) {
                         paintBackground = false;
                     } else {
@@ -774,17 +1067,17 @@ protected:
             this->m_style->drawBackground(rect, painter, bgColor);
         }
 
-        const SwRect& paintRect = event->paintRect();
-        for (SwObject* objChild : getChildren()) {
+        const SwRect& paintRect = localEvent->paintRect();
+        for (SwObject* objChild : children()) {
             auto* child = dynamic_cast<SwWidget*>(objChild);
             if (!child) {
                 continue;
             }
-            SwRect childRect = child->getRect();
+            const SwRect childRect = child->geometry();
+            const bool intersects = rectsIntersect(paintRect, childRect);
 
-            // Vérifier si l'enfant est visible et si son rectangle intersecte la zone de peinture
-            if (child->isVisibleInHierarchy() && rectsIntersect(paintRect, childRect)) {
-                child->paintEvent(event);
+            if (child->isVisibleInHierarchy() && intersects) {
+                paintChild_(localEvent, child);
             }
         }
     }
@@ -805,6 +1098,90 @@ protected:
                  r1.y > (r2.y + r2.height));
     }
 
+    static SwRect intersectRect_(const SwRect& a, const SwRect& b) {
+        const int left = (std::max)(a.x, b.x);
+        const int top = (std::max)(a.y, b.y);
+        const int right = (std::min)(a.x + a.width, b.x + b.width);
+        const int bottom = (std::min)(a.y + a.height, b.y + b.height);
+        if (right <= left || bottom <= top) {
+            return SwRect{0, 0, 0, 0};
+        }
+        return SwRect{left, top, right - left, bottom - top};
+    }
+
+    static bool rectContainsRect_(const SwRect& outer, const SwRect& inner) {
+        return inner.x >= outer.x &&
+               inner.y >= outer.y &&
+               (inner.x + inner.width) <= (outer.x + outer.width) &&
+               (inner.y + inner.height) <= (outer.y + outer.height);
+    }
+
+    struct NormalizedPaintEvent_ {
+        SwPainter* painter{nullptr};
+        SwRect paintRect{0, 0, 0, 0};
+        std::unique_ptr<SwOffsetPainter> ownedPainter;
+    };
+
+    NormalizedPaintEvent_ normalizePaintEvent_(PaintEvent* event) {
+        NormalizedPaintEvent_ result;
+        if (!event) {
+            return result;
+        }
+
+        result.painter = event->painter();
+        result.paintRect = event->paintRect();
+        if (!result.painter) {
+            return result;
+        }
+
+        if (!dynamic_cast<SwWidget*>(SwObject::parent())) {
+            return result;
+        }
+
+        const SwRect localRect = rect();
+        if (rectContainsRect_(localRect, result.paintRect)) {
+            return result;
+        }
+
+        const SwRect parentRect = geometry();
+        if (!rectsIntersect(result.paintRect, parentRect)) {
+            return result;
+        }
+
+        SwRect childPaintRect = intersectRect_(result.paintRect, parentRect);
+        if (childPaintRect.width <= 0 || childPaintRect.height <= 0) {
+            result.paintRect = SwRect{0, 0, 0, 0};
+            return result;
+        }
+
+        childPaintRect.x -= parentRect.x;
+        childPaintRect.y -= parentRect.y;
+        result.ownedPainter = std::make_unique<SwOffsetPainter>(result.painter, parentRect.x, parentRect.y);
+        result.painter = result.ownedPainter.get();
+        result.paintRect = childPaintRect;
+        return result;
+    }
+
+    void paintChild_(PaintEvent* event, SwWidget* child) {
+        if (!event || !child || !child->isVisibleInHierarchy()) {
+            return;
+        }
+        SwPainter* painter = event->painter();
+        if (!painter) {
+            return;
+        }
+        const SwRect childGeometry = child->geometry();
+        SwRect childPaintRect = intersectRect_(event->paintRect(), childGeometry);
+        if (childPaintRect.width <= 0 || childPaintRect.height <= 0) {
+            return;
+        }
+        childPaintRect.x -= childGeometry.x;
+        childPaintRect.y -= childGeometry.y;
+        SwOffsetPainter childPainter(painter, childGeometry.x, childGeometry.y);
+        PaintEvent childEvent(&childPainter, childPaintRect);
+        child->paintEvent(&childEvent);
+    }
+
     /**
      * @brief Handles the key press event for the SwWidget.
      *
@@ -818,7 +1195,7 @@ protected:
             return;
         }
 
-        const std::vector<SwObject*>& directChildren = getChildren();
+        const auto& directChildren = children();
         size_t i = 0;
         while (i < directChildren.size()) {
             if (event->isAccepted()) {
@@ -880,11 +1257,15 @@ protected:
 
         if (targetWidget) {
             if (targetWidget->getFocusPolicy() != FocusPolicyEnum::NoFocus) {
-                auto clearFocusRecursively = [&](auto&& self, SwWidget* widget) -> void {
+                std::vector<SwWidget*> stack;
+                stack.push_back(this);
+                while (!stack.empty()) {
+                    SwWidget* widget = stack.back();
+                    stack.pop_back();
                     if (!widget) {
-                        return;
+                        continue;
                     }
-                    const std::vector<SwObject*>& directChildren = widget->getChildren();
+                    const auto& directChildren = widget->children();
                     size_t i = 0;
                     while (i < directChildren.size()) {
                         SwObject* obj = directChildren[i];
@@ -893,20 +1274,23 @@ protected:
                             if (child != targetWidget) {
                                 child->setFocus(false);
                             }
-                            self(self, child);
+                            stack.push_back(child);
                         }
                         if (i < directChildren.size() && directChildren[i] == obj) {
                             ++i;
                         }
                     }
-                };
-                clearFocusRecursively(clearFocusRecursively, this);
+                }
                 targetWidget->setFocus(true);
             }
-            targetWidget->mousePressEvent(event);
+            MouseEvent childEvent = mapMouseEventToChild_(*event, this, targetWidget);
+            targetWidget->mousePressEvent(&childEvent);
+            if (childEvent.isAccepted()) {
+                event->accept();
+            }
         }
 
-        const std::vector<SwObject*>& directChildren = getChildren();
+        const auto& directChildren = children();
         size_t i = 0;
         while (i < directChildren.size()) {
             if (event->isAccepted()) {
@@ -915,8 +1299,13 @@ protected:
             SwObject* obj = directChildren[i];
             SwWidget* child = obj ? dynamic_cast<SwWidget*>(obj) : nullptr;
             if (child && child != targetTopChild && child->isVisibleInHierarchy()) {
-                if (child->isPointInside(event->x(), event->y())) {
-                    child->mousePressEvent(event);
+                const SwPoint childLocal = child->mapFromParent(event->pos());
+                if (child->isPointInside(childLocal.x, childLocal.y)) {
+                    MouseEvent childEvent = mapMouseEventToChild_(*event, this, child);
+                    child->mousePressEvent(&childEvent);
+                    if (childEvent.isAccepted()) {
+                        event->accept();
+                    }
                 }
             }
             if (i < directChildren.size() && directChildren[i] == obj) {
@@ -939,13 +1328,17 @@ protected:
         if (!isVisibleInHierarchy() || !event) {
             return;
         }
-        const std::vector<SwObject*>& directChildren = getChildren();
+        const auto& directChildren = children();
         size_t i = 0;
         while (i < directChildren.size()) {
             SwObject* obj = directChildren[i];
             SwWidget* child = obj ? dynamic_cast<SwWidget*>(obj) : nullptr;
             if (child && child->isVisibleInHierarchy()) {
-                child->mouseReleaseEvent(event);
+                MouseEvent childEvent = mapMouseEventToChild_(*event, this, child);
+                child->mouseReleaseEvent(&childEvent);
+                if (childEvent.isAccepted()) {
+                    event->accept();
+                }
             }
             if (i < directChildren.size() && directChildren[i] == obj) {
                 ++i;
@@ -965,7 +1358,7 @@ protected:
         if (!isVisibleInHierarchy() || !event) {
             return;
         }
-        const std::vector<SwObject*>& directChildren = getChildren();
+        const auto& directChildren = children();
         size_t i = 0;
         while (i < directChildren.size()) {
             SwObject* obj = directChildren[i];
@@ -974,8 +1367,13 @@ protected:
                 if (event->isAccepted()) {
                     return;
                 }
-                if (child->isPointInside(event->x(), event->y())) {
-                    child->mouseDoubleClickEvent(event);
+                const SwPoint childLocal = child->mapFromParent(event->pos());
+                if (child->isPointInside(childLocal.x, childLocal.y)) {
+                    MouseEvent childEvent = mapMouseEventToChild_(*event, this, child);
+                    child->mouseDoubleClickEvent(&childEvent);
+                    if (childEvent.isAccepted()) {
+                        event->accept();
+                    }
                 }
             }
             if (i < directChildren.size() && directChildren[i] == obj) {
@@ -1000,13 +1398,17 @@ protected:
 
         
         //c'est l'enfant qui decide donc c'est lui qui parlera le derneir
-        const std::vector<SwObject*>& directChildren = getChildren();
+        const auto& directChildren = children();
         size_t i = 0;
         while (i < directChildren.size()) {
             SwObject* obj = directChildren[i];
             SwWidget* child = obj ? dynamic_cast<SwWidget*>(obj) : nullptr;
             if (child && child->isVisibleInHierarchy()) {
-                child->mouseMoveEvent(event);
+                MouseEvent childEvent = mapMouseEventToChild_(*event, this, child);
+                child->mouseMoveEvent(&childEvent);
+                if (childEvent.isAccepted()) {
+                    event->accept();
+                }
             }
             if (i < directChildren.size() && directChildren[i] == obj) {
                 ++i;
@@ -1023,6 +1425,183 @@ protected:
 
 protected:
 
+    // ─── Style-resolution utilities (shared by all widgets) ───────────────
+
+    static int clampInt(int value, int minValue, int maxValue) {
+        if (value < minValue) return minValue;
+        if (value > maxValue) return maxValue;
+        return value;
+    }
+
+    static double clampDouble(double value, double minValue, double maxValue) {
+        if (value < minValue) return minValue;
+        if (value > maxValue) return maxValue;
+        return value;
+    }
+
+    static SwColor clampColor(const SwColor& c) {
+        return SwColor{clampInt(c.r, 0, 255), clampInt(c.g, 0, 255), clampInt(c.b, 0, 255)};
+    }
+
+    static int parsePixelValue(const SwString& value, int defaultValue) {
+        if (value.isEmpty()) {
+            return defaultValue;
+        }
+        SwString cleaned = value;
+        cleaned.replace("px", "");
+        bool ok = false;
+        int v = cleaned.toInt(&ok);
+        return ok ? v : defaultValue;
+    }
+
+    void resolveBackground(const StyleSheet* sheet,
+                           SwColor& outColor,
+                           float& outAlpha,
+                           bool& outPaint) const {
+        if (!sheet) {
+            return;
+        }
+
+        auto selectors = classHierarchy();
+        if (!selectors.contains("SwWidget")) {
+            selectors.append("SwWidget");
+        }
+
+        for (int i = static_cast<int>(selectors.size()) - 1; i >= 0; --i) {
+            const SwString& selector = selectors[i];
+            if (selector.isEmpty()) {
+                continue;
+            }
+            SwString value = sheet->getStyleProperty(selector, "background-color");
+            if (value.isEmpty()) {
+                continue;
+            }
+            float alpha = 1.0f;
+            try {
+                SwColor resolved = const_cast<StyleSheet*>(sheet)->parseColor(value, &alpha);
+                if (alpha <= 0.0f) {
+                    outPaint = false;
+                } else {
+                    outColor = clampColor(resolved);
+                    outPaint = true;
+                }
+                outAlpha = alpha;
+            } catch (...) {
+            }
+            return;
+        }
+    }
+
+    void resolveBorder(const StyleSheet* sheet,
+                       SwColor& outColor,
+                       int& outWidth,
+                       int& outRadius) const {
+        if (!sheet) {
+            return;
+        }
+
+        auto selectors = classHierarchy();
+        if (!selectors.contains("SwWidget")) {
+            selectors.append("SwWidget");
+        }
+
+        for (int i = static_cast<int>(selectors.size()) - 1; i >= 0; --i) {
+            const SwString& selector = selectors[i];
+            if (selector.isEmpty()) {
+                continue;
+            }
+
+            SwString borderColor = sheet->getStyleProperty(selector, "border-color");
+            if (!borderColor.isEmpty()) {
+                try {
+                    SwColor resolved = const_cast<StyleSheet*>(sheet)->parseColor(borderColor, nullptr);
+                    outColor = clampColor(resolved);
+                } catch (...) {
+                }
+            }
+
+            SwString borderWidth = sheet->getStyleProperty(selector, "border-width");
+            if (!borderWidth.isEmpty()) {
+                outWidth = clampInt(parsePixelValue(borderWidth, outWidth), 0, 20);
+            }
+
+            SwString borderRadius = sheet->getStyleProperty(selector, "border-radius");
+            if (!borderRadius.isEmpty()) {
+                outRadius = clampInt(parsePixelValue(borderRadius, outRadius), 0, 32);
+            }
+        }
+    }
+
+    void resolveBorderCornerRadii(const StyleSheet* sheet,
+                                  int& outTopLeft,
+                                  int& outTopRight,
+                                  int& outBottomRight,
+                                  int& outBottomLeft) const {
+        if (!sheet) {
+            return;
+        }
+
+        auto selectors = classHierarchy();
+        if (!selectors.contains("SwWidget")) {
+            selectors.append("SwWidget");
+        }
+
+        for (int i = static_cast<int>(selectors.size()) - 1; i >= 0; --i) {
+            const SwString& selector = selectors[i];
+            if (selector.isEmpty()) {
+                continue;
+            }
+
+            SwString v = sheet->getStyleProperty(selector, "border-top-left-radius");
+            if (!v.isEmpty()) {
+                outTopLeft = clampInt(parsePixelValue(v, outTopLeft), 0, 32);
+            }
+            v = sheet->getStyleProperty(selector, "border-top-right-radius");
+            if (!v.isEmpty()) {
+                outTopRight = clampInt(parsePixelValue(v, outTopRight), 0, 32);
+            }
+            v = sheet->getStyleProperty(selector, "border-bottom-right-radius");
+            if (!v.isEmpty()) {
+                outBottomRight = clampInt(parsePixelValue(v, outBottomRight), 0, 32);
+            }
+            v = sheet->getStyleProperty(selector, "border-bottom-left-radius");
+            if (!v.isEmpty()) {
+                outBottomLeft = clampInt(parsePixelValue(v, outBottomLeft), 0, 32);
+            }
+        }
+    }
+
+    SwColor resolveTextColor(const StyleSheet* sheet, const SwColor& fallback) const {
+        if (!sheet) {
+            return fallback;
+        }
+
+        auto selectors = classHierarchy();
+        if (!selectors.contains("SwWidget")) {
+            selectors.append("SwWidget");
+        }
+
+        for (int i = static_cast<int>(selectors.size()) - 1; i >= 0; --i) {
+            const SwString& selector = selectors[i];
+            if (selector.isEmpty()) {
+                continue;
+            }
+            SwString value = sheet->getStyleProperty(selector, "color");
+            if (value.isEmpty()) {
+                continue;
+            }
+            try {
+                SwColor resolved = const_cast<StyleSheet*>(sheet)->parseColor(value, nullptr);
+                return clampColor(resolved);
+            } catch (...) {
+                return fallback;
+            }
+        }
+        return fallback;
+    }
+
+    // ─── End style-resolution utilities ───────────────────────────────────
+
     /**
      * @brief Checks if a given point is inside the SwWidget's boundaries.
      *
@@ -1033,7 +1612,7 @@ protected:
      * @return `true` if the point is inside the SwWidget, `false` otherwise.
      */
     bool isPointInside(int px, int py) const {
-        return (px >= x && px <= x + m_width && py >= y && py <= y + m_height);
+        return (px >= 0 && px < m_width && py >= 0 && py < m_height);
     }
 
     /**
@@ -1043,12 +1622,7 @@ protected:
      * through the active platform adapter.
      */
     virtual void invalidateRect() {
-        SwRect rect;
-        rect.x = x;
-        rect.y = y;
-        rect.width = m_width;
-        rect.height = m_height;
-        SwWidgetPlatformAdapter::invalidateRect(m_nativeWindowHandle, rect);
+        SwWidgetPlatformAdapter::invalidateRect(m_nativeWindowHandle, absoluteRect_());
     }
 
 
@@ -1058,7 +1632,7 @@ protected:
     int m_minHeight;
     int m_maxWidth;
     int m_maxHeight;
-    int x, y;
+    int m_absX, m_absY;
     SwStyle *m_style;
     SwWidgetPlatformHandle m_nativeWindowHandle;
 
@@ -1067,13 +1641,52 @@ private:
     SwAbstractLayout* m_layout;
 
 protected:
+    static MouseEvent mapMouseEventToChild_(const MouseEvent& event,
+                                            const SwWidget* source,
+                                            const SwWidget* child) {
+        const SwPoint childPos = child ? child->mapFrom(source, event.pos()) : event.pos();
+        MouseEvent mapped(event.type(),
+                          childPos.x,
+                          childPos.y,
+                          event.button(),
+                          event.isCtrlPressed(),
+                          event.isShiftPressed(),
+                          event.isAltPressed());
+        mapped.setGlobalPos(event.globalPos());
+        mapped.setDeltaX(event.getDeltaX());
+        mapped.setDeltaY(event.getDeltaY());
+        mapped.setSpeedX(event.getSpeedX());
+        mapped.setSpeedY(event.getSpeedY());
+        if (event.isAccepted()) {
+            mapped.accept();
+        }
+        return mapped;
+    }
+
+    static WheelEvent mapWheelEventToChild_(const WheelEvent& event,
+                                            const SwWidget* source,
+                                            const SwWidget* child) {
+        const SwPoint childPos = child ? child->mapFrom(source, event.pos()) : event.pos();
+        WheelEvent mapped(childPos.x,
+                          childPos.y,
+                          event.delta(),
+                          event.isCtrlPressed(),
+                          event.isShiftPressed(),
+                          event.isAltPressed());
+        mapped.setGlobalPos(event.globalPos());
+        if (event.isAccepted()) {
+            mapped.accept();
+        }
+        return mapped;
+    }
+
     void setNativeWindowHandle(const SwWidgetPlatformHandle& handle) {
         m_nativeWindowHandle = handle;
     }
 
     void setNativeWindowHandleRecursive(const SwWidgetPlatformHandle& handle) {
         setNativeWindowHandle(handle);
-        const std::vector<SwObject*>& directChildren = getChildren();
+        const auto& directChildren = children();
         size_t i = 0;
         while (i < directChildren.size()) {
             SwObject* obj = directChildren[i];
@@ -1091,3 +1704,6 @@ protected:
         return m_nativeWindowHandle;
     }
 };
+
+
+

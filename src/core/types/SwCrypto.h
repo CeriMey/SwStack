@@ -22,6 +22,30 @@
 
 #pragma once
 
+/**
+ * @file src/core/types/SwCrypto.h
+ * @ingroup core_types
+ * @brief Declares the public interface exposed by SwCrypto in the CoreSw fundamental types layer.
+ *
+ * This header belongs to the CoreSw fundamental types layer. It provides value types, containers,
+ * text and binary helpers, and lightweight serialization primitives shared across the stack.
+ *
+ * Within that layer, this file focuses on the crypto interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are BcryptWrapper and SwCrypto.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * Interfaces in this area are intentionally reused by runtime, IO, GUI, remote, and media modules
+ * to keep cross-module semantics consistent.
+ *
+ */
+
+
 #include <string>
 #include <vector>
 #include <stdexcept>
@@ -64,11 +88,27 @@ static constexpr const char* kSwLogCategory_SwCrypto = "sw.core.types.swcrypto";
 #if defined(_WIN32)
 class BcryptWrapper {
 public:
+    /**
+     * @brief Returns the current instance.
+     * @return The current instance.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static BcryptWrapper& instance() {
         static BcryptWrapper wrapper;
         return wrapper;
     }
 
+    /**
+     * @brief Opens the open Algorithm Provider handled by the object.
+     * @param phAlgorithm Value passed to the method.
+     * @param pszAlgId Value passed to the method.
+     * @param pszImplementation Value passed to the method.
+     * @param dwFlags Value passed to the method.
+     * @return The requested open Algorithm Provider.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     static NTSTATUS OpenAlgorithmProvider(BCRYPT_ALG_HANDLE* phAlgorithm, LPCWSTR pszAlgId, LPCWSTR pszImplementation, ULONG dwFlags) {
         if (!instance().pBCryptOpenAlgorithmProvider) {
             swCError(kSwLogCategory_SwCrypto) << "[SwCrypto] BCryptOpenAlgorithmProvider is not initialized.";
@@ -77,6 +117,14 @@ public:
         return instance().pBCryptOpenAlgorithmProvider(phAlgorithm, pszAlgId, pszImplementation, dwFlags);
     }
 
+    /**
+     * @brief Closes the close Algorithm Provider handled by the object.
+     * @param hAlgorithm Value passed to the method.
+     * @param dwFlags Value passed to the method.
+     * @return The requested close Algorithm Provider.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     static NTSTATUS CloseAlgorithmProvider(BCRYPT_ALG_HANDLE hAlgorithm, ULONG dwFlags) {
         if (!instance().pBCryptCloseAlgorithmProvider) {
             swCError(kSwLogCategory_SwCrypto) << "[SwCrypto] BCryptCloseAlgorithmProvider is not initialized.";
@@ -85,6 +133,17 @@ public:
         return instance().pBCryptCloseAlgorithmProvider(hAlgorithm, dwFlags);
     }
 
+    /**
+     * @brief Creates the requested create Hash.
+     * @param hAlgorithm Value passed to the method.
+     * @param phHash Value passed to the method.
+     * @param pbHashObject Value passed to the method.
+     * @param cbHashObject Value passed to the method.
+     * @param pbSecret Value passed to the method.
+     * @param cbSecret Value passed to the method.
+     * @param dwFlags Value passed to the method.
+     * @return The resulting create Hash.
+     */
     static NTSTATUS CreateHash(BCRYPT_ALG_HANDLE hAlgorithm, BCRYPT_HASH_HANDLE* phHash, PUCHAR pbHashObject, ULONG cbHashObject, PUCHAR pbSecret, ULONG cbSecret, ULONG dwFlags) {
         if (!instance().pBCryptCreateHash) {
             swCError(kSwLogCategory_SwCrypto) << "[SwCrypto] BCryptCreateHash is not initialized.";
@@ -93,6 +152,16 @@ public:
         return instance().pBCryptCreateHash(hAlgorithm, phHash, pbHashObject, cbHashObject, pbSecret, cbSecret, dwFlags);
     }
 
+    /**
+     * @brief Returns whether the object reports hash Data.
+     * @param hHash Value passed to the method.
+     * @param pbInput Value passed to the method.
+     * @param cbInput Value passed to the method.
+     * @param dwFlags Value passed to the method.
+     * @return The requested hash Data.
+     *
+     * @details This query does not modify the object state.
+     */
     static NTSTATUS HashData(BCRYPT_HASH_HANDLE hHash, PUCHAR pbInput, ULONG cbInput, ULONG dwFlags) {
         if (!instance().pBCryptHashData) {
             swCError(kSwLogCategory_SwCrypto) << "[SwCrypto] BCryptHashData is not initialized.";
@@ -101,6 +170,14 @@ public:
         return instance().pBCryptHashData(hHash, pbInput, cbInput, dwFlags);
     }
 
+    /**
+     * @brief Performs the `FinishHash` operation.
+     * @param hHash Value passed to the method.
+     * @param pbOutput Value passed to the method.
+     * @param cbOutput Value passed to the method.
+     * @param dwFlags Value passed to the method.
+     * @return The requested finish Hash.
+     */
     static NTSTATUS FinishHash(BCRYPT_HASH_HANDLE hHash, PUCHAR pbOutput, ULONG cbOutput, ULONG dwFlags) {
         if (!instance().pBCryptFinishHash) {
             swCError(kSwLogCategory_SwCrypto) << "[SwCrypto] BCryptFinishHash is not initialized.";
@@ -109,6 +186,11 @@ public:
         return instance().pBCryptFinishHash(hHash, pbOutput, cbOutput, dwFlags);
     }
 
+    /**
+     * @brief Destroys the specified destroy Hash.
+     * @param hHash Value passed to the method.
+     * @return The requested destroy Hash.
+     */
     static NTSTATUS DestroyHash(BCRYPT_HASH_HANDLE hHash) {
         if (!instance().pBCryptDestroyHash) {
             swCError(kSwLogCategory_SwCrypto) << "[SwCrypto] BCryptDestroyHash is not initialized.";
@@ -117,6 +199,18 @@ public:
         return instance().pBCryptDestroyHash(hHash);
     }
 
+    /**
+     * @brief Performs the `GetProperty` operation.
+     * @param hObject Value passed to the method.
+     * @param pszProperty Value passed to the method.
+     * @param pbOutput Value passed to the method.
+     * @param cbOutput Value passed to the method.
+     * @param pcbResult Value passed to the method.
+     * @param dwFlags Value passed to the method.
+     * @return The requested get Property.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static NTSTATUS GetProperty(BCRYPT_HANDLE hObject, LPCWSTR pszProperty, PUCHAR pbOutput, ULONG cbOutput, ULONG* pcbResult, ULONG dwFlags) {
         if (!instance().pBCryptGetProperty) {
             swCError(kSwLogCategory_SwCrypto) << "[SwCrypto] BCryptGetProperty is not initialized.";
@@ -125,6 +219,17 @@ public:
         return instance().pBCryptGetProperty(hObject, pszProperty, pbOutput, cbOutput, pcbResult, dwFlags);
     }
 
+    /**
+     * @brief Sets the set Property.
+     * @param hObject Value passed to the method.
+     * @param pszProperty Value passed to the method.
+     * @param pbInput Value passed to the method.
+     * @param cbInput Value passed to the method.
+     * @param dwFlags Value passed to the method.
+     * @return The requested set Property.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     static NTSTATUS SetProperty(BCRYPT_HANDLE hObject, LPCWSTR pszProperty, PUCHAR pbInput, ULONG cbInput, ULONG dwFlags) {
         if (!instance().pBCryptSetProperty) {
             swCError(kSwLogCategory_SwCrypto) << "[SwCrypto] BCryptSetProperty is not initialized.";
@@ -133,6 +238,17 @@ public:
         return instance().pBCryptSetProperty(hObject, pszProperty, pbInput, cbInput, dwFlags);
     }
 
+    /**
+     * @brief Performs the `GenerateSymmetricKey` operation.
+     * @param hAlgorithm Value passed to the method.
+     * @param phKey Value passed to the method.
+     * @param pbKeyObject Value passed to the method.
+     * @param cbKeyObject Value passed to the method.
+     * @param pbSecret Value passed to the method.
+     * @param cbSecret Value passed to the method.
+     * @param dwFlags Value passed to the method.
+     * @return The requested generate Symmetric Key.
+     */
     static NTSTATUS GenerateSymmetricKey(BCRYPT_ALG_HANDLE hAlgorithm, BCRYPT_KEY_HANDLE* phKey, PUCHAR pbKeyObject, ULONG cbKeyObject, PUCHAR pbSecret, ULONG cbSecret, ULONG dwFlags) {
         if (!instance().pBCryptGenerateSymmetricKey) {
             swCError(kSwLogCategory_SwCrypto) << "[SwCrypto] BCryptGenerateSymmetricKey is not initialized.";
@@ -141,6 +257,20 @@ public:
         return instance().pBCryptGenerateSymmetricKey(hAlgorithm, phKey, pbKeyObject, cbKeyObject, pbSecret, cbSecret, dwFlags);
     }
 
+    /**
+     * @brief Performs the `Encrypt` operation.
+     * @param hKey Value passed to the method.
+     * @param pbInput Value passed to the method.
+     * @param cbInput Value passed to the method.
+     * @param pPaddingInfo Value passed to the method.
+     * @param pbIV Value passed to the method.
+     * @param cbIV Value passed to the method.
+     * @param pbOutput Value passed to the method.
+     * @param cbOutput Value passed to the method.
+     * @param pcbResult Value passed to the method.
+     * @param dwFlags Value passed to the method.
+     * @return The requested encrypt.
+     */
     static NTSTATUS Encrypt(BCRYPT_KEY_HANDLE hKey, PUCHAR pbInput, ULONG cbInput, VOID* pPaddingInfo, PUCHAR pbIV, ULONG cbIV, PUCHAR pbOutput, ULONG cbOutput, ULONG* pcbResult, ULONG dwFlags) {
         if (!instance().pBCryptEncrypt) {
             swCError(kSwLogCategory_SwCrypto) << "[SwCrypto] BCryptEncrypt is not initialized.";
@@ -149,6 +279,20 @@ public:
         return instance().pBCryptEncrypt(hKey, pbInput, cbInput, pPaddingInfo, pbIV, cbIV, pbOutput, cbOutput, pcbResult, dwFlags);
     }
 
+    /**
+     * @brief Performs the `Decrypt` operation.
+     * @param hKey Value passed to the method.
+     * @param pbInput Value passed to the method.
+     * @param cbInput Value passed to the method.
+     * @param pPaddingInfo Value passed to the method.
+     * @param pbIV Value passed to the method.
+     * @param cbIV Value passed to the method.
+     * @param pbOutput Value passed to the method.
+     * @param cbOutput Value passed to the method.
+     * @param pcbResult Value passed to the method.
+     * @param dwFlags Value passed to the method.
+     * @return The requested decrypt.
+     */
     static NTSTATUS Decrypt(BCRYPT_KEY_HANDLE hKey, PUCHAR pbInput, ULONG cbInput, VOID* pPaddingInfo, PUCHAR pbIV, ULONG cbIV, PUCHAR pbOutput, ULONG cbOutput, ULONG* pcbResult, ULONG dwFlags) {
         if (!instance().pBCryptDecrypt) {
             swCError(kSwLogCategory_SwCrypto) << "[SwCrypto] BCryptDecrypt is not initialized.";
@@ -157,6 +301,11 @@ public:
         return instance().pBCryptDecrypt(hKey, pbInput, cbInput, pPaddingInfo, pbIV, cbIV, pbOutput, cbOutput, pcbResult, dwFlags);
     }
 
+    /**
+     * @brief Destroys the specified destroy Key.
+     * @param hKey Value passed to the method.
+     * @return The requested destroy Key.
+     */
     static NTSTATUS DestroyKey(BCRYPT_KEY_HANDLE hKey) {
         if (!instance().pBCryptDestroyKey) {
             swCError(kSwLogCategory_SwCrypto) << "[SwCrypto] BCryptDestroyKey is not initialized.";
@@ -250,40 +399,94 @@ private:
 class SwCrypto {
 public:
     // Génération de hachage SHA256 / SHA512
+    /**
+     * @brief Performs the `generateHashSHA1` operation.
+     * @param input Value passed to the method.
+     * @return The requested generate Hash SHA1.
+     */
     static std::vector<unsigned char> generateHashSHA1(const std::string& input) {
         return computeHash(input, HashAlgo::SHA1);
     }
 
+    /**
+     * @brief Performs the `generateHashSHA256` operation.
+     * @param input Value passed to the method.
+     * @return The requested generate Hash SHA256.
+     */
     static std::vector<unsigned char> generateHashSHA256(const std::string& input) {
         return computeHash(input, HashAlgo::SHA256);
     }
+    /**
+     * @brief Performs the `generateHashSHA512` operation.
+     * @param input Value passed to the method.
+     * @return The requested generate Hash SHA512.
+     */
     static std::vector<unsigned char> generateHashSHA512(const std::string& input) {
         return computeHash(input, HashAlgo::SHA512);
     }
 
     // Hachage -> string hex
+    /**
+     * @brief Returns whether the object reports h SHA1.
+     * @param input Value passed to the method.
+     * @return The requested h SHA1.
+     *
+     * @details This query does not modify the object state.
+     */
     static std::string hashSHA1(const std::string& input) {
         return hexEncode(generateHashSHA1(input));
     }
 
+    /**
+     * @brief Returns whether the object reports h SHA256.
+     * @param input Value passed to the method.
+     * @return The requested h SHA256.
+     *
+     * @details This query does not modify the object state.
+     */
     static std::string hashSHA256(const std::string& input) {
         return hexEncode(generateHashSHA256(input));
     }
+    /**
+     * @brief Returns whether the object reports h SHA512.
+     * @param input Value passed to the method.
+     * @return The requested h SHA512.
+     *
+     * @details This query does not modify the object state.
+     */
     static std::string hashSHA512(const std::string& input) {
         return hexEncode(generateHashSHA512(input));
     }
 
     // HMAC-SHA256 (clé)
+    /**
+     * @brief Performs the `generateKeyedHashSHA256` operation.
+     * @param data Value passed to the method.
+     * @param key Value passed to the method.
+     * @return The requested generate Keyed Hash SHA256.
+     */
     static std::vector<unsigned char> generateKeyedHashSHA256(const std::string& data, const std::string& key) {
         return computeHMAC_SHA256(data, key);
     }
 
     // AES (ECB, padding PKCS#7 manuel pour compatibilité)
+    /**
+     * @brief Performs the `encryptAES` operation.
+     * @param data Value passed to the method.
+     * @param key Value passed to the method.
+     * @return The requested encrypt AES.
+     */
     static std::vector<unsigned char> encryptAES(const std::vector<unsigned char>& data, const std::vector<unsigned char>& key) {
         auto validKey = normalizeKey(key);
         auto encrypted = cryptAES_ECB(data, validKey, true);
         return encrypted;
     }
+    /**
+     * @brief Performs the `decryptAES` operation.
+     * @param data Value passed to the method.
+     * @param key Value passed to the method.
+     * @return The requested decrypt AES.
+     */
     static std::vector<unsigned char> decryptAES(const std::vector<unsigned char>& data, const std::vector<unsigned char>& key) {
         auto validKey = normalizeKey(key);
         auto decrypted = cryptAES_ECB(data, validKey, false);
@@ -291,11 +494,23 @@ public:
     }
 
     // Surcharges string (AES + base64)
+    /**
+     * @brief Performs the `encryptAES` operation.
+     * @param data Value passed to the method.
+     * @param key Value passed to the method.
+     * @return The requested encrypt AES.
+     */
     static std::string encryptAES(const std::string& data, const std::string& key) {
         auto validKey = normalizeKey(std::vector<unsigned char>(key.begin(), key.end()));
         auto encrypted = cryptAES_ECB(std::vector<unsigned char>(data.begin(), data.end()), validKey, true);
         return base64Encode(encrypted);
     }
+    /**
+     * @brief Performs the `decryptAES` operation.
+     * @param data Value passed to the method.
+     * @param key Value passed to the method.
+     * @return The requested decrypt AES.
+     */
     static std::string decryptAES(const std::string& data, const std::string& key) {
         auto validKey = normalizeKey(std::vector<unsigned char>(key.begin(), key.end()));
         auto decoded = base64Decode(data);
@@ -305,6 +520,11 @@ public:
     }
 
     // Base64
+    /**
+     * @brief Performs the `base64Encode` operation.
+     * @param data Value passed to the method.
+     * @return The requested base64 Encode.
+     */
     static std::string base64Encode(const std::vector<unsigned char>& data) {
         const char base64Chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         std::string encoded;
@@ -321,20 +541,40 @@ public:
         while (encoded.size() % 4) encoded.push_back('=');
         return encoded;
     }
+    /**
+     * @brief Performs the `base64Encode` operation.
+     * @param data Value passed to the method.
+     * @return The requested base64 Encode.
+     */
     static std::string base64Encode(const char* data) {
         if (!data) throw std::invalid_argument("Null pointer passed to base64Encode.");
         std::vector<unsigned char> vec(data, data + std::strlen(data));
         return base64Encode(vec);
     }
+    /**
+     * @brief Performs the `base64Encode` operation.
+     * @param data Value passed to the method.
+     * @return The requested base64 Encode.
+     */
     static std::string base64Encode(char* data) {
         if (!data) throw std::invalid_argument("Null pointer passed to base64Encode.");
         std::vector<unsigned char> vec(data, data + std::strlen(data));
         return base64Encode(vec);
     }
+    /**
+     * @brief Performs the `base64Encode` operation.
+     * @param data Value passed to the method.
+     * @return The requested base64 Encode.
+     */
     static std::string base64Encode(const std::string& data) {
         std::vector<unsigned char> vec(data.begin(), data.end());
         return base64Encode(vec);
     }
+    /**
+     * @brief Performs the `base64Decode` operation.
+     * @param encoded Value passed to the method.
+     * @return The requested base64 Decode.
+     */
     static std::vector<unsigned char> base64Decode(const std::string& encoded) {
         const char base64Chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         std::vector<int> T(256, -1);
@@ -355,6 +595,11 @@ public:
     }
 
     // Checksum de fichier (SHA-256)
+    /**
+     * @brief Performs the `calculateFileChecksum` operation.
+     * @param filePath Path of the target file.
+     * @return The requested calculate File Checksum.
+     */
     static std::string calculateFileChecksum(const std::string& filePath) {
     #if defined(_WIN32)
         BCRYPT_ALG_HANDLE hAlgorithm = nullptr;

@@ -1,4 +1,4 @@
-#include "PingPongGameWidget.h"
+﻿#include "PingPongGameWidget.h"
 
 #include <algorithm>
 #include <cmath>
@@ -79,7 +79,7 @@ void PingPongGameWidget::paintEvent(PaintEvent* event) {
         return;
     }
 
-    SwRect canvas = getRect();
+    SwRect canvas = rect();
     painter->fillRoundedRect(canvas, 20, SwColor{16, 22, 42}, SwColor{40, 55, 90}, 2);
 
     auto translateRect = [&](SwRect rect) {
@@ -316,3 +316,4 @@ bool PingPongGameWidget::rectsIntersect(const SwRect& a, const SwRect& b) const 
                      (a.y + a.height) < b.y || (b.y + b.height) < a.y;
     return !noOverlap;
 }
+

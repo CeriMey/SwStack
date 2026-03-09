@@ -22,3 +22,26 @@
 
 #pragma once
 
+/**
+ * @file src/core/types/SwFlags.h
+ * @ingroup core_types
+ * @brief Declares the public interface exposed by SwFlags in the CoreSw fundamental types layer.
+ *
+ * This header belongs to the CoreSw fundamental types layer. It provides value types, containers,
+ * text and binary helpers, and lightweight serialization primitives shared across the stack.
+ *
+ * Within that layer, this file focuses on the flags interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * This header mainly contributes module-level utilities, helper declarations, or namespaced types
+ * that are consumed by the surrounding subsystem.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * Interfaces in this area are intentionally reused by runtime, IO, GUI, remote, and media modules
+ * to keep cross-module semantics consistent.
+ *
+ */

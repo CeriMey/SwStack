@@ -22,6 +22,30 @@
 
 #pragma once
 
+/**
+ * @file src/fireBD/FireBDUserService.h
+ * @ingroup firebd
+ * @brief Declares the public interface exposed by FireBDUserService in the FireBD service layer.
+ *
+ * This header belongs to the FireBD service layer. It declares application-facing clients,
+ * service types, and data models used to communicate with the FireBD backend.
+ *
+ * Within that layer, this file focuses on the fire bd user service interface. The declarations
+ * exposed here define the stable surface that adjacent code can rely on while the implementation
+ * remains free to evolve behind the header.
+ *
+ * The main declarations in this header are FireBDUser and FireBDUserService.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * The contracts in this area mainly describe request and response shapes, client composition, and
+ * higher-level service boundaries.
+ *
+ */
+
+
 /***************************************************************************************************
  * fireBD - Firebase RTDB user/account service (demo-friendly).
  *
@@ -61,6 +85,12 @@ struct FireBDUser {
     SwString lastName;
     std::int64_t createdAtMs{0};
 
+    /**
+     * @brief Returns the current display Name.
+     * @return The current display Name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString displayName() const {
         if (!pseudo.trimmed().isEmpty()) {
             return pseudo.trimmed();
@@ -78,9 +108,21 @@ class FireBDUserService : public SwObject {
     SW_OBJECT(FireBDUserService, SwObject)
 
 public:
+    /**
+     * @brief Constructs a `FireBDUserService` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit FireBDUserService(SwObject* parent = nullptr)
         : SwObject(parent) {}
 
+    /**
+     * @brief Sets the database Url.
+     * @param url Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setDatabaseUrl(SwString url) {
         url = url.trimmed();
         while (url.endsWith("/")) {
@@ -88,11 +130,37 @@ public:
         }
         m_baseUrl = url;
     }
+    /**
+     * @brief Returns the current database Url.
+     * @return The current database Url.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString databaseUrl() const { return m_baseUrl; }
 
+    /**
+     * @brief Sets the auth Token.
+     * @param m_authToken Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setAuthToken(const SwString& token) { m_authToken = token.trimmed(); }
+    /**
+     * @brief Returns the current auth Token.
+     * @return The current auth Token.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString authToken() const { return m_authToken; }
 
+    /**
+     * @brief Performs the `signUp` operation.
+     * @param firstName Value passed to the method.
+     * @param lastName Value passed to the method.
+     * @param pseudo Value passed to the method.
+     * @param phoneRaw Value passed to the method.
+     * @param password Value passed to the method.
+     */
     void signUp(const SwString& firstName,
                 const SwString& lastName,
                 const SwString& pseudo,
@@ -218,6 +286,11 @@ public:
         httpPseudo->get(pseudoIndexUrl);
     }
 
+    /**
+     * @brief Performs the `logIn` operation.
+     * @param identifier Value passed to the method.
+     * @param password Value passed to the method.
+     */
     void logIn(const SwString& identifier, const SwString& password) {
         if (m_baseUrl.isEmpty()) {
             loginFinished(false, FireBDUser{}, "Firebase URL manquante.");
@@ -253,6 +326,10 @@ public:
         lookupByPseudoAndLogin_(id, password);
     }
 
+    /**
+     * @brief Performs the `lookupUserByPhone` operation.
+     * @param phoneRaw Value passed to the method.
+     */
     void lookupUserByPhone(const SwString& phoneRaw) {
         if (m_baseUrl.isEmpty()) {
             lookupFinished(false, FireBDUser{}, "Firebase URL manquante.");
@@ -305,6 +382,12 @@ private:
         SwString passSalt;
         SwString passHash;
 
+        /**
+         * @brief Returns the current to User.
+         * @return The current to User.
+         *
+         * @details The returned value reflects the state currently stored by the instance.
+         */
         FireBDUser toUser() const {
             FireBDUser u;
             u.phone = phone;
@@ -395,17 +478,17 @@ private:
         SwString err;
         SwJsonDocument doc = SwJsonDocument::fromJson(body.toStdString(), err);
         SwJsonValue root = doc.toJsonValue();
-        if (!root.isObject() || !root.toObject()) {
+        if (!root.isObject()) {
             return SwString();
         }
 
-        const SwJsonObject& o = *root.toObject();
+        const SwJsonObject o = root.toObject();
         const SwJsonValue ev = o.value("error");
         if (ev.isString()) {
             return SwString(ev.toString()).trimmed();
         }
-        if (ev.isObject() && ev.toObject()) {
-            const SwJsonObject& eo = *ev.toObject();
+        if (ev.isObject()) {
+            const SwJsonObject eo = ev.toObject();
             const SwJsonValue mv = eo.value("message");
             if (mv.isString()) {
                 return SwString(mv.toString()).trimmed();
@@ -430,7 +513,7 @@ private:
         // Keep it as-is (do NOT parse into a number, leading zeros are meaningful for phone keys).
         if (json.startsWith("\"")) {
             if (json.size() >= 2 && json.endsWith("\"")) {
-                return json.mid(1, json.size() - 2).trimmed();
+                return json.mid(1, static_cast<int>(json.size() - 2)).trimmed();
             }
             return json.trimmed();
         }
@@ -580,11 +663,11 @@ private:
         if (root.isNull()) {
             return false;
         }
-        if (!root.isObject() || !root.toObject()) {
+        if (!root.isObject()) {
             return false;
         }
 
-        const SwJsonObject& o = *root.toObject();
+        const SwJsonObject o = root.toObject();
         out.phone = jsonString_(o.value("phone"));
         out.pseudo = jsonString_(o.value("pseudo"));
         out.firstName = jsonString_(o.value("firstName"));

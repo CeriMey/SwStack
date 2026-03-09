@@ -1,3 +1,14 @@
+
+/**
+ * @file
+ * @ingroup core_gui
+ * @brief Declares the bar-series data container used by chart widgets.
+ *
+ * This series stores categorical or numeric bar values on top of `SwAbstractSeries` and
+ * exposes the state needed by the chart renderer to draw grouped bars with consistent
+ * bounds computation, point limits, and palette-driven styling.
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -22,6 +33,8 @@
 
 #pragma once
 
+
+
 #include "SwAbstractSeries.h"
 
 #include <algorithm>
@@ -31,11 +44,29 @@ class SwBarSeries : public SwAbstractSeries {
     SW_OBJECT(SwBarSeries, SwAbstractSeries)
 
 public:
+    /**
+     * @brief Constructs a `SwBarSeries` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwBarSeries(SwObject* parent = nullptr)
         : SwAbstractSeries(parent) {}
 
+    /**
+     * @brief Returns the current type.
+     * @return The current type.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SeriesType type() const override { return SeriesType::Bar; }
 
+    /**
+     * @brief Sets the bar Width.
+     * @param width Width value.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setBarWidth(double width) {
         if (!std::isfinite(width)) {
             return;
@@ -51,8 +82,20 @@ public:
     }
 
     // Width in X axis units. 0 == auto.
+    /**
+     * @brief Returns the current bar Width.
+     * @return The current bar Width.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     double barWidth() const { return m_barWidth; }
 
+    /**
+     * @brief Sets the baseline.
+     * @param baseline Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setBaseline(double baseline) {
         if (!std::isfinite(baseline) || baseline == m_baseline) {
             return;
@@ -61,10 +104,15 @@ public:
         updated();
     }
 
+    /**
+     * @brief Returns the current baseline.
+     * @return The current baseline.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     double baseline() const { return m_baseline; }
 
 private:
     double m_barWidth{0.0};
     double m_baseline{0.0};
 };
-

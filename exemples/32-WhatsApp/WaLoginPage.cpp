@@ -1,4 +1,4 @@
-#include "WaLoginPage.h"
+﻿#include "WaLoginPage.h"
 
 #include "SwButton.h"
 #include "SwFrame.h"
@@ -182,7 +182,7 @@ void WaLoginPage::paintEvent(PaintEvent* event) {
         return;
     }
 
-    const SwRect r = getRect();
+    const SwRect r = rect();
 
     // WhatsApp-like top banner.
     const int bannerH = std::min(220, std::max(140, r.height / 4));
@@ -219,13 +219,13 @@ void WaLoginPage::buildUi_() {
     m_title = new SwLabel("WhatsApp", m_card);
     m_title->setStyleSheet("SwLabel { background-color: rgba(0,0,0,0); border-width: 0px; color: rgb(17, 27, 33); font-size: 22px; }");
 
-    m_subtitle = new SwLabel("Crée un compte ou connecte-toi.", m_card);
+    m_subtitle = new SwLabel("CrÃ©e un compte ou connecte-toi.", m_card);
     m_subtitle->setStyleSheet("SwLabel { background-color: rgba(0,0,0,0); border-width: 0px; color: rgb(102, 119, 129); font-size: 13px; }");
 
     // Tabs.
     m_tabLogin = new SwButton("Connexion", m_card);
     m_tabLogin->setStyleSheet(kTabSelectedCss);
-    m_tabSignUp = new SwButton("Créer un compte", m_card);
+    m_tabSignUp = new SwButton("CrÃ©er un compte", m_card);
     m_tabSignUp->setStyleSheet(kTabCss);
     SwObject::connect(m_tabLogin, &SwButton::clicked, [this]() { setMode_(Mode::Login); });
     SwObject::connect(m_tabSignUp, &SwButton::clicked, [this]() { setMode_(Mode::SignUp); });
@@ -245,7 +245,7 @@ void WaLoginPage::buildUi_() {
     setFireConfigVisible(false);
 
     // Login form.
-    m_loginId = new SwLineEdit("Pseudo ou téléphone", m_card);
+    m_loginId = new SwLineEdit("Pseudo ou tÃ©lÃ©phone", m_card);
     m_loginId->setStyleSheet(kInputCss);
     m_loginPass = new SwLineEdit("Mot de passe", m_card);
     m_loginPass->setStyleSheet(kInputCss);
@@ -257,11 +257,11 @@ void WaLoginPage::buildUi_() {
     // Sign-up form.
     m_lastName = new SwLineEdit("Nom", m_card);
     m_lastName->setStyleSheet(kInputCss);
-    m_firstName = new SwLineEdit("Prénom", m_card);
+    m_firstName = new SwLineEdit("PrÃ©nom", m_card);
     m_firstName->setStyleSheet(kInputCss);
     m_pseudo = new SwLineEdit("Pseudo", m_card);
     m_pseudo->setStyleSheet(kInputCss);
-    m_phone = new SwLineEdit("Téléphone", m_card);
+    m_phone = new SwLineEdit("TÃ©lÃ©phone", m_card);
     m_phone->setStyleSheet(kInputCss);
     m_pass1 = new SwLineEdit("Mot de passe", m_card);
     m_pass1->setStyleSheet(kInputCss);
@@ -270,7 +270,7 @@ void WaLoginPage::buildUi_() {
     m_pass2->setStyleSheet(kInputCss);
     m_pass2->setEchoMode(EchoModeEnum::PasswordEcho);
 
-    m_signup = new SwButton("Créer le compte", m_card);
+    m_signup = new SwButton("CrÃ©er le compte", m_card);
     m_signup->setStyleSheet(kPrimaryBtnCss);
 
     m_error = new SwLabel("", m_card);
@@ -289,76 +289,76 @@ void WaLoginPage::updateLayout_() {
         return;
     }
 
-    const SwRect r = getRect();
+    const SwRect r = rect();
 
     const int cardW = std::min(620, std::max(380, r.width - 64));
     const int cardH = std::min(600, std::max(440, r.height - 120));
 
-    const int cardX = r.x + (r.width - cardW) / 2;
-    const int cardY = r.y + 120 + std::max(0, (r.height - 120 - cardH) / 2);
+    const int cardX = (r.width - cardW) / 2;
+    const int cardY = 120 + std::max(0, (r.height - 120 - cardH) / 2);
 
     m_card->move(cardX, cardY);
     m_card->resize(cardW, cardH);
 
-    const SwRect cr = m_card->getRect();
+    const SwRect cr = m_card->frameGeometry();
     const int pad = 20;
     const int gap = 10;
 
-    if (m_logo) { m_logo->move(cr.x + pad, cr.y + pad); m_logo->resize(44, 44); }
+    if (m_logo) { m_logo->move(pad, pad); m_logo->resize(44, 44); }
 
-    const int textX = cr.x + pad + 56;
-    const int textW = std::max(0, cr.width - (textX - cr.x) - pad);
+    const int textX = pad + 56;
+    const int textW = std::max(0, cr.width - textX - pad);
 
-    if (m_title) { m_title->move(textX, cr.y + pad + 2); m_title->resize(textW, 26); }
-    if (m_subtitle) { m_subtitle->move(textX, cr.y + pad + 30); m_subtitle->resize(textW, 18); }
+    if (m_title) { m_title->move(textX, pad + 2); m_title->resize(textW, 26); }
+    if (m_subtitle) { m_subtitle->move(textX, pad + 30); m_subtitle->resize(textW, 18); }
 
-    int y = cr.y + pad + 72;
+    int y = pad + 72;
     const int fieldW = std::max(0, cr.width - 2 * pad);
 
     // Tabs row.
     const int tabH = 36;
     const int tabW = (fieldW - gap) / 2;
-    if (m_tabLogin) { m_tabLogin->move(cr.x + pad, y); m_tabLogin->resize(tabW, tabH); }
-    if (m_tabSignUp) { m_tabSignUp->move(cr.x + pad + tabW + gap, y); m_tabSignUp->resize(fieldW - tabW - gap, tabH); }
+    if (m_tabLogin) { m_tabLogin->move(pad, y); m_tabLogin->resize(tabW, tabH); }
+    if (m_tabSignUp) { m_tabSignUp->move(pad + tabW + gap, y); m_tabSignUp->resize(fieldW - tabW - gap, tabH); }
     y += tabH + 12;
 
     // Firebase config (optional, usually hidden in the standalone app).
     if (m_fireConfigVisible) {
         const int configH = 38;
-        if (m_fbUrl) { m_fbUrl->move(cr.x + pad, y); m_fbUrl->resize(fieldW, configH); y += configH + 8; }
-        if (m_fbToken) { m_fbToken->move(cr.x + pad, y); m_fbToken->resize(fieldW, configH); y += configH + 8; }
-        if (m_fbPollMs) { m_fbPollMs->move(cr.x + pad, y); m_fbPollMs->resize(fieldW, configH); y += configH + 12; }
+        if (m_fbUrl) { m_fbUrl->move(pad, y); m_fbUrl->resize(fieldW, configH); y += configH + 8; }
+        if (m_fbToken) { m_fbToken->move(pad, y); m_fbToken->resize(fieldW, configH); y += configH + 8; }
+        if (m_fbPollMs) { m_fbPollMs->move(pad, y); m_fbPollMs->resize(fieldW, configH); y += configH + 12; }
     }
 
     const int btnH = 44;
     const int rowH = 40;
 
     if (m_mode == Mode::Login) {
-        if (m_loginId) { m_loginId->move(cr.x + pad, y); m_loginId->resize(fieldW, rowH); y += rowH + 10; }
-        if (m_loginPass) { m_loginPass->move(cr.x + pad, y); m_loginPass->resize(fieldW, rowH); y += rowH + 14; }
+        if (m_loginId) { m_loginId->move(pad, y); m_loginId->resize(fieldW, rowH); y += rowH + 10; }
+        if (m_loginPass) { m_loginPass->move(pad, y); m_loginPass->resize(fieldW, rowH); y += rowH + 14; }
         if (m_login) {
             const int btnW2 = std::min(220, fieldW);
-            m_login->move(cr.x + cr.width - pad - btnW2, cr.y + cr.height - pad - btnH);
+            m_login->move(cr.width - pad - btnW2, cr.height - pad - btnH);
             m_login->resize(btnW2, btnH);
         }
     } else {
-        if (m_lastName) { m_lastName->move(cr.x + pad, y); m_lastName->resize(fieldW, rowH); y += rowH + 8; }
-        if (m_firstName) { m_firstName->move(cr.x + pad, y); m_firstName->resize(fieldW, rowH); y += rowH + 8; }
-        if (m_pseudo) { m_pseudo->move(cr.x + pad, y); m_pseudo->resize(fieldW, rowH); y += rowH + 8; }
-        if (m_phone) { m_phone->move(cr.x + pad, y); m_phone->resize(fieldW, rowH); y += rowH + 8; }
-        if (m_pass1) { m_pass1->move(cr.x + pad, y); m_pass1->resize(fieldW, rowH); y += rowH + 8; }
-        if (m_pass2) { m_pass2->move(cr.x + pad, y); m_pass2->resize(fieldW, rowH); y += rowH + 14; }
+        if (m_lastName) { m_lastName->move(pad, y); m_lastName->resize(fieldW, rowH); y += rowH + 8; }
+        if (m_firstName) { m_firstName->move(pad, y); m_firstName->resize(fieldW, rowH); y += rowH + 8; }
+        if (m_pseudo) { m_pseudo->move(pad, y); m_pseudo->resize(fieldW, rowH); y += rowH + 8; }
+        if (m_phone) { m_phone->move(pad, y); m_phone->resize(fieldW, rowH); y += rowH + 8; }
+        if (m_pass1) { m_pass1->move(pad, y); m_pass1->resize(fieldW, rowH); y += rowH + 8; }
+        if (m_pass2) { m_pass2->move(pad, y); m_pass2->resize(fieldW, rowH); y += rowH + 14; }
 
         if (m_signup) {
             const int btnW2 = std::min(240, fieldW);
-            m_signup->move(cr.x + cr.width - pad - btnW2, cr.y + cr.height - pad - btnH);
+            m_signup->move(cr.width - pad - btnW2, cr.height - pad - btnH);
             m_signup->resize(btnW2, btnH);
         }
     }
 
     if (m_error) {
         const int errH = 18;
-        m_error->move(cr.x + pad, cr.y + cr.height - pad - btnH - 10 - errH);
+        m_error->move(pad, cr.height - pad - btnH - 10 - errH);
         m_error->resize(fieldW, errH);
     }
 }
@@ -422,7 +422,7 @@ void WaLoginPage::tryLogin_() {
 
     const SwString id = m_loginId->getText().trimmed();
     if (id.isEmpty()) {
-        setErrorText("Pseudo ou téléphone manquant.");
+        setErrorText("Pseudo ou tÃ©lÃ©phone manquant.");
         m_loginId->setFocus(true);
         return;
     }
@@ -460,9 +460,9 @@ void WaLoginPage::trySignUp_() {
     const SwString p2 = m_pass2->getText();
 
     if (lastName.isEmpty()) { setErrorText("Nom manquant."); m_lastName->setFocus(true); return; }
-    if (firstName.isEmpty()) { setErrorText("Prénom manquant."); m_firstName->setFocus(true); return; }
+    if (firstName.isEmpty()) { setErrorText("PrÃ©nom manquant."); m_firstName->setFocus(true); return; }
     if (pseudo.isEmpty()) { setErrorText("Pseudo manquant."); m_pseudo->setFocus(true); return; }
-    if (phone.isEmpty()) { setErrorText("Téléphone manquant."); m_phone->setFocus(true); return; }
+    if (phone.isEmpty()) { setErrorText("TÃ©lÃ©phone manquant."); m_phone->setFocus(true); return; }
     if (!waIsValidPseudoKey_(pseudo)) { setErrorText("Pseudo invalide (lettres/chiffres/_/-)."); m_pseudo->setFocus(true); return; }
     if (waCountDigits_(phone) < 6) { setErrorText("Numero de telephone invalide."); m_phone->setFocus(true); return; }
     if (p1.trimmed().isEmpty()) { setErrorText("Mot de passe manquant."); m_pass1->setFocus(true); return; }
@@ -471,3 +471,4 @@ void WaLoginPage::trySignUp_() {
     setErrorText(SwString());
     emit signUpRequested(firstName, lastName, pseudo, phone, p1);
 }
+

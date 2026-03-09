@@ -22,13 +22,38 @@
 
 #pragma once
 
+/**
+ * @file src/media/SwVideoDecoder.h
+ * @ingroup media
+ * @brief Declares the public interface exposed by SwVideoDecoder in the CoreSw media layer.
+ *
+ * This header belongs to the CoreSw media layer. It exposes video frames, packets, decoders,
+ * capture sources, and streaming-oriented helpers used by media pipelines.
+ *
+ * Within that layer, this file focuses on the video decoder interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are SwVideoDecoder, SwPassthroughVideoDecoder, and
+ * SwVideoDecoderFactory.
+ *
+ * Decoder-oriented declarations here establish the boundary between encoded input and decoded
+ * output, including the format assumptions and ownership expectations that surround that
+ * conversion.
+ *
+ * Media-facing declarations here focus on packet and frame ownership, format description,
+ * decoding boundaries, and real-time source control.
+ *
+ */
+
+
 #include "media/SwVideoFrame.h"
 #include "media/SwVideoPacket.h"
 
 #include <functional>
 #include <map>
 #include <memory>
-#include <mutex>
+#include "core/fs/SwMutex.h"
 #include <vector>
 #include <algorithm>
 
@@ -36,26 +61,65 @@ class SwVideoDecoder {
 public:
     using FrameCallback = std::function<void(const SwVideoFrame&)>;
 
+    /**
+     * @brief Destroys the `SwVideoDecoder` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     virtual ~SwVideoDecoder() = default;
 
+    /**
+     * @brief Returns the current name.
+     * @return The current name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     virtual const char* name() const = 0;
+    /**
+     * @brief Opens the underlying resource managed by the object.
+     * @param expectedFormat Value passed to the method.
+     * @return The requested open.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     virtual bool open(const SwVideoFormatInfo& expectedFormat) {
         (void)expectedFormat;
         return true;
     }
+    /**
+     * @brief Performs the `feed` operation.
+     * @param packet Value passed to the method.
+     * @return The requested feed.
+     */
     virtual bool feed(const SwVideoPacket& packet) = 0;
+    /**
+     * @brief Returns the current flush.
+     * @return The current flush.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     virtual void flush() {}
 
+    /**
+     * @brief Sets the frame Callback.
+     * @param callback Callback invoked by the operation.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setFrameCallback(FrameCallback callback) {
-        std::lock_guard<std::mutex> lock(m_callbackMutex);
+        SwMutexLocker lock(m_callbackMutex);
         m_frameCallback = std::move(callback);
     }
 
 protected:
+    /**
+     * @brief Performs the `emitFrame` operation.
+     * @param frame Value passed to the method.
+     */
     void emitFrame(const SwVideoFrame& frame) {
         FrameCallback cb;
         {
-            std::lock_guard<std::mutex> lock(m_callbackMutex);
+            SwMutexLocker lock(m_callbackMutex);
             cb = m_frameCallback;
         }
         if (cb) {
@@ -64,14 +128,25 @@ protected:
     }
 
 private:
-    std::mutex m_callbackMutex;
+    SwMutex m_callbackMutex;
     FrameCallback m_frameCallback;
 };
 
 class SwPassthroughVideoDecoder : public SwVideoDecoder {
 public:
+    /**
+     * @brief Returns the current name.
+     * @return The current name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const char* name() const override { return "SwPassthroughVideoDecoder"; }
 
+    /**
+     * @brief Performs the `feed` operation.
+     * @param packet Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool feed(const SwVideoPacket& packet) override {
         if (!packet.carriesRawFrame() || packet.payload().isEmpty()) {
             return false;
@@ -95,11 +170,24 @@ class SwVideoDecoderFactory {
 public:
     using Creator = std::function<std::shared_ptr<SwVideoDecoder>()>;
 
+    /**
+     * @brief Returns the current instance.
+     * @return The current instance.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static SwVideoDecoderFactory& instance() {
         static SwVideoDecoderFactory g_factory;
         return g_factory;
     }
 
+    /**
+     * @brief Performs the `registerDecoder` operation.
+     * @param codec Value passed to the method.
+     * @param creator Value passed to the method.
+     * @param priority Value passed to the method.
+     * @param shareable Value passed to the method.
+     */
     void registerDecoder(SwVideoPacket::Codec codec,
                          Creator creator,
                          int priority = 0,
@@ -107,7 +195,7 @@ public:
         if (!creator) {
             return;
         }
-        std::lock_guard<std::mutex> lock(m_mutex);
+        SwMutexLocker lock(m_mutex);
         auto& entries = m_decoders[codec];
         entries.emplace_back();
         auto& entry = entries.back();
@@ -119,8 +207,13 @@ public:
         });
     }
 
+    /**
+     * @brief Performs the `acquire` operation.
+     * @param codec Value passed to the method.
+     * @return The requested acquire.
+     */
     std::shared_ptr<SwVideoDecoder> acquire(SwVideoPacket::Codec codec) {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        SwMutexLocker lock(m_mutex);
         auto it = m_decoders.find(codec);
         if (it == m_decoders.end()) {
             return nullptr;
@@ -147,6 +240,11 @@ public:
         return nullptr;
     }
 
+    /**
+     * @brief Creates the requested create.
+     * @param codec Value passed to the method.
+     * @return The resulting create.
+     */
     std::shared_ptr<SwVideoDecoder> create(SwVideoPacket::Codec codec) {
         return acquire(codec);
     }
@@ -166,6 +264,6 @@ private:
         registerDecoder(SwVideoPacket::Codec::RawBGRA, []() { return std::make_shared<SwPassthroughVideoDecoder>(); }, -1, true);
     }
 
-    mutable std::mutex m_mutex;
+    mutable SwMutex m_mutex;
     std::map<SwVideoPacket::Codec, std::vector<Entry>> m_decoders;
 };

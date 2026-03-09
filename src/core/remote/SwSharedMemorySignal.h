@@ -1,4 +1,30 @@
 #pragma once
+
+/**
+ * @file src/core/remote/SwSharedMemorySignal.h
+ * @ingroup core_remote
+ * @brief Declares the public interface exposed by SwSharedMemorySignal in the CoreSw remote and
+ * IPC layer.
+ *
+ * This header belongs to the CoreSw remote and IPC layer. It provides the abstractions used to
+ * expose objects across process boundaries and to transport data or signals between peers.
+ *
+ * Within that layer, this file focuses on the shared memory signal interface. The declarations
+ * exposed here define the stable surface that adjacent code can rely on while the implementation
+ * remains free to evolve behind the header.
+ *
+ * This header mainly contributes module-level utilities, helper declarations, or namespaced types
+ * that are consumed by the surrounding subsystem.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * Remote-facing declarations in this area usually coordinate identity, proxying, serialization,
+ * and synchronization across runtimes.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -34,6 +60,7 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -285,14 +312,33 @@ inline SwString& subscriberObjectContextTls_() {
 
 class ScopedSubscriberObject {
 public:
+    /**
+     * @brief Constructs a `ScopedSubscriberObject` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     explicit ScopedSubscriberObject(const SwString& subscriberObject)
         : prev_(subscriberObjectContextTls_()) {
         subscriberObjectContextTls_() = subscriberObject;
     }
 
+    /**
+     * @brief Destroys the `ScopedSubscriberObject` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~ScopedSubscriberObject() { subscriberObjectContextTls_() = prev_; }
 
+    /**
+     * @brief Constructs a `ScopedSubscriberObject` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     ScopedSubscriberObject(const ScopedSubscriberObject&) = delete;
+    /**
+     * @brief Performs the `operator=` operation.
+     * @return The requested operator =.
+     */
     ScopedSubscriberObject& operator=(const ScopedSubscriberObject&) = delete;
 
 private:
@@ -404,6 +450,11 @@ public:
     typedef AppLayout<MaxApps> Layout;
     static const uint64_t kPidTtlMs = 15000; // heartbeat is 1s; keep margin
 
+    /**
+     * @brief Performs the `registerDomain` operation.
+     * @param domain Value passed to the method.
+     * @return The requested register Domain.
+     */
     static void registerDomain(const SwString& domain) {
         try {
             ProcessHooks::trackDomain(domain);
@@ -465,6 +516,11 @@ public:
         }
     }
 
+    /**
+     * @brief Performs the `unregisterCurrentPid` operation.
+     * @param domain Value passed to the method.
+     * @return The requested unregister Current Pid.
+     */
     static void unregisterCurrentPid(const SwString& domain) {
         try {
             std::shared_ptr<Mapping> map = openOrCreate_();
@@ -497,6 +553,12 @@ public:
         }
     }
 
+    /**
+     * @brief Returns the current snapshot.
+     * @return The current snapshot.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static SwJsonArray snapshot() {
         SwJsonArray arr;
         try {
@@ -550,7 +612,18 @@ private:
 
     class Mapping {
     public:
+        /**
+         * @brief Constructs a `Mapping` instance.
+         * @param L Value passed to the method.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
         explicit Mapping(Layout* L) : L_(L) {}
+        /**
+         * @brief Destroys the `Mapping` instance.
+         *
+         * @details Use this hook to release any resources that remain associated with the instance.
+         */
         ~Mapping() {
 #ifdef _WIN32
             if (mem_) {
@@ -573,6 +646,12 @@ private:
 #endif
         }
 
+        /**
+         * @brief Returns the current layout.
+         * @return The current layout.
+         *
+         * @details The returned value reflects the state currently stored by the instance.
+         */
         Layout* layout() const { return L_; }
 
 #ifdef _WIN32
@@ -859,6 +938,11 @@ private:
     }
 
     struct ProcessHooks {
+        /**
+         * @brief Performs the `trackDomain` operation.
+         * @param domain Value passed to the method.
+         * @return The requested track Domain.
+         */
         static void trackDomain(const SwString& domain) {
             ensureInstalled_();
             const std::string d = domain.toStdString();
@@ -866,6 +950,11 @@ private:
             domains_().insert(d);
         }
 
+        /**
+         * @brief Performs the `ensureHeartbeat` operation.
+         * @param domain Value passed to the method.
+         * @return The requested ensure Heartbeat.
+         */
         static void ensureHeartbeat(const SwString& domain) {
             ensureInstalled_();
             const std::string key = domain.toStdString();
@@ -954,6 +1043,16 @@ public:
     typedef RegistryLayout<MaxEntries> Layout;
     static const uint64_t kEntryTtlMs = 15000; // must be >= heartbeat period
 
+    /**
+     * @brief Performs the `registerSignal` operation.
+     * @param domain Value passed to the method.
+     * @param object Value passed to the method.
+     * @param signal Value passed to the method.
+     * @param shmName Value passed to the method.
+     * @param typeId Value passed to the method.
+     * @param typeName Value passed to the method.
+     * @return The requested register Signal.
+     */
     static void registerSignal(const SwString& domain,
                                const SwString& object,
                                const SwString& signal,
@@ -1021,6 +1120,11 @@ public:
         }
     }
 
+    /**
+     * @brief Performs the `snapshot` operation.
+     * @param domain Value passed to the method.
+     * @return The requested snapshot.
+     */
     static SwJsonArray snapshot(const SwString& domain) {
         SwJsonArray arr;
         try {
@@ -1057,7 +1161,18 @@ private:
 
     class Mapping {
     public:
+        /**
+         * @brief Constructs a `Mapping` instance.
+         * @param L Value passed to the method.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
         explicit Mapping(Layout* L) : L_(L) {}
+        /**
+         * @brief Destroys the `Mapping` instance.
+         *
+         * @details Use this hook to release any resources that remain associated with the instance.
+         */
         ~Mapping() {
 #ifdef _WIN32
             if (mem_) {
@@ -1080,6 +1195,12 @@ private:
 #endif
         }
 
+        /**
+         * @brief Returns the current layout.
+         * @return The current layout.
+         *
+         * @details The returned value reflects the state currently stored by the instance.
+         */
         Layout* layout() const { return L_; }
 
 #ifdef _WIN32
@@ -1275,6 +1396,11 @@ private:
     }
 
     struct ProcessHooks {
+        /**
+         * @brief Performs the `ensureHeartbeat` operation.
+         * @param domain Value passed to the method.
+         * @return The requested ensure Heartbeat.
+         */
         static void ensureHeartbeat(const SwString& domain) {
             const std::string key = domain.toStdString();
             std::lock_guard<std::mutex> lk(mtx_());
@@ -1307,6 +1433,14 @@ public:
     typedef SubscribersLayout<MaxEntries> Layout;
     static const uint64_t kEntryTtlMs = 15000; // must be >= heartbeat period
 
+    /**
+     * @brief Performs the `registerSubscription` operation.
+     * @param domain Value passed to the method.
+     * @param object Value passed to the method.
+     * @param signal Value passed to the method.
+     * @param subPid Value passed to the method.
+     * @return The requested register Subscription.
+     */
     static void registerSubscription(const SwString& domain,
                                      const SwString& object,
                                      const SwString& signal,
@@ -1314,6 +1448,15 @@ public:
         registerSubscription(domain, object, signal, subPid, currentSubscriberObject_());
     }
 
+    /**
+     * @brief Performs the `registerSubscription` operation.
+     * @param domain Value passed to the method.
+     * @param object Value passed to the method.
+     * @param signal Value passed to the method.
+     * @param subPid Value passed to the method.
+     * @param subscriberObject Value passed to the method.
+     * @return The requested register Subscription.
+     */
     static void registerSubscription(const SwString& domain,
                                      const SwString& object,
                                      const SwString& signal,
@@ -1364,6 +1507,14 @@ public:
         }
     }
 
+    /**
+     * @brief Performs the `unregisterSubscription` operation.
+     * @param domain Value passed to the method.
+     * @param object Value passed to the method.
+     * @param signal Value passed to the method.
+     * @param subPid Value passed to the method.
+     * @return The requested unregister Subscription.
+     */
     static void unregisterSubscription(const SwString& domain,
                                        const SwString& object,
                                        const SwString& signal,
@@ -1371,6 +1522,15 @@ public:
         unregisterSubscription(domain, object, signal, subPid, SwString());
     }
 
+    /**
+     * @brief Performs the `unregisterSubscription` operation.
+     * @param domain Value passed to the method.
+     * @param object Value passed to the method.
+     * @param signal Value passed to the method.
+     * @param subPid Value passed to the method.
+     * @param subscriberObject Value passed to the method.
+     * @return The requested unregister Subscription.
+     */
     static void unregisterSubscription(const SwString& domain,
                                        const SwString& object,
                                        const SwString& signal,
@@ -1403,6 +1563,11 @@ public:
         }
     }
 
+    /**
+     * @brief Performs the `snapshot` operation.
+     * @param domain Value passed to the method.
+     * @return The requested snapshot.
+     */
     static SwJsonArray snapshot(const SwString& domain) {
         SwJsonArray arr;
         try {
@@ -1441,6 +1606,14 @@ public:
  
     // Returns the list of subscriber PIDs for a given (domain, object, signal).
     // Used by publishers to deliver a best-effort wakeup notification.
+    /**
+     * @brief Performs the `listSubscriberPids` operation.
+     * @param domain Value passed to the method.
+     * @param object Value passed to the method.
+     * @param signal Value passed to the method.
+     * @param outPids Output value filled by the method.
+     * @return The requested list Subscriber Pids.
+     */
     static void listSubscriberPids(const SwString& domain,
                                   const SwString& object,
                                   const SwString& signal,
@@ -1456,7 +1629,18 @@ public:
 
             struct Unlocker {
                 std::shared_ptr<Mapping> map;
+                /**
+                 * @brief Constructs a `Unlocker` instance.
+                 *
+                 * @details The instance is initialized and prepared for immediate use.
+                 */
                 explicit Unlocker(std::shared_ptr<Mapping> m) : map(std::move(m)) {}
+                /**
+                 * @brief Destroys the `Unlocker` instance.
+                 * @param map Value passed to the method.
+                 *
+                 * @details Use this hook to release any resources that remain associated with the instance.
+                 */
                 ~Unlocker() { unlock_(map); }
             };
 
@@ -1505,7 +1689,18 @@ private:
 
     class Mapping {
     public:
+        /**
+         * @brief Constructs a `Mapping` instance.
+         * @param L Value passed to the method.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
         explicit Mapping(Layout* L) : L_(L) {}
+        /**
+         * @brief Destroys the `Mapping` instance.
+         *
+         * @details Use this hook to release any resources that remain associated with the instance.
+         */
         ~Mapping() {
 #ifdef _WIN32
             if (mem_) {
@@ -1528,6 +1723,12 @@ private:
 #endif
         }
 
+        /**
+         * @brief Returns the current layout.
+         * @return The current layout.
+         *
+         * @details The returned value reflects the state currently stored by the instance.
+         */
         Layout* layout() const { return L_; }
 
 #ifdef _WIN32
@@ -1719,6 +1920,11 @@ private:
     }
 
     struct ProcessHooks {
+        /**
+         * @brief Performs the `ensureHeartbeat` operation.
+         * @param domain Value passed to the method.
+         * @return The requested ensure Heartbeat.
+         */
         static void ensureHeartbeat(const SwString& domain) {
             const std::string key = domain.toStdString();
             std::lock_guard<std::mutex> lk(mtx_());
@@ -1773,8 +1979,20 @@ struct Encoder {
     size_t cap;
     size_t pos;
 
+    /**
+     * @brief Constructs a `Encoder` instance.
+     * @param data Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     Encoder(uint8_t* data, size_t capacity) : p(data), cap(capacity), pos(0) {}
 
+    /**
+     * @brief Performs the `writeBytes` operation on the associated resource.
+     * @param data Value passed to the method.
+     * @param len Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool writeBytes(const void* data, size_t len) {
         if (pos + len > cap) return false;
         std::memcpy(p + pos, data, len);
@@ -1783,6 +2001,11 @@ struct Encoder {
     }
 
     template <class T>
+    /**
+     * @brief Performs the `writePOD` operation on the associated resource.
+     * @param v Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool writePOD(const T& v) {
         if (pos + sizeof(T) > cap) return false;
         std::memcpy(p + pos, &v, sizeof(T));
@@ -1790,6 +2013,12 @@ struct Encoder {
         return true;
     }
 
+    /**
+     * @brief Returns the current size.
+     * @return The current size.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     size_t size() const { return pos; }
 };
 
@@ -1798,8 +2027,20 @@ struct Decoder {
     size_t cap;
     size_t pos;
 
+    /**
+     * @brief Constructs a `Decoder` instance.
+     * @param data Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     Decoder(const uint8_t* data, size_t capacity) : p(data), cap(capacity), pos(0) {}
 
+    /**
+     * @brief Performs the `readBytes` operation on the associated resource.
+     * @param out Value passed to the method.
+     * @param len Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool readBytes(void* out, size_t len) {
         if (pos + len > cap) return false;
         std::memcpy(out, p + pos, len);
@@ -1808,6 +2049,11 @@ struct Decoder {
     }
 
     template <class T>
+    /**
+     * @brief Performs the `readPOD` operation on the associated resource.
+     * @param out Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool readPOD(T& out) {
         if (pos + sizeof(T) > cap) return false;
         std::memcpy(&out, p + pos, sizeof(T));
@@ -1818,9 +2064,21 @@ struct Decoder {
 
 template <typename T, typename Enable = void>
 struct Codec {
+    /**
+     * @brief Performs the `write` operation on the associated resource.
+     * @param enc Value passed to the method.
+     * @param v Value passed to the method.
+     * @return The requested write.
+     */
     static bool write(Encoder& enc, const T& v) {
         return enc.writePOD(v);
     }
+    /**
+     * @brief Performs the `read` operation on the associated resource.
+     * @param dec Value passed to the method.
+     * @param out Value passed to the method.
+     * @return The resulting read.
+     */
     static bool read(Decoder& dec, T& out) {
         return dec.readPOD(out);
     }
@@ -1828,12 +2086,24 @@ struct Codec {
 
 template <typename T>
 struct Codec<T, typename std::enable_if<std::is_same<T, SwString>::value>::type> {
+    /**
+     * @brief Performs the `write` operation on the associated resource.
+     * @param enc Value passed to the method.
+     * @param v Value passed to the method.
+     * @return The requested write.
+     */
     static bool write(Encoder& enc, const SwString& v) {
         std::string s = v.toStdString();
         const uint32_t len = static_cast<uint32_t>(s.size());
         if (!enc.writePOD(len)) return false;
         return enc.writeBytes(s.data(), len);
     }
+    /**
+     * @brief Performs the `read` operation on the associated resource.
+     * @param dec Value passed to the method.
+     * @param out Value passed to the method.
+     * @return The resulting read.
+     */
     static bool read(Decoder& dec, SwString& out) {
         uint32_t len = 0;
         if (!dec.readPOD(len)) return false;
@@ -1847,12 +2117,24 @@ struct Codec<T, typename std::enable_if<std::is_same<T, SwString>::value>::type>
 
 template <typename T>
 struct Codec<T, typename std::enable_if<std::is_same<T, SwByteArray>::value>::type> {
+    /**
+     * @brief Performs the `write` operation on the associated resource.
+     * @param enc Value passed to the method.
+     * @param v Value passed to the method.
+     * @return The requested write.
+     */
     static bool write(Encoder& enc, const SwByteArray& v) {
         const uint32_t len = static_cast<uint32_t>(v.size());
         if (!enc.writePOD(len)) return false;
         if (len == 0) return true;
         return enc.writeBytes(v.constData(), len);
     }
+    /**
+     * @brief Performs the `read` operation on the associated resource.
+     * @param dec Value passed to the method.
+     * @param out Value passed to the method.
+     * @return The resulting read.
+     */
     static bool read(Decoder& dec, SwByteArray& out) {
         uint32_t len = 0;
         if (!dec.readPOD(len)) return false;
@@ -1954,6 +2236,12 @@ struct LoopPollerDispatchRegistry {
         uintptr_t fns[kMax];
     };
 
+    /**
+     * @brief Returns the current table.
+     * @return The current table.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static Table* table() {
         static Table* s_tbl = nullptr;
         if (s_tbl) return s_tbl;
@@ -1993,6 +2281,10 @@ struct LoopPollerDispatchRegistry {
         return s_tbl;
     }
 
+    /**
+     * @brief Performs the `registerFn` operation.
+     * @return The requested register Fn.
+     */
     static void registerFn(void (*fn)()) {
         if (!fn) return;
         Table* t = table();
@@ -2037,6 +2329,12 @@ struct LoopPollerDispatchRegistry {
         }
     }
 
+    /**
+     * @brief Returns the current dispatch All.
+     * @return The current dispatch All.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static void dispatchAll() {
         Table* t = table();
         if (!t) return;
@@ -2056,6 +2354,10 @@ struct LoopPollerDispatchRegistry {
         }
     }
 
+    /**
+     * @brief Performs the `unregisterFn` operation.
+     * @return The requested unregister Fn.
+     */
     static void unregisterFn(void (*fn)()) {
         if (!fn) return;
         Table* t = table();
@@ -2085,13 +2387,37 @@ class LoopPoller {
 public:
     struct Task {
         std::atomic_bool active;
+        /**
+         * @brief Returns the current function<void.
+         * @return The current function<void.
+         *
+         * @details The returned value reflects the state currently stored by the instance.
+         */
         std::function<void()> fn;
+        /**
+         * @brief Constructs a `Task` instance.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
         Task(std::function<void()> f) : active(true), fn(std::move(f)) {}
     };
 
+    /**
+     * @brief Performs the `dispatch` operation.
+     */
     void dispatch() { tick_(); }
+    /**
+     * @brief Performs the `notifyProcess` operation.
+     * @param pid Value passed to the method.
+     * @return The requested notify Process.
+     */
     static void notifyProcess(uint32_t pid);
 
+    /**
+     * @brief Adds the specified add.
+     * @param fn Value passed to the method.
+     * @return The requested add.
+     */
     size_t add(std::function<void()> fn) {
         LoopPollerDispatchRegistry::registerFn(&LoopPoller::dispatchSelf_);
         std::shared_ptr<Task> t(new Task(std::move(fn)));
@@ -2105,6 +2431,10 @@ public:
         return id;
     }
 
+    /**
+     * @brief Removes the specified remove.
+     * @param id Value passed to the method.
+     */
     void remove(size_t id) {
         std::shared_ptr<Task> t;
         bool shouldDetach = false;
@@ -2125,6 +2455,12 @@ public:
         if (t) t->active.store(false, std::memory_order_release);
     }
 
+    /**
+     * @brief Returns the current instance.
+     * @return The current instance.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static LoopPoller& instance() {
         static LoopPoller p;
         return p;
@@ -2137,11 +2473,20 @@ private:
 
     class IpcWakeup {
     public:
+        /**
+         * @brief Returns the current instance.
+         * @return The current instance.
+         *
+         * @details The returned value reflects the state currently stored by the instance.
+         */
         static IpcWakeup& instance() {
             static IpcWakeup n;
             return n;
         }
 
+        /**
+         * @brief Performs the `ensureAttached` operation.
+         */
         void ensureAttached() {
             if (attached_.load(std::memory_order_acquire)) return;
             std::lock_guard<std::mutex> lk(mtx_);
@@ -2149,6 +2494,9 @@ private:
             attachLocked_();
         }
 
+        /**
+         * @brief Performs the `detach` operation.
+         */
         void detach() {
             if (!attached_.load(std::memory_order_acquire)) return;
             std::lock_guard<std::mutex> lk(mtx_);
@@ -2175,6 +2523,11 @@ private:
             attached_.store(false, std::memory_order_release);
         }
 
+        /**
+         * @brief Performs the `notifyPid` operation.
+         * @param pid Value passed to the method.
+         * @return The requested notify Pid.
+         */
         static void notifyPid(uint32_t pid) {
 #ifdef _WIN32
             const std::string name = std::string("Local\\sw_ipc_notify_") + std::to_string(pid);
@@ -2197,6 +2550,13 @@ private:
     private:
         IpcWakeup() = default;
 
+// EXCEPTION DOCUMENTEE (Tâche 15): Les sockets AF_UNIX utilisées ici pour la signalisation IPC
+// inter-processus (abstract namespace Linux) constituent une exception acceptée au paradigme SwObject.
+// Elles ne peuvent pas être remplacées par SwUdpSocket ou un autre type Sw existant car :
+// - Elles utilisent l'espace de nommage abstrait Linux (sun_path[0] == '\0'), non portable
+// - La sémantique est différente de UDP réseau (pas de résolution d'adresse, broadcast local)
+// - Créer un SwLocalSocket nécessiterait un chantier architectural à part entière
+// Si SwLocalSocket est créé à l'avenir, cette section devra être refactorisée.
 #ifndef _WIN32
         static int senderSocket_() {
             static int s = -1;
@@ -2356,10 +2716,29 @@ inline void invokeWithTuple(Fn& fn, Tuple& t) {
 
 class Registry {
 public:
+    /**
+     * @brief Constructs a `Registry` instance.
+     * @param domain Value passed to the method.
+     * @param object Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     Registry(const SwString& domain, const SwString& object)
         : domain_(domain), object_(object) {}
 
+    /**
+     * @brief Returns the current domain.
+     * @return The current domain.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwString& domain() const { return domain_; }
+    /**
+     * @brief Returns the current object.
+     * @return The current object.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwString& object() const { return object_; }
 
 private:
@@ -2415,6 +2794,14 @@ class ShmMapping {
 public:
     typedef ShmLayout<MaxPayload> Layout;
 
+    /**
+     * @brief Opens the or Create handled by the object.
+     * @param shmName Value passed to the method.
+     * @param expectedTypeId Value passed to the method.
+     * @return The requested or Create.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     static std::shared_ptr<ShmMapping> openOrCreate(const SwString& shmName, uint64_t expectedTypeId) {
         bool created = false;
 
@@ -2518,11 +2905,21 @@ public:
     }
 
 #ifndef _WIN32
+    /**
+     * @brief Destroys the specified destroy.
+     * @param shmName Value passed to the method.
+     * @return The requested destroy.
+     */
     static void destroy(const SwString& shmName) {
         ::shm_unlink(shmName.toStdString().c_str());
     }
 #endif
 
+    /**
+     * @brief Destroys the `ShmMapping` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~ShmMapping() {
 #ifdef _WIN32
         if (mem_) {
@@ -2538,7 +2935,18 @@ public:
 #endif
     }
 
+    /**
+     * @brief Performs the `layout` operation.
+     * @param mem_ Value passed to the method.
+     * @return The requested layout.
+     */
     Layout* layout() const { return static_cast<Layout*>(mem_); }
+    /**
+     * @brief Returns the current name.
+     * @return The current name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwString& name() const { return name_; }
 
 private:
@@ -2596,6 +3004,11 @@ struct ShmQueueLayout {
     static const uint32_t kMagic = 0x51554531u; // 'QUE1'
     static const uint32_t kVersion = 1;
 
+    /**
+     * @brief Performs the `initLayout` operation.
+     * @param L Value passed to the method.
+     * @return The requested init Layout.
+     */
     static void initLayout(ShmQueueLayout* L) {
         if (!L) return;
         L->seq = 0;
@@ -2612,6 +3025,14 @@ struct ShmQueueLayout {
 template <typename Layout>
 class ShmMappingT {
 public:
+    /**
+     * @brief Opens the or Create handled by the object.
+     * @param shmName Value passed to the method.
+     * @param expectedTypeId Value passed to the method.
+     * @return The requested or Create.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     static std::shared_ptr<ShmMappingT> openOrCreate(const SwString& shmName, uint64_t expectedTypeId) {
         bool created = false;
 
@@ -2714,11 +3135,21 @@ public:
     }
 
 #ifndef _WIN32
+    /**
+     * @brief Destroys the specified destroy.
+     * @param shmName Value passed to the method.
+     * @return The requested destroy.
+     */
     static void destroy(const SwString& shmName) {
         ::shm_unlink(shmName.toStdString().c_str());
     }
 #endif
 
+    /**
+     * @brief Destroys the `ShmMappingT` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~ShmMappingT() {
 #ifdef _WIN32
         if (mem_) {
@@ -2734,7 +3165,18 @@ public:
 #endif
     }
 
+    /**
+     * @brief Performs the `layout` operation.
+     * @param mem_ Value passed to the method.
+     * @return The requested layout.
+     */
     Layout* layout() const { return static_cast<Layout*>(mem_); }
+    /**
+     * @brief Returns the current name.
+     * @return The current name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwString& name() const { return name_; }
 
 private:
@@ -2762,7 +3204,23 @@ public:
 
     class Subscription {
     public:
+        /**
+         * @brief Constructs a `Subscription` instance.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
         Subscription() {}
+        /**
+         * @brief Constructs a `Subscription` instance.
+         * @param pollerId Value passed to the method.
+         * @param domain Value passed to the method.
+         * @param object Value passed to the method.
+         * @param signal Value passed to the method.
+         * @param subPid Value passed to the method.
+         * @param true Value passed to the method.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
         Subscription(size_t pollerId,
                      const SwString& domain,
                      const SwString& object,
@@ -2778,6 +3236,18 @@ public:
               registered_(true) {}
 
 #ifdef _WIN32
+        /**
+         * @brief Constructs a `Subscription` instance.
+         * @param app Value passed to the method.
+         * @param waitableId Value passed to the method.
+         * @param domain Value passed to the method.
+         * @param object Value passed to the method.
+         * @param signal Value passed to the method.
+         * @param subPid Value passed to the method.
+         * @param true Value passed to the method.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
         Subscription(SwCoreApplication* app,
                      size_t waitableId,
                      const SwString& domain,
@@ -2795,10 +3265,30 @@ public:
               registered_(true) {}
 #endif
 
+        /**
+         * @brief Constructs a `Subscription` instance.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
         Subscription(const Subscription&) = delete;
+        /**
+         * @brief Performs the `operator=` operation.
+         * @return The requested operator =.
+         */
         Subscription& operator=(const Subscription&) = delete;
 
+        /**
+         * @brief Constructs a `Subscription` instance.
+         * @param this Value passed to the method.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
         Subscription(Subscription&& o) noexcept { *this = std::move(o); }
+        /**
+         * @brief Performs the `operator=` operation.
+         * @param o Value passed to the method.
+         * @return The requested operator =.
+         */
         Subscription& operator=(Subscription&& o) noexcept {
             if (this == &o) return *this;
             stop();
@@ -2821,8 +3311,18 @@ public:
             return *this;
         }
 
+        /**
+         * @brief Destroys the `Subscription` instance.
+         *
+         * @details Use this hook to release any resources that remain associated with the instance.
+         */
         ~Subscription() { stop(); }
 
+        /**
+         * @brief Stops the underlying activity managed by the object.
+         *
+         * @details The call affects the runtime state associated with the underlying resource or service.
+         */
         void stop() {
             if (!pollerId_
 #ifdef _WIN32
@@ -2864,6 +3364,13 @@ public:
         bool registered_{false};
     };
 
+    /**
+     * @brief Constructs a `RingQueue` instance.
+     * @param reg Value passed to the method.
+     * @param signalName Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     RingQueue(Registry& reg, const SwString& signalName)
         : reg_(reg), signalName_(signalName) {
         shmName_ = detail::make_shm_name(reg_.domain(), reg_.object(), signalName_);
@@ -2897,6 +3404,11 @@ public:
 #endif
     }
 
+    /**
+     * @brief Destroys the `RingQueue` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~RingQueue() {
 #ifdef _WIN32
         if (mutex_) {
@@ -2914,12 +3426,23 @@ public:
 #endif
     }
 
+    /**
+     * @brief Returns the current shm Name.
+     * @return The current shm Name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwString& shmName() const { return shmName_; }
 
 #ifdef _WIN32
     HANDLE wakeEvent() const { return event_; }
 #endif
 
+    /**
+     * @brief Performs the `push` operation.
+     * @param args Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool push(const Args&... args) {
         std::array<uint8_t, kMaxPayload> tmp;
         detail::Encoder enc(tmp.data(), tmp.size());
@@ -2990,9 +3513,20 @@ public:
         return true;
     }
 
+    /**
+     * @brief Performs the `operator` operation.
+     * @return `true` on success; otherwise `false`.
+     */
     bool operator()(const Args&... args) { return push(args...); }
 
     template <typename Fn>
+    /**
+     * @brief Performs the `connect` operation.
+     * @param cb Value passed to the method.
+     * @param fireInitial Value passed to the method.
+     * @param timeoutMs Timeout expressed in milliseconds.
+     * @return The requested connect.
+     */
     Subscription connect(Fn cb, bool fireInitial = true, int timeoutMs = 0) {
         typedef typename std::decay<Fn>::type Callback;
         Callback cbCopy(std::move(cb));
@@ -3011,6 +3545,14 @@ public:
                 HANDLE mtx;
                 HANDLE evt;
 
+                /**
+                 * @brief Constructs a `State` instance.
+                 * @param m Value passed to the method.
+                 * @param c Value passed to the method.
+                 * @param NULL Value passed to the method.
+                 *
+                 * @details The instance is initialized and prepared for immediate use.
+                 */
                 State(const std::shared_ptr<Mapping>& m, Callback c, bool fi)
                     : map(m),
                       cb(std::move(c)),
@@ -3020,6 +3562,11 @@ public:
                       mtx(NULL),
                       evt(NULL) {}
 
+                /**
+                 * @brief Destroys the `State` instance.
+                 *
+                 * @details Use this hook to release any resources that remain associated with the instance.
+                 */
                 ~State() {
                     if (mtx) ::CloseHandle(mtx);
                     if (evt) ::CloseHandle(evt);
@@ -3143,6 +3690,15 @@ public:
             HANDLE mtx;
 #endif
 
+            /**
+             * @brief Constructs a `State` instance.
+             * @param m Value passed to the method.
+             * @param c Value passed to the method.
+             * @param _WIN32 Value passed to the method.
+             * @param NULL Value passed to the method.
+             *
+             * @details The instance is initialized and prepared for immediate use.
+             */
             State(const std::shared_ptr<Mapping>& m, Callback c, bool fi)
                 : map(m),
                   cb(std::move(c)),
@@ -3156,6 +3712,12 @@ public:
             {
             }
 #ifdef _WIN32
+            /**
+             * @brief Destroys the `State` instance.
+             * @param mtx Value passed to the method.
+             *
+             * @details Use this hook to release any resources that remain associated with the instance.
+             */
             ~State() { if (mtx) ::CloseHandle(mtx); }
 #endif
         };
@@ -3174,7 +3736,15 @@ public:
         const SwString objCopy = reg_.object();
         const SwString sigCopy = signalName_;
         const uint32_t subPid = detail::currentPid();
-        const SwString subObjCopy = detail::currentSubscriberObject_();
+        SwString subObjCopy = detail::currentSubscriberObject_();
+        if (subObjCopy.isEmpty()) {
+            static std::atomic<uint64_t> s_autoSubSeq(0ull);
+            const uint64_t n = s_autoSubSeq.fetch_add(1ull, std::memory_order_relaxed) + 1ull;
+            subObjCopy = SwString("__rqsub__") +
+                         SwString::number(static_cast<unsigned long long>(subPid)) +
+                         SwString("|") +
+                         SwString::number(static_cast<unsigned long long>(n));
+        }
 
         const size_t id = detail::LoopPoller::instance().add([st]() {
             if (!st) return;
@@ -3277,12 +3847,948 @@ private:
 };
 
 template <class... Args>
+class RingQueueDynamic {
+public:
+    static const uint32_t kDefaultMaxPayload = 4096u;
+    static const uint32_t kMaxSubscriberCursors = 64u;
+private:
+    class DynamicMapping;
+public:
+
+    class Subscription {
+    public:
+        /**
+         * @brief Constructs a `Subscription` instance.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
+        Subscription() {}
+        /**
+         * @brief Constructs a `Subscription` instance.
+         * @param pollerId Value passed to the method.
+         * @param domain Value passed to the method.
+         * @param object Value passed to the method.
+         * @param signal Value passed to the method.
+         * @param subPid Value passed to the method.
+         * @param subscriberObject Value passed to the method.
+         * @param map Value passed to the method.
+         * @param true Value passed to the method.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
+        Subscription(size_t pollerId,
+                     const SwString& domain,
+                     const SwString& object,
+                     const SwString& signal,
+                     uint32_t subPid,
+                     const SwString& subscriberObject,
+                     const std::shared_ptr<DynamicMapping>& map,
+                     const SwString& shmName)
+            : pollerId_(pollerId),
+              domain_(domain),
+              object_(object),
+              signal_(signal),
+              subPid_(subPid),
+              subscriberObject_(subscriberObject),
+              map_(map),
+              shmName_(shmName),
+              registered_(true) {}
+
+        /**
+         * @brief Constructs a `Subscription` instance.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
+        Subscription(const Subscription&) = delete;
+        /**
+         * @brief Performs the `operator=` operation.
+         * @return The requested operator =.
+         */
+        Subscription& operator=(const Subscription&) = delete;
+
+        /**
+         * @brief Constructs a `Subscription` instance.
+         * @param this Value passed to the method.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
+        Subscription(Subscription&& o) noexcept { *this = std::move(o); }
+        /**
+         * @brief Performs the `operator=` operation.
+         * @param o Value passed to the method.
+         * @return The requested operator =.
+         */
+        Subscription& operator=(Subscription&& o) noexcept {
+            if (this == &o) return *this;
+            stop();
+            pollerId_ = o.pollerId_;
+            o.pollerId_ = 0;
+            domain_ = std::move(o.domain_);
+            object_ = std::move(o.object_);
+            signal_ = std::move(o.signal_);
+            subPid_ = o.subPid_;
+            o.subPid_ = 0;
+            subscriberObject_ = std::move(o.subscriberObject_);
+            map_ = std::move(o.map_);
+            shmName_ = std::move(o.shmName_);
+            registered_ = o.registered_;
+            o.registered_ = false;
+            return *this;
+        }
+
+        /**
+         * @brief Destroys the `Subscription` instance.
+         *
+         * @details Use this hook to release any resources that remain associated with the instance.
+         */
+        ~Subscription() { stop(); }
+
+        /**
+         * @brief Stops the underlying activity managed by the object.
+         *
+         * @details The call affects the runtime state associated with the underlying resource or service.
+         */
+        void stop() {
+            if (!pollerId_ && !registered_) return;
+
+            if (registered_) {
+                detail::SubscribersRegistryTable<>::unregisterSubscription(domain_, object_, signal_, subPid_, subscriberObject_);
+                registered_ = false;
+            }
+
+            if (map_) {
+                clearSubscriberCursor_(map_, shmName_, subPid_, subscriberObject_);
+            }
+
+            detail::LoopPoller::instance().remove(pollerId_);
+            pollerId_ = 0;
+        }
+
+    private:
+        size_t pollerId_{0};
+        SwString domain_;
+        SwString object_;
+        SwString signal_;
+        uint32_t subPid_{0};
+        SwString subscriberObject_;
+        std::shared_ptr<DynamicMapping> map_;
+        SwString shmName_;
+        bool registered_{false};
+    };
+
+    /**
+     * @brief Constructs a `RingQueueDynamic` instance.
+     * @param reg Value passed to the method.
+     * @param signalName Value passed to the method.
+     * @param capacity Value passed to the method.
+     * @param maxPayload Value passed to the method.
+     * @param signalName Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
+    RingQueueDynamic(Registry& reg,
+                     const SwString& signalName,
+                     uint32_t capacity,
+                     uint32_t maxPayload = kDefaultMaxPayload)
+        : reg_(reg), signalName_(signalName) {
+        if (capacity == 0u) throw std::runtime_error("RingQueueDynamic: capacity must be > 0");
+        if (maxPayload == 0u) throw std::runtime_error("RingQueueDynamic: maxPayload must be > 0");
+
+        shmName_ = detail::make_shm_name(reg_.domain(), reg_.object(), signalName_);
+        map_ = openOrCreateMapping_(shmName_, detail::type_id<Args...>(), capacity, maxPayload);
+        detail::RegistryTable<>::registerSignal(reg_.domain(), reg_.object(), signalName_, shmName_,
+                                               detail::type_id<Args...>(), detail::type_name<Args...>());
+
+#ifdef _WIN32
+        const std::string mtxName = (shmName_ + "_mtx").toStdString();
+        mutex_ = ::CreateMutexA(NULL, FALSE, mtxName.c_str());
+        if (!mutex_) {
+            throw std::runtime_error("CreateMutex failed");
+        }
+#endif
+    }
+
+    /**
+     * @brief Destroys the `RingQueueDynamic` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
+    ~RingQueueDynamic() {
+#ifdef _WIN32
+        if (mutex_) {
+            ::CloseHandle(mutex_);
+            mutex_ = NULL;
+        }
+#endif
+    }
+
+    /**
+     * @brief Returns the current shm Name.
+     * @return The current shm Name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
+    const SwString& shmName() const { return shmName_; }
+    /**
+     * @brief Performs the `capacity` operation.
+     * @return The requested capacity.
+     */
+    uint32_t capacity() const { return map_ ? map_->header()->capacity : 0u; }
+    /**
+     * @brief Performs the `maxPayload` operation.
+     * @return The requested max Payload.
+     */
+    uint32_t maxPayload() const { return map_ ? map_->header()->maxPayload : 0u; }
+
+    /**
+     * @brief Performs the `push` operation.
+     * @param args Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
+    bool push(const Args&... args) {
+        Header* L = map_ ? map_->header() : nullptr;
+        if (!L) return false;
+
+        const uint32_t cap = L->capacity;
+        const uint32_t maxPayloadBytes = L->maxPayload;
+        if (cap == 0u || maxPayloadBytes == 0u) return false;
+
+        std::vector<uint8_t> tmp(static_cast<size_t>(maxPayloadBytes), 0);
+        detail::Encoder enc(tmp.data(), tmp.size());
+        if (!detail::writeAll(enc, args...)) return false;
+
+        bool ok = false;
+
+#ifdef _WIN32
+        ::WaitForSingleObject(mutex_, INFINITE);
+        const uint64_t minRead = minReadSeqLocked_(L);
+        L->readSeq = minRead;
+        const uint64_t inFlight = (L->seq >= minRead) ? (L->seq - minRead) : 0ull;
+        if (inFlight < static_cast<uint64_t>(cap)) {
+            const uint64_t next = L->seq + 1;
+            DynamicSlot* slot = map_->slotAt(static_cast<size_t>(next % cap));
+            slot->seq = next;
+            slot->size = static_cast<uint32_t>(enc.size());
+            slot->reserved = 0;
+            if (slot->size <= maxPayloadBytes) {
+                if (slot->size != 0) std::memcpy(map_->slotData(slot), tmp.data(), slot->size);
+                L->seq = next;
+                ok = true;
+            }
+        }
+        ::ReleaseMutex(mutex_);
+#else
+        pthread_mutex_lock(&L->mtx);
+        const uint64_t minRead = minReadSeqLocked_(L);
+        L->readSeq = minRead;
+        const uint64_t inFlight = (L->seq >= minRead) ? (L->seq - minRead) : 0ull;
+        if (inFlight < static_cast<uint64_t>(cap)) {
+            const uint64_t next = L->seq + 1;
+            DynamicSlot* slot = map_->slotAt(static_cast<size_t>(next % cap));
+            slot->seq = next;
+            slot->size = static_cast<uint32_t>(enc.size());
+            slot->reserved = 0;
+            if (slot->size <= maxPayloadBytes) {
+                if (slot->size != 0) std::memcpy(map_->slotData(slot), tmp.data(), slot->size);
+                L->seq = next;
+                ok = true;
+            }
+        }
+        if (ok) pthread_cond_broadcast(&L->cv);
+        pthread_mutex_unlock(&L->mtx);
+#endif
+
+        if (!ok) return false;
+
+        // Notify all subscribers so LoopPoller dispatches callbacks promptly.
+        std::vector<uint32_t> pids;
+        detail::SubscribersRegistryTable<>::listSubscriberPids(reg_.domain(), reg_.object(), signalName_, pids);
+        if (!pids.empty()) {
+            std::sort(pids.begin(), pids.end());
+            pids.erase(std::unique(pids.begin(), pids.end()), pids.end());
+            for (size_t i = 0; i < pids.size(); ++i) {
+                detail::LoopPoller::notifyProcess(pids[i]);
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * @brief Performs the `operator` operation.
+     * @return `true` on success; otherwise `false`.
+     */
+    bool operator()(const Args&... args) { return push(args...); }
+
+    template <typename Fn>
+    /**
+     * @brief Performs the `connect` operation.
+     * @param cb Value passed to the method.
+     * @param fireInitial Value passed to the method.
+     * @param timeoutMs Timeout expressed in milliseconds.
+     * @return The requested connect.
+     */
+    Subscription connect(Fn cb, bool fireInitial = true, int timeoutMs = 0) {
+        typedef typename std::decay<Fn>::type Callback;
+        Callback cbCopy(std::move(cb));
+
+        if (timeoutMs < 0) timeoutMs = 0;
+
+        struct State {
+            std::shared_ptr<DynamicMapping> map;
+            Callback cb;
+            bool fireInitial;
+            std::atomic_bool inCallback;
+            uint32_t subPid;
+            SwString subscriberObject;
+
+#ifdef _WIN32
+            HANDLE mtx;
+#endif
+
+            /**
+             * @brief Constructs a `State` instance.
+             * @param m Value passed to the method.
+             * @param c Value passed to the method.
+             * @param fi Value passed to the method.
+             * @param pid Value passed to the method.
+             * @param _WIN32 Value passed to the method.
+             * @param NULL Value passed to the method.
+             *
+             * @details The instance is initialized and prepared for immediate use.
+             */
+            State(const std::shared_ptr<DynamicMapping>& m,
+                  Callback c,
+                  bool fi,
+                  uint32_t pid,
+                  const SwString& subObj)
+                : map(m),
+                  cb(std::move(c)),
+                  fireInitial(fi),
+                  inCallback(false),
+                  subPid(pid),
+                  subscriberObject(subObj)
+#ifdef _WIN32
+                  ,
+                  mtx(NULL)
+#endif
+            {
+            }
+
+#ifdef _WIN32
+            /**
+             * @brief Destroys the `State` instance.
+             *
+             * @details Use this hook to release any resources that remain associated with the instance.
+             */
+            ~State() {
+                if (mtx) ::CloseHandle(mtx);
+            }
+#endif
+        };
+
+        const SwString domCopy = reg_.domain();
+        const SwString objCopy = reg_.object();
+        const SwString sigCopy = signalName_;
+        const uint32_t subPid = detail::currentPid();
+        const SwString subObjCopy = detail::currentSubscriberObject_();
+
+        std::shared_ptr<State> st(new State(map_, cbCopy, fireInitial, subPid, subObjCopy));
+
+#ifdef _WIN32
+        const std::string mtxName = (shmName_ + "_mtx").toStdString();
+        st->mtx = ::CreateMutexA(NULL, FALSE, mtxName.c_str());
+        if (!st->mtx) {
+            throw std::runtime_error("CreateMutex (loop sub) failed");
+        }
+#endif
+
+        const size_t id = detail::LoopPoller::instance().add([st]() {
+            if (!st) return;
+            if (st->inCallback.exchange(true, std::memory_order_acq_rel)) return;
+
+            Header* L = st->map ? st->map->header() : nullptr;
+            if (!L) {
+                st->inCallback.store(false, std::memory_order_release);
+                return;
+            }
+
+            struct Msg {
+                uint32_t sz;
+                std::vector<uint8_t> data;
+            };
+            std::vector<Msg> msgs;
+
+#ifdef _WIN32
+            if (!st->mtx) {
+                st->inCallback.store(false, std::memory_order_release);
+                return;
+            }
+            DWORD wr = ::WaitForSingleObject(st->mtx, INFINITE);
+            if (wr != WAIT_OBJECT_0 && wr != WAIT_ABANDONED) {
+                st->inCallback.store(false, std::memory_order_release);
+                return;
+            }
+#else
+            pthread_mutex_lock(&L->mtx);
+#endif
+
+            const uint32_t cap = L->capacity;
+            const uint32_t maxPayloadBytes = L->maxPayload;
+            SubscriberCursor* cursor =
+                findOrCreateCursorLocked_(L, st->subPid, st->subscriberObject, st->fireInitial);
+            if (!cursor) {
+#ifdef _WIN32
+                    ::ReleaseMutex(st->mtx);
+#else
+                    pthread_mutex_unlock(&L->mtx);
+#endif
+                st->inCallback.store(false, std::memory_order_release);
+                return;
+            }
+
+            const uint64_t seqNow = L->seq;
+
+            if (cursor->readSeq < seqNow) {
+                const uint64_t start = cursor->readSeq + 1ull;
+                for (uint64_t seq = start; seq <= seqNow; ++seq) {
+                    DynamicSlot* slot = st->map->slotAt(static_cast<size_t>(seq % cap));
+                    const uint32_t sz = slot->size;
+                    if (slot->seq == seq && sz <= maxPayloadBytes) {
+                        Msg m;
+                        m.sz = sz;
+                        m.data.resize(static_cast<size_t>(sz));
+                        if (sz != 0) std::memcpy(m.data.data(), st->map->slotData(slot), sz);
+                        msgs.push_back(std::move(m));
+                    }
+                }
+                cursor->readSeq = seqNow;
+            }
+            cursor->lastSeenMs = detail::nowMs();
+            L->readSeq = minReadSeqLocked_(L);
+
+#ifdef _WIN32
+            ::ReleaseMutex(st->mtx);
+#else
+            pthread_mutex_unlock(&L->mtx);
+#endif
+
+            for (size_t i = 0; i < msgs.size(); ++i) {
+                Msg& m = msgs[i];
+                typedef std::tuple<typename std::decay<Args>::type...> Tuple;
+                Tuple out;
+                detail::Decoder dec(m.data.data(), m.sz);
+                if (detail::readTuple(dec, out)) {
+                    detail::invokeWithTuple(st->cb, out);
+                }
+            }
+
+            st->inCallback.store(false, std::memory_order_release);
+        });
+
+        detail::SubscribersRegistryTable<>::registerSubscription(domCopy, objCopy, sigCopy, subPid, subObjCopy);
+
+        if (timeoutMs > 0) {
+            std::shared_ptr<DynamicMapping> mapCopy = map_;
+            const SwString shmCopy = shmName_;
+            SwTimer::singleShot(timeoutMs, [id, domCopy, objCopy, sigCopy, subPid, subObjCopy, mapCopy, shmCopy]() {
+                detail::SubscribersRegistryTable<>::unregisterSubscription(domCopy, objCopy, sigCopy, subPid, subObjCopy);
+                clearSubscriberCursor_(mapCopy, shmCopy, subPid, subObjCopy);
+                detail::LoopPoller::instance().remove(id);
+            });
+        }
+
+        return Subscription(id, domCopy, objCopy, sigCopy, subPid, subObjCopy, map_, shmName_);
+    }
+
+private:
+    struct SubscriberCursor {
+        uint32_t subPid;
+        uint32_t active;
+        uint64_t readSeq;
+        uint64_t lastSeenMs;
+        char subscriberObject[64];
+    };
+
+    struct Header {
+        uint32_t magic;
+        uint32_t version;
+        uint64_t typeId;
+        uint32_t capacity;
+        uint32_t maxPayload;
+        uint32_t cursorCount;
+        uint32_t cursorCapacity;
+
+#ifndef _WIN32
+        pthread_mutex_t mtx;
+        pthread_cond_t cv;
+#endif
+
+        uint64_t seq;
+        uint64_t readSeq;
+        uint32_t winWaiters;
+        uint32_t reserved0;
+        SubscriberCursor cursors[kMaxSubscriberCursors];
+        uint8_t reserved[64];
+
+        static const uint32_t kMagic = 0x51554431u; // 'QUD1'
+        static const uint32_t kVersion = 2;
+    };
+
+    struct DynamicSlot {
+        uint64_t seq;
+        uint32_t size;
+        uint32_t reserved;
+    };
+
+    class DynamicMapping {
+    public:
+#ifdef _WIN32
+        /**
+         * @brief Constructs a `DynamicMapping` instance.
+         * @param name Value passed to the method.
+         * @param mem Value passed to the method.
+         * @param hMap Value passed to the method.
+         * @param mappedSize Value passed to the method.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
+        DynamicMapping(const SwString& name, void* mem, HANDLE hMap, size_t mappedSize)
+            : name_(name), mem_(mem), hMap_(hMap), mappedSize_(mappedSize) {}
+#else
+        /**
+         * @brief Constructs a `DynamicMapping` instance.
+         * @param name Value passed to the method.
+         * @param mem Value passed to the method.
+         * @param mappedSize Value passed to the method.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
+        DynamicMapping(const SwString& name, void* mem, size_t mappedSize)
+            : name_(name), mem_(mem), mappedSize_(mappedSize) {}
+#endif
+
+        /**
+         * @brief Destroys the `DynamicMapping` instance.
+         *
+         * @details Use this hook to release any resources that remain associated with the instance.
+         */
+        ~DynamicMapping() {
+#ifdef _WIN32
+            if (mem_) ::UnmapViewOfFile(mem_);
+            if (hMap_) ::CloseHandle(hMap_);
+#else
+            if (mem_ && mem_ != MAP_FAILED) ::munmap(mem_, mappedSize_);
+#endif
+        }
+
+        /**
+         * @brief Performs the `header` operation.
+         * @param mem_ Value passed to the method.
+         * @return The requested header.
+         */
+        Header* header() const { return static_cast<Header*>(mem_); }
+        /**
+         * @brief Returns the current mapped Size.
+         * @return The current mapped Size.
+         *
+         * @details The returned value reflects the state currently stored by the instance.
+         */
+        size_t mappedSize() const { return mappedSize_; }
+
+        /**
+         * @brief Performs the `configure` operation.
+         * @param entriesOffset Value passed to the method.
+         * @param slotStride Value passed to the method.
+         * @param requiredSize Value passed to the method.
+         */
+        void configure(size_t entriesOffset, size_t slotStride, size_t requiredSize) {
+            entriesOffset_ = entriesOffset;
+            slotStride_ = slotStride;
+            requiredSize_ = requiredSize;
+        }
+
+        /**
+         * @brief Performs the `slotAt` operation.
+         * @param slotIndex Value passed to the method.
+         * @return The requested slot At.
+         */
+        DynamicSlot* slotAt(size_t slotIndex) const {
+            uint8_t* base = static_cast<uint8_t*>(mem_) + entriesOffset_ + slotIndex * slotStride_;
+            return reinterpret_cast<DynamicSlot*>(base);
+        }
+
+        /**
+         * @brief Performs the `slotData` operation.
+         * @param slot Value passed to the method.
+         * @return The requested slot Data.
+         */
+        uint8_t* slotData(DynamicSlot* slot) const {
+            return reinterpret_cast<uint8_t*>(slot) + sizeof(DynamicSlot);
+        }
+
+    private:
+        SwString name_;
+        void* mem_{nullptr};
+        size_t mappedSize_{0};
+        size_t entriesOffset_{0};
+        size_t slotStride_{0};
+        size_t requiredSize_{0};
+#ifdef _WIN32
+        HANDLE hMap_{NULL};
+#endif
+    };
+
+    static std::string normalizedSubscriberObjectKey_(const SwString& subscriberObject) {
+        std::string key = subscriberObject.toStdString();
+        const size_t cap = sizeof(SubscriberCursor::subscriberObject);
+        if (cap > 0 && key.size() >= cap) key.resize(cap - 1);
+        return key;
+    }
+
+    static bool cursorMatches_(const SubscriberCursor& c, uint32_t subPid, const std::string& key) {
+        if (c.active == 0u) return false;
+        if (c.subPid != subPid) return false;
+        return std::string(c.subscriberObject) == key;
+    }
+
+    static uint32_t recomputeCursorCountLocked_(Header* L) {
+        if (!L) return 0u;
+        uint32_t n = 0u;
+        for (uint32_t i = 0; i < kMaxSubscriberCursors; ++i) {
+            if (L->cursors[i].active != 0u) ++n;
+        }
+        L->cursorCount = n;
+        return n;
+    }
+
+    static SubscriberCursor* findCursorLocked_(Header* L, uint32_t subPid, const std::string& key) {
+        if (!L) return nullptr;
+        for (uint32_t i = 0; i < kMaxSubscriberCursors; ++i) {
+            if (cursorMatches_(L->cursors[i], subPid, key)) {
+                return &L->cursors[i];
+            }
+        }
+        return nullptr;
+    }
+
+    static SubscriberCursor* findOrCreateCursorLocked_(Header* L,
+                                                       uint32_t subPid,
+                                                       const SwString& subscriberObject,
+                                                       bool fireInitial) {
+        if (!L) return nullptr;
+        const std::string key = normalizedSubscriberObjectKey_(subscriberObject);
+
+        SubscriberCursor* c = findCursorLocked_(L, subPid, key);
+        if (c) {
+            c->lastSeenMs = detail::nowMs();
+            return c;
+        }
+
+        SubscriberCursor* freeSlot = nullptr;
+        for (uint32_t i = 0; i < kMaxSubscriberCursors; ++i) {
+            if (L->cursors[i].active == 0u) {
+                freeSlot = &L->cursors[i];
+                break;
+            }
+        }
+
+        if (!freeSlot) {
+            for (uint32_t i = 0; i < kMaxSubscriberCursors; ++i) {
+                SubscriberCursor& c0 = L->cursors[i];
+                if (c0.active == 0u) continue;
+                if (detail::pidStateBestEffort_(c0.subPid) == detail::PidState::Dead) {
+                    std::memset(&c0, 0, sizeof(SubscriberCursor));
+                    freeSlot = &c0;
+                    break;
+                }
+            }
+        }
+        if (!freeSlot) return nullptr;
+
+        std::memset(freeSlot, 0, sizeof(SubscriberCursor));
+        freeSlot->subPid = subPid;
+        freeSlot->active = 1u;
+        freeSlot->lastSeenMs = detail::nowMs();
+        detail::copyTrunc(freeSlot->subscriberObject, sizeof(freeSlot->subscriberObject), SwString(key));
+
+        const uint64_t seqNow = L->seq;
+        if (fireInitial) {
+            const uint64_t cap = static_cast<uint64_t>(L->capacity);
+            freeSlot->readSeq = (seqNow > cap) ? (seqNow - cap) : 0ull;
+        } else {
+            freeSlot->readSeq = seqNow;
+        }
+
+        recomputeCursorCountLocked_(L);
+        return freeSlot;
+    }
+
+    static uint64_t minReadSeqLocked_(Header* L) {
+        if (!L) return 0ull;
+        uint64_t minRead = L->seq;
+        bool found = false;
+        for (uint32_t i = 0; i < kMaxSubscriberCursors; ++i) {
+            const SubscriberCursor& c = L->cursors[i];
+            if (c.active == 0u) continue;
+            if (!found || c.readSeq < minRead) {
+                minRead = c.readSeq;
+                found = true;
+            }
+        }
+        if (!found) minRead = L->seq;
+        return minRead;
+    }
+
+    static void clearSubscriberCursor_(const std::shared_ptr<DynamicMapping>& map,
+                                       const SwString& shmName,
+                                       uint32_t subPid,
+                                       const SwString& subscriberObject) {
+        if (!map) return;
+        Header* L = map->header();
+        if (!L) return;
+        const std::string key = normalizedSubscriberObjectKey_(subscriberObject);
+
+#ifdef _WIN32
+        const std::string mtxName = (shmName + "_mtx").toStdString();
+        HANDLE mtx = ::CreateMutexA(NULL, FALSE, mtxName.c_str());
+        if (!mtx) return;
+        DWORD wr = ::WaitForSingleObject(mtx, 1000);
+        if (wr != WAIT_OBJECT_0 && wr != WAIT_ABANDONED) {
+            ::CloseHandle(mtx);
+            return;
+        }
+#else
+        pthread_mutex_lock(&L->mtx);
+#endif
+
+        for (uint32_t i = 0; i < kMaxSubscriberCursors; ++i) {
+            SubscriberCursor& c = L->cursors[i];
+            if (!cursorMatches_(c, subPid, key)) continue;
+            std::memset(&c, 0, sizeof(SubscriberCursor));
+            break;
+        }
+        recomputeCursorCountLocked_(L);
+        L->readSeq = minReadSeqLocked_(L);
+
+#ifdef _WIN32
+        ::ReleaseMutex(mtx);
+        ::CloseHandle(mtx);
+#else
+        pthread_mutex_unlock(&L->mtx);
+#endif
+    }
+
+    static size_t alignUp_(size_t v, size_t a) {
+        if (a == 0u) return v;
+        const size_t rem = v % a;
+        return (rem == 0u) ? v : (v + (a - rem));
+    }
+
+    static bool computeLayout_(uint32_t capacity,
+                               uint32_t maxPayload,
+                               size_t& entriesOffsetOut,
+                               size_t& slotStrideOut,
+                               size_t& totalSizeOut) {
+        if (capacity == 0u || maxPayload == 0u) return false;
+
+        const size_t align = alignof(DynamicSlot);
+        const size_t entriesOffset = alignUp_(sizeof(Header), align);
+        const size_t rawStride = sizeof(DynamicSlot) + static_cast<size_t>(maxPayload);
+        const size_t slotStride = alignUp_(rawStride, align);
+
+        if (slotStride == 0u) return false;
+        if (static_cast<size_t>(capacity) > (std::numeric_limits<size_t>::max() - entriesOffset) / slotStride) {
+            return false;
+        }
+
+        const size_t total = entriesOffset + static_cast<size_t>(capacity) * slotStride;
+        entriesOffsetOut = entriesOffset;
+        slotStrideOut = slotStride;
+        totalSizeOut = total;
+        return true;
+    }
+
+    static std::shared_ptr<DynamicMapping> openOrCreateMapping_(const SwString& shmName,
+                                                                uint64_t expectedTypeId,
+                                                                uint32_t expectedCapacity,
+                                                                uint32_t expectedMaxPayload) {
+        size_t expectedEntriesOffset = 0;
+        size_t expectedSlotStride = 0;
+        size_t expectedTotalSize = 0;
+        if (!computeLayout_(expectedCapacity, expectedMaxPayload,
+                            expectedEntriesOffset, expectedSlotStride, expectedTotalSize)) {
+            throw std::runtime_error("RingQueueDynamic: invalid queue layout");
+        }
+
+        bool created = false;
+
+#ifdef _WIN32
+        const std::string nameA = shmName.toStdString();
+        HANDLE hMap = ::CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0,
+                                           static_cast<DWORD>(expectedTotalSize), nameA.c_str());
+        const DWORD lastErr = ::GetLastError();
+        if (!hMap) {
+            throw std::runtime_error("CreateFileMapping failed");
+        }
+        created = (lastErr != ERROR_ALREADY_EXISTS);
+
+        void* mem = ::MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, 0, 0, 0);
+        if (!mem) {
+            ::CloseHandle(hMap);
+            throw std::runtime_error("MapViewOfFile failed");
+        }
+
+        std::shared_ptr<DynamicMapping> mapping(new DynamicMapping(shmName, mem, hMap, expectedTotalSize));
+#else
+        const std::string nameA = shmName.toStdString();
+        int fd = ::shm_open(nameA.c_str(), O_RDWR | O_CREAT | O_EXCL, 0666);
+        if (fd >= 0) {
+            created = true;
+            if (::ftruncate(fd, static_cast<off_t>(expectedTotalSize)) != 0) {
+                ::close(fd);
+                ::shm_unlink(nameA.c_str());
+                throw std::runtime_error("ftruncate(shm) failed");
+            }
+        } else if (errno == EEXIST) {
+            fd = ::shm_open(nameA.c_str(), O_RDWR, 0666);
+            if (fd < 0) throw std::runtime_error("shm_open(existing) failed");
+        } else {
+            throw std::runtime_error("shm_open failed");
+        }
+
+        struct stat st;
+        if (::fstat(fd, &st) != 0) {
+            ::close(fd);
+            throw std::runtime_error("fstat(shm) failed");
+        }
+        const size_t mappedSize = static_cast<size_t>(st.st_size);
+        if (mappedSize < sizeof(Header)) {
+            ::close(fd);
+            throw std::runtime_error("shm too small");
+        }
+
+        void* mem = ::mmap(NULL, mappedSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        ::close(fd);
+        if (mem == MAP_FAILED) throw std::runtime_error("mmap failed");
+
+        std::shared_ptr<DynamicMapping> mapping(new DynamicMapping(shmName, mem, mappedSize));
+#endif
+
+        Header* L = mapping->header();
+
+#ifdef _WIN32
+        const std::string initName = shmName.toStdString() + "_init";
+        HANDLE initMtx = ::CreateMutexA(NULL, FALSE, initName.c_str());
+        if (!initMtx) {
+            throw std::runtime_error("CreateMutex(init) failed");
+        }
+        ::WaitForSingleObject(initMtx, INFINITE);
+        try {
+#endif
+            if (created || (L->magic == 0 && L->version == 0)) {
+                if (mapping->mappedSize() < expectedTotalSize) {
+                    throw std::runtime_error("SHM queue mapping too small for requested capacity");
+                }
+
+                std::memset(L, 0, expectedTotalSize);
+                L->magic = Header::kMagic;
+                L->version = Header::kVersion;
+                L->typeId = expectedTypeId;
+                L->capacity = expectedCapacity;
+                L->maxPayload = expectedMaxPayload;
+                L->cursorCount = 0;
+                L->cursorCapacity = kMaxSubscriberCursors;
+                L->seq = 0;
+                L->readSeq = 0;
+                L->winWaiters = 0;
+                L->reserved0 = 0;
+
+#ifndef _WIN32
+                pthread_mutexattr_t ma;
+                pthread_condattr_t ca;
+                pthread_mutexattr_init(&ma);
+                pthread_condattr_init(&ca);
+                pthread_mutexattr_setpshared(&ma, PTHREAD_PROCESS_SHARED);
+                pthread_condattr_setpshared(&ca, PTHREAD_PROCESS_SHARED);
+                pthread_mutex_init(&L->mtx, &ma);
+                pthread_cond_init(&L->cv, &ca);
+                pthread_mutexattr_destroy(&ma);
+                pthread_condattr_destroy(&ca);
+#endif
+
+                uint8_t* entriesBase = reinterpret_cast<uint8_t*>(L) + expectedEntriesOffset;
+                for (size_t i = 0; i < static_cast<size_t>(expectedCapacity); ++i) {
+                    DynamicSlot* slot =
+                        reinterpret_cast<DynamicSlot*>(entriesBase + i * expectedSlotStride);
+                    slot->seq = 0;
+                    slot->size = 0;
+                    slot->reserved = 0;
+                }
+            } else {
+                if (L->magic != Header::kMagic || L->version != Header::kVersion) {
+                    throw std::runtime_error("SHM queue layout mismatch (magic/version)");
+                }
+                if (L->typeId != expectedTypeId) {
+                    throw std::runtime_error("SHM queue type mismatch");
+                }
+                if (L->capacity != expectedCapacity || L->maxPayload != expectedMaxPayload) {
+                    throw std::runtime_error("SHM queue config mismatch (capacity/maxPayload)");
+                }
+                if (L->cursorCapacity != kMaxSubscriberCursors) {
+                    throw std::runtime_error("SHM queue cursor config mismatch");
+                }
+            }
+
+            size_t actualEntriesOffset = 0;
+            size_t actualSlotStride = 0;
+            size_t actualTotalSize = 0;
+            if (!computeLayout_(L->capacity, L->maxPayload,
+                                actualEntriesOffset, actualSlotStride, actualTotalSize)) {
+                throw std::runtime_error("SHM queue layout invalid");
+            }
+            if (mapping->mappedSize() < actualTotalSize) {
+                throw std::runtime_error("SHM queue mapping smaller than layout");
+            }
+
+            mapping->configure(actualEntriesOffset, actualSlotStride, actualTotalSize);
+
+#ifdef _WIN32
+            ::ReleaseMutex(initMtx);
+            ::CloseHandle(initMtx);
+        } catch (...) {
+            ::ReleaseMutex(initMtx);
+            ::CloseHandle(initMtx);
+            throw;
+        }
+#endif
+
+        return mapping;
+    }
+
+    Registry& reg_;
+    SwString signalName_;
+    SwString shmName_;
+    std::shared_ptr<DynamicMapping> map_;
+#ifdef _WIN32
+    HANDLE mutex_{NULL};
+#endif
+};
+
+template <class... Args>
 class Signal {
 public:
     static const size_t kMaxPayload = 4096;
     typedef ShmMapping<kMaxPayload> Mapping;
     typedef ShmLayout<kMaxPayload> Layout;
 
+    /**
+     * @brief Constructs a `Signal` instance.
+     * @param reg Value passed to the method.
+     * @param signalName Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     Signal(Registry& reg, const SwString& signalName)
         : reg_(reg), signalName_(signalName) {
         shmName_ = detail::make_shm_name(reg_.domain(), reg_.object(), signalName_);
@@ -3305,6 +4811,11 @@ public:
 #endif
     }
 
+    /**
+     * @brief Destroys the `Signal` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~Signal() {
 #ifdef _WIN32
         if (mutex_) {
@@ -3318,8 +4829,19 @@ public:
 #endif
     }
 
+    /**
+     * @brief Returns the current shm Name.
+     * @return The current shm Name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwString& shmName() const { return shmName_; }
 
+    /**
+     * @brief Performs the `publish` operation.
+     * @param args Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool publish(const Args&... args) {
         std::array<uint8_t, kMaxPayload> tmp;
         detail::Encoder enc(tmp.data(), tmp.size());
@@ -3364,8 +4886,17 @@ public:
         return true;
     }
 
+    /**
+     * @brief Performs the `operator` operation.
+     * @return `true` on success; otherwise `false`.
+     */
     bool operator()(const Args&... args) { return publish(args...); }
 
+    /**
+     * @brief Performs the `readLatest` operation on the associated resource.
+     * @param out Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool readLatest(Args&... out) const {
         Layout* L = map_->layout();
         std::array<uint8_t, kMaxPayload> tmp;
@@ -3396,7 +4927,23 @@ public:
 
     class Subscription {
     public:
+        /**
+         * @brief Constructs a `Subscription` instance.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
         Subscription() {}
+        /**
+         * @brief Constructs a `Subscription` instance.
+         * @param id Value passed to the method.
+         * @param domain Value passed to the method.
+         * @param object Value passed to the method.
+         * @param signal Value passed to the method.
+         * @param subPid Value passed to the method.
+         * @param true Value passed to the method.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
         explicit Subscription(size_t id,
                                    const SwString& domain,
                                    const SwString& object,
@@ -3410,12 +4957,37 @@ public:
               subPid_(subPid),
               subscriberObject_(subscriberObject),
               registered_(true) {}
+        /**
+         * @brief Destroys the `Subscription` instance.
+         *
+         * @details Use this hook to release any resources that remain associated with the instance.
+         */
         ~Subscription() { stop(); }
 
+        /**
+         * @brief Constructs a `Subscription` instance.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
         Subscription(const Subscription&) = delete;
+        /**
+         * @brief Performs the `operator=` operation.
+         * @return The requested operator =.
+         */
         Subscription& operator=(const Subscription&) = delete;
 
+        /**
+         * @brief Constructs a `Subscription` instance.
+         * @param this Value passed to the method.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
         Subscription(Subscription&& o) noexcept { *this = std::move(o); }
+        /**
+         * @brief Performs the `operator=` operation.
+         * @param o Value passed to the method.
+         * @return The requested operator =.
+         */
         Subscription& operator=(Subscription&& o) noexcept {
             if (this == &o) return *this;
             stop();
@@ -3431,6 +5003,11 @@ public:
             return *this;
         }
 
+        /**
+         * @brief Stops the underlying activity managed by the object.
+         *
+         * @details The call affects the runtime state associated with the underlying resource or service.
+         */
         void stop() {
             if (!id_) return;
             if (registered_) {
@@ -3457,6 +5034,13 @@ public:
     // - Good for "state signals" (latest value wins)
     // - Optional timeoutMs to auto-stop the runtime
     template <typename Fn>
+    /**
+     * @brief Performs the `connect` operation.
+     * @param cb Value passed to the method.
+     * @param fireInitial Value passed to the method.
+     * @param timeoutMs Timeout expressed in milliseconds.
+     * @return The requested connect.
+     */
     Subscription connect(Fn cb, bool fireInitial = true, int timeoutMs = 0) {
         typedef typename std::decay<Fn>::type Callback;
         Callback cbCopy(std::move(cb));
@@ -3472,9 +5056,27 @@ public:
             std::atomic_bool inCallback;
 #ifdef _WIN32
             HANDLE mtx;
+            /**
+             * @brief Constructs a `State` instance.
+             * @param NULL Value passed to the method.
+             *
+             * @details The instance is initialized and prepared for immediate use.
+             */
             explicit State() : lastSeq(0), fireInitial(true), firedInitial(false), inCallback(false), mtx(NULL) {}
+            /**
+             * @brief Destroys the `State` instance.
+             * @param mtx Value passed to the method.
+             *
+             * @details Use this hook to release any resources that remain associated with the instance.
+             */
             ~State() { if (mtx) ::CloseHandle(mtx); }
 #else
+            /**
+             * @brief Constructs a `State` instance.
+             * @param false Value passed to the method.
+             *
+             * @details The instance is initialized and prepared for immediate use.
+             */
             explicit State() : lastSeq(0), fireInitial(true), firedInitial(false), inCallback(false) {}
 #endif
         };
@@ -3598,19 +5200,49 @@ private:
 template <class... Args>
 class SignalProxy {
 public:
+    /**
+     * @brief Constructs a `SignalProxy` instance.
+     * @param reg Value passed to the method.
+     * @param signalName Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SignalProxy(Registry& reg, const SwString& signalName)
         : sig_(reg, signalName) {}
 
+    /**
+     * @brief Performs the `publish` operation.
+     * @return `true` on success; otherwise `false`.
+     */
     bool publish(const Args&... args) { return sig_.publish(args...); }
+    /**
+     * @brief Performs the `operator` operation.
+     * @return `true` on success; otherwise `false`.
+     */
     bool operator()(const Args&... args) { return publish(args...); }
 
+    /**
+     * @brief Performs the `readLatest` operation on the associated resource.
+     * @return `true` on success; otherwise `false`.
+     */
     bool readLatest(Args&... out) const { return sig_.readLatest(out...); }
 
     template <typename Fn>
+    /**
+     * @brief Performs the `connect` operation.
+     * @param cb Value passed to the method.
+     * @param fireInitial Value passed to the method.
+     * @param timeoutMs Timeout expressed in milliseconds.
+     * @return The requested connect.
+     */
     typename Signal<Args...>::Subscription connect(Fn cb, bool fireInitial = true, int timeoutMs = 0) {
         return sig_.connect(cb, fireInitial, timeoutMs);
     }
 
+    /**
+     * @brief Performs the `shmName` operation.
+     * @return The requested shm Name.
+     */
     const SwString& shmName() const { return sig_.shmName(); }
 
 private:
@@ -3626,6 +5258,11 @@ inline void notifyRegistryChangedBestEffort_(const SwString& domain) {
         struct Notifier {
             Registry reg;
             Signal<uint64_t> sig;
+            /**
+             * @brief Constructs a `Notifier` instance.
+             *
+             * @details The instance is initialized and prepared for immediate use.
+             */
             explicit Notifier(const SwString& dom)
                 : reg(dom, registryEventsObjectName_()),
                   sig(reg, registryEventsSignalName_()) {}

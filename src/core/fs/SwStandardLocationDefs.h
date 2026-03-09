@@ -1,4 +1,17 @@
 #pragma once
+
+/**
+ * @file
+ * @ingroup core_fs
+ * @brief Defines enums shared by the standard-location and path-conversion APIs.
+ *
+ * The values in this header identify logical directories and path style targets.
+ * They form the contract between filesystem helpers and the platform providers that
+ * resolve native locations or rewrite separators and path conventions.
+ */
+
+
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -22,6 +35,8 @@
  ***************************************************************************************************/
 
 // Shared enums defining standard locations and path transformations.
+
+
 enum class SwStandardPathType {
     Windows,
     WindowsLong,

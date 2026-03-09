@@ -1,5 +1,18 @@
 #pragma once
 
+/**
+ * @file
+ * @ingroup core_swizio_nodes
+ * @brief Declares hashing helpers for node-editor connection identifiers.
+ *
+ * The utilities in this header make `ConnectionId` usable in hash-based containers by
+ * providing both a project-local hash functor and a `std::hash` specialization. That
+ * keeps lookup code efficient without spreading ad-hoc hashing logic through the editor.
+ */
+
+
+
+
 #include "Definitions.hpp"
 
 #include <cstddef>
@@ -8,6 +21,11 @@ namespace SwizioNodes {
 
 struct ConnectionIdHash
 {
+    /**
+     * @brief Performs the `operator` operation.
+     * @param c Value passed to the method.
+     * @return The requested operator.
+     */
     std::size_t operator()(ConnectionId const& c) const noexcept
     {
         // Basic hash combine for the four integers.
@@ -28,10 +46,14 @@ struct ConnectionIdHash
 namespace std {
 template <>
 struct hash<SwizioNodes::ConnectionId> {
+    /**
+     * @brief Performs the `operator` operation.
+     * @param c Value passed to the method.
+     * @return The requested operator.
+     */
     std::size_t operator()(SwizioNodes::ConnectionId const& c) const noexcept
     {
         return SwizioNodes::ConnectionIdHash{}(c);
     }
 };
 } // namespace std
-

@@ -1,4 +1,28 @@
 #pragma once
+
+/**
+ * @file src/core/io/SwSerial.h
+ * @ingroup core_io
+ * @brief Declares the public interface exposed by SwSerial in the CoreSw IO layer.
+ *
+ * This header belongs to the CoreSw IO layer. It defines files, sockets, servers, descriptors,
+ * processes, and network helpers that sit directly at operating-system boundaries.
+ *
+ * Within that layer, this file focuses on the serial interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwSerial.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * IO-facing declarations here usually manage handles, readiness state, buffering, and error
+ * propagation while presenting a portable framework API.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -47,6 +71,12 @@ class SwSerial : public SwIODevice {
     SW_OBJECT(SwSerial, SwIODevice)
 
 public:
+    /**
+     * @brief Constructs a `SwSerial` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwSerial(SwObject* parent = nullptr)
         : SwIODevice(parent)
         , m_pollTimer(new SwTimer(10, this))
@@ -60,16 +90,53 @@ public:
         SwObject::connect(m_pollTimer, &SwTimer::timeout, [this]() { pollPort(); });
     }
 
+    /**
+     * @brief Destroys the `SwSerial` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~SwSerial() override {
         close();
     }
 
+    /**
+     * @brief Sets the port Name.
+     * @param name Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setPortName(const SwString& name) { m_portName = name; }
+    /**
+     * @brief Returns the current port Name.
+     * @return The current port Name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString portName() const { return m_portName; }
 
+    /**
+     * @brief Sets the baud Rate.
+     * @param baudRate Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setBaudRate(int baudRate) { m_baudRate = baudRate; }
+    /**
+     * @brief Returns the current baud Rate.
+     * @return The current baud Rate.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int baudRate() const { return m_baudRate; }
 
+    /**
+     * @brief Opens the underlying resource managed by the object.
+     * @param portName Value passed to the method.
+     * @param baudRate Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     bool open(const SwString& portName, int baudRate = 115200) {
         close();
 #if defined(_WIN32)
@@ -127,6 +194,11 @@ public:
         return true;
     }
 
+    /**
+     * @brief Closes the underlying resource and stops active work.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     void close() override {
         m_pollTimer->stop();
 #if defined(_WIN32)
@@ -144,6 +216,12 @@ public:
         m_buffer.clear();
     }
 
+    /**
+     * @brief Returns whether the object reports open.
+     * @return `true` when the object reports open; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isOpen() const override {
 #if defined(_WIN32)
         return m_handle != INVALID_HANDLE_VALUE;
@@ -152,6 +230,11 @@ public:
 #endif
     }
 
+    /**
+     * @brief Performs the `read` operation on the associated resource.
+     * @param maxSize Value passed to the method.
+     * @return The resulting read.
+     */
     SwString read(int64_t maxSize = 0) override {
         std::lock_guard<std::mutex> lock(m_bufferMutex);
         if (m_buffer.empty()) {
@@ -166,6 +249,11 @@ public:
         return result;
     }
 
+    /**
+     * @brief Performs the `write` operation on the associated resource.
+     * @param data Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool write(const SwString& data) override {
         if (!isOpen()) {
             return false;
@@ -181,6 +269,11 @@ public:
 #endif
     }
 
+    /**
+     * @brief Performs the `waitForReadyRead` operation.
+     * @param msecs Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool waitForReadyRead(int msecs = 30000) {
         if (!isOpen()) {
             return false;
@@ -188,6 +281,11 @@ public:
         return waitForCondition([this]() { return hasBufferedData(); }, msecs);
     }
 
+    /**
+     * @brief Performs the `waitForBytesWritten` operation.
+     * @param msecs Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool waitForBytesWritten(int msecs = 30000) {
         if (!isOpen()) {
             return false;

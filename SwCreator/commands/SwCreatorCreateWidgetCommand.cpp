@@ -1,6 +1,6 @@
-#include "SwCreatorCreateWidgetCommand.h"
+﻿#include "SwCreatorCreateWidgetCommand.h"
 
-#include "ui/SwCreatorFormCanvas.h"
+#include "designer/SwCreatorFormCanvas.h"
 #include "serialization/SwCreatorSwuiSerializer.h"
 
 #include "SwWidget.h"
@@ -43,7 +43,7 @@ void SwCreatorCreateWidgetCommand::redo() {
         return;
     }
 
-    SwRect r = w->getRect();
+    SwRect r = w->frameGeometry();
     w->move(r.x + m_dx, r.y + m_dy);
 
     m_canvas->registerDesignWidget(w);
@@ -53,3 +53,4 @@ void SwCreatorCreateWidgetCommand::redo() {
     w->setFocus(true);
     m_widget = w;
 }
+

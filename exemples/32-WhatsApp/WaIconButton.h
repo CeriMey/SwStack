@@ -9,7 +9,7 @@ public:
     enum class Kind {
         Chats,
         Phone,
-        Status,
+        StatusTab,
         Settings,
         NewChat,
         Menu,

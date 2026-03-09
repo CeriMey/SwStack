@@ -21,6 +21,9 @@ if(WIN32)
     target_link_libraries(ConfigurableObjectDemo PRIVATE crypt32)
     target_link_libraries(RpcClientDemo PRIVATE crypt32)
     target_link_libraries(RpcFactoryDemo PRIVATE crypt32)
+    target_compile_options(ConfigurableObjectDemo PRIVATE /bigobj)
+    target_compile_options(RpcClientDemo PRIVATE /bigobj)
+    target_compile_options(RpcFactoryDemo PRIVATE /bigobj)
 endif()
 
 target_include_directories(ConfigurableObjectDemo PRIVATE

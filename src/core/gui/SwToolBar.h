@@ -1,4 +1,28 @@
-#pragma once
+﻿#pragma once
+
+/**
+ * @file src/core/gui/SwToolBar.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwToolBar in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the tool bar interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwToolBar.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -34,11 +58,23 @@ class SwToolBar : public SwFrame {
     SW_OBJECT(SwToolBar, SwFrame)
 
 public:
+    /**
+     * @brief Constructs a `SwToolBar` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwToolBar(SwWidget* parent = nullptr)
         : SwFrame(parent) {
         initDefaults();
     }
 
+    /**
+     * @brief Adds the specified action.
+     * @param text Value passed to the method.
+     * @param callback Callback invoked by the operation.
+     * @return The requested action.
+     */
     SwAction* addAction(const SwString& text, const std::function<void()>& callback = {}) {
         auto* action = new SwAction(text, this);
         if (callback) {
@@ -48,6 +84,10 @@ public:
         return action;
     }
 
+    /**
+     * @brief Adds the specified action.
+     * @param action Value passed to the method.
+     */
     void addAction(SwAction* action) {
         if (!action) {
             return;
@@ -74,6 +114,9 @@ public:
         updateLayout();
     }
 
+    /**
+     * @brief Adds the specified separator.
+     */
     void addSeparator() {
         auto* sep = new Separator(this);
         Item item;
@@ -84,11 +127,23 @@ public:
     }
 
 protected:
+    /**
+     * @brief Handles the resize Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void resizeEvent(ResizeEvent* event) override {
         SwFrame::resizeEvent(event);
         updateLayout();
     }
 
+    /**
+     * @brief Handles the paint Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void paintEvent(PaintEvent* event) override {
         if (!isVisibleInHierarchy()) {
             return;
@@ -98,7 +153,7 @@ protected:
             return;
         }
 
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
         StyleSheet* sheet = getToolSheet();
 
         SwColor bg{248, 250, 252};
@@ -122,17 +177,28 @@ private:
         SW_OBJECT(Separator, SwWidget)
 
     public:
+        /**
+         * @brief Performs the `Separator` operation.
+         * @param parent Optional parent object that owns this instance.
+         * @return The requested separator.
+         */
         explicit Separator(SwWidget* parent = nullptr)
             : SwWidget(parent) {
             setStyleSheet("SwWidget { background-color: rgba(0,0,0,0); border-width: 0px; }");
         }
 
+        /**
+         * @brief Handles the paint Event forwarded by the framework.
+         * @param event Event object forwarded by the framework.
+         *
+         * @details Override this hook when the default framework behavior needs to be extended or replaced.
+         */
         void paintEvent(PaintEvent* event) override {
             SwPainter* painter = event ? event->painter() : nullptr;
             if (!painter) {
                 return;
             }
-            const SwRect r = getRect();
+            const SwRect r = rect();
             const int x = r.x + r.width / 2;
             painter->drawLine(x, r.y + 8, x, r.y + r.height - 8, SwColor{226, 232, 240}, 1);
         }
@@ -178,7 +244,7 @@ private:
     }
 
     void updateLayout() {
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
         int borderWidth = 1;
         int radius = 0;
         SwColor border{0, 0, 0};
@@ -203,7 +269,7 @@ private:
                 continue;
             }
 
-            SwRect hint = item.widget->sizeHint();
+            SwSize hint = item.widget->sizeHint();
             const int w = clampInt(hint.width > 0 ? hint.width : 96, 64, 240);
             item.widget->move(x, y0 + m_margin);
             item.widget->resize(w, innerH);
@@ -212,13 +278,8 @@ private:
         update();
     }
 
-    static int clampInt(int value, int minValue, int maxValue) {
-        if (value < minValue) return minValue;
-        if (value > maxValue) return maxValue;
-        return value;
-    }
-
     SwVector<Item> m_items;
     int m_margin{8};
     int m_spacing{8};
 };
+

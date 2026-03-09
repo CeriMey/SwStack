@@ -44,6 +44,7 @@ public:
     // Snapshot helpers (used by WhatsAppWindow::saveSnapshot).
     void setLoggedInForSnapshot(bool on) { setLoggedIn_(on); }
     void setAttachMenuForSnapshot(bool on) { setAttachPopupVisible_(on); }
+    void setEmojiPopupForSnapshot(bool on) { setEmojiPopupVisible_(on); }
     void setComposerTextForSnapshot(const SwString& text);
     void appendTextMessageForSnapshot(const SwString& text);
     void appendMediaMessageForSnapshot(const SwString& kind, const SwString& payload);

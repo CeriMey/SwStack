@@ -1,4 +1,30 @@
 #pragma once
+
+/**
+ * @file src/core/runtime/linux_fiber.h
+ * @ingroup core_runtime
+ * @brief Declares the public interface exposed by linux_fiber in the CoreSw runtime layer.
+ *
+ * This header belongs to the CoreSw runtime layer. It coordinates application lifetime, event
+ * delivery, timers, threads, crash handling, and other process-level services consumed by the
+ * rest of the stack.
+ *
+ * Within that layer, this file focuses on the linux fiber interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * This header mainly contributes module-level utilities, helper declarations, or namespaced types
+ * that are consumed by the surrounding subsystem.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * Runtime declarations in this area define lifecycle and threading contracts that higher-level
+ * modules depend on for safe execution and orderly shutdown.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *

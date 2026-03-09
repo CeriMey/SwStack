@@ -1,4 +1,28 @@
 #pragma once
+
+/**
+ * @file src/core/gui/graphics/SwFontMetrics.h
+ * @ingroup core_graphics
+ * @brief Declares the public interface exposed by SwFontMetrics in the CoreSw graphics layer.
+ *
+ * This header belongs to the CoreSw graphics layer. It provides geometry types, painting
+ * primitives, images, scene-graph helpers, and rendering support consumed by widgets and views.
+ *
+ * Within that layer, this file focuses on the font metrics interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are SwFontMetrics.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * Graphics-facing declarations here define the data flow from high-level UI state to lower-level
+ * rendering backends.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -21,6 +45,16 @@
  *
  ***************************************************************************************************/
 
+/**
+ * @file
+ * @brief Declares text measurement helpers for SwFont.
+ *
+ * SwFontMetrics centralizes the small amount of font measurement logic needed by
+ * widgets, text items, and layout code. It uses native Win32 metrics when
+ * available and falls back to deterministic approximations on other platforms,
+ * which keeps the API usable even when no platform text backend is wired yet.
+ */
+
 #include "SwFont.h"
 #include "SwString.h"
 #include "Sw.h"
@@ -31,11 +65,30 @@
 
 #include <algorithm>
 
+/**
+ * @brief Computes bounding information for text rendered with a given font.
+ *
+ * The class intentionally exposes only a narrow API: line height, horizontal
+ * advance, and a simple bounding rectangle. Those queries cover the current
+ * needs of the stack while keeping the implementation easy to port.
+ */
 class SwFontMetrics {
 public:
+    /**
+     * @brief Constructs a `SwFontMetrics` instance.
+     * @param font Font value used by the operation.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     explicit SwFontMetrics(const SwFont& font)
         : m_font(font) {}
 
+    /**
+     * @brief Returns the current height.
+     * @return The current height.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int height() const {
 #if defined(_WIN32)
         HDC dc = GetDC(nullptr);
@@ -62,6 +115,11 @@ public:
 #endif
     }
 
+    /**
+     * @brief Performs the `horizontalAdvance` operation.
+     * @param text Value passed to the method.
+     * @return The requested horizontal Advance.
+     */
     int horizontalAdvance(const SwString& text) const {
 #if defined(_WIN32)
         std::wstring wide = text.toStdWString();
@@ -93,6 +151,11 @@ public:
 #endif
     }
 
+    /**
+     * @brief Performs the `boundingRect` operation.
+     * @param text Value passed to the method.
+     * @return The requested bounding Rect.
+     */
     SwRect boundingRect(const SwString& text) const {
         const int w = std::max(0, horizontalAdvance(text));
         const int h = std::max(0, height());
@@ -113,4 +176,3 @@ private:
 
     SwFont m_font;
 };
-

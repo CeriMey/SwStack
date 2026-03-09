@@ -1,4 +1,28 @@
 #pragma once
+
+/**
+ * @file src/core/runtime/SwTimer.h
+ * @ingroup core_runtime
+ * @brief Declares the public interface exposed by SwTimer in the CoreSw runtime layer.
+ *
+ * This header belongs to the CoreSw runtime layer. It coordinates application lifetime, event
+ * delivery, timers, threads, crash handling, and other process-level services consumed by the
+ * rest of the stack.
+ *
+ * Within that layer, this file focuses on the timer interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwTimer.
+ *
+ * Timer-oriented declarations here define how deferred or periodic work is scheduled and surfaced
+ * to higher layers through framework-native callbacks or signals.
+ *
+ * Runtime declarations in this area define lifecycle and threading contracts that higher-level
+ * modules depend on for safe execution and orderly shutdown.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -27,15 +51,16 @@
 
 /**
  * @class SwTimer
- * @brief Provides a timer implementation for periodic or single-shot execution of tasks, similar to QTimer.
+ * @brief Provides a timer implementation for periodic or single-shot execution of tasks.
  */
 class SwTimer : public SwObject
 {
+    SW_OBJECT(SwTimer, SwObject)
 public:
 
     /**
      * @enum TimerType
-     * @brief Mimics Qt::TimerType to define how the timer measures time.
+     * @brief Defines how the timer measures time.
      */
     enum class TimerType {
         PreciseTimer,
@@ -226,21 +251,27 @@ public:
         SwTimer* tempTimer = new SwTimer(ms);
 
         tempTimer->setSingleShot(true);
-        tempTimer->connect(tempTimer, SIGNAL(timeout), std::function<void(void)>([callback, tempTimer]() {
+        tempTimer->connect(tempTimer, &SwTimer::timeout, [callback, tempTimer]() {
             callback();
             tempTimer->stop();
             tempTimer->deleteLater();
-        }));
+        });
 
         tempTimer->start();
     }
 
     template <typename T>
+    /**
+     * @brief Performs the `singleShot` operation.
+     * @param ms Value passed to the method.
+     * @param obj Value passed to the method.
+     * @return The requested single Shot.
+     */
     static void singleShot(int ms, T* obj, void (T::*func)()) {
         SwTimer* tempTimer = new SwTimer(ms);
 
         tempTimer->setSingleShot(true);
-        tempTimer->connect(tempTimer, SIGNAL(timeout), [obj, func, tempTimer]() {
+        tempTimer->connect(tempTimer, &SwTimer::timeout, [obj, func, tempTimer]() {
             (obj->*func)();
             tempTimer->stop();
             tempTimer->deleteLater();

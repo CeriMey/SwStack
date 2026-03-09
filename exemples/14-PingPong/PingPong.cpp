@@ -1,4 +1,4 @@
-#include "SwGuiApplication.h"
+﻿#include "SwGuiApplication.h"
 #include "SwMainWindow.h"
 #include "SwPushButton.h"
 #include "SwObject.h"
@@ -24,7 +24,7 @@ int main() {
     headerLayout->setMargin(0);
     headerLayout->setSpacing(20);
     headerLayout->addWidget(scoreBanner, 1);
-    headerLayout->addWidget(replayButton, 0, replayButton->getRect().width);
+    headerLayout->addWidget(replayButton, 0, replayButton->frameGeometry().width);
     headerWidget->setLayout(headerLayout);
 
     PingPongGameWidget* gameWidget = new PingPongGameWidget(&mainWindow);
@@ -45,3 +45,4 @@ int main() {
 
     return app.exec();
 }
+

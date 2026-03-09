@@ -26,6 +26,14 @@ if not defined CMAKE_BIN (
     set "CMAKE_BIN=cmake"
 )
 
+rem Options CMake supplementaires :
+rem   - arguments passes au script (ex: build.bat -DSW_BUILD_ALL_EXAMPLES=ON)
+rem   - variable d'environnement SW_BUILD_ALL_EXAMPLES=ON/OFF
+set "SCRIPT_CMAKE_ARGS=%*"
+if defined SW_BUILD_ALL_EXAMPLES (
+    set "SCRIPT_CMAKE_ARGS=%SCRIPT_CMAKE_ARGS% -DSW_BUILD_ALL_EXAMPLES=%SW_BUILD_ALL_EXAMPLES%"
+)
+
 rem -----------------------------------------------------------------------------
 rem Localisation de CMake
 rem -----------------------------------------------------------------------------
@@ -47,7 +55,10 @@ if not exist "%BUILD_DIR%" (
 
 echo [Info] Build directory: "%BUILD_DIR%"
 echo [CMake] Configuration...
-"%CMAKE_BIN%" -S "%ROOT_DIR%" -B "%BUILD_DIR%" -DCMAKE_BUILD_TYPE=%BUILD_TYPE%
+if defined SCRIPT_CMAKE_ARGS (
+    echo [CMake] Options: %SCRIPT_CMAKE_ARGS%
+)
+"%CMAKE_BIN%" -S "%ROOT_DIR%" -B "%BUILD_DIR%" -DCMAKE_BUILD_TYPE=%BUILD_TYPE% %SCRIPT_CMAKE_ARGS%
 if errorlevel 1 goto :cmake_error
 
 echo [CMake] Compilation %BUILD_TYPE%...
@@ -102,7 +113,7 @@ if %CHOIX% GTR %EXE_COUNT% goto :menu
 call set "TARGET=%%EXEC_PATH_%CHOIX%%%"
 echo.
 echo [RUN] !TARGET!
-"!TARGET!"
+start "" /wait "!TARGET!"
 echo.
 pause
 goto :menu

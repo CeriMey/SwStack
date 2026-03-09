@@ -1,4 +1,28 @@
 #pragma once
+
+/**
+ * @file src/core/io/SwBackendSsl.h
+ * @ingroup core_io
+ * @brief Declares the public interface exposed by SwBackendSsl in the CoreSw IO layer.
+ *
+ * This header belongs to the CoreSw IO layer. It defines files, sockets, servers, descriptors,
+ * processes, and network helpers that sit directly at operating-system boundaries.
+ *
+ * Within that layer, this file focuses on the backend SSL interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are SwBackendSsl.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * IO-facing declarations here usually manage handles, readiness state, buffering, and error
+ * propagation while presenting a portable framework API.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -58,18 +82,39 @@ public:
         Error
     };
 
+    /**
+     * @brief Constructs a `SwBackendSsl` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwBackendSsl() = default;
+    /**
+     * @brief Destroys the `SwBackendSsl` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~SwBackendSsl() {
         cleanup();
     }
 
     // Register an extra directory to search for libssl/libcrypto when loading dynamically.
+    /**
+     * @brief Adds the specified search Path.
+     * @param path Path used by the operation.
+     * @return The requested search Path.
+     */
     static void addSearchPath(const std::string& path) {
         if (!path.empty()) {
             extraSearchPaths().push_back(path);
         }
     }
 
+    /**
+     * @brief Performs the `init` operation.
+     * @param host Value passed to the method.
+     * @param fd Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool init(const std::string& host, intptr_t fd) {
         if (!ensureLoaded()) {
             m_lastError = "OpenSSL libraries not found";
@@ -116,6 +161,12 @@ public:
         return true;
     }
 
+    /**
+     * @brief Returns the current handshake.
+     * @return The current handshake.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     IoResult handshake() {
         if (!m_ssl || !m_loader) {
             return IoResult::Error;
@@ -124,6 +175,13 @@ public:
         return mapResult(ret);
     }
 
+    /**
+     * @brief Performs the `read` operation on the associated resource.
+     * @param buf Value passed to the method.
+     * @param len Value passed to the method.
+     * @param outBytes Output value filled by the method.
+     * @return The resulting read.
+     */
     IoResult read(char* buf, int len, int& outBytes) {
         outBytes = 0;
         if (!m_ssl || !m_loader) {
@@ -137,6 +195,13 @@ public:
         return mapResult(ret);
     }
 
+    /**
+     * @brief Performs the `write` operation on the associated resource.
+     * @param buf Value passed to the method.
+     * @param len Value passed to the method.
+     * @param outBytes Output value filled by the method.
+     * @return The requested write.
+     */
     IoResult write(const char* buf, int len, int& outBytes) {
         outBytes = 0;
         if (!m_ssl || !m_loader) {
@@ -150,6 +215,9 @@ public:
         return mapResult(ret);
     }
 
+    /**
+     * @brief Performs the `shutdown` operation.
+     */
     void shutdown() {
         if (m_ssl && m_loader) {
             m_loader->SSL_shutdown(m_ssl);
@@ -157,6 +225,12 @@ public:
         cleanup();
     }
 
+    /**
+     * @brief Returns the current last Error.
+     * @return The current last Error.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     std::string lastError() const {
         return m_lastError;
     }
@@ -212,6 +286,11 @@ private:
         FnWrite SSL_write = nullptr;
         FnShutdown SSL_shutdown = nullptr;
 
+        /**
+         * @brief Performs the `load` operation on the associated resource.
+         * @param outError Output value filled by the method.
+         * @return `true` on success; otherwise `false`.
+         */
         bool load(std::string& outError) {
             if (ready) {
                 return true;

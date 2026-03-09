@@ -22,6 +22,31 @@
 
 #pragma once
 
+/**
+ * @file src/core/types/SwJsonDocument.h
+ * @ingroup core_types
+ * @brief Declares the public interface exposed by SwJsonDocument in the CoreSw fundamental types
+ * layer.
+ *
+ * This header belongs to the CoreSw fundamental types layer. It provides value types, containers,
+ * text and binary helpers, and lightweight serialization primitives shared across the stack.
+ *
+ * Within that layer, this file focuses on the JSON document interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are SwJsonDocument.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * Interfaces in this area are intentionally reused by runtime, IO, GUI, remote, and media modules
+ * to keep cross-module semantics consistent.
+ *
+ */
+
+
 #include "SwJsonObject.h"
 #include "SwJsonArray.h"
 #include "SwString.h"
@@ -107,12 +132,18 @@ public:
      */
     bool isArray() const { return rootValue_.isArray(); }
 
+    /**
+     * @brief Returns the current object.
+     * @return The current object.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwJsonObject object() const {
         if (!rootValue_.isObject()) {
             swCError(kSwLogCategory_SwJsonDocument) << "Root is not a JSON object.";
             return SwJsonObject(); // Retourne un objet vide si ce n'est pas un objet
         }
-        return *rootValue_.toObject(); // Retourne l'objet JSON
+        return rootValue_.toObject(); // Retourne l'objet JSON
     }
 
     /**
@@ -129,7 +160,7 @@ public:
             swCError(kSwLogCategory_SwJsonDocument) << "Root is not a JSON array.";
             return SwJsonArray(); // Retourne un tableau vide si ce n'est pas un tableau
         }
-        return *rootValue_.toArray(); // Retourne le tableau JSON
+        return rootValue_.toArray(); // Retourne le tableau JSON
     }
 
     /**
@@ -178,9 +209,9 @@ public:
                 }
             }
 
-            if (!current->toObject()->contains(token)) {
+            if (!current->toObjectPtr()->contains(token)) {
                 if (createIfNotExist) {
-                    (*current->toObject())[token] = SwJsonValue(std::make_shared<SwJsonObject>());
+                    (*current->toObjectPtr())[token] = SwJsonValue(std::make_shared<SwJsonObject>());
                 } else {
                     swCError(kSwLogCategory_SwJsonDocument) << "Path not found: '" << token << "' - Key does not exist.";
                     static SwJsonValue invalidValue; // Valeur par défaut pour les cas d'échec
@@ -188,7 +219,7 @@ public:
                 }
             }
 
-            current = &(*current->toObject())[token];
+            current = &(*current->toObjectPtr())[token];
         }
 
         return *current;
@@ -327,7 +358,7 @@ private:
             SwString boolStr = value.toBool() ? "true" : "false";
             output += SwString("%1").arg(processValue(boolStr));
         } else if (value.isInt()) {
-            SwString intStr = SwString::number(value.toInt());
+            SwString intStr = SwString::number(value.toLongLong());
             output += SwString("%1").arg(processValue(intStr));
         } else if (value.isDouble()) {
             SwString doubleStr = SwString::number(value.toDouble());
@@ -335,7 +366,7 @@ private:
         } else if (value.isNull()) {
             output += "null";
         } else if (value.isObject()) {
-            const auto& obj = *value.toObject();
+            SwJsonObject obj = value.toObject();
             if(!obj.isEmpty()){
                 output += pretty ? "{\n" : "{";
                 bool first = true;
@@ -356,7 +387,7 @@ private:
                 output += "{}";
             }
         } else if (value.isArray()) {
-            const auto& arr = *value.toArray();
+            SwJsonArray arr = value.toArray();
             if(!arr.isEmpty()){
                 output += pretty ? "[\n" : "[";
                 for (size_t i = 0; i < arr.data().size(); ++i) {
@@ -475,7 +506,7 @@ private:
             if (value == "true") return SwJsonValue(true);
             if (value == "false") return SwJsonValue(false);
             if (value == "null") return SwJsonValue();
-            if (value.isInt()) return SwJsonValue(static_cast<long long>(value.toInt()));
+            if (value.isInt()) return SwJsonValue(value.toLongLong());
             if (value.isFloat()) return SwJsonValue(value.toFloat());
             return SwJsonValue(value.toStdString());
         }

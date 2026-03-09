@@ -22,8 +22,32 @@
 
 #pragma once
 
+/**
+ * @file src/core/gui/SwModelIndex.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwModelIndex in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the model index interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are SwModelIndex.
+ *
+ * Model-oriented declarations here define the data contract consumed by views, delegates, or
+ * algorithms, with an emphasis on stable roles, ownership, and update flow rather than on
+ * presentation details.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
 /***************************************************************************************************
- * SwModelIndex - Qt-like model index (≈ QModelIndex).
+ * SwModelIndex - model index.
  *
  * Stores row/column + an internal pointer owned by the model.
  **************************************************************************************************/
@@ -32,16 +56,56 @@ class SwAbstractItemModel;
 
 class SwModelIndex {
 public:
+    /**
+     * @brief Constructs a `SwModelIndex` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwModelIndex() = default;
 
+    /**
+     * @brief Returns whether the object reports valid.
+     * @return `true` when the object reports valid; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isValid() const { return m_model != nullptr && m_row >= 0 && m_column >= 0; }
 
+    /**
+     * @brief Returns the current row.
+     * @return The current row.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int row() const { return m_row; }
+    /**
+     * @brief Returns the current column.
+     * @return The current column.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int column() const { return m_column; }
 
+    /**
+     * @brief Returns the current internal Pointer.
+     * @return The current internal Pointer.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     void* internalPointer() const { return m_internalPointer; }
+    /**
+     * @brief Returns the current model.
+     * @return The current model.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwAbstractItemModel* model() const { return m_model; }
 
+    /**
+     * @brief Performs the `operator==` operation.
+     * @param other Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool operator==(const SwModelIndex& other) const {
         return m_row == other.m_row &&
                m_column == other.m_column &&
@@ -49,6 +113,11 @@ public:
                m_model == other.m_model;
     }
 
+    /**
+     * @brief Performs the `operator!=` operation.
+     * @param this Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool operator!=(const SwModelIndex& other) const { return !(*this == other); }
 
 private:
@@ -65,4 +134,3 @@ private:
 
     friend class SwAbstractItemModel;
 };
-

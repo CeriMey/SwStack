@@ -128,14 +128,14 @@ function resolveSwapiExecutable_() {
     candidates.push(path.join(r, 'bin', exe));
   }
   for (const r of roots) {
-    candidates.push(path.join(r, 'build-win', 'SwNode', 'SwAPI', 'SwApi', 'Release', exe));
-    candidates.push(path.join(r, 'build-win', 'SwNode', 'SwAPI', 'SwApi', 'RelWithDebInfo', exe));
-    candidates.push(path.join(r, 'build-win', 'SwNode', 'SwAPI', 'SwApi', 'Debug', exe));
-    candidates.push(path.join(r, 'build-check', 'SwNode', 'SwAPI', 'SwApi', 'Release', exe));
-    candidates.push(path.join(r, 'build', 'SwNode', 'SwAPI', 'SwApi', 'Release', exe));
-    candidates.push(path.join(r, 'build', 'SwNode', 'SwAPI', 'SwApi', 'RelWithDebInfo', exe));
-    candidates.push(path.join(r, 'build', 'SwNode', 'SwAPI', 'SwApi', 'Debug', exe));
-    candidates.push(path.join(r, 'build-wsl', 'SwNode', 'SwAPI', 'SwApi', 'swapi'));
+    candidates.push(path.join(r, 'build-win', 'tools', 'SwNode', 'SwAPI', 'SwApi', 'Release', exe));
+    candidates.push(path.join(r, 'build-win', 'tools', 'SwNode', 'SwAPI', 'SwApi', 'RelWithDebInfo', exe));
+    candidates.push(path.join(r, 'build-win', 'tools', 'SwNode', 'SwAPI', 'SwApi', 'Debug', exe));
+    candidates.push(path.join(r, 'build-check', 'tools', 'SwNode', 'SwAPI', 'SwApi', 'Release', exe));
+    candidates.push(path.join(r, 'build', 'tools', 'SwNode', 'SwAPI', 'SwApi', 'Release', exe));
+    candidates.push(path.join(r, 'build', 'tools', 'SwNode', 'SwAPI', 'SwApi', 'RelWithDebInfo', exe));
+    candidates.push(path.join(r, 'build', 'tools', 'SwNode', 'SwAPI', 'SwApi', 'Debug', exe));
+    candidates.push(path.join(r, 'build-wsl', 'tools', 'SwNode', 'SwAPI', 'SwApi', 'swapi'));
   }
 
   for (const p of candidates) {
@@ -165,12 +165,12 @@ function resolveSwBridgeExecutable_() {
     candidates.push(path.join(r, 'bin', exe));
   }
   for (const r of roots) {
-    candidates.push(path.join(r, 'build-win', 'SwNode', 'SwAPI', 'SwBridge', 'Release', exe));
-    candidates.push(path.join(r, 'build-win', 'SwNode', 'SwAPI', 'SwBridge', 'RelWithDebInfo', exe));
-    candidates.push(path.join(r, 'build-win', 'SwNode', 'SwAPI', 'SwBridge', 'Debug', exe));
-    candidates.push(path.join(r, 'build', 'SwNode', 'SwAPI', 'SwBridge', 'Release', exe));
-    candidates.push(path.join(r, 'build', 'SwNode', 'SwAPI', 'SwBridge', 'RelWithDebInfo', exe));
-    candidates.push(path.join(r, 'build', 'SwNode', 'SwAPI', 'SwBridge', 'Debug', exe));
+    candidates.push(path.join(r, 'build-win', 'tools', 'SwNode', 'SwAPI', 'SwBridge', 'Release', exe));
+    candidates.push(path.join(r, 'build-win', 'tools', 'SwNode', 'SwAPI', 'SwBridge', 'RelWithDebInfo', exe));
+    candidates.push(path.join(r, 'build-win', 'tools', 'SwNode', 'SwAPI', 'SwBridge', 'Debug', exe));
+    candidates.push(path.join(r, 'build', 'tools', 'SwNode', 'SwAPI', 'SwBridge', 'Release', exe));
+    candidates.push(path.join(r, 'build', 'tools', 'SwNode', 'SwAPI', 'SwBridge', 'RelWithDebInfo', exe));
+    candidates.push(path.join(r, 'build', 'tools', 'SwNode', 'SwAPI', 'SwBridge', 'Debug', exe));
   }
 
   for (const p of candidates) {
@@ -200,12 +200,12 @@ function resolveSwLaunchExecutable_() {
     candidates.push(path.join(r, 'bin', exe));
   }
   for (const r of roots) {
-    candidates.push(path.join(r, 'build-win', 'SwNode', 'SwLaunch', 'Release', exe));
-    candidates.push(path.join(r, 'build-win', 'SwNode', 'SwLaunch', 'RelWithDebInfo', exe));
-    candidates.push(path.join(r, 'build-win', 'SwNode', 'SwLaunch', 'Debug', exe));
-    candidates.push(path.join(r, 'build', 'SwNode', 'SwLaunch', 'Release', exe));
-    candidates.push(path.join(r, 'build', 'SwNode', 'SwLaunch', 'RelWithDebInfo', exe));
-    candidates.push(path.join(r, 'build', 'SwNode', 'SwLaunch', 'Debug', exe));
+    candidates.push(path.join(r, 'build-win', 'tools', 'SwNode', 'SwLaunch', 'Release', exe));
+    candidates.push(path.join(r, 'build-win', 'tools', 'SwNode', 'SwLaunch', 'RelWithDebInfo', exe));
+    candidates.push(path.join(r, 'build-win', 'tools', 'SwNode', 'SwLaunch', 'Debug', exe));
+    candidates.push(path.join(r, 'build', 'tools', 'SwNode', 'SwLaunch', 'Release', exe));
+    candidates.push(path.join(r, 'build', 'tools', 'SwNode', 'SwLaunch', 'RelWithDebInfo', exe));
+    candidates.push(path.join(r, 'build', 'tools', 'SwNode', 'SwLaunch', 'Debug', exe));
   }
 
   for (const p of candidates) {
@@ -235,12 +235,12 @@ function resolveSwBuildExecutable_() {
     candidates.push(path.join(r, 'bin', exe));
   }
   for (const r of roots) {
-    candidates.push(path.join(r, 'build-win', 'SwNode', 'SwBuild', 'Release', exe));
-    candidates.push(path.join(r, 'build-win', 'SwNode', 'SwBuild', 'RelWithDebInfo', exe));
-    candidates.push(path.join(r, 'build-win', 'SwNode', 'SwBuild', 'Debug', exe));
-    candidates.push(path.join(r, 'build', 'SwNode', 'SwBuild', 'Release', exe));
-    candidates.push(path.join(r, 'build', 'SwNode', 'SwBuild', 'RelWithDebInfo', exe));
-    candidates.push(path.join(r, 'build', 'SwNode', 'SwBuild', 'Debug', exe));
+    candidates.push(path.join(r, 'build-win', 'tools', 'SwNode', 'SwBuild', 'Release', exe));
+    candidates.push(path.join(r, 'build-win', 'tools', 'SwNode', 'SwBuild', 'RelWithDebInfo', exe));
+    candidates.push(path.join(r, 'build-win', 'tools', 'SwNode', 'SwBuild', 'Debug', exe));
+    candidates.push(path.join(r, 'build', 'tools', 'SwNode', 'SwBuild', 'Release', exe));
+    candidates.push(path.join(r, 'build', 'tools', 'SwNode', 'SwBuild', 'RelWithDebInfo', exe));
+    candidates.push(path.join(r, 'build', 'tools', 'SwNode', 'SwBuild', 'Debug', exe));
   }
 
   for (const p of candidates) {
@@ -630,12 +630,12 @@ function resolveSwComponentContainerExecutable_() {
     candidates.push(path.join(r, 'bin', exe));
   }
   for (const r of roots) {
-    candidates.push(path.join(r, 'build-win', 'SwNode', 'SwComponentContainer', 'Release', exe));
-    candidates.push(path.join(r, 'build-win', 'SwNode', 'SwComponentContainer', 'RelWithDebInfo', exe));
-    candidates.push(path.join(r, 'build-win', 'SwNode', 'SwComponentContainer', 'Debug', exe));
-    candidates.push(path.join(r, 'build', 'SwNode', 'SwComponentContainer', 'Release', exe));
-    candidates.push(path.join(r, 'build', 'SwNode', 'SwComponentContainer', 'RelWithDebInfo', exe));
-    candidates.push(path.join(r, 'build', 'SwNode', 'SwComponentContainer', 'Debug', exe));
+    candidates.push(path.join(r, 'build-win', 'tools', 'SwNode', 'SwComponentContainer', 'Release', exe));
+    candidates.push(path.join(r, 'build-win', 'tools', 'SwNode', 'SwComponentContainer', 'RelWithDebInfo', exe));
+    candidates.push(path.join(r, 'build-win', 'tools', 'SwNode', 'SwComponentContainer', 'Debug', exe));
+    candidates.push(path.join(r, 'build', 'tools', 'SwNode', 'SwComponentContainer', 'Release', exe));
+    candidates.push(path.join(r, 'build', 'tools', 'SwNode', 'SwComponentContainer', 'RelWithDebInfo', exe));
+    candidates.push(path.join(r, 'build', 'tools', 'SwNode', 'SwComponentContainer', 'Debug', exe));
   }
 
   for (const p of candidates) {

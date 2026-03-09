@@ -1,4 +1,4 @@
-#include "IpcRingBufferVideoWidget.h"
+﻿#include "IpcRingBufferVideoWidget.h"
 
 #include "SwPainter.h"
 
@@ -25,7 +25,7 @@ void IpcRingBufferVideoWidget::paintEvent(PaintEvent* event) {
     SwPainter* painter = event->painter();
     if (!painter) return;
 
-    const SwRect rect = getRect();
+    const SwRect rect = this->rect();
     painter->fillRect(rect, {10, 10, 10}, {10, 10, 10}, 0);
 
     SwVideoFrame f;
@@ -124,3 +124,4 @@ void IpcRingBufferVideoWidget::drawPlaceholder_(SwPainter* painter, const SwRect
                       {220, 220, 220},
                       SwFont());
 }
+

@@ -22,6 +22,30 @@
 
 #pragma once
 
+/**
+ * @file src/core/types/SwAny.h
+ * @ingroup core_types
+ * @brief Declares the public interface exposed by SwAny in the CoreSw fundamental types layer.
+ *
+ * This header belongs to the CoreSw fundamental types layer. It provides value types, containers,
+ * text and binary helpers, and lightweight serialization primitives shared across the stack.
+ *
+ * Within that layer, this file focuses on the any interface. The declarations exposed here define
+ * the stable surface that adjacent code can rely on while the implementation remains free to
+ * evolve behind the header.
+ *
+ * The main declarations in this header are SwAny.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * Interfaces in this area are intentionally reused by runtime, IO, GUI, remote, and media modules
+ * to keep cross-module semantics consistent.
+ *
+ */
+
+
 #include <iostream>
 #include <string>
 #include <memory>
@@ -53,11 +77,23 @@ static constexpr const char* kSwLogCategory_SwAny = "sw.core.types.swany";
 class SwAny {
 
 protected:
+    /**
+     * @brief Returns the current register All Type Once.
+     * @return The current register All Type Once.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static bool registerAllTypeOnce() {
         static bool oneCheck = registerAllType();
         return oneCheck;
     }
 
+    /**
+     * @brief Returns the current register All Type.
+     * @return The current register All Type.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static bool registerAllType() {
         swCWarning(kSwLogCategory_SwAny) << "********************CALL ONCE NOT TWICE********************";
         registerMetaType<SwString>();
@@ -186,6 +222,23 @@ protected:
             return SwString::number(i);
         });
 
+        SwAny::registerConversion<SwString, long long>([](const SwString& s) {
+            return s.toLongLong();
+        });
+        SwAny::registerConversion<long long, SwString>([](long long v) {
+            return SwString::number(v);
+        });
+        SwAny::registerConversion<int, long long>([](int v) {
+            return static_cast<long long>(v);
+        });
+        SwAny::registerConversion<long long, int>([](long long v) {
+            if (v < static_cast<long long>(std::numeric_limits<int>::min()) ||
+                v > static_cast<long long>(std::numeric_limits<int>::max())) {
+                return 0;
+            }
+            return static_cast<int>(v);
+        });
+
         // Conversion depuis SwString vers float
         SwAny::registerConversion<SwString, float>([](const SwString& s) {
             return s.toFloat();
@@ -242,6 +295,12 @@ protected:
         return true;
     }
 
+    /**
+     * @brief Returns the current ensure Registry Initialized.
+     * @return The current ensure Registry Initialized.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static void ensureRegistryInitialized() {
         static bool initialized = registerAllTypeOnce();
         (void)initialized;
@@ -253,6 +312,7 @@ private:
         void* dynamic;
         bool b;
         int i;
+        long long i64;
         float f;
         double d;
         uint32_t u32;
@@ -266,31 +326,118 @@ private:
 
 public:
     // Constructeurs pour les types de base et complexes
+    /**
+     * @brief Constructs a `SwAny` instance.
+     * @param value Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwAny(bool value) { ensureRegistryInitialized(); store(value); }
+    /**
+     * @brief Constructs a `SwAny` instance.
+     * @param value Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwAny(int value) { ensureRegistryInitialized(); store(value); }
+    /**
+     * @brief Constructs a `SwAny` instance.
+     * @param value Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
+    SwAny(long long value) { ensureRegistryInitialized(); store(value); }
+    /**
+     * @brief Constructs a `SwAny` instance.
+     * @param value Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwAny(float value) { ensureRegistryInitialized(); store(value); }
+    /**
+     * @brief Constructs a `SwAny` instance.
+     * @param value Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwAny(double value) { ensureRegistryInitialized(); store(value); }
+    /**
+     * @brief Constructs a `SwAny` instance.
+     * @param value Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwAny(const std::string& value) { ensureRegistryInitialized(); store(value); }
+    /**
+     * @brief Constructs a `SwAny` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwAny(const char* value) { ensureRegistryInitialized(); store(std::string(value)); }
+    /**
+     * @brief Constructs a `SwAny` instance.
+     * @param value Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwAny(const std::vector<uint8_t>& value) { ensureRegistryInitialized(); store(value); }
+    /**
+     * @brief Constructs a `SwAny` instance.
+     * @param value Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwAny(const SwString& value) { ensureRegistryInitialized(); store(value); }
+    /**
+     * @brief Constructs a `SwAny` instance.
+     * @param value Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwAny(const SwByteArray& value) { ensureRegistryInitialized(); store(value); }
+    /**
+     * @brief Constructs a `SwAny` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwAny(unsigned int value) { ensureRegistryInitialized(); store(static_cast<uint32_t>(value)); }
 
+    /**
+     * @brief Constructs a `SwAny` instance.
+     * @param other Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwAny(const SwAny& other) {
         ensureRegistryInitialized();
         copyFrom(other);
     }
 
+    /**
+     * @brief Constructs a `SwAny` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwAny() : typeNameStr("") {
         ensureRegistryInitialized();
     }
 
+    /**
+     * @brief Sets the type Name.
+     * @param typeName Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setTypeName(const std::string& typeName){
         typeNameStr = typeName;
     }
 
     // Opérateur d'assignation pour copier les valeurs
+    /**
+     * @brief Performs the `operator=` operation.
+     * @param other Value passed to the method.
+     * @return The requested operator =.
+     */
     SwAny& operator=(const SwAny& other) {
         if (this != &other) {
             clear();
@@ -299,27 +446,68 @@ public:
         return *this;
     }
 
+    /**
+     * @brief Performs the `operator=` operation.
+     * @param bytes Value passed to the method.
+     * @return The requested operator =.
+     */
     SwAny& operator=(const SwByteArray& bytes) {
         store(bytes);
         return *this;
     }
 
+    /**
+     * @brief Performs the `operator=` operation.
+     * @param value Value passed to the method.
+     * @return The requested operator =.
+     */
     SwAny& operator=(unsigned int value) {
         store(static_cast<uint32_t>(value));
         return *this;
     }
 
+    /**
+     * @brief Performs the `operator=` operation.
+     * @param v Value passed to the method.
+     * @return The requested operator =.
+     */
     SwAny& operator=(double v) { store(v); return *this; }
+    /**
+     * @brief Performs the `operator=` operation.
+     * @param v Value passed to the method.
+     * @return The requested operator =.
+     */
     SwAny& operator=(float  v) { store(v); return *this; }
+    /**
+     * @brief Performs the `operator=` operation.
+     * @param v Value passed to the method.
+     * @return The requested operator =.
+     */
     SwAny& operator=(int    v) { store(v); return *this; }
+    /**
+     * @brief Performs the `operator=` operation.
+     * @param v Value passed to the method.
+     * @return The requested operator =.
+     */
+    SwAny& operator=(long long v) { store(v); return *this; }
 
     // Destructeur
+    /**
+     * @brief Destroys the `SwAny` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~SwAny() { clear(); }
 
 
     // Méthode statique pour enregistrer une conversion possible entre deux types
     // On demande un lambda ou une fonction qui explique comment convertir From -> To.
     template<typename From, typename To>
+    /**
+     * @brief Performs the `registerConversion` operation.
+     * @param converterFunc Value passed to the method.
+     * @return The requested register Conversion.
+     */
     static void registerConversion(std::function<To(const From&)> converterFunc) {
         auto fromName = std::string(typeid(From).name());
         auto toName = std::string(typeid(To).name());
@@ -338,6 +526,13 @@ public:
     }
 
     // Version avec std::string
+    /**
+     * @brief Returns whether the object reports convert.
+     * @param targetName Value passed to the method.
+     * @return `true` when the object reports convert; otherwise `false`.
+     *
+     * @details This query does not modify the object state.
+     */
     bool canConvert(const std::string& targetName) const {
         // Vérification du type exact
         if (typeNameStr == targetName) {
@@ -359,6 +554,12 @@ public:
     }
 
     template<typename T>
+    /**
+     * @brief Returns the current type Name.
+     * @return The current type Name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static std::string getTypeName() {
         return std::string(typeid(T).name());
     }
@@ -366,6 +567,12 @@ public:
 
     // Version template qui appelle la version string
     template<typename T>
+    /**
+     * @brief Returns whether the object reports convert.
+     * @return `true` when the object reports convert; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool canConvert() const {
         auto targetName = getTypeName<T>();
         return canConvert(targetName);
@@ -373,6 +580,11 @@ public:
 
 
     // Version avec std::string pour la conversion
+    /**
+     * @brief Performs the `convert` operation.
+     * @param targetName Value passed to the method.
+     * @return The requested convert.
+     */
     SwAny convert(const std::string& targetName) const {
         // Si le type actuel est déjà le bon
         if (typeNameStr == targetName) {
@@ -394,6 +606,12 @@ public:
 
     // Version template qui appelle la version string
     template<typename T>
+    /**
+     * @brief Returns the current convert.
+     * @return The current convert.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwAny convert() const {
         auto targetName = std::string(typeid(T).name());
         return convert(targetName);
@@ -402,6 +620,12 @@ public:
 
 
     // Instance : est-ce que *ce* SwAny est sérialisable ET désérialisable en string ?
+    /**
+     * @brief Returns whether the object reports serializable.
+     * @return `true` when the object reports serializable; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isSerializable() const {
         if (typeNameStr.empty()) return false;
         return isSerializable(typeNameStr);
@@ -409,23 +633,37 @@ public:
 
     // Statique (par type T)
     template<typename T>
+    /**
+     * @brief Returns whether the object reports serializable.
+     * @return The current serializable.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static bool isSerializable() {
         const std::string src = typeid(T).name();
         return isSerializable(src);
     }
 
     // Statique (par nom de type tel que stocké: typeid(T).name())
+    /**
+     * @brief Returns whether the object reports serializable.
+     * @param src Value passed to the method.
+     * @return The requested serializable.
+     *
+     * @details This query does not modify the object state.
+     */
     static bool isSerializable(const std::string& src) {
         
         const std::string tSw    = typeid(SwString).name();
         const std::string tStd   = typeid(std::string).name();
         const std::string tBool  = typeid(bool).name();
         const std::string tInt   = typeid(int).name();
+        const std::string tInt64 = typeid(long long).name();
         const std::string tFloat = typeid(float).name();
         const std::string tDouble= typeid(double).name();
         const std::string tBytes = typeid(std::vector<uint8_t>).name();
 
-        if (src == tSw || src == tStd || src == tBool || src == tInt ||
+        if (src == tSw || src == tStd || src == tBool || src == tInt || src == tInt64 ||
             src == tFloat || src == tDouble || src == tBytes)
             return true;
 
@@ -472,6 +710,12 @@ public:
     // toString : T -> SwString
     // fromString : SwString -> T
     template<typename T>
+    /**
+     * @brief Performs the `registerStringSerialization` operation.
+     * @param toString Value passed to the method.
+     * @param fromString Value passed to the method.
+     * @return The requested register String Serialization.
+     */
     static void registerStringSerialization(std::function<SwString(const T&)> toString,
                                     std::function<T(const SwString&)> fromString) {
         // T <-> SwString
@@ -488,6 +732,12 @@ public:
     }
 
     //Verifier si le metaType est dans le registery
+    /**
+     * @brief Returns whether the object reports my Type Registered.
+     * @return `true` when the object reports my Type Registered; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isMyTypeRegistered() const {
         return !typeNameStr.empty() && isMetaTypeRegistered(typeNameStr);
     }
@@ -495,12 +745,25 @@ public:
 
     // Vérifie par type T
     template<typename T>
+    /**
+     * @brief Returns whether the object reports meta Type Registered.
+     * @return The current meta Type Registered.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static bool isMetaTypeRegistered() {
         const std::string tname = typeid(T).name();
         return isMetaTypeRegistered(tname);
     }
 
     // Vérifie par nom (tel que stocké: typeid(T).name())
+    /**
+     * @brief Returns whether the object reports meta Type Registered.
+     * @param typeName Value passed to the method.
+     * @return The requested meta Type Registered.
+     *
+     * @details This query does not modify the object state.
+     */
     static bool isMetaTypeRegistered(const std::string& typeName) {
         // Un type est considéré comme "enregistré" s'il apparaît dans au moins
         // une des maps installées par registerMetaType<T>().
@@ -508,12 +771,14 @@ public:
         const std::string tStd   = typeid(std::string).name();
         const std::string tBool   = typeid(bool).name();
         const std::string tInt   = typeid(int).name();
+        const std::string tInt64 = typeid(long long).name();
         const std::string tFloat = typeid(float).name();
         const std::string tDouble= typeid(double).name();
         const std::string tBytes = typeid(std::vector<uint8_t>).name();
 
         // Trivial pour TOUS les types natifs du Storage (on garantit leurs conversions ci-dessous)
-        if (typeName == tBool || typeName == tSw || typeName == tStd || typeName == tInt || 
+        if (typeName == tBool || typeName == tSw || typeName == tStd || typeName == tInt ||
+            typeName == tInt64 ||
             typeName == tFloat || typeName == tDouble || typeName == tBytes)
             return true;
 
@@ -541,9 +806,21 @@ public:
 
     
     // Récupération du type sous forme de string
+    /**
+     * @brief Returns the current type Name.
+     * @return The current type Name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const std::string& typeName() const { return typeNameStr; }
 
     template <typename T>
+    /**
+     * @brief Returns the current register Meta Type.
+     * @return The current register Meta Type.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static void registerMetaType() {
         auto typeName = typeid(T).name();
 
@@ -587,6 +864,11 @@ public:
 
     // Créer une instance depuis un type
     template <typename T>
+    /**
+     * @brief Performs the `from` operation.
+     * @param value Value passed to the method.
+     * @return The requested from.
+     */
     static SwAny from(const T& value) {
         SwAny any;
         any.store(value);
@@ -594,10 +876,21 @@ public:
     }
 
     template <typename T>
+    /**
+     * @brief Performs the `fromValue` operation.
+     * @param value Value passed to the method.
+     * @return The requested from Value.
+     */
     static SwAny fromValue(const T& value) {
         return from(value);
     }
 
+    /**
+     * @brief Performs the `fromVoidPtr` operation.
+     * @param ptr Value passed to the method.
+     * @param typeNameStr Value passed to the method.
+     * @return The requested from Void Ptr.
+     */
     static SwAny fromVoidPtr(void* ptr, const std::string& typeNameStr) {
         if (ptr == nullptr || typeNameStr.empty()) {
             swCError(kSwLogCategory_SwAny) << "Error: Null pointer or empty type name provided to fromVoidPtr.";
@@ -608,6 +901,8 @@ public:
             return SwAny(*static_cast<bool*>(ptr));
         } else if (typeNameStr == typeid(int).name()) {
             return SwAny(*static_cast<int*>(ptr));
+        } else if (typeNameStr == typeid(long long).name()) {
+            return SwAny(*static_cast<long long*>(ptr));
         } else if (typeNameStr == typeid(float).name()) {
             return SwAny(*static_cast<float*>(ptr));
         } else if (typeNameStr == typeid(double).name()) {
@@ -644,6 +939,12 @@ public:
 
     // Récupérer la valeur avec cast explicite
     template <typename T>
+    /**
+     * @brief Returns the current get.
+     * @return The current get.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const T& get() const {
         if (typeNameStr != typeid(T).name()) {
             throw std::runtime_error("Type mismatch in SwAny::get");
@@ -656,6 +957,12 @@ public:
     }
 
     template <typename T>
+    /**
+     * @brief Returns the current get.
+     * @return The current get.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     T& get() {
         if (typeNameStr != typeid(T).name()) {
             throw std::runtime_error("Type mismatch in SwAny::get");
@@ -669,12 +976,20 @@ public:
 
 
     // Méthode pour obtenir un pointeur générique vers les données
+    /**
+     * @brief Returns the current data.
+     * @return The current data.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     void* data() const {
         // Gestion des types natifs
         if (typeNameStr == typeid(bool).name()) {
             return const_cast<void*>(static_cast<const void*>(&storage.b));
         } else if (typeNameStr == typeid(int).name()) {
             return const_cast<void*>(static_cast<const void*>(&storage.i));
+        } else if (typeNameStr == typeid(long long).name()) {
+            return const_cast<void*>(static_cast<const void*>(&storage.i64));
         } else if (typeNameStr == typeid(float).name()) {
             return const_cast<void*>(static_cast<const void*>(&storage.f));
         } else if (typeNameStr == typeid(double).name()) {
@@ -695,6 +1010,11 @@ public:
             return it->second(*this); // Appel de la fonction pour récupérer les données dynamiques
         }
 
+        // Fallback: if stored via template store<T>(), the pointer is in storage.dynamic
+        if (storage.dynamic) {
+            return storage.dynamic;
+        }
+
         // Aucun type trouvé, retourne nullptr
         return nullptr;
     }
@@ -704,6 +1024,10 @@ public:
 
     std::string typeNameStr;  // Sauvegarde du nom du type
 
+    /**
+     * @brief Performs the `copyFrom` operation.
+     * @param other Value passed to the method.
+     */
     void copyFrom(const SwAny& other) {
         // Copier le type du nom
         typeNameStr = other.typeNameStr;
@@ -717,6 +1041,8 @@ public:
             store(other.storage.b);
         } else if (typeNameStr == typeid(int).name()) {
             store(other.storage.i);
+        } else if (typeNameStr == typeid(long long).name()) {
+            store(other.storage.i64);
         } else if (typeNameStr == typeid(float).name()) {
             store(other.storage.f);
         } else if (typeNameStr == typeid(double).name()) {
@@ -745,6 +1071,10 @@ public:
 
 
     // Méthode pour déplacer les données (move)
+    /**
+     * @brief Performs the `moveFrom` operation.
+     * @param other Value passed to the method.
+     */
     void moveFrom(SwAny&& other) {
         // Déplacer le type du nom
         typeNameStr = std::move(other.typeNameStr);
@@ -757,6 +1087,8 @@ public:
         // Cas spécifiques pour les types natifs ou gérés explicitement
         if (typeNameStr == typeid(int).name()) {
             storage.i = other.storage.i;
+        } else if (typeNameStr == typeid(long long).name()) {
+            storage.i64 = other.storage.i64;
         } else if (typeNameStr == typeid(float).name()) {
             storage.f = other.storage.f;
         } else if (typeNameStr == typeid(double).name()) {
@@ -790,23 +1122,73 @@ public:
 
     // Méthodes pour stocker les données
     template <typename T>
+    /**
+     * @brief Performs the `store` operation.
+     * @param value Value passed to the method.
+     */
     void store(const T& value) {
         clear();
         storage.dynamic = new T(value);
         typeNameStr = typeid(T).name();
     }
+    /**
+     * @brief Performs the `store` operation.
+     */
     void store(void* ptr) { clear(); storage.dynamic = ptr; }
+    /**
+     * @brief Performs the `store` operation.
+     * @param b Value passed to the method.
+     */
     void store(bool val) { clear(); storage.b = val; typeNameStr = typeid(bool).name(); }
+    /**
+     * @brief Performs the `store` operation.
+     * @param i Value passed to the method.
+     */
     void store(int val) { clear(); storage.i = val; typeNameStr = typeid(int).name(); }
+    /**
+     * @brief Performs the `store` operation.
+     * @param i64 Value passed to the method.
+     */
+    void store(long long val) { clear(); storage.i64 = val; typeNameStr = typeid(long long).name(); }
+    /**
+     * @brief Performs the `store` operation.
+     * @param f Value passed to the method.
+     */
     void store(float val) { clear(); storage.f = val; typeNameStr = typeid(float).name(); }
+    /**
+     * @brief Performs the `store` operation.
+     * @param d Value passed to the method.
+     */
     void store(double val) { clear(); storage.d = val; typeNameStr = typeid(double).name(); }
+    /**
+     * @brief Performs the `store` operation.
+     * @param typeNameStr Value passed to the method.
+     */
     void store(const std::string& val) { clear(); new (&storage.str) std::string(val); typeNameStr = typeid(std::string).name(); }
+    /**
+     * @brief Performs the `store` operation.
+     * @param typeNameStr Value passed to the method.
+     */
     void store(const std::vector<uint8_t>& val) { clear(); new (&storage.byteArray) std::vector<uint8_t>(val); typeNameStr = typeid(std::vector<uint8_t>).name(); }
+    /**
+     * @brief Performs the `store` operation.
+     * @param dynamic Value passed to the method.
+     */
     void store(const SwString& val) { clear(); storage.dynamic = new SwString(val); typeNameStr = typeid(SwString).name(); }
+    /**
+     * @brief Performs the `store` operation.
+     */
     void store(const SwByteArray& val) { store(SwString(val)); }
+    /**
+     * @brief Performs the `store` operation.
+     * @param u32 Value passed to the method.
+     */
     void store(uint32_t val) { clear(); storage.u32 = val; typeNameStr = typeid(uint32_t).name(); }
 
     // Libérer les ressources allouées
+    /**
+     * @brief Clears the current object state.
+     */
     void clear() {
         if (!typeNameStr.empty()) {
             // Utilisation de _dynamicClear si une fonction correspondante existe pour ce type
@@ -830,36 +1212,62 @@ public:
 
 
 
+    /**
+     * @brief Performs the `function<void` operation.
+     * @return The requested function<void.
+     */
     static std::map<std::string, std::function<void(SwAny&)>>& getDynamicClearMap() {
         static std::map<std::string, std::function<void(SwAny&)>> _dynamicClear;
         return _dynamicClear;
     }
 
     // Méthode pour accéder à _dynamicCopyFrom
+    /**
+     * @brief Performs the `function<void` operation.
+     * @return The requested function<void.
+     */
     static std::map<std::string, std::function<void(SwAny&, const SwAny&)>>& getDynamicCopyFromMap() {
         static std::map<std::string, std::function<void(SwAny&, const SwAny&)>> _dynamicCopyFrom;
         return _dynamicCopyFrom;
     }
 
     // Méthode pour accéder à _dynamicData
+    /**
+     * @brief Performs the `function<void*` operation.
+     * @return The requested function<void*.
+     */
     static std::map<std::string, std::function<void*(const SwAny&)>>& getDynamicDataMap() {
         static std::map<std::string, std::function<void*(const SwAny&)>> _dynamicData;
         return _dynamicData;
     }
 
     // Méthode pour accéder à _dynamicFromVoidPtr
+    /**
+     * @brief Performs the `function<SwAny` operation.
+     * @return The requested function<Sw Any.
+     */
     static std::map<std::string, std::function<SwAny(void*)>>& getDynamicFromVoidPtrMap() {
         static std::map<std::string, std::function<SwAny(void*)>> _dynamicFromVoidPtr;
         return _dynamicFromVoidPtr;
     }
 
     // Méthode pour accéder à _dynamicMoveFrom
+    /**
+     * @brief Performs the `function<void` operation.
+     * @return The requested function<void.
+     */
     static std::map<std::string, std::function<void(SwAny&, SwAny&&)>>& getDynamicMoveFromMap() {
         static std::map<std::string, std::function<void(SwAny&, SwAny&&)>> _dynamicMoveFrom;
         return _dynamicMoveFrom;
     }
 
     // Map statique : nom du type source -> liste de noms de types cibles
+    /**
+     * @brief Returns the current conversion Rules.
+     * @return The current conversion Rules.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static std::map<std::string, std::vector<std::string>>& getConversionRules() {
         static std::map<std::string, std::vector<std::string>> conversionRules;
         return conversionRules;
@@ -867,6 +1275,10 @@ public:
 
     // Map statique pour stocker les fonctions de conversion
     // Clé : (fromType, toType)
+    /**
+     * @brief Performs the `function<SwAny` operation.
+     * @return The requested function<Sw Any.
+     */
     static std::map<std::pair<std::string, std::string>, std::function<SwAny(const SwAny&)>>& getConverters() {
         static std::map<std::pair<std::string, std::string>, std::function<SwAny(const SwAny&)>> converters;
         return converters;
@@ -875,11 +1287,19 @@ public:
 
 public:
 
+    /**
+     * @brief Returns the current to Bool.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool toBool() const {
         if (typeNameStr == typeid(bool).name()) {
             return get<bool>();
         } else if (typeNameStr == typeid(int).name()) {
             return get<int>() != 0;
+        } else if (typeNameStr == typeid(long long).name()) {
+            return get<long long>() != 0;
         } else if (typeNameStr == typeid(unsigned int).name()) {
             return get<unsigned int>() != 0;
         } else if (typeNameStr == typeid(uint32_t).name()) {
@@ -915,6 +1335,58 @@ public:
         if (typeNameStr == typeid(int).name()) {
             if (ok) *ok = true;
             return get<int>();
+        } else if (typeNameStr == typeid(long long).name()) {
+            const long long value = get<long long>();
+            if (value < static_cast<long long>(std::numeric_limits<int>::min()) ||
+                value > static_cast<long long>(std::numeric_limits<int>::max())) {
+                if (ok) *ok = false;
+                return 0;
+            }
+            if (ok) *ok = true;
+            return static_cast<int>(value);
+        } else if (typeNameStr == typeid(unsigned int).name()) {
+            const unsigned int value = get<unsigned int>();
+            if (value > static_cast<unsigned int>(std::numeric_limits<int>::max())) {
+                if (ok) *ok = false;
+                return 0;
+            }
+            if (ok) *ok = true;
+            return static_cast<int>(value);
+        } else if (typeNameStr == typeid(uint32_t).name()) {
+            const uint32_t value = get<uint32_t>();
+            if (value > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
+                if (ok) *ok = false;
+                return 0;
+            }
+            if (ok) *ok = true;
+            return static_cast<int>(value);
+        } else if (typeNameStr == typeid(bool).name()) {
+            if (ok) *ok = true;
+            return get<bool>() ? 1 : 0;
+        } else if (typeNameStr == typeid(float).name()) {
+            const float value = get<float>();
+            if (!std::isfinite(value) ||
+                value < static_cast<float>(std::numeric_limits<int>::min()) ||
+                value > static_cast<float>(std::numeric_limits<int>::max())) {
+                if (ok) *ok = false;
+                return 0;
+            }
+            if (ok) *ok = true;
+            return static_cast<int>(value);
+        } else if (typeNameStr == typeid(double).name()) {
+            const double value = get<double>();
+            if (!std::isfinite(value) ||
+                value < static_cast<double>(std::numeric_limits<int>::min()) ||
+                value > static_cast<double>(std::numeric_limits<int>::max())) {
+                if (ok) *ok = false;
+                return 0;
+            }
+            if (ok) *ok = true;
+            return static_cast<int>(value);
+        } else if (typeNameStr == typeid(SwString).name()) {
+            return get<SwString>().toInt(ok);
+        } else if (typeNameStr == typeid(std::string).name()) {
+            return SwString(get<std::string>()).toInt(ok);
         } else if (canConvert<int>()) {
             SwAny converted = convert<int>();
             if (ok) *ok = true;
@@ -924,6 +1396,60 @@ public:
             if (ok) *ok = false;
             return 0;
         }
+    }
+
+    /**
+     * @brief Performs the `toLongLong` operation.
+     * @param ok Optional flag updated to report success.
+     * @return The requested to Long Long.
+     */
+    long long toLongLong(bool* ok = nullptr) const {
+        if (typeNameStr == typeid(long long).name()) {
+            if (ok) *ok = true;
+            return get<long long>();
+        } else if (typeNameStr == typeid(int).name()) {
+            if (ok) *ok = true;
+            return static_cast<long long>(get<int>());
+        } else if (typeNameStr == typeid(unsigned int).name()) {
+            if (ok) *ok = true;
+            return static_cast<long long>(get<unsigned int>());
+        } else if (typeNameStr == typeid(uint32_t).name()) {
+            if (ok) *ok = true;
+            return static_cast<long long>(get<uint32_t>());
+        } else if (typeNameStr == typeid(bool).name()) {
+            if (ok) *ok = true;
+            return get<bool>() ? 1ll : 0ll;
+        } else if (typeNameStr == typeid(float).name()) {
+            const float value = get<float>();
+            if (!std::isfinite(value) ||
+                value < static_cast<float>(std::numeric_limits<long long>::min()) ||
+                value > static_cast<float>(std::numeric_limits<long long>::max())) {
+                if (ok) *ok = false;
+                return 0;
+            }
+            if (ok) *ok = true;
+            return static_cast<long long>(value);
+        } else if (typeNameStr == typeid(double).name()) {
+            const double value = get<double>();
+            if (!std::isfinite(value) ||
+                value < static_cast<double>(std::numeric_limits<long long>::min()) ||
+                value > static_cast<double>(std::numeric_limits<long long>::max())) {
+                if (ok) *ok = false;
+                return 0;
+            }
+            if (ok) *ok = true;
+            return static_cast<long long>(value);
+        } else if (typeNameStr == typeid(SwString).name()) {
+            return get<SwString>().toLongLong(ok);
+        } else if (typeNameStr == typeid(std::string).name()) {
+            return SwString(get<std::string>()).toLongLong(ok);
+        } else if (canConvert<long long>()) {
+            SwAny converted = convert<long long>();
+            if (ok) *ok = true;
+            return converted.get<long long>();
+        }
+        if (ok) *ok = false;
+        return 0;
     }
 
 
@@ -971,6 +1497,9 @@ public:
         if (typeNameStr == typeid(int).name()) {
             return static_cast<double>(get<int>());
         }
+        if (typeNameStr == typeid(long long).name()) {
+            return static_cast<double>(get<long long>());
+        }
         if (typeNameStr == typeid(unsigned int).name()) {
             return static_cast<double>(get<unsigned int>());
         }
@@ -997,6 +1526,12 @@ public:
         return 0.0;
     }
 
+    /**
+     * @brief Returns the current to UInt.
+     * @return The current to UInt.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     uint32_t toUInt() const {
         if (typeNameStr.empty()) {
             return 0u;
@@ -1008,6 +1543,13 @@ public:
         } else if (typeNameStr == typeid(int).name()) {
             const int v = get<int>();
             return v < 0 ? 0u : static_cast<uint32_t>(v);
+        } else if (typeNameStr == typeid(long long).name()) {
+            const long long v = get<long long>();
+            if (v < 0) return 0u;
+            if (v > static_cast<long long>(std::numeric_limits<uint32_t>::max())) {
+                return std::numeric_limits<uint32_t>::max();
+            }
+            return static_cast<uint32_t>(v);
         } else if (typeNameStr == typeid(double).name()) {
             const double v = get<double>();
             return v < 0.0 ? 0u : static_cast<uint32_t>(v);
@@ -1135,7 +1677,16 @@ public:
         }
     }
 
+    /**
+     * @brief Performs the `metaType` operation.
+     * @param typeNameStr Value passed to the method.
+     * @return The requested meta Type.
+     */
     SwMetaType::Type metaType() const { return SwMetaType::fromName(typeNameStr); }
+    /**
+     * @brief Performs the `typeId` operation.
+     * @return The requested type Id.
+     */
     int typeId() const { return static_cast<int>(metaType()); }
 
 
@@ -1167,6 +1718,9 @@ inline bool operator==(const SwAny& lhs, const SwAny& rhs)
 
         if (lt == typeid(int).name())
             return lhs.get<int>() == rhs.get<int>();
+
+        if (lt == typeid(long long).name())
+            return lhs.get<long long>() == rhs.get<long long>();
 
         if (lt == typeid(unsigned int).name())
             return lhs.get<unsigned int>() == rhs.get<unsigned int>();

@@ -1,4 +1,29 @@
-#pragma once
+﻿#pragma once
+
+/**
+ * @file src/core/gui/chatbubble/SwChatBubble.h
+ * @ingroup core_chatbubble
+ * @brief Declares the public interface exposed by SwChatBubble in the CoreSw chat bubble UI
+ * layer.
+ *
+ * This header belongs to the CoreSw chat bubble UI layer. It contains models, theme data, and
+ * delegates used to render conversation-style user interfaces.
+ *
+ * Within that layer, this file focuses on the chat bubble interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are SwChatBubble.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * The declarations in this area focus on layout, theme, item presentation, and delegate behavior
+ * rather than business logic.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -40,27 +65,62 @@ class SwChatBubble final : public SwWidget {
     SW_OBJECT(SwChatBubble, SwWidget)
 
 public:
+    /**
+     * @brief Performs the `SwChatBubble` operation.
+     * @param parent Optional parent object that owns this instance.
+     * @return The requested sw Chat Bubble.
+     */
     explicit SwChatBubble(SwWidget* parent = nullptr)
         : SwWidget(parent) {
         setStyleSheet("SwWidget { background-color: rgba(0,0,0,0); border-width: 0px; }");
         setFocusPolicy(FocusPolicyEnum::NoFocus);
     }
 
+    /**
+     * @brief Sets the theme.
+     * @param theme Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setTheme(const SwChatBubbleTheme& theme) {
         m_theme = theme;
         update();
     }
 
+    /**
+     * @brief Returns the current theme.
+     * @return The current theme.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwChatBubbleTheme& theme() const { return m_theme; }
 
+    /**
+     * @brief Sets the message.
+     * @param message Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setMessage(const SwChatBubbleMessage& message) {
         m_message = message;
         clearSelection();
         update();
     }
 
+    /**
+     * @brief Returns the current message.
+     * @return The current message.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwChatBubbleMessage& message() const { return m_message; }
 
+    /**
+     * @brief Sets the text Selectable.
+     * @param on Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setTextSelectable(bool on) {
         if (m_textSelectable == on) {
             return;
@@ -79,8 +139,20 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the current text Selectable.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool textSelectable() const { return m_textSelectable; }
 
+    /**
+     * @brief Returns whether the object reports selected Text.
+     * @return `true` when the object reports selected Text; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool hasSelectedText() const {
         if (!m_textSelectable) {
             return false;
@@ -91,6 +163,12 @@ public:
         return m_selectionStart != m_selectionEnd;
     }
 
+    /**
+     * @brief Returns the current selected Text.
+     * @return The current selected Text.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString selectedText() const {
         if (!hasSelectedText()) {
             return {};
@@ -104,12 +182,18 @@ public:
         return m_message.text.substr(a, b - a);
     }
 
+    /**
+     * @brief Clears the current object state.
+     */
     void clearSelection() {
         m_selecting = false;
         m_selectionStart = 0;
         m_selectionEnd = 0;
     }
 
+    /**
+     * @brief Performs the `selectAll` operation.
+     */
     void selectAll() {
         if (!m_textSelectable) {
             return;
@@ -122,6 +206,13 @@ public:
         update();
     }
 
+    /**
+     * @brief Sets the selection Range.
+     * @param start Value passed to the method.
+     * @param end Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setSelectionRange(size_t start, size_t end) {
         if (!m_textSelectable) {
             return;
@@ -135,8 +226,19 @@ public:
         update();
     }
 
+    /**
+     * @brief Performs the `defaultTheme` operation.
+     * @return The requested default Theme.
+     */
     static SwChatBubbleTheme defaultTheme() { return swChatBubbleWhatsAppTheme(); }
 
+    /**
+     * @brief Performs the `sizeHintForRow` operation.
+     * @param rowWidth Value passed to the method.
+     * @param msg Value passed to the method.
+     * @param theme Value passed to the method.
+     * @return The requested size Hint For Row.
+     */
     static SwSize sizeHintForRow(int rowWidth, const SwChatBubbleMessage& msg, const SwChatBubbleTheme& theme) {
         const SwChatBubbleStyle& style = (msg.role == SwChatBubbleRole::User) ? theme.user : theme.bot;
         const SwChatBubbleLayoutConfig& cfg = theme.layout;
@@ -194,6 +296,14 @@ public:
         return SwSize{rowW, rowH};
     }
 
+    /**
+     * @brief Performs the `paintRow` operation.
+     * @param painter Value passed to the method.
+     * @param rowRect Value passed to the method.
+     * @param msg Value passed to the method.
+     * @param theme Value passed to the method.
+     * @return The requested paint Row.
+     */
     static void paintRow(SwPainter* painter, const SwRect& rowRect, const SwChatBubbleMessage& msg, const SwChatBubbleTheme& theme) {
         if (!painter) {
             return;
@@ -331,11 +441,23 @@ public:
         }
     }
 
-    SwRect sizeHint() const override {
-        return SwRect{0, 0, 10000, 60};
+    /**
+     * @brief Returns the current size Hint.
+     * @return The current size Hint.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
+    SwSize sizeHint() const override {
+        return SwSize{10000, 60};
     }
 
 protected:
+    /**
+     * @brief Handles the paint Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void paintEvent(PaintEvent* event) override {
         if (!isVisibleInHierarchy()) {
             return;
@@ -346,14 +468,20 @@ protected:
         }
 
         if (!m_textSelectable || m_message.kind != SwChatMessageKind::Text) {
-            paintRow(painter, getRect(), m_message, m_theme);
+            paintRow(painter, rect(), m_message, m_theme);
             return;
         }
 
         // Custom paint to support selection highlight in read-only mode.
-        paintSelectableTextRow_(painter, getRect(), m_message, m_theme);
+        paintSelectableTextRow_(painter, rect(), m_message, m_theme);
     }
 
+    /**
+     * @brief Handles the mouse Press Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mousePressEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -369,7 +497,7 @@ protected:
             return;
         }
 
-        Layout layout = computeLayout_(getRect(), m_message, m_theme);
+        Layout layout = computeLayout_(rect(), m_message, m_theme);
         if (!pointInRect_(layout.contentRect, event->x(), event->y())) {
             SwWidget::mousePressEvent(event);
             return;
@@ -383,6 +511,12 @@ protected:
         update();
     }
 
+    /**
+     * @brief Handles the mouse Move Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseMoveEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -398,13 +532,19 @@ protected:
             return;
         }
 
-        Layout layout = computeLayout_(getRect(), m_message, m_theme);
+        Layout layout = computeLayout_(rect(), m_message, m_theme);
         const size_t idx = indexFromPosition_(layout, event->x(), event->y());
         m_selectionEnd = idx;
         event->accept();
         update();
     }
 
+    /**
+     * @brief Handles the mouse Release Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseReleaseEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -420,7 +560,7 @@ protected:
             return;
         }
 
-        Layout layout = computeLayout_(getRect(), m_message, m_theme);
+        Layout layout = computeLayout_(rect(), m_message, m_theme);
         const size_t idx = indexFromPosition_(layout, event->x(), event->y());
         m_selectionEnd = idx;
         m_selecting = false;
@@ -428,6 +568,12 @@ protected:
         update();
     }
 
+    /**
+     * @brief Handles the key Press Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void keyPressEvent(KeyEvent* event) override {
         if (!event) {
             return;
@@ -550,6 +696,23 @@ private:
     struct WrappedLine {
         size_t start{0};
         size_t len{0};
+
+        /**
+         * @brief Constructs a `WrappedLine` instance.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
+        WrappedLine() {}
+        /**
+         * @brief Constructs a `WrappedLine` instance.
+         * @param startValue Value passed to the method.
+         * @param lenValue Value passed to the method.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
+        WrappedLine(size_t startValue, size_t lenValue)
+            : start(startValue)
+            , len(lenValue) {}
     };
 
     static bool pointInRect_(const SwRect& r, int px, int py) {
@@ -992,3 +1155,4 @@ private:
     size_t m_selectionStart{0};
     size_t m_selectionEnd{0};
 };
+

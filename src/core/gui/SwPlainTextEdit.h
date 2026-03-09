@@ -1,4 +1,4 @@
-/***************************************************************************************************
+﻿/***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
  * Copyright (C) 2025 Ariya Consulting
@@ -22,8 +22,32 @@
 
 #pragma once
 
+/**
+ * @file src/core/gui/SwPlainTextEdit.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwPlainTextEdit in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the plain text edit interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are SwPlainTextEdit.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
 /***************************************************************************************************
- * SwPlainTextEdit - Qt-like multi-line plain text editor (≈ QPlainTextEdit).
+ * SwPlainTextEdit - multi-line plain text editor.
  *
  * Goals:
  * - Plain text storage (no rich text rendering).
@@ -55,9 +79,21 @@ protected:
         size_t selectionStart{0};
         size_t selectionEnd{0};
         int firstVisibleLine{0};
+        /**
+         * @brief Returns the current function<void.
+         * @return The current function<void.
+         *
+         * @details The returned value reflects the state currently stored by the instance.
+         */
         std::function<void()> applyExtra;
     };
 
+    /**
+     * @brief Returns the current capture Edit State.
+     * @return The current capture Edit State.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     virtual EditState captureEditState() const {
         EditState st;
         st.text = m_text;
@@ -69,6 +105,12 @@ protected:
     }
 
 public:
+    /**
+     * @brief Constructs a `SwPlainTextEdit` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwPlainTextEdit(SwWidget* parent = nullptr)
         : SwFrame(parent) {
         initDefaults();
@@ -76,6 +118,12 @@ public:
         ensureBlinkTimer();
     }
 
+    /**
+     * @brief Sets the word Wrap Enabled.
+     * @param on Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setWordWrapEnabled(bool on) {
         if (m_wordWrapEnabled == on) {
             return;
@@ -86,9 +134,21 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the current word Wrap Enabled.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool wordWrapEnabled() const { return m_wordWrapEnabled; }
 
-    void setPlainText(const SwString& text) {
+    /**
+     * @brief Sets the plain Text.
+     * @param text Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
+    virtual void setPlainText(const SwString& text) {
         if (m_text == text) {
             return;
         }
@@ -104,9 +164,19 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the current to Plain Text.
+     * @return The current to Plain Text.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString toPlainText() const { return m_text; }
 
-    void appendPlainText(const SwString& text) {
+    /**
+     * @brief Performs the `appendPlainText` operation.
+     * @param text Value passed to the method.
+     */
+    virtual void appendPlainText(const SwString& text) {
         if (!m_text.isEmpty() && !m_text.endsWith("\n")) {
             m_text.append("\n");
         }
@@ -120,7 +190,10 @@ public:
         update();
     }
 
-    void clear() {
+    /**
+     * @brief Clears the current object state.
+     */
+    virtual void clear() {
         if (m_text.isEmpty()) {
             return;
         }
@@ -134,6 +207,12 @@ public:
         update();
     }
 
+    /**
+     * @brief Sets the placeholder Text.
+     * @param text Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setPlaceholderText(const SwString& text) {
         if (m_placeholder == text) {
             return;
@@ -142,15 +221,50 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the current placeholder Text.
+     * @return The current placeholder Text.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString placeholderText() const { return m_placeholder; }
 
+    /**
+     * @brief Sets the read Only.
+     * @param on Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setReadOnly(bool on) { m_readOnly = on; }
+    /**
+     * @brief Returns whether the object reports read Only.
+     * @return `true` when the object reports read Only; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isReadOnly() const { return m_readOnly; }
 
+    /**
+     * @brief Performs the `cursorPosition` operation.
+     * @param m_cursorPos Value passed to the method.
+     * @return The requested cursor Position.
+     */
     int cursorPosition() const { return static_cast<int>(m_cursorPos); }
 
+    /**
+     * @brief Returns whether the object reports selected Text.
+     * @return `true` when the object reports selected Text; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool hasSelectedText() const { return m_selectionStart != m_selectionEnd; }
 
+    /**
+     * @brief Returns the current selected Text.
+     * @return The current selected Text.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString selectedText() const {
         if (!hasSelectedText()) {
             return {};
@@ -163,6 +277,9 @@ public:
         return m_text.substr(start, end - start);
     }
 
+    /**
+     * @brief Performs the `selectAll` operation.
+     */
     void selectAll() {
         m_selectionStart = 0;
         m_selectionEnd = m_text.size();
@@ -170,6 +287,12 @@ public:
         update();
     }
 
+    /**
+     * @brief Sets the undo Redo Enabled.
+     * @param on Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setUndoRedoEnabled(bool on) {
         m_undoRedoEnabled = on;
         if (!m_undoRedoEnabled) {
@@ -178,10 +301,31 @@ public:
         }
     }
 
+    /**
+     * @brief Returns whether the object reports undo Redo Enabled.
+     * @return `true` when the object reports undo Redo Enabled; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isUndoRedoEnabled() const { return m_undoRedoEnabled; }
+    /**
+     * @brief Returns whether the object reports undo.
+     * @return `true` when the object reports undo; otherwise `false`.
+     *
+     * @details This query does not modify the object state.
+     */
     bool canUndo() const { return m_undoRedoEnabled && !m_undoStack.empty(); }
+    /**
+     * @brief Returns whether the object reports redo.
+     * @return `true` when the object reports redo; otherwise `false`.
+     *
+     * @details This query does not modify the object state.
+     */
     bool canRedo() const { return m_undoRedoEnabled && !m_redoStack.empty(); }
 
+    /**
+     * @brief Performs the `undo` operation.
+     */
     void undo() {
         if (m_readOnly || !canUndo()) {
             return;
@@ -193,6 +337,9 @@ public:
         restoreEditState_(previous);
     }
 
+    /**
+     * @brief Performs the `redo` operation.
+     */
     void redo() {
         if (m_readOnly || !canRedo()) {
             return;
@@ -204,6 +351,9 @@ public:
         restoreEditState_(next);
     }
 
+    /**
+     * @brief Performs the `copy` operation.
+     */
     void copy() {
         if (!hasSelectedText()) {
             return;
@@ -213,6 +363,9 @@ public:
         }
     }
 
+    /**
+     * @brief Performs the `cut` operation.
+     */
     void cut() {
         if (m_readOnly) {
             return;
@@ -223,6 +376,9 @@ public:
         update();
     }
 
+    /**
+     * @brief Performs the `paste` operation.
+     */
     void paste() {
         if (m_readOnly) {
             return;
@@ -244,6 +400,12 @@ public:
     DECLARE_SIGNAL_VOID(textChanged);
 
 protected:
+    /**
+     * @brief Handles the resize Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void resizeEvent(ResizeEvent* event) override {
         SwFrame::resizeEvent(event);
         if (!m_wordWrapEnabled) {
@@ -254,6 +416,12 @@ protected:
         update();
     }
 
+    /**
+     * @brief Handles the paint Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void paintEvent(PaintEvent* event) override {
         if (!isVisibleInHierarchy()) {
             return;
@@ -264,7 +432,7 @@ protected:
             return;
         }
 
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
         StyleSheet* sheet = getToolSheet();
 
         SwColor bg{255, 255, 255};
@@ -391,6 +559,12 @@ protected:
         painter->finalize();
     }
 
+    /**
+     * @brief Handles the mouse Press Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mousePressEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -423,6 +597,12 @@ protected:
         update();
     }
 
+    /**
+     * @brief Handles the mouse Move Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseMoveEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -440,6 +620,12 @@ protected:
         SwFrame::mouseMoveEvent(event);
     }
 
+    /**
+     * @brief Handles the mouse Release Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseReleaseEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -452,6 +638,12 @@ protected:
         SwFrame::mouseReleaseEvent(event);
     }
 
+    /**
+     * @brief Handles the mouse Double Click Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseDoubleClickEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -471,11 +663,24 @@ protected:
         update();
     }
 
+    /**
+     * @brief Handles the wheel Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void wheelEvent(WheelEvent* event) override {
         if (!event) {
             return;
         }
         if (!isPointInside(event->x(), event->y())) {
+            SwFrame::wheelEvent(event);
+            return;
+        }
+        if (event->isShiftPressed()) {
+            // Plain text edit only implements vertical wheel scrolling. Let
+            // horizontal wheel gestures bubble so parent scroll areas or
+            // horizontal scroll bars can consume them.
             SwFrame::wheelEvent(event);
             return;
         }
@@ -486,7 +691,7 @@ protected:
             return;
         }
 
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
         const Padding pad = resolvePadding(getToolSheet());
         const int borderWidth = 1;
         SwRect inner = bounds;
@@ -513,6 +718,12 @@ protected:
         update();
     }
 
+    /**
+     * @brief Handles the key Press Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void keyPressEvent(KeyEvent* event) override {
         if (!event) {
             return;
@@ -666,13 +877,27 @@ protected:
         } else if (SwWidgetPlatformAdapter::isEscapeKey(key)) {
             event->accept();
         } else if (!m_readOnly) {
-            char ch = '\0';
-            const bool caps = SwWidgetPlatformAdapter::isCapsLockKey(key);
-            if (SwWidgetPlatformAdapter::translateCharacter(key, event->isShiftPressed(), caps, ch)) {
-                if (ch != '\r' && ch != '\n') {
-                    insertChar(ch);
-                    event->accept();
+            wchar_t wc = event->text();
+            if (wc == L'\0' && !event->isTextProvided()) {
+                char ascii = '\0';
+                const bool caps = SwWidgetPlatformAdapter::isCapsLockKey(key);
+                if (SwWidgetPlatformAdapter::translateCharacter(key, event->isShiftPressed(), caps, ascii)) {
+                    wc = static_cast<wchar_t>(static_cast<unsigned char>(ascii));
                 }
+            }
+            if (wc != L'\0' && wc != L'\r' && wc != L'\n') {
+                // Encode as UTF-8 before inserting (1 byte ASCII, 2 bytes Latin-1 like ÃƒÂª/ÃƒÂ /ÃƒÂ©)
+                if (wc < 0x80) {
+                    insertChar(static_cast<char>(wc));
+                } else if (wc < 0x800) {
+                    insertChar(static_cast<char>(0xC0 | (wc >> 6)));
+                    insertChar(static_cast<char>(0x80 | (wc & 0x3F)));
+                } else {
+                    insertChar(static_cast<char>(0xE0 | (wc >> 12)));
+                    insertChar(static_cast<char>(0x80 | ((wc >> 6) & 0x3F)));
+                    insertChar(static_cast<char>(0x80 | (wc & 0x3F)));
+                }
+                event->accept();
             }
         }
 
@@ -699,28 +924,12 @@ protected:
         size_t lineStart{0};
     };
 
-    static int clampInt(int value, int minValue, int maxValue) {
-        if (value < minValue) return minValue;
-        if (value > maxValue) return maxValue;
-        return value;
-    }
-
-    static int parsePixelValue(const SwString& value, int fallback) {
-        if (value.isEmpty()) {
-            return fallback;
-        }
-        std::string s = value.toStdString();
-        size_t pos = s.find_first_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ%");
-        if (pos != std::string::npos) {
-            s = s.substr(0, pos);
-        }
-        try {
-            return std::stoi(s);
-        } catch (...) {
-            return fallback;
-        }
-    }
-
+    /**
+     * @brief Performs the `parsePaddingShorthand` operation.
+     * @param value Value passed to the method.
+     * @param current Value passed to the method.
+     * @return The requested parse Padding Shorthand.
+     */
     static Padding parsePaddingShorthand(const SwString& value, Padding current) {
         if (value.isEmpty()) {
             return current;
@@ -758,6 +967,11 @@ protected:
         return current;
     }
 
+    /**
+     * @brief Performs the `resolvePadding` operation.
+     * @param sheet Value passed to the method.
+     * @return The requested resolve Padding.
+     */
     Padding resolvePadding(StyleSheet* sheet) const {
         Padding padding{};
         if (!sheet) {
@@ -771,15 +985,8 @@ protected:
         SwString paddingLeftValue;
 
         auto selectors = classHierarchy();
-        bool hasSwWidgetSelector = false;
-        for (const SwString& selector : selectors) {
-            if (selector == "SwWidget") {
-                hasSwWidgetSelector = true;
-                break;
-            }
-        }
-        if (!hasSwWidgetSelector) {
-            selectors.emplace_back("SwWidget");
+        if (!selectors.contains("SwWidget")) {
+            selectors.append("SwWidget");
         }
 
         for (int i = static_cast<int>(selectors.size()) - 1; i >= 0; --i) {
@@ -787,23 +994,23 @@ protected:
             if (selector.isEmpty()) {
                 continue;
             }
-            SwString pad = sheet->getStyleProperty(selector.toStdString(), "padding");
+            SwString pad = sheet->getStyleProperty(selector, "padding");
             if (!pad.isEmpty()) {
                 paddingValue = pad;
             }
-            SwString padTop = sheet->getStyleProperty(selector.toStdString(), "padding-top");
+            SwString padTop = sheet->getStyleProperty(selector, "padding-top");
             if (!padTop.isEmpty()) {
                 paddingTopValue = padTop;
             }
-            SwString padRight = sheet->getStyleProperty(selector.toStdString(), "padding-right");
+            SwString padRight = sheet->getStyleProperty(selector, "padding-right");
             if (!padRight.isEmpty()) {
                 paddingRightValue = padRight;
             }
-            SwString padBottom = sheet->getStyleProperty(selector.toStdString(), "padding-bottom");
+            SwString padBottom = sheet->getStyleProperty(selector, "padding-bottom");
             if (!padBottom.isEmpty()) {
                 paddingBottomValue = padBottom;
             }
-            SwString padLeft = sheet->getStyleProperty(selector.toStdString(), "padding-left");
+            SwString padLeft = sheet->getStyleProperty(selector, "padding-left");
             if (!padLeft.isEmpty()) {
                 paddingLeftValue = padLeft;
             }
@@ -833,47 +1040,20 @@ protected:
         return padding;
     }
 
-    SwColor resolveTextColor(StyleSheet* sheet, const SwColor& fallback) const {
-        if (!sheet) {
-            return fallback;
-        }
-
-        auto selectors = classHierarchy();
-        bool hasSwWidgetSelector = false;
-        for (const SwString& selector : selectors) {
-            if (selector == "SwWidget") {
-                hasSwWidgetSelector = true;
-                break;
-            }
-        }
-        if (!hasSwWidgetSelector) {
-            selectors.emplace_back("SwWidget");
-        }
-
-        for (int i = static_cast<int>(selectors.size()) - 1; i >= 0; --i) {
-            const SwString& selector = selectors[i];
-            if (selector.isEmpty()) {
-                continue;
-            }
-            SwString value = sheet->getStyleProperty(selector.toStdString(), "color");
-            if (value.isEmpty()) {
-                continue;
-            }
-            try {
-                SwColor resolved = sheet->parseColor(value.toStdString(), nullptr);
-                return resolved;
-            } catch (...) {
-                return fallback;
-            }
-        }
-        return fallback;
-    }
-
+    /**
+     * @brief Returns the current line Height Px.
+     * @return The current line Height Px.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int lineHeightPx() const {
         const int pt = getFont().getPointSize();
         return clampInt(pt + 10, 18, 34);
     }
 
+    /**
+     * @brief Performs the `ensureBlinkTimer` operation.
+     */
     void ensureBlinkTimer() {
         if (m_blinkTimer) {
             return;
@@ -902,6 +1082,9 @@ protected:
         });
     }
 
+    /**
+     * @brief Performs the `rebuildLines` operation.
+     */
     void rebuildLines() {
         m_lines.clear();
         m_lineStarts.clear();
@@ -996,8 +1179,14 @@ protected:
         }
     }
 
+    /**
+     * @brief Returns the current resolve Inner Wrap Width Px.
+     * @return The current resolve Inner Wrap Width Px.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int resolveInnerWrapWidthPx_() {
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
         if (bounds.width <= 0) {
             return 1;
         }
@@ -1014,6 +1203,12 @@ protected:
         return std::max(1, innerW);
     }
 
+    /**
+     * @brief Returns the current cursor Info.
+     * @return The current cursor Info.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     CursorInfo cursorInfo() const {
         CursorInfo ci;
         const size_t cursor = std::min(m_cursorPos, m_text.size());
@@ -1036,19 +1231,26 @@ protected:
         return ci;
     }
 
+    /**
+     * @brief Performs the `clampFirstVisibleLine` operation.
+     * @param visibleLines Value passed to the method.
+     */
     void clampFirstVisibleLine(int visibleLines) {
         visibleLines = std::max(1, visibleLines);
         const int maxFirst = std::max(0, m_lines.size() - visibleLines);
         m_firstVisibleLine = clampInt(m_firstVisibleLine, 0, maxFirst);
     }
 
+    /**
+     * @brief Performs the `ensureCursorVisible` operation.
+     */
     void ensureCursorVisible() {
         const int lh = lineHeightPx();
         if (lh <= 0) {
             return;
         }
 
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
         const Padding pad = resolvePadding(getToolSheet());
         const int borderWidth = 1;
         SwRect inner = bounds;
@@ -1069,8 +1271,14 @@ protected:
         clampFirstVisibleLine(visibleLines);
     }
 
+    /**
+     * @brief Updates the cursor From Position managed by the object.
+     * @param px Value passed to the method.
+     * @param py Value passed to the method.
+     * @return The requested cursor From Position.
+     */
     virtual void updateCursorFromPosition(int px, int py) {
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
         const Padding pad = resolvePadding(getToolSheet());
         const int borderWidth = 1;
         SwRect inner = bounds;
@@ -1098,11 +1306,23 @@ protected:
         m_cursorPos = std::min(lineStart + clampedCol, m_text.size());
     }
 
+    /**
+     * @brief Performs the `insertTextAt` operation.
+     * @param pos Position used by the operation.
+     * @param text Value passed to the method.
+     * @return The requested insert Text At.
+     */
     virtual void insertTextAt(size_t pos, const SwString& text) {
         const size_t clamped = std::min(pos, m_text.size());
         m_text.insert(clamped, text);
     }
 
+    /**
+     * @brief Performs the `eraseTextAt` operation.
+     * @param pos Position used by the operation.
+     * @param len Value passed to the method.
+     * @return The requested erase Text At.
+     */
     virtual void eraseTextAt(size_t pos, size_t len) {
         if (len == 0 || m_text.isEmpty()) {
             return;
@@ -1115,6 +1335,11 @@ protected:
         m_text.erase(clampedPos, clampedLen);
     }
 
+    /**
+     * @brief Performs the `insertChar` operation.
+     * @param ch Value passed to the method.
+     * @return The requested insert Char.
+     */
     virtual void insertChar(char ch) {
         if (m_readOnly) {
             return;
@@ -1122,6 +1347,12 @@ protected:
         replaceSelectionWithText_(SwString(1, ch));
     }
 
+    /**
+     * @brief Returns the current backspace.
+     * @return The current backspace.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     virtual void backspace() {
         if (m_readOnly) {
             return;
@@ -1142,6 +1373,12 @@ protected:
         textChanged();
     }
 
+    /**
+     * @brief Returns the current delete Forward.
+     * @return The current delete Forward.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     virtual void deleteForward() {
         if (m_readOnly) {
             return;
@@ -1162,29 +1399,44 @@ protected:
         textChanged();
     }
 
+    /**
+     * @brief Performs the `moveCursorLeft` operation.
+     */
     void moveCursorLeft() {
         if (m_cursorPos > 0) {
             --m_cursorPos;
         }
     }
 
+    /**
+     * @brief Performs the `moveCursorRight` operation.
+     */
     void moveCursorRight() {
         if (m_cursorPos < m_text.size()) {
             ++m_cursorPos;
         }
     }
 
+    /**
+     * @brief Performs the `moveCursorHome` operation.
+     */
     void moveCursorHome() {
         const CursorInfo ci = cursorInfo();
         m_cursorPos = ci.lineStart;
     }
 
+    /**
+     * @brief Performs the `moveCursorEnd` operation.
+     */
     void moveCursorEnd() {
         const CursorInfo ci = cursorInfo();
         const size_t lineLen = (ci.line >= 0 && ci.line < m_lines.size()) ? m_lines[ci.line].size() : 0;
         m_cursorPos = std::min(ci.lineStart + lineLen, m_text.size());
     }
 
+    /**
+     * @brief Performs the `moveCursorUp` operation.
+     */
     void moveCursorUp() {
         const CursorInfo ci = cursorInfo();
         if (ci.line <= 0) {
@@ -1197,6 +1449,9 @@ protected:
         m_cursorPos = std::min(start + col, m_text.size());
     }
 
+    /**
+     * @brief Performs the `moveCursorDown` operation.
+     */
     void moveCursorDown() {
         const CursorInfo ci = cursorInfo();
         if (ci.line >= m_lines.size() - 1) {
@@ -1209,6 +1464,9 @@ protected:
         m_cursorPos = std::min(start + col, m_text.size());
     }
 
+    /**
+     * @brief Performs the `initDefaults` operation.
+     */
     void initDefaults() {
         resize(420, 160);
         setCursor(CursorType::IBeam);
@@ -1228,29 +1486,6 @@ protected:
         )");
     }
 
-    SwString m_text;
-    SwString m_placeholder;
-    SwVector<SwString> m_lines;
-    SwVector<size_t> m_lineStarts;
-    size_t m_cursorPos{0};
-    size_t m_selectionStart{0};
-    size_t m_selectionEnd{0};
-    bool m_isSelecting{false};
-    int m_firstVisibleLine{0};
-    bool m_readOnly{false};
-    bool m_undoRedoEnabled{true};
-    size_t m_undoLimit{200};
-    std::vector<EditState> m_undoStack;
-    std::vector<EditState> m_redoStack;
-
-    bool m_caretVisible{true};
-    SwTimer* m_blinkTimer{nullptr};
-
-    SwColor m_focusAccent{59, 130, 246};
-
-    bool m_wordWrapEnabled{false};
-
-private:
     size_t selectionMin_() const { return (std::min)(m_selectionStart, m_selectionEnd); }
     size_t selectionMax_() const { return (std::max)(m_selectionStart, m_selectionEnd); }
 
@@ -1359,8 +1594,31 @@ private:
         m_cursorPos = end;
     }
 
+    SwString m_text;
+    SwString m_placeholder;
+    SwVector<SwString> m_lines;
+    SwVector<size_t> m_lineStarts;
+    size_t m_cursorPos{0};
+    size_t m_selectionStart{0};
+    size_t m_selectionEnd{0};
+    bool m_isSelecting{false};
+    int m_firstVisibleLine{0};
+    bool m_readOnly{false};
+    bool m_undoRedoEnabled{true};
+    size_t m_undoLimit{200};
+    std::vector<EditState> m_undoStack;
+    std::vector<EditState> m_redoStack;
+
+    bool m_caretVisible{true};
+    SwTimer* m_blinkTimer{nullptr};
+
+    SwColor m_focusAccent{59, 130, 246};
+
+    bool m_wordWrapEnabled{false};
+
     SwPlatformIntegration* currentPlatformIntegration_() const {
         SwGuiApplication* app = SwGuiApplication::instance(false);
         return app ? app->platformIntegration() : nullptr;
     }
 };
+

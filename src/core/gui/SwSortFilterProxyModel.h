@@ -22,8 +22,32 @@
 
 #pragma once
 
+/**
+ * @file src/core/gui/SwSortFilterProxyModel.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwSortFilterProxyModel in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the sort filter proxy model interface. The declarations
+ * exposed here define the stable surface that adjacent code can rely on while the implementation
+ * remains free to evolve behind the header.
+ *
+ * The main declarations in this header are SwSortFilterProxyModel.
+ *
+ * Model-oriented declarations here define the data contract consumed by views, delegates, or
+ * algorithms, with an emphasis on stable roles, ownership, and update flow rather than on
+ * presentation details.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
 /***************************************************************************************************
- * SwSortFilterProxyModel - Qt-like sort/filter proxy model (≈ QSortFilterProxyModel).
+ * SwSortFilterProxyModel - sort/filter proxy model.
  *
  * Scope (v1):
  * - Wraps a source SwAbstractItemModel.
@@ -44,9 +68,21 @@ class SwSortFilterProxyModel : public SwAbstractItemModel {
     SW_OBJECT(SwSortFilterProxyModel, SwAbstractItemModel)
 
 public:
+    /**
+     * @brief Constructs a `SwSortFilterProxyModel` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwSortFilterProxyModel(SwObject* parent = nullptr)
         : SwAbstractItemModel(parent) {}
 
+    /**
+     * @brief Sets the source Model.
+     * @param source Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setSourceModel(SwAbstractItemModel* source) {
         if (m_sourceModel == source) {
             return;
@@ -63,8 +99,20 @@ public:
         invalidate();
     }
 
+    /**
+     * @brief Returns the current source Model.
+     * @return The current source Model.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwAbstractItemModel* sourceModel() const { return m_sourceModel; }
 
+    /**
+     * @brief Sets the filter Fixed String.
+     * @param text Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setFilterFixedString(const SwString& text) {
         if (!m_useRegex && m_filterFixedString == text) {
             return;
@@ -74,8 +122,20 @@ public:
         invalidate();
     }
 
+    /**
+     * @brief Returns the current filter Fixed String.
+     * @return The current filter Fixed String.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString filterFixedString() const { return m_filterFixedString; }
 
+    /**
+     * @brief Sets the filter Regular Expression.
+     * @param re Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setFilterRegularExpression(const SwRegularExpression& re) {
         if (m_useRegex && m_filterRegularExpression == re) {
             return;
@@ -85,8 +145,20 @@ public:
         invalidate();
     }
 
+    /**
+     * @brief Returns the current filter Regular Expression.
+     * @return The current filter Regular Expression.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwRegularExpression filterRegularExpression() const { return m_filterRegularExpression; }
 
+    /**
+     * @brief Sets the filter Case Sensitivity.
+     * @param cs Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setFilterCaseSensitivity(Sw::CaseSensitivity cs) {
         if (m_filterCaseSensitivity == cs) {
             return;
@@ -95,8 +167,20 @@ public:
         invalidate();
     }
 
+    /**
+     * @brief Returns the current filter Case Sensitivity.
+     * @return The current filter Case Sensitivity.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     Sw::CaseSensitivity filterCaseSensitivity() const { return m_filterCaseSensitivity; }
 
+    /**
+     * @brief Sets the filter Key Column.
+     * @param column Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setFilterKeyColumn(int column) {
         if (m_filterKeyColumn == column) {
             return;
@@ -105,8 +189,20 @@ public:
         invalidate();
     }
 
+    /**
+     * @brief Returns the current filter Key Column.
+     * @return The current filter Key Column.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int filterKeyColumn() const { return m_filterKeyColumn; }
 
+    /**
+     * @brief Sets the filter Role.
+     * @param role Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setFilterRole(SwItemDataRole role) {
         if (m_filterRole == role) {
             return;
@@ -115,8 +211,20 @@ public:
         invalidate();
     }
 
+    /**
+     * @brief Returns the current filter Role.
+     * @return The current filter Role.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwItemDataRole filterRole() const { return m_filterRole; }
 
+    /**
+     * @brief Sets the sort Role.
+     * @param role Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setSortRole(SwItemDataRole role) {
         if (m_sortRole == role) {
             return;
@@ -125,8 +233,20 @@ public:
         invalidate();
     }
 
+    /**
+     * @brief Returns the current sort Role.
+     * @return The current sort Role.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwItemDataRole sortRole() const { return m_sortRole; }
 
+    /**
+     * @brief Sets the sort Case Sensitivity.
+     * @param cs Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setSortCaseSensitivity(Sw::CaseSensitivity cs) {
         if (m_sortCaseSensitivity == cs) {
             return;
@@ -135,13 +255,27 @@ public:
         invalidate();
     }
 
+    /**
+     * @brief Returns the current sort Case Sensitivity.
+     * @return The current sort Case Sensitivity.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     Sw::CaseSensitivity sortCaseSensitivity() const { return m_sortCaseSensitivity; }
 
+    /**
+     * @brief Performs the `invalidate` operation.
+     */
     void invalidate() {
         invalidateInternal_(true);
         modelReset();
     }
 
+    /**
+     * @brief Performs the `mapToSource` operation.
+     * @param proxyIndex Value passed to the method.
+     * @return The requested map To Source.
+     */
     SwModelIndex mapToSource(const SwModelIndex& proxyIndex) const {
         if (!m_sourceModel || !proxyIndex.isValid() || proxyIndex.model() != this) {
             return SwModelIndex();
@@ -154,6 +288,11 @@ public:
         return it->second;
     }
 
+    /**
+     * @brief Performs the `mapFromSource` operation.
+     * @param sourceIndex Value passed to the method.
+     * @return The requested map From Source.
+     */
     SwModelIndex mapFromSource(const SwModelIndex& sourceIndex) const {
         if (!m_sourceModel || !sourceIndex.isValid() || sourceIndex.model() != m_sourceModel) {
             return SwModelIndex();
@@ -163,6 +302,13 @@ public:
     }
 
     // SwAbstractItemModel overrides
+    /**
+     * @brief Performs the `index` operation.
+     * @param row Value passed to the method.
+     * @param column Value passed to the method.
+     * @param parent Optional parent object that owns this instance.
+     * @return The requested index.
+     */
     SwModelIndex index(int row, int column, const SwModelIndex& parent = SwModelIndex()) const override {
         if (!m_sourceModel) {
             return SwModelIndex();
@@ -188,6 +334,11 @@ public:
         return createIndex(row, column, sourceIndex.internalPointer());
     }
 
+    /**
+     * @brief Performs the `parent` operation.
+     * @param child Value passed to the method.
+     * @return The requested parent.
+     */
     SwModelIndex parent(const SwModelIndex& child) const override {
         if (!m_sourceModel || !child.isValid() || child.model() != this) {
             return SwModelIndex();
@@ -204,6 +355,11 @@ public:
         return mapFromSourceInternal_(sourceParent);
     }
 
+    /**
+     * @brief Performs the `rowCount` operation.
+     * @param parent Optional parent object that owns this instance.
+     * @return The requested row Count.
+     */
     int rowCount(const SwModelIndex& parent = SwModelIndex()) const override {
         if (!m_sourceModel) {
             return 0;
@@ -215,6 +371,11 @@ public:
         return static_cast<int>(node.sourceRows.size());
     }
 
+    /**
+     * @brief Performs the `columnCount` operation.
+     * @param parent Optional parent object that owns this instance.
+     * @return The requested column Count.
+     */
     int columnCount(const SwModelIndex& parent = SwModelIndex()) const override {
         if (!m_sourceModel) {
             return 0;
@@ -223,6 +384,12 @@ public:
         return std::max(0, m_sourceModel->columnCount(sourceParent));
     }
 
+    /**
+     * @brief Performs the `data` operation.
+     * @param index Value passed to the method.
+     * @param role Value passed to the method.
+     * @return The requested data.
+     */
     SwAny data(const SwModelIndex& index, SwItemDataRole role = SwItemDataRole::DisplayRole) const override {
         if (!m_sourceModel) {
             return SwAny();
@@ -234,6 +401,15 @@ public:
         return m_sourceModel->data(src, role);
     }
 
+    /**
+     * @brief Sets the data.
+     * @param index Value passed to the method.
+     * @param value Value passed to the method.
+     * @param role Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     bool setData(const SwModelIndex& index, const SwAny& value, SwItemDataRole role = SwItemDataRole::EditRole) override {
         if (!m_sourceModel) {
             return false;
@@ -249,6 +425,13 @@ public:
         return ok;
     }
 
+    /**
+     * @brief Performs the `headerData` operation.
+     * @param section Value passed to the method.
+     * @param orientation Value passed to the method.
+     * @param role Value passed to the method.
+     * @return The requested header Data.
+     */
     SwAny headerData(int section,
                      SwOrientation orientation,
                      SwItemDataRole role = SwItemDataRole::DisplayRole) const override {
@@ -258,6 +441,11 @@ public:
         return m_sourceModel->headerData(section, orientation, role);
     }
 
+    /**
+     * @brief Performs the `flags` operation.
+     * @param index Value passed to the method.
+     * @return The requested flags.
+     */
     SwItemFlags flags(const SwModelIndex& index) const override {
         if (!m_sourceModel) {
             return SwItemFlags();
@@ -266,6 +454,11 @@ public:
         return src.isValid() ? m_sourceModel->flags(src) : SwItemFlags();
     }
 
+    /**
+     * @brief Performs the `sort` operation.
+     * @param column Value passed to the method.
+     * @param order Value passed to the method.
+     */
     void sort(int column, SwSortOrder order = SwSortOrder::AscendingOrder) override {
         m_sortColumn = column;
         m_sortOrder = order;
@@ -325,7 +518,7 @@ private:
             }
         }
 
-        // Recurse using column 0 as the parent index for child rows (Qt-like convention).
+        // Recurse using column 0 as the parent index for child rows.
         for (int r = 0; r < rows; ++r) {
             const SwModelIndex childParent = m_sourceModel->index(r, 0, parent);
             if (!childParent.isValid()) {
@@ -489,4 +682,3 @@ private:
     mutable std::unordered_map<void*, SwModelIndex> m_sourceIndexByPtr;
     mutable SwList<Node> m_nodes;
 };
-

@@ -3,11 +3,13 @@
 #include "SwUiLoader.h"
 #include "SwLayout.h"
 #include "SwScrollArea.h"
+#include "SwSpacer.h"
 #include "SwStackedWidget.h"
 #include "SwTabWidget.h"
 #include "SwToolBox.h"
 #include "SwWidget.h"
-#include "ui/SwCreatorFormCanvas.h"
+#include "core/types/SwXmlDocument.h"
+#include "designer/SwCreatorFormCanvas.h"
 
 #include <functional>
 #include <sstream>
@@ -120,6 +122,260 @@ void emitAttribute_(std::ostringstream& oss,
     oss << "<string>" << xmlEscape(value.toStdString()) << "</string>";
     oss << "</attribute>\n";
 }
+
+bool isSpacerWidget_(const SwWidget* widget) {
+    if (!widget) {
+        return false;
+    }
+    if (dynamic_cast<const SwSpacer*>(widget)) {
+        return true;
+    }
+    if (!widget->isDynamicProperty("__SwCreator_IsSpacer")) {
+        return false;
+    }
+    const SwAny value = const_cast<SwWidget*>(widget)->property("__SwCreator_IsSpacer");
+    const SwString text = value.toString().trimmed().toLower();
+    return text == "true" || text == "1" || text == "yes";
+}
+
+SwSizePolicy::Policy spacerPolicyFromString_(SwString value) {
+    value = value.trimmed();
+    const size_t sep = value.lastIndexOf(':');
+    if (sep != static_cast<size_t>(-1)) {
+        value = value.mid(static_cast<int>(sep + 1));
+    }
+    return SwSpacer::policyFromString(value);
+}
+
+struct SpacerInfo {
+    SwString name;
+    SwString orientation{"Qt::Horizontal"};
+    SwSizePolicy::Policy horizontalPolicy{SwSizePolicy::Minimum};
+    SwSizePolicy::Policy verticalPolicy{SwSizePolicy::Minimum};
+    int width{40};
+    int height{20};
+};
+
+SpacerInfo spacerInfoFromWidget_(const SwWidget* widget) {
+    SpacerInfo info;
+    if (!widget) {
+        return info;
+    }
+    info.name = widget->getObjectName();
+    info.width = std::max(0, widget->width());
+    info.height = std::max(0, widget->height());
+
+    if (const auto* spacer = dynamic_cast<const SwSpacer*>(widget)) {
+        info.orientation = spacer->direction() == SwSpacer::Direction::Vertical ? SwString("Qt::Vertical") : SwString("Qt::Horizontal");
+        const SwSizePolicy policy = spacer->sizePolicy();
+        info.horizontalPolicy = policy.horizontalPolicy();
+        info.verticalPolicy = policy.verticalPolicy();
+        const SwSize hint = spacer->sizeHint();
+        info.width = std::max(0, hint.width);
+        info.height = std::max(0, hint.height);
+        return info;
+    }
+
+    const SwAny orientation = const_cast<SwWidget*>(widget)->property("Orientation");
+    if (!orientation.toString().isEmpty()) {
+        info.orientation = orientation.toString().trimmed().toLower() == "vertical" ? SwString("Qt::Vertical") : SwString("Qt::Horizontal");
+    }
+
+    const SwAny horizontalPolicy = const_cast<SwWidget*>(widget)->property("HorizontalPolicy");
+    const SwAny verticalPolicy = const_cast<SwWidget*>(widget)->property("VerticalPolicy");
+    info.horizontalPolicy = spacerPolicyFromString_(horizontalPolicy.toString());
+    info.verticalPolicy = spacerPolicyFromString_(verticalPolicy.toString());
+
+    const SwAny width = const_cast<SwWidget*>(widget)->property("SizeHintWidth");
+    const SwAny height = const_cast<SwWidget*>(widget)->property("SizeHintHeight");
+    if (!width.toString().isEmpty()) {
+        info.width = std::max(0, width.toString().toInt());
+    }
+    if (!height.toString().isEmpty()) {
+        info.height = std::max(0, height.toString().toInt());
+    }
+    return info;
+}
+
+SpacerInfo spacerInfoFromNode_(const SwXmlNode& spacerNode) {
+    SpacerInfo info;
+    info.name = spacerNode.attr("name");
+
+    bool explicitHorizontalPolicy = false;
+    bool explicitVerticalPolicy = false;
+    bool hasSizeType = false;
+    SwSizePolicy::Policy sizeTypePolicy = SwSizePolicy::Minimum;
+
+    for (const auto* prop : spacerNode.childrenNamed("property")) {
+        if (!prop) {
+            continue;
+        }
+        const SwString name = prop->attr("name");
+        if (name == "orientation") {
+            const SwXmlNode* valueNode = prop->firstChild("enum");
+            if (valueNode) {
+                info.orientation = valueNode->text.trimmed();
+            }
+        } else if (name == "sizeHint") {
+            const SwXmlNode* size = prop->firstChild("size");
+            if (!size) {
+                continue;
+            }
+            const SwXmlNode* width = size->firstChild("width");
+            const SwXmlNode* height = size->firstChild("height");
+            if (width) {
+                info.width = std::max(0, width->text.toInt());
+            }
+            if (height) {
+                info.height = std::max(0, height->text.toInt());
+            }
+        } else if (name == "sizeType") {
+            const SwXmlNode* valueNode = prop->firstChild("enum");
+            if (valueNode) {
+                hasSizeType = true;
+                sizeTypePolicy = spacerPolicyFromString_(valueNode->text.trimmed());
+            }
+        } else if (name == "horizontalSizeType") {
+            const SwXmlNode* valueNode = prop->firstChild("enum");
+            if (valueNode) {
+                explicitHorizontalPolicy = true;
+                info.horizontalPolicy = spacerPolicyFromString_(valueNode->text.trimmed());
+            }
+        } else if (name == "verticalSizeType") {
+            const SwXmlNode* valueNode = prop->firstChild("enum");
+            if (valueNode) {
+                explicitVerticalPolicy = true;
+                info.verticalPolicy = spacerPolicyFromString_(valueNode->text.trimmed());
+            }
+        }
+    }
+
+    const bool vertical = info.orientation.trimmed().toLower().contains("vertical");
+    if (hasSizeType) {
+        if (vertical) {
+            if (!explicitVerticalPolicy) {
+                info.verticalPolicy = sizeTypePolicy;
+            }
+            if (!explicitHorizontalPolicy) {
+                info.horizontalPolicy = SwSizePolicy::Minimum;
+            }
+        } else {
+            if (!explicitHorizontalPolicy) {
+                info.horizontalPolicy = sizeTypePolicy;
+            }
+            if (!explicitVerticalPolicy) {
+                info.verticalPolicy = SwSizePolicy::Minimum;
+            }
+        }
+    }
+    return info;
+}
+
+void emitSpacerNode_(std::ostringstream& oss, const SpacerInfo& info, int indent) {
+    emitIndent_(oss, indent);
+    oss << "<spacer";
+    if (!info.name.isEmpty()) {
+        oss << " name=\"" << xmlEscape(info.name.toStdString()) << "\"";
+    }
+    oss << ">\n";
+
+    emitIndent_(oss, indent + 2);
+    oss << "<property name=\"orientation\"><enum>" << xmlEscape(info.orientation.toStdString()) << "</enum></property>\n";
+
+    const bool vertical = info.orientation.trimmed().toLower().contains("vertical");
+    const SwSizePolicy::Policy primaryPolicy = vertical ? info.verticalPolicy : info.horizontalPolicy;
+    emitIndent_(oss, indent + 2);
+    oss << "<property name=\"sizeType\"><enum>QSizePolicy::"
+        << xmlEscape(SwSpacer::policyToString(primaryPolicy).toStdString())
+        << "</enum></property>\n";
+
+    emitIndent_(oss, indent + 2);
+    oss << "<property name=\"horizontalSizeType\"><enum>QSizePolicy::"
+        << xmlEscape(SwSpacer::policyToString(info.horizontalPolicy).toStdString())
+        << "</enum></property>\n";
+
+    emitIndent_(oss, indent + 2);
+    oss << "<property name=\"verticalSizeType\"><enum>QSizePolicy::"
+        << xmlEscape(SwSpacer::policyToString(info.verticalPolicy).toStdString())
+        << "</enum></property>\n";
+
+    emitIndent_(oss, indent + 2);
+    oss << "<property name=\"sizeHint\"><size><width>" << info.width << "</width><height>" << info.height
+        << "</height></size></property>\n";
+
+    emitIndent_(oss, indent);
+    oss << "</spacer>\n";
+}
+
+void emitDesignerSpacerWidget_(std::ostringstream& oss, const SpacerInfo& info, int indent) {
+    emitIndent_(oss, indent);
+    oss << "<widget class=\"SwSpacer\"";
+    if (!info.name.isEmpty()) {
+        oss << " name=\"" << xmlEscape(info.name.toStdString()) << "\"";
+    }
+    oss << ">\n";
+
+    emitGeometry_(oss, SwRect{0, 0, info.width, info.height}, indent + 2);
+    emitProperty_(oss, kSwCreatorDesignMarker, SwAny(true), indent + 2);
+    emitProperty_(oss,
+                  "Orientation",
+                  SwAny(info.orientation.trimmed().toLower().contains("vertical") ? SwString("Vertical") : SwString("Horizontal")),
+                  indent + 2);
+    emitProperty_(oss, "HorizontalPolicy", SwAny(SwSpacer::policyToString(info.horizontalPolicy)), indent + 2);
+    emitProperty_(oss, "VerticalPolicy", SwAny(SwSpacer::policyToString(info.verticalPolicy)), indent + 2);
+    emitProperty_(oss, "SizeHintWidth", SwAny(info.width), indent + 2);
+    emitProperty_(oss, "SizeHintHeight", SwAny(info.height), indent + 2);
+
+    emitIndent_(oss, indent);
+    oss << "</widget>\n";
+}
+
+void emitXmlNodeRecursive_(std::ostringstream& oss, const SwXmlNode& node, int indent) {
+    if (node.name == "spacer") {
+        emitDesignerSpacerWidget_(oss, spacerInfoFromNode_(node), indent);
+        return;
+    }
+
+    emitIndent_(oss, indent);
+    oss << "<" << node.name.toStdString();
+    for (const auto& attr : node.attributes) {
+        oss << " " << attr.first.toStdString() << "=\"" << xmlEscape(attr.second.toStdString()) << "\"";
+    }
+
+    const bool hasChildren = !node.children.isEmpty();
+    const SwString text = node.text;
+    if (!hasChildren && text.isEmpty()) {
+        oss << "/>\n";
+        return;
+    }
+
+    oss << ">";
+    if (!hasChildren) {
+        oss << xmlEscape(text.toStdString()) << "</" << node.name.toStdString() << ">\n";
+        return;
+    }
+
+    oss << "\n";
+    for (const SwXmlNode& child : node.children) {
+        emitXmlNodeRecursive_(oss, child, indent + 2);
+    }
+    emitIndent_(oss, indent);
+    oss << "</" << node.name.toStdString() << ">\n";
+}
+
+SwString materializeCanvasSpacers_(const SwString& xml, SwString* outError) {
+    const SwXmlDocument::ParseResult parsed = SwXmlDocument::parse(xml);
+    if (!parsed.ok) {
+        if (outError) {
+            *outError = parsed.error.isEmpty() ? SwString("Invalid XML") : parsed.error;
+        }
+        return SwString();
+    }
+
+    std::ostringstream oss;
+    emitXmlNodeRecursive_(oss, parsed.root, 0);
+    return SwString(oss.str());
+}
 } // namespace
 
 SwString SwCreatorSwuiSerializer::serializeWidget(const SwWidget* widget) {
@@ -129,7 +385,7 @@ SwString SwCreatorSwuiSerializer::serializeWidget(const SwWidget* widget) {
 
     const SwString cls = widget->className();
     const SwString name = widget->getObjectName();
-    const SwRect r = widget->getRect();
+    const SwRect r = widget->frameGeometry();
 
     std::ostringstream oss;
     oss << "<swui>\n";
@@ -248,7 +504,7 @@ SwString SwCreatorSwuiSerializer::serializeCanvas(const SwCreatorFormCanvas* can
         if (auto* scroll = dynamic_cast<const SwScrollArea*>(w)) {
             includeDocNode(scroll->widget());
         } else if (auto* tab = dynamic_cast<const SwTabWidget*>(w)) {
-            for (SwObject* childObj : tab->getChildren()) {
+            for (SwObject* childObj : tab->children()) {
                 auto* page = dynamic_cast<SwWidget*>(childObj);
                 if (!page) {
                     continue;
@@ -256,7 +512,7 @@ SwString SwCreatorSwuiSerializer::serializeCanvas(const SwCreatorFormCanvas* can
                 includeDocNode(page);
             }
         } else if (auto* stack = dynamic_cast<const SwStackedWidget*>(w)) {
-            for (SwObject* childObj : stack->getChildren()) {
+            for (SwObject* childObj : stack->children()) {
                 auto* page = dynamic_cast<SwWidget*>(childObj);
                 if (!page || page->parent() != stack) {
                     continue;
@@ -264,7 +520,7 @@ SwString SwCreatorSwuiSerializer::serializeCanvas(const SwCreatorFormCanvas* can
                 includeDocNode(page);
             }
         } else if (auto* toolbox = dynamic_cast<const SwToolBox*>(w)) {
-            for (SwObject* childObj : toolbox->getChildren()) {
+            for (SwObject* childObj : toolbox->children()) {
                 auto* page = dynamic_cast<SwWidget*>(childObj);
                 if (!page || page->parent() != toolbox) {
                     continue;
@@ -308,7 +564,7 @@ SwString SwCreatorSwuiSerializer::serializeCanvas(const SwCreatorFormCanvas* can
         if (!root) {
             return;
         }
-        for (SwObject* objChild : root->getChildren()) {
+        for (SwObject* objChild : root->children()) {
             auto* child = dynamic_cast<const SwWidget*>(objChild);
             if (!child) {
                 continue;
@@ -352,8 +608,8 @@ SwString SwCreatorSwuiSerializer::serializeCanvas(const SwCreatorFormCanvas* can
     std::ostringstream oss;
     oss << "<swui>\n";
 
-    // Synthetic root captures the canvas origin so load can re-align absolute coordinates.
-    const SwRect canvasRect = canvas->getRect();
+    // Synthetic root is a temporary local container inside the canvas.
+    const SwRect canvasRect = canvas->rect();
     oss << "  <widget class=\"SwWidget\" name=\"Form\">\n";
     emitGeometry_(oss, canvasRect, 4);
     emitProperty_(oss,
@@ -367,6 +623,11 @@ SwString SwCreatorSwuiSerializer::serializeCanvas(const SwCreatorFormCanvas* can
             return;
         }
 
+        if (isSpacerWidget_(w) && parent && parent->layout()) {
+            emitSpacerNode_(oss, spacerInfoFromWidget_(w), indent);
+            return;
+        }
+
         const SwString cls = w->className();
         const SwString name = w->getObjectName();
 
@@ -377,7 +638,7 @@ SwString SwCreatorSwuiSerializer::serializeCanvas(const SwCreatorFormCanvas* can
         }
         oss << ">\n";
 
-        // Container page labels (Qt-like).
+        // Container page labels.
         if (parent) {
             if (dynamic_cast<const SwTabWidget*>(parent)) {
                 SwString label = !name.isEmpty() ? name : defaultPageLabel(indexInParent);
@@ -388,14 +649,14 @@ SwString SwCreatorSwuiSerializer::serializeCanvas(const SwCreatorFormCanvas* can
             }
         }
 
-        emitGeometry_(oss, w->getRect(), indent + 2);
+        emitGeometry_(oss, w->frameGeometry(), indent + 2);
 
         // Persist designer marker only for design widgets (used on load to re-register).
         if (designSet.find(w) != designSet.end()) {
             emitProperty_(oss, kSwCreatorDesignMarker, SwAny(true), indent + 2);
         }
 
-        // Helpful state for common containers (Qt-like "currentIndex").
+        // Helpful state for common containers ("currentIndex").
         if (auto* tab = dynamic_cast<const SwTabWidget*>(w)) {
             emitProperty_(oss, "currentIndex", SwAny(tab->currentIndex()), indent + 2);
         } else if (auto* stack = dynamic_cast<const SwStackedWidget*>(w)) {
@@ -507,7 +768,12 @@ bool SwCreatorSwuiSerializer::deserializeCanvas(const SwString& xml, SwCreatorFo
         return false;
     }
 
-    swui::UiLoader::LoadResult res = swui::UiLoader::loadFromString(xml, canvas);
+    SwString preparedXml = materializeCanvasSpacers_(xml, outError);
+    if (preparedXml.isEmpty()) {
+        return false;
+    }
+
+    swui::UiLoader::LoadResult res = swui::UiLoader::loadFromString(preparedXml, canvas);
     if (!res.ok || !res.root) {
         if (outError) {
             *outError = res.error;
@@ -516,25 +782,43 @@ bool SwCreatorSwuiSerializer::deserializeCanvas(const SwString& xml, SwCreatorFo
     }
 
     SwWidget* root = res.root;
-    const SwRect saved = root->getRect();
-    const SwRect current = canvas->getRect();
-    const int dx = current.x - saved.x;
-    const int dy = current.y - saved.y;
-    if (dx != 0 || dy != 0) {
-        root->move(saved.x + dx, saved.y + dy);
-    }
+    // The synthetic root lives inside the canvas, so its coordinates must stay local.
+    root->move(0, 0);
+    canvas->setFormSize(root->width(), root->height());
 
     // Flatten synthetic root into the canvas.
     std::vector<SwWidget*> topLevel;
-    topLevel.reserve(root->getChildren().size());
-    for (SwObject* obj : root->getChildren()) {
+    topLevel.reserve(root->children().size());
+    for (SwObject* obj : root->children()) {
         auto* w = dynamic_cast<SwWidget*>(obj);
         if (w && w->parent() == root) {
             topLevel.push_back(w);
         }
     }
     for (SwWidget* w : topLevel) {
+        // newParentEvent resets w's absolute position to canvas origin without propagating
+        // to w's descendants. We must restore all positions top-down after re-parenting.
+        std::vector<std::pair<SwWidget*, SwRect>> descendants;
+        std::function<void(SwWidget*)> gatherDesc = [&](SwWidget* widget) {
+            for (SwObject* obj : widget->children()) {
+                if (auto* child = dynamic_cast<SwWidget*>(obj)) {
+                    descendants.push_back({child, child->frameGeometry()});
+                    gatherDesc(child);
+                }
+            }
+        };
+        gatherDesc(w);
+
+        const SwRect wr = w->geometry();
         w->setParent(canvas);
+        w->move(wr.x, wr.y);
+
+        // Restore descendants top-down: each parent is correct before its children are processed.
+        for (auto& entry : descendants) {
+            SwWidget* desc = entry.first;
+            const SwRect& savedRect = entry.second;
+            desc->move(savedRect.x, savedRect.y);
+        }
     }
     delete root;
 
@@ -544,7 +828,7 @@ bool SwCreatorSwuiSerializer::deserializeCanvas(const SwString& xml, SwCreatorFo
         if (!parent) {
             return;
         }
-        for (SwObject* obj : parent->getChildren()) {
+        for (SwObject* obj : parent->children()) {
             auto* child = dynamic_cast<SwWidget*>(obj);
             if (!child) {
                 continue;
@@ -563,3 +847,4 @@ bool SwCreatorSwuiSerializer::deserializeCanvas(const SwString& xml, SwCreatorFo
 
     return true;
 }
+

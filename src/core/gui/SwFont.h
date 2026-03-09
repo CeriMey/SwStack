@@ -1,3 +1,14 @@
+
+/**
+ * @file
+ * @ingroup core_gui
+ * @brief Declares `SwFont`, the value type that describes widget and painter fonts.
+ *
+ * The class stores family, point size, weight, and style flags in a backend-neutral form
+ * while lazily creating native handles when a platform painter needs them. It acts as the
+ * portable font contract shared by widgets, styles, and text measurement helpers.
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -22,6 +33,9 @@
 
 #pragma once
 
+
+
+
 #include <string>
 #include <iostream>
 #include "SwDebug.h"
@@ -36,9 +50,27 @@ using HFONT = void *;
 using HDC = void *;
 #endif
 
+/**
+ * @brief Value object describing a concrete font face and style selection.
+ *
+ * The class is shared by widgets, dialogs, painters, and text metrics helpers.
+ * It keeps font state independent from any specific painter instance while still
+ * allowing platform-specific handles to be materialized on demand.
+ */
 class SwFont
 {
 public:
+    /**
+     * @brief Constructs a `SwFont` instance.
+     * @param family Value passed to the method.
+     * @param pointSize Value passed to the method.
+     * @param weight Value passed to the method.
+     * @param italic Value passed to the method.
+     * @param underline Value passed to the method.
+     * @param underline Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwFont(const std::wstring &family = L"Segoe UI",
            int pointSize = 9,
            FontWeight weight = Normal,
@@ -48,6 +80,12 @@ public:
     {
     }
 
+    /**
+     * @brief Constructs a `SwFont` instance.
+     * @param underline Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwFont(const SwFont &other)
         : familyName(other.familyName),
           pointSize(other.pointSize),
@@ -57,12 +95,22 @@ public:
     {
     }
 
+    /**
+     * @brief Performs the `operator==` operation.
+     * @param other Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool operator==(const SwFont &other) const
     {
         return familyName == other.familyName && pointSize == other.pointSize && weight == other.weight &&
                italic == other.italic && underline == other.underline;
     }
 
+    /**
+     * @brief Performs the `&operator=` operation.
+     * @param other Value passed to the method.
+     * @return The requested &operator =.
+     */
     SwFont &operator=(const SwFont &other)
     {
         if (this != &other)
@@ -77,6 +125,11 @@ public:
         return *this;
     }
 
+    /**
+     * @brief Destroys the `SwFont` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~SwFont()
     {
 #if defined(_WIN32)
@@ -84,6 +137,12 @@ public:
 #endif
     }
 
+    /**
+     * @brief Sets the family.
+     * @param family Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setFamily(const std::wstring &family)
     {
         if (familyName != family)
@@ -93,8 +152,20 @@ public:
         }
     }
 
+    /**
+     * @brief Returns the current family.
+     * @return The current family.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     std::wstring getFamily() const { return familyName; }
 
+    /**
+     * @brief Sets the point Size.
+     * @param size Size value used by the operation.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setPointSize(int size)
     {
         if (pointSize != size)
@@ -104,8 +175,20 @@ public:
         }
     }
 
+    /**
+     * @brief Returns the current point Size.
+     * @return The current point Size.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int getPointSize() const { return pointSize; }
 
+    /**
+     * @brief Sets the weight.
+     * @param fontWeight Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setWeight(FontWeight fontWeight)
     {
         if (weight != fontWeight)
@@ -115,8 +198,20 @@ public:
         }
     }
 
+    /**
+     * @brief Returns the current weight.
+     * @return The current weight.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     FontWeight getWeight() const { return weight; }
 
+    /**
+     * @brief Sets the italic.
+     * @param isItalic Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setItalic(bool isItalic)
     {
         if (italic != isItalic)
@@ -126,8 +221,20 @@ public:
         }
     }
 
+    /**
+     * @brief Returns whether the object reports italic.
+     * @return `true` when the object reports italic; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isItalic() const { return italic; }
 
+    /**
+     * @brief Sets the underline.
+     * @param isUnderline Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setUnderline(bool isUnderline)
     {
         if (underline != isUnderline)
@@ -137,8 +244,19 @@ public:
         }
     }
 
+    /**
+     * @brief Returns whether the object reports underline.
+     * @return `true` when the object reports underline; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isUnderline() const { return underline; }
 
+    /**
+     * @brief Performs the `operator!=` operation.
+     * @param this Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool operator!=(const SwFont &other) const { return !(*this == other); }
 
     HFONT handle(HDC context)

@@ -60,15 +60,15 @@ for %%T in (SwBridge swapi SwLaunch SwComponentContainer SwBuild) do (
 set "BIN_DIR=%ROOT_DIR%\\bin"
 if not exist "%BIN_DIR%" mkdir "%BIN_DIR%" >nul 2>&1
 
-call :copy_exec "SwBridge" "SwNode\\SwAPI\\SwBridge" "SwBridge.exe"
+call :copy_exec "SwBridge" "tools\\SwNode\\SwAPI\\SwBridge" "SwBridge.exe"
 if errorlevel 1 exit /b 1
-call :copy_exec "swapi" "SwNode\\SwAPI\\SwApi" "swapi.exe"
+call :copy_exec "swapi" "tools\\SwNode\\SwAPI\\SwApi" "swapi.exe"
 if errorlevel 1 exit /b 1
-call :copy_exec "SwLaunch" "SwNode\\SwLaunch" "SwLaunch.exe"
+call :copy_exec "SwLaunch" "tools\\SwNode\\SwLaunch" "SwLaunch.exe"
 if errorlevel 1 exit /b 1
-call :copy_exec "SwComponentContainer" "SwNode\\SwComponentContainer" "SwComponentContainer.exe"
+call :copy_exec "SwComponentContainer" "tools\\SwNode\\SwComponentContainer" "SwComponentContainer.exe"
 if errorlevel 1 exit /b 1
-call :copy_exec "SwBuild" "SwNode\\SwBuild" "SwBuild.exe"
+call :copy_exec "SwBuild" "tools\\SwNode\\SwBuild" "SwBuild.exe"
 if errorlevel 1 exit /b 1
 
 echo [OK] Termine.
@@ -147,4 +147,3 @@ if exist "%BRIDGE_DIR%js\\app.js" (
 )
 
 exit /b 0
-

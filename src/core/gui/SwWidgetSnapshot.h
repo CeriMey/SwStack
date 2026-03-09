@@ -1,4 +1,28 @@
-#pragma once
+﻿#pragma once
+
+/**
+ * @file src/core/gui/SwWidgetSnapshot.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwWidgetSnapshot in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the widget snapshot interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are SwWidgetSnapshot.
+ *
+ * Widget-oriented declarations here usually capture persistent UI state, input handling, layout
+ * participation, and paint-time behavior while keeping platform-specific rendering details behind
+ * lower layers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -30,18 +54,29 @@
 #include "platform/win/SwWindows.h"
 #include "platform/win/SwWin32Painter.h"
 #include <cstdint>
-#include <vector>
 #endif
 
 class SwWidgetSnapshot {
 public:
+    /**
+     * @brief Performs the `savePng` operation on the associated resource.
+     * @param widget Widget associated with the operation.
+     * @param filePath Path of the target file.
+     * @return The requested png.
+     */
     static bool savePng(SwWidgetInterface* widget, const SwString& filePath) {
         if (!widget) {
             return false;
         }
 
 #if defined(_WIN32)
-        SwRect rect = widget->getRect();
+        SwRect rect = widget->frameGeometry();
+        if (auto* concrete = dynamic_cast<SwWidget*>(widget)) {
+            rect = concrete->rect();
+        } else {
+            rect.x = 0;
+            rect.y = 0;
+        }
         if (rect.width <= 0 || rect.height <= 0) {
             return false;
         }
@@ -78,8 +113,7 @@ public:
 
         HBITMAP oldBitmap = static_cast<HBITMAP>(SelectObject(memDc, dib));
 
-        SwWin32Painter basePainter(memDc);
-        OffsetPainter painter(&basePainter, -rect.x, -rect.y);
+        SwWin32Painter painter(memDc);
         painter.clear(SwColor{255, 255, 255});
 
         PaintEvent paintEvent(&painter, rect);
@@ -115,168 +149,6 @@ public:
 
 private:
 #if defined(_WIN32)
-    class OffsetPainter final : public SwPainter {
-    public:
-        OffsetPainter(SwPainter* base, int dx, int dy)
-            : m_base(base), m_dx(dx), m_dy(dy) {}
-
-        void clear(const SwColor& color) override {
-            if (m_base) {
-                m_base->clear(color);
-            }
-        }
-
-        void fillRect(const SwRect& rect,
-                      const SwColor& fillColor,
-                      const SwColor& borderColor,
-                      int borderWidth) override {
-            if (!m_base) {
-                return;
-            }
-            SwRect r = rect;
-            r.x += m_dx;
-            r.y += m_dy;
-            m_base->fillRect(r, fillColor, borderColor, borderWidth);
-        }
-
-        void fillRoundedRect(const SwRect& rect,
-                             int radius,
-                             const SwColor& fillColor,
-                             const SwColor& borderColor,
-                             int borderWidth) override {
-            if (!m_base) {
-                return;
-            }
-            SwRect r = rect;
-            r.x += m_dx;
-            r.y += m_dy;
-            m_base->fillRoundedRect(r, radius, fillColor, borderColor, borderWidth);
-        }
-
-        void drawRect(const SwRect& rect,
-                      const SwColor& borderColor,
-                      int borderWidth) override {
-            if (!m_base) {
-                return;
-            }
-            SwRect r = rect;
-            r.x += m_dx;
-            r.y += m_dy;
-            m_base->drawRect(r, borderColor, borderWidth);
-        }
-
-        void drawLine(int x1,
-                      int y1,
-                      int x2,
-                      int y2,
-                      const SwColor& color,
-                      int width) override {
-            if (!m_base) {
-                return;
-            }
-            m_base->drawLine(x1 + m_dx, y1 + m_dy, x2 + m_dx, y2 + m_dy, color, width);
-        }
-
-        void fillPolygon(const SwPoint* points,
-                         int count,
-                         const SwColor& fillColor,
-                         const SwColor& borderColor,
-                         int borderWidth) override {
-            if (!m_base || !points || count <= 0) {
-                return;
-            }
-            std::vector<SwPoint> pts;
-            pts.reserve(static_cast<size_t>(count));
-            for (int i = 0; i < count; ++i) {
-                pts.push_back(SwPoint{points[i].x + m_dx, points[i].y + m_dy});
-            }
-            m_base->fillPolygon(pts.data(), count, fillColor, borderColor, borderWidth);
-        }
-
-        void pushClipRect(const SwRect& rect) override {
-            if (!m_base) {
-                return;
-            }
-            SwRect r = rect;
-            r.x += m_dx;
-            r.y += m_dy;
-            m_base->pushClipRect(r);
-        }
-
-        void popClipRect() override {
-            if (!m_base) {
-                return;
-            }
-            m_base->popClipRect();
-        }
-
-        void fillEllipse(const SwRect& rect,
-                         const SwColor& fillColor,
-                         const SwColor& borderColor,
-                         int borderWidth) override {
-            if (!m_base) {
-                return;
-            }
-            SwRect r = rect;
-            r.x += m_dx;
-            r.y += m_dy;
-            m_base->fillEllipse(r, fillColor, borderColor, borderWidth);
-        }
-
-        void drawEllipse(const SwRect& rect,
-                         const SwColor& borderColor,
-                         int borderWidth) override {
-            if (!m_base) {
-                return;
-            }
-            SwRect r = rect;
-            r.x += m_dx;
-            r.y += m_dy;
-            m_base->drawEllipse(r, borderColor, borderWidth);
-        }
-
-        void drawImage(const SwRect& targetRect,
-                       const SwImage& image,
-                       const SwRect* sourceRect = nullptr) override {
-            if (!m_base) {
-                return;
-            }
-            SwRect r = targetRect;
-            r.x += m_dx;
-            r.y += m_dy;
-            m_base->drawImage(r, image, sourceRect);
-        }
-
-        void drawText(const SwRect& rect,
-                      const SwString& text,
-                      DrawTextFormats alignment,
-                      const SwColor& color,
-                      const SwFont& font) override {
-            if (!m_base) {
-                return;
-            }
-            SwRect r = rect;
-            r.x += m_dx;
-            r.y += m_dy;
-            m_base->drawText(r, text, alignment, color, font);
-        }
-
-        void finalize() override {
-            if (m_base) {
-                m_base->finalize();
-            }
-        }
-
-        void* nativeHandle() override {
-            return m_base ? m_base->nativeHandle() : nullptr;
-        }
-
-    private:
-        SwPainter* m_base{nullptr};
-        int m_dx{0};
-        int m_dy{0};
-    };
-
     static void appendU8(SwByteArray& out, std::uint8_t value) {
         out.append(static_cast<char>(value));
     }
@@ -482,3 +354,4 @@ private:
     }
 #endif
 };
+

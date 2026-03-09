@@ -1,0 +1,36 @@
+{
+  "global": {
+    "clientMaxBodyMb": 100,
+    "enableGzip": true,
+    "enableHttp2": true,
+    "httpPort": 80,
+    "httpsPort": 443,
+    "proxyBuffering": true,
+    "workerProcesses": "auto"
+  },
+  "subdomains": [
+    {
+      "accessPolicy": "public",
+      "forceHttps": false,
+      "headers": [],
+      "host": "app.local.test",
+      "pathPrefix": "/",
+      "rateLimitRpm": 0,
+      "stripPrefix": false,
+      "tls": false,
+      "upstreamId": "app_main",
+      "websocket": true
+    }
+  ],
+  "upstreams": [
+    {
+      "active": true,
+      "connectTimeoutMs": 3000,
+      "host": "127.0.0.1",
+      "id": "app_main",
+      "port": 8081,
+      "protocol": "http",
+      "readTimeoutMs": 30000
+    }
+  ]
+}

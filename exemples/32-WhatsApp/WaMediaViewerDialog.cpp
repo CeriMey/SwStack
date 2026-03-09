@@ -1,4 +1,4 @@
-#include "WaMediaViewerDialog.h"
+﻿#include "WaMediaViewerDialog.h"
 
 #include "WaMediaImageLoader.h"
 
@@ -32,7 +32,7 @@ protected:
             return;
         }
 
-        const SwRect r = getRect();
+        const SwRect r = rect();
         painter->fillRect(r, SwColor{0, 0, 0}, SwColor{0, 0, 0}, 0);
 
         if (m_image.isNull()) {
@@ -126,16 +126,16 @@ void WaMediaViewerDialog::buildUi_() {
             m_videoWidget->setVideoSource(movie);
             m_videoWidget->start();
         } else {
-            auto* label = new SwLabel("Impossible de lire cette vidéo.", content);
+            auto* label = new SwLabel("Impossible de lire cette vidÃ©o.", content);
             label->setStyleSheet("SwLabel { background-color: rgba(0,0,0,0); border-width: 0px; color: rgb(255,255,255); font-size: 14px; }");
             label->show();
         }
-        setWindowTitle("Vidéo");
+        setWindowTitle("VidÃ©o");
 #else
-        auto* label = new SwLabel("La lecture vidéo est supportée uniquement sur Windows.", content);
+        auto* label = new SwLabel("La lecture vidÃ©o est supportÃ©e uniquement sur Windows.", content);
         label->setStyleSheet("SwLabel { background-color: rgba(0,0,0,0); border-width: 0px; color: rgb(255,255,255); font-size: 14px; }");
         label->show();
-        setWindowTitle("Vidéo");
+        setWindowTitle("VidÃ©o");
 #endif
         return;
     }
@@ -147,14 +147,13 @@ void WaMediaViewerDialog::updateLayout_() {
         return;
     }
 
-    const SwRect r = content->getRect();
+    const SwRect r = content->rect();
     if (m_imageView) {
-        m_imageView->move(r.x, r.y);
         m_imageView->resize(r.width, r.height);
     }
     if (m_videoWidget) {
-        m_videoWidget->move(r.x, r.y);
         m_videoWidget->resize(r.width, r.height);
     }
 }
+
 

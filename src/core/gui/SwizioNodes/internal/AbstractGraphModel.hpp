@@ -1,5 +1,31 @@
 #pragma once
 
+/**
+ * @file src/core/gui/SwizioNodes/internal/AbstractGraphModel.hpp
+ * @ingroup core_swizio_nodes
+ * @brief Declares the public interface exposed by AbstractGraphModel in the CoreSw node-editor
+ * layer.
+ *
+ * This header belongs to the CoreSw node-editor layer. It contains the graph, geometry, style,
+ * and scene infrastructure used by the embedded node editor.
+ *
+ * Within that layer, this file focuses on the abstract graph model interface. The declarations
+ * exposed here define the stable surface that adjacent code can rely on while the implementation
+ * remains free to evolve behind the header.
+ *
+ * This header mainly contributes module-level utilities, helper declarations, or namespaced types
+ * that are consumed by the surrounding subsystem.
+ *
+ * Model-oriented declarations here define the data contract consumed by views, delegates, or
+ * algorithms, with an emphasis on stable roles, ownership, and update flow rather than on
+ * presentation details.
+ *
+ * Most declarations here are extension points or internal contracts that coordinate graph
+ * editing, visualization, and interaction.
+ *
+ */
+
+
 #include "Export.hpp"
 
 #include "core/object/SwObject.h"
@@ -32,9 +58,20 @@ class SWIZIO_NODES_PUBLIC AbstractGraphModel : public SwObject
     SW_OBJECT(AbstractGraphModel, SwObject)
 
 public:
+    /**
+     * @brief Constructs a `AbstractGraphModel` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit AbstractGraphModel(SwObject* parent = nullptr)
         : SwObject(parent) {}
 
+    /**
+     * @brief Destroys the `AbstractGraphModel` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~AbstractGraphModel() override = default;
 
 public:
@@ -120,6 +157,11 @@ public:
         return nodeData(nodeId, role).get<T>();
     }
 
+    /**
+     * @brief Performs the `nodeFlags` operation.
+     * @param nodeId Value passed to the method.
+     * @return The requested node Flags.
+     */
     virtual NodeFlags nodeFlags(NodeId nodeId) const
     {
         SW_UNUSED(nodeId);
@@ -150,6 +192,17 @@ public:
         return portData(nodeId, portType, index, role).get<T>();
     }
 
+    /**
+     * @brief Sets the port Data.
+     * @param nodeId Value passed to the method.
+     * @param portType Value passed to the method.
+     * @param index Value passed to the method.
+     * @param value Value passed to the method.
+     * @param role Value passed to the method.
+     * @return The requested port Data.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     virtual bool setPortData(NodeId nodeId,
                              PortType portType,
                              PortIndex index,
@@ -157,8 +210,18 @@ public:
                              PortRole role = PortRole::Data)
         = 0;
 
+    /**
+     * @brief Performs the `deleteConnection` operation.
+     * @param connectionId Value passed to the method.
+     * @return The requested delete Connection.
+     */
     virtual bool deleteConnection(ConnectionId const connectionId) = 0;
 
+    /**
+     * @brief Performs the `deleteNode` operation.
+     * @param nodeId Value passed to the method.
+     * @return The requested delete Node.
+     */
     virtual bool deleteNode(NodeId const nodeId) = 0;
 
     /**
@@ -317,4 +380,3 @@ inline void AbstractGraphModel::portsInserted()
 }
 
 } // namespace SwizioNodes
-

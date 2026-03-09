@@ -1,4 +1,29 @@
 #pragma once
+
+/**
+ * @file src/core/platform/SwPlatformWin.h
+ * @ingroup core_platform
+ * @brief Declares the public interface exposed by SwPlatformWin in the CoreSw core platform
+ * abstraction layer.
+ *
+ * This header belongs to the CoreSw core platform abstraction layer. It encapsulates low-level
+ * filesystem and standard-location services that differ across supported operating systems.
+ *
+ * Within that layer, this file focuses on the platform win interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are SwWinFilePlatform, SwWinDirPlatform,
+ * SwWinFileInfoPlatform, and SwWinStandardLocationProvider.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * The declarations in this area keep higher layers independent from direct POSIX or Win32 usage.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -56,6 +81,13 @@ inline SwString fromWide(const std::wstring& wstr) {
 
 class SwWinFilePlatform : public SwFilePlatform {
 public:
+    /**
+     * @brief Returns whether the object reports file.
+     * @param path Path used by the operation.
+     * @return `true` when the object reports file; otherwise `false`.
+     *
+     * @details This query does not modify the object state.
+     */
     bool isFile(const SwString& path) const override {
         struct _stat64 info;
         if (_wstat64(toWide(path).c_str(), &info) != 0) {
@@ -64,6 +96,13 @@ public:
         return (info.st_mode & _S_IFREG) != 0;
     }
 
+    /**
+     * @brief Performs the `copy` operation.
+     * @param source Value passed to the method.
+     * @param destination Value passed to the method.
+     * @param overwrite Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool copy(const SwString& source, const SwString& destination, bool overwrite) override {
         if (!CopyFileW(toWide(source).c_str(), toWide(destination).c_str(), !overwrite)) {
             swCError(kSwLogCategory_SwPlatformWin) << "Failed to copy file. Error: " << GetLastError();
@@ -72,6 +111,16 @@ public:
         return true;
     }
 
+    /**
+     * @brief Performs the `getFileMetadata` operation.
+     * @param path Path used by the operation.
+     * @param creationTime Value passed to the method.
+     * @param lastAccessTime Value passed to the method.
+     * @param lastWriteTime Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool getFileMetadata(const SwString& path, SwDateTime& creationTime, SwDateTime& lastAccessTime, SwDateTime& lastWriteTime) override {
         HANDLE handle = CreateFileW(toWide(path).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (handle == INVALID_HANDLE_VALUE) {
@@ -90,6 +139,14 @@ public:
         return true;
     }
 
+    /**
+     * @brief Sets the creation Time.
+     * @param path Path used by the operation.
+     * @param creationTime Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     bool setCreationTime(const SwString& path, SwDateTime creationTime) override {
         HANDLE handle = openForMetadata(path);
         if (handle == INVALID_HANDLE_VALUE) return false;
@@ -99,6 +156,14 @@ public:
         return ok;
     }
 
+    /**
+     * @brief Sets the last Write Date.
+     * @param path Path used by the operation.
+     * @param lastWriteTime Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     bool setLastWriteDate(const SwString& path, SwDateTime lastWriteTime) override {
         HANDLE handle = openForMetadata(path);
         if (handle == INVALID_HANDLE_VALUE) return false;
@@ -108,6 +173,14 @@ public:
         return ok;
     }
 
+    /**
+     * @brief Sets the last Access Date.
+     * @param path Path used by the operation.
+     * @param lastAccessTime Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     bool setLastAccessDate(const SwString& path, SwDateTime lastAccessTime) override {
         HANDLE handle = openForMetadata(path);
         if (handle == INVALID_HANDLE_VALUE) return false;
@@ -117,6 +190,16 @@ public:
         return ok;
     }
 
+    /**
+     * @brief Sets the all Dates.
+     * @param path Path used by the operation.
+     * @param creationTime Value passed to the method.
+     * @param lastAccessTime Value passed to the method.
+     * @param lastWriteTime Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     bool setAllDates(const SwString& path, SwDateTime creationTime, SwDateTime lastAccessTime, SwDateTime lastWriteTime) override {
         HANDLE handle = openForMetadata(path);
         if (handle == INVALID_HANDLE_VALUE) return false;
@@ -128,6 +211,13 @@ public:
         return ok;
     }
 
+    /**
+     * @brief Performs the `writeMetadata` operation on the associated resource.
+     * @param path Path used by the operation.
+     * @param key Value passed to the method.
+     * @param value Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool writeMetadata(const SwString& path, const SwString& key, const SwString& value) override {
         if (!isNTFS(path)) {
             swCWarning(kSwLogCategory_SwPlatformWin) << "ADS metadata unsupported on this volume";
@@ -146,6 +236,12 @@ public:
         return ok != 0;
     }
 
+    /**
+     * @brief Performs the `readMetadata` operation on the associated resource.
+     * @param path Path used by the operation.
+     * @param key Value passed to the method.
+     * @return The resulting metadata.
+     */
     SwString readMetadata(const SwString& path, const SwString& key) override {
         std::wstring adsPath = toWide(convertToLongPath(path)) + L":" + toWide(key);
         HANDLE handle = CreateFileW(adsPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -213,16 +309,33 @@ private:
 
 class SwWinDirPlatform : public SwDirPlatform {
 public:
+    /**
+     * @brief Performs the `exists` operation.
+     * @param path Path used by the operation.
+     * @return `true` on success; otherwise `false`.
+     */
     bool exists(const SwString& path) const override {
         DWORD attr = GetFileAttributesW(toWide(path).c_str());
         return attr != INVALID_FILE_ATTRIBUTES;
     }
 
+    /**
+     * @brief Returns whether the object reports directory.
+     * @param path Path used by the operation.
+     * @return `true` when the object reports directory; otherwise `false`.
+     *
+     * @details This query does not modify the object state.
+     */
     bool isDirectory(const SwString& path) const override {
         DWORD attr = GetFileAttributesW(toWide(path).c_str());
         return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY);
     }
 
+    /**
+     * @brief Performs the `normalizePath` operation.
+     * @param path Path used by the operation.
+     * @return The requested normalize Path.
+     */
     SwString normalizePath(const SwString& path) const override {
         SwString result = path;
         result.replace("/", "\\");
@@ -232,22 +345,50 @@ public:
         return result;
     }
 
+    /**
+     * @brief Performs the `pathSeparator` operation.
+     * @return The requested path Separator.
+     */
     SwString pathSeparator() const override { return SwString("\\"); }
 
+    /**
+     * @brief Performs the `entryList` operation.
+     * @param path Path used by the operation.
+     * @param flags Flags that refine the operation.
+     * @return The requested entry List.
+     */
     SwStringList entryList(const SwString& path, EntryTypes flags) const override {
         return listInternal(path, flags, {});
     }
 
+    /**
+     * @brief Performs the `entryList` operation.
+     * @param path Path used by the operation.
+     * @param filters Value passed to the method.
+     * @param flags Flags that refine the operation.
+     * @return The requested entry List.
+     */
     SwStringList entryList(const SwString& path, const SwStringList& filters, EntryTypes flags) const override {
         return listInternal(path, flags, filters);
     }
 
+    /**
+     * @brief Performs the `findFiles` operation.
+     * @param path Path used by the operation.
+     * @param filter Value passed to the method.
+     * @return The requested find Files.
+     */
     SwStringList findFiles(const SwString& path, const SwString& filter) const override {
         SwStringList found;
         recurseFind(normalizeWithSeparator(path), filter, found);
         return found;
     }
 
+    /**
+     * @brief Performs the `absolutePath` operation.
+     * @param path Path used by the operation.
+     * @return The requested absolute Path.
+     */
     SwString absolutePath(const SwString& path) const override {
         wchar_t buffer[MAX_PATH];
         DWORD len = GetFullPathNameW(toWide(path).c_str(), MAX_PATH, buffer, nullptr);
@@ -257,6 +398,12 @@ public:
         return fromWide(buffer);
     }
 
+    /**
+     * @brief Returns the current current Path.
+     * @return The current current Path.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString currentPath() const override {
         wchar_t buffer[MAX_PATH];
         DWORD len = GetCurrentDirectoryW(MAX_PATH, buffer);
@@ -270,6 +417,11 @@ public:
         return result;
     }
 
+    /**
+     * @brief Performs the `mkdir` operation.
+     * @param path Path used by the operation.
+     * @return `true` on success; otherwise `false`.
+     */
     bool mkdir(const SwString& path) const override {
         SwString normalized = normalizePath(path);
         std::wstring wide = toWide(normalized);
@@ -323,6 +475,11 @@ public:
         return err == ERROR_ALREADY_EXISTS;
     }
 
+    /**
+     * @brief Removes the specified recursively.
+     * @param path Path used by the operation.
+     * @return `true` on success; otherwise `false`.
+     */
     bool removeRecursively(const SwString& path) const override {
         WIN32_FIND_DATAW data;
         SwString search = normalizeWithSeparator(path) + "*";
@@ -344,6 +501,12 @@ public:
         return RemoveDirectoryW(toWide(path).c_str()) != 0;
     }
 
+    /**
+     * @brief Performs the `copyDirectory` operation.
+     * @param source Value passed to the method.
+     * @param destination Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool copyDirectory(const SwString& source, const SwString& destination) const override {
         if (!mkdir(destination)) {
             return false;
@@ -388,7 +551,10 @@ private:
         SwStringList entries;
         WIN32_FIND_DATAW data;
         SwString search = normalizeWithSeparator(path) + "*";
+        // Suppress error dialogs for inaccessible paths (e.g. disconnected network drives).
+        const UINT oldMode = SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
         HANDLE handle = FindFirstFileW(toWide(search).c_str(), &data);
+        SetErrorMode(oldMode);
         if (handle == INVALID_HANDLE_VALUE) {
             return entries;
         }
@@ -445,23 +611,47 @@ private:
 
 class SwWinFileInfoPlatform : public SwFileInfoPlatform {
 public:
+    /**
+     * @brief Performs the `exists` operation.
+     * @param path Path used by the operation.
+     * @return `true` on success; otherwise `false`.
+     */
     bool exists(const std::string& path) const override {
         DWORD attributes = GetFileAttributesA(path.c_str());
         return attributes != INVALID_FILE_ATTRIBUTES;
     }
 
+    /**
+     * @brief Returns whether the object reports file.
+     * @param path Path used by the operation.
+     * @return `true` when the object reports file; otherwise `false`.
+     *
+     * @details This query does not modify the object state.
+     */
     bool isFile(const std::string& path) const override {
         DWORD attributes = GetFileAttributesA(path.c_str());
         if (attributes == INVALID_FILE_ATTRIBUTES) return false;
         return !(attributes & FILE_ATTRIBUTE_DIRECTORY);
     }
 
+    /**
+     * @brief Returns whether the object reports dir.
+     * @param path Path used by the operation.
+     * @return `true` when the object reports dir; otherwise `false`.
+     *
+     * @details This query does not modify the object state.
+     */
     bool isDir(const std::string& path) const override {
         DWORD attributes = GetFileAttributesA(path.c_str());
         if (attributes == INVALID_FILE_ATTRIBUTES) return false;
         return (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
     }
 
+    /**
+     * @brief Performs the `absoluteFilePath` operation.
+     * @param path Path used by the operation.
+     * @return The requested absolute File Path.
+     */
     std::string absoluteFilePath(const std::string& path) const override {
         char buffer[MAX_PATH];
         if (_fullpath(buffer, path.c_str(), MAX_PATH)) {
@@ -470,6 +660,11 @@ public:
         return path;
     }
 
+    /**
+     * @brief Performs the `size` operation.
+     * @param path Path used by the operation.
+     * @return The current size value.
+     */
     size_t size(const std::string& path) const override {
         WIN32_FILE_ATTRIBUTE_DATA fileInfo;
         if (!GetFileAttributesExA(path.c_str(), GetFileExInfoStandard, &fileInfo)) {
@@ -481,6 +676,10 @@ public:
         return static_cast<size_t>(fileSize.QuadPart);
     }
 
+    /**
+     * @brief Performs the `normalizePath` operation.
+     * @param path Path used by the operation.
+     */
     void normalizePath(std::string& path) const override {
         std::replace(path.begin(), path.end(), '/', '\\');
     }
@@ -488,6 +687,11 @@ public:
 
 class SwWinStandardLocationProvider : public SwStandardLocationProvider {
 public:
+    /**
+     * @brief Performs the `standardLocation` operation.
+     * @param type Value passed to the method.
+     * @return The requested standard Location.
+     */
     SwString standardLocation(SwStandardLocationId type) const override {
         if (type == SwStandardLocationId::Temp) {
             wchar_t tempPath[MAX_PATH];
@@ -513,6 +717,12 @@ public:
         return lookupKnownFolder(folderId);
     }
 
+    /**
+     * @brief Performs the `convertPath` operation.
+     * @param path Path used by the operation.
+     * @param type Value passed to the method.
+     * @return The requested convert Path.
+     */
     SwString convertPath(const SwString& path, SwStandardPathType type) const override {
         SwString result = path;
         switch (type) {

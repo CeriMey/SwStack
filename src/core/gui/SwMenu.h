@@ -1,4 +1,4 @@
-/***************************************************************************************************
+﻿/***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
  * Copyright (C) 2025 Ariya Consulting
@@ -22,14 +22,21 @@
 
 #pragma once
 
-/***************************************************************************************************
- * SwMenu - Qt-like popup menu (≈ QMenu).
+/**
+ * @file SwMenu.h
+ * @ingroup core_gui
+ * @brief Declares `SwMenu`, a popup menu container built from Sw actions and widgets.
  *
- * Notes:
- * - Implemented as an action container (SwObject) with an internal popup widget.
- * - Uses a transparent overlay to capture outside clicks and close the menu.
- * - Rendered using SwPainter; styleable via StyleSheet on the internal popup widget.
- **************************************************************************************************/
+ * @details
+ * `SwMenu` implements a menu system entirely inside the toolkit instead of deferring to platform
+ * menu APIs. The menu owns a list of `SwAction` objects and materializes them into two internal
+ * widgets when displayed:
+ * - a transparent overlay that captures outside interaction,
+ * - a popup list that renders rows, highlights, check marks, icons, and submenu arrows.
+ *
+ * This structure gives the toolkit full control over painting, keyboard navigation, submenu
+ * placement, and event forwarding to root widgets such as menu bars.
+ */
 
 #include "SwAction.h"
 #include "SwWidget.h"
@@ -41,19 +48,52 @@
 #include <algorithm>
 #include <functional>
 
+/**
+ * @class SwMenu
+ * @brief Action container that can show itself as a transient popup menu.
+ *
+ * @details
+ * A `SwMenu` stores actions independently from presentation and only builds the popup widgets on
+ * demand. This lazy approach keeps the data model lightweight while still supporting:
+ * - regular clickable actions,
+ * - separators,
+ * - nested submenus,
+ * - keyboard navigation,
+ * - outside-click dismissal through a transparent overlay,
+ * - "hover keep alive" behavior for menu-bar style interactions.
+ *
+ * `popup()` anchors the menu relative to a root widget, `hide()` collapses the current menu branch,
+ * and `hideAll()` dismisses the whole root menu chain. The `triggered` signal is emitted with the
+ * originating action when the user activates an entry.
+ */
 class SwMenu : public SwObject {
     SW_OBJECT(SwMenu, SwObject)
 
 public:
+    /**
+     * @brief Constructs an empty menu.
+     * @param parent Optional owning object or parent menu.
+     */
     explicit SwMenu(SwObject* parent = nullptr)
         : SwObject(parent) {}
 
+    /**
+     * @brief Creates a text-only action, adds it to the menu, and returns it.
+     * @param text Visible label shown in the popup row.
+     * @return Newly created action owned by the menu.
+     */
     SwAction* addAction(const SwString& text) {
         auto* action = new SwAction(text, this);
         addAction(action);
         return action;
     }
 
+    /**
+     * @brief Creates an action with an icon and adds it to the menu.
+     * @param icon Icon painted in the action row.
+     * @param text Visible action label.
+     * @return Newly created action owned by the menu.
+     */
     SwAction* addAction(const SwImage& icon, const SwString& text) {
         SwAction* action = addAction(text);
         if (action) {
@@ -62,6 +102,12 @@ public:
         return action;
     }
 
+    /**
+     * @brief Creates an action and wires a callback to its `triggered` signal.
+     * @param text Visible action label.
+     * @param callback Function invoked when the action is triggered.
+     * @return Newly created action owned by the menu.
+     */
     SwAction* addAction(const SwString& text, const std::function<void()>& callback) {
         SwAction* action = addAction(text);
         if (callback) {
@@ -70,6 +116,13 @@ public:
         return action;
     }
 
+    /**
+     * @brief Creates an action with both icon and callback.
+     * @param icon Icon shown beside the action text.
+     * @param text Visible action label.
+     * @param callback Function invoked when the action is triggered.
+     * @return Newly created action owned by the menu.
+     */
     SwAction* addAction(const SwImage& icon, const SwString& text, const std::function<void()>& callback) {
         SwAction* action = addAction(text, callback);
         if (action) {
@@ -78,6 +131,14 @@ public:
         return action;
     }
 
+    /**
+     * @brief Adds an already constructed action to the menu.
+     * @param action Action instance to append.
+     *
+     * @details
+     * The method adopts the action when it does not already have a parent and hooks its `changed`
+     * signal so the popup geometry and painting stay in sync with runtime updates.
+     */
     void addAction(SwAction* action) {
         if (!action) {
             return;
@@ -100,6 +161,10 @@ public:
         }
     }
 
+    /**
+     * @brief Appends a non-interactive separator row.
+     * @return Separator action object owned by the menu.
+     */
     SwAction* addSeparator() {
         auto* action = new SwAction(SwString(), this);
         action->setSeparator(true);
@@ -107,6 +172,11 @@ public:
         return action;
     }
 
+    /**
+     * @brief Creates a submenu entry and returns the nested menu instance.
+     * @param text Visible label of the parent row.
+     * @return Newly created submenu owned by this menu.
+     */
     SwMenu* addMenu(const SwString& text) {
         auto* sub = new SwMenu(this);
         SwAction* a = addAction(text);
@@ -116,6 +186,12 @@ public:
         return sub;
     }
 
+    /**
+     * @brief Creates a submenu entry with an icon.
+     * @param icon Icon displayed for the submenu row.
+     * @param text Visible label of the parent row.
+     * @return Newly created submenu owned by this menu.
+     */
     SwMenu* addMenu(const SwImage& icon, const SwString& text) {
         SwMenu* sub = addMenu(text);
         SwAction* a = m_actions.isEmpty() ? nullptr : m_actions.back();
@@ -125,8 +201,22 @@ public:
         return sub;
     }
 
+    /**
+     * @brief Returns the actions currently stored in the menu.
+     * @return Snapshot of the action list in insertion order.
+     */
     SwVector<SwAction*> actions() const { return m_actions; }
 
+    /**
+     * @brief Shows the menu popup near the provided root-widget coordinates.
+     * @param x Horizontal popup origin in the root widget coordinate space.
+     * @param y Vertical popup origin in the root widget coordinate space.
+     *
+     * @details
+     * The menu ensures that its overlay and popup widgets exist, clamps the requested geometry to
+     * the visible root widget bounds, updates the popup size from the current action list, and then
+     * shows both the overlay and popup widgets.
+     */
     void popup(int x, int y) {
         ensurePopup();
         if (!m_root || !m_overlay || !m_popup) {
@@ -139,7 +229,7 @@ public:
         m_overlay->resize(m_root->width(), m_root->height());
 
         m_popup->updateGeometryFromActions();
-        const SwRect size = m_popup->sizeHint();
+        const SwSize size = m_popup->sizeHint();
 
         const int maxX = std::max(0, m_root->width() - size.width - 2);
         const int maxY = std::max(0, m_root->height() - size.height - 2);
@@ -155,12 +245,29 @@ public:
         m_popup->update();
     }
 
+    /**
+     * @brief Shows the menu and preserves an additional hover-safe rectangle.
+     * @param x Horizontal popup origin in root-widget coordinates.
+     * @param y Vertical popup origin in root-widget coordinates.
+     * @param hoverKeepAliveRect Rectangle that should not immediately close the menu when crossed.
+     *
+     * @details
+     * This overload is primarily used by menu bars so pointer travel between the source widget and
+     * the popup does not collapse the menu chain too aggressively.
+     */
     void popup(int x, int y, const SwRect& hoverKeepAliveRect) {
         m_hoverCloseEnabled = true;
         m_hoverKeepAliveRect = hoverKeepAliveRect;
         popup(x, y);
     }
 
+    /**
+     * @brief Hides this menu and any currently open submenu branch.
+     *
+     * @details
+     * The call clears hover-close state, closes nested submenus, emits `aboutToHide` when the popup
+     * was visible, and hides the overlay when this menu owns it.
+     */
     void hide() {
         closeSubMenu_();
         stopHoverCloseTimer_();
@@ -178,26 +285,51 @@ public:
         }
     }
 
+    /**
+     * @brief Hides the entire root menu chain.
+     *
+     * @details
+     * This is the preferred dismissal path when an outside click or Escape key should close all
+     * nested menus rather than only the current branch.
+     */
     void hideAll() {
         if (SwMenu* root = rootMenu_()) {
             root->hide();
         }
     }
 
+    /**
+     * @brief Returns whether the popup widget for this menu is currently visible.
+     * @return `true` when the popup exists and is shown.
+     */
     bool isVisible() const { return m_popup && m_popup->getVisible(); }
 
 signals:
-    DECLARE_SIGNAL_VOID(aboutToShow);
-    DECLARE_SIGNAL_VOID(aboutToHide);
-    DECLARE_SIGNAL(triggered, SwAction*);
+    DECLARE_SIGNAL_VOID(aboutToShow);   ///< Emitted just before the popup becomes visible.
+    DECLARE_SIGNAL_VOID(aboutToHide);   ///< Emitted just before the popup is hidden.
+    DECLARE_SIGNAL(triggered, SwAction*); ///< Emitted when an action from this menu tree is activated.
 
 private:
     class PopupList;
 
+    /**
+     * @brief Full-screen transparent widget that dismisses menus and forwards outside events.
+     *
+     * @details
+     * The overlay sits on top of the root widget while a menu is open. It detects clicks outside
+     * the visible popup chain, closes the menu hierarchy, and optionally forwards the original event
+     * back to the underlying root widget so controls such as menu bars can immediately react.
+     */
     class PopupOverlay final : public SwWidget {
         SW_OBJECT(PopupOverlay, SwWidget)
 
     public:
+        /**
+         * @brief Constructs the overlay that captures interaction outside the popup.
+         * @param owner Menu tree controlled by this overlay.
+         * @param root Root widget that receives forwarded outside-click events when needed.
+         * @param parent Parent widget, typically the same root widget.
+         */
         PopupOverlay(SwMenu* owner, SwWidget* root, SwWidget* parent = nullptr)
             : SwWidget(parent)
             , m_owner(owner)
@@ -206,6 +338,10 @@ private:
             setFocusPolicy(FocusPolicyEnum::Strong);
         }
 
+        /**
+         * @brief Handles outside clicks by closing menus or forwarding the event to the root widget.
+         * @param event Mouse press event expressed in root-widget coordinates.
+         */
         void mousePressEvent(MouseEvent* event) override {
             if (!event || !m_owner) {
                 return;
@@ -221,6 +357,9 @@ private:
 
             if (m_owner->isPointInsideHoverKeepAlive_(px, py)) {
                 if (m_root) {
+                    // Hide self first so the forwarded event reaches the actual widget
+                    // (menubar) instead of looping back through this overlay.
+                    hide();
                     MouseEvent forwarded(EventType::MousePressEvent,
                                          px,
                                          py,
@@ -253,6 +392,10 @@ private:
             SwWidget::mousePressEvent(event);
         }
 
+        /**
+         * @brief Reports pointer movement back to the owning menu for hover-close tracking.
+         * @param event Mouse move event expressed in root-widget coordinates.
+         */
         void mouseMoveEvent(MouseEvent* event) override {
             if (!event || !m_owner) {
                 return;
@@ -261,6 +404,10 @@ private:
             m_owner->onOverlayMouseMove_(event->x(), event->y());
         }
 
+        /**
+         * @brief Handles overlay keyboard shortcuts such as Escape-to-close.
+         * @param event Key event received by the overlay widget.
+         */
         void keyPressEvent(KeyEvent* event) override {
             if (!event || !m_owner) {
                 return;
@@ -280,28 +427,48 @@ private:
         SwWidget* m_root{nullptr};
     };
 
+    /**
+     * @brief Internal popup surface that paints menu rows and handles keyboard or pointer selection.
+     *
+     * @details
+     * `PopupList` is responsible for geometry calculation, row hit testing, hover tracking, and
+     * action activation. It stays deliberately focused on presentation and delegates higher-level
+     * submenu management back to its owning `SwMenu`.
+     */
     class PopupList final : public SwWidget {
         SW_OBJECT(PopupList, SwWidget)
 
     public:
+        /**
+         * @brief Constructs the popup list that renders the menu action rows.
+         * @param owner Menu whose actions are painted by this popup.
+         * @param parent Parent widget, usually the shared overlay.
+         */
         explicit PopupList(SwMenu* owner, SwWidget* parent = nullptr)
             : SwWidget(parent)
             , m_owner(owner) {
             setCursor(CursorType::Hand);
             setFocusPolicy(FocusPolicyEnum::Strong);
             setStyleSheet(R"(
-                SwMenuPopup {
+                PopupList {
                     background-color: rgb(255, 255, 255);
                     border-color: rgb(220, 224, 232);
                     border-width: 1px;
-                    border-radius: 12px;
-                    padding: 8px;
+                    border-radius: 0px;
+                    padding: 4px;
                     color: rgb(24, 28, 36);
                     font-size: 13px;
                 }
             )");
         }
 
+        /**
+         * @brief Recomputes cached popup dimensions from the current action list.
+         *
+         * @details
+         * Text width, action count, icon gutters, checkmark space, and submenu arrow space all
+         * contribute to the geometry cached for `sizeHint()` and popup placement.
+         */
         void updateGeometryFromActions() {
             const int n = m_owner ? m_owner->m_actions.size() : 0;
             const int h = m_padding * 2 + n * m_itemHeight;
@@ -332,10 +499,18 @@ private:
             m_cachedWidth = std::max(m_minWidth, w);
         }
 
-        SwRect sizeHint() const override {
-            return SwRect{0, 0, m_cachedWidth, m_cachedHeight};
+        /**
+         * @brief Returns the preferred popup size derived from cached geometry.
+         * @return Rectangle whose width and height match the currently measured content.
+         */
+        SwSize sizeHint() const override {
+            return SwSize{m_cachedWidth, m_cachedHeight};
         }
 
+        /**
+         * @brief Paints the popup frame and all visible rows.
+         * @param event Paint event providing the active painter.
+         */
         void paintEvent(PaintEvent* event) override {
             SwPainter* painter = event ? event->painter() : nullptr;
             if (!painter) {
@@ -354,7 +529,7 @@ private:
             resolveBackground(sheet, bg, bgAlpha, paintBg);
             resolveBorder(sheet, border, borderWidth, radius);
 
-            const SwRect bounds = getRect();
+            const SwRect bounds = rect();
             painter->fillRoundedRect(bounds, radius, bg, border, borderWidth);
 
             const SwColor textColor = resolveTextColor(sheet, SwColor{24, 28, 36});
@@ -431,6 +606,10 @@ private:
             }
         }
 
+        /**
+         * @brief Updates row hover state as the pointer moves inside the popup.
+         * @param event Mouse move event in popup coordinates.
+         */
         void mouseMoveEvent(MouseEvent* event) override {
             if (!event || !m_owner) {
                 return;
@@ -463,6 +642,10 @@ private:
             event->accept();
         }
 
+        /**
+         * @brief Activates the pointed action or opens its submenu.
+         * @param event Mouse press event in popup coordinates.
+         */
         void mousePressEvent(MouseEvent* event) override {
             if (!event || !m_owner) {
                 return;
@@ -487,6 +670,10 @@ private:
             SwWidget::mousePressEvent(event);
         }
 
+        /**
+         * @brief Handles keyboard navigation and activation within the popup.
+         * @param event Key event targeting the popup.
+         */
         void keyPressEvent(KeyEvent* event) override {
             if (!event || !m_owner) {
                 return;
@@ -536,155 +723,14 @@ private:
         }
 
     private:
-        static int clampInt(int value, int minValue, int maxValue) {
-            if (value < minValue) return minValue;
-            if (value > maxValue) return maxValue;
-            return value;
-        }
-
-        static SwColor clampColor(const SwColor& c) {
-            return SwColor{clampInt(c.r, 0, 255), clampInt(c.g, 0, 255), clampInt(c.b, 0, 255)};
-        }
-
-        static int parsePixelValue(const SwString& value, int defaultValue) {
-            if (value.isEmpty()) {
-                return defaultValue;
-            }
-            SwString cleaned = value;
-            cleaned.replace("px", "");
-            bool ok = false;
-            int v = cleaned.toInt(&ok);
-            return ok ? v : defaultValue;
-        }
-
-        void resolveBackground(const StyleSheet* sheet,
-                               SwColor& outColor,
-                               float& outAlpha,
-                               bool& outPaint) const {
-            if (!sheet) {
-                return;
-            }
-            auto selectors = classHierarchy();
-            selectors.insert(selectors.begin(), "SwMenuPopup");
-            bool hasSwWidgetSelector = false;
-            for (const SwString& selector : selectors) {
-                if (selector == "SwWidget") {
-                    hasSwWidgetSelector = true;
-                    break;
-                }
-            }
-            if (!hasSwWidgetSelector) {
-                selectors.emplace_back("SwWidget");
-            }
-            for (int i = static_cast<int>(selectors.size()) - 1; i >= 0; --i) {
-                const SwString& selector = selectors[i];
-                if (selector.isEmpty()) {
-                    continue;
-                }
-                SwString value = sheet->getStyleProperty(selector.toStdString(), "background-color");
-                if (value.isEmpty()) {
-                    continue;
-                }
-                float alpha = 1.0f;
-                try {
-                    SwColor resolved = const_cast<StyleSheet*>(sheet)->parseColor(value.toStdString(), &alpha);
-                    if (alpha <= 0.0f) {
-                        outPaint = false;
-                    } else {
-                        outColor = clampColor(resolved);
-                        outPaint = true;
-                    }
-                    outAlpha = alpha;
-                } catch (...) {
-                }
-                return;
-            }
-        }
-
-        void resolveBorder(const StyleSheet* sheet,
-                           SwColor& outColor,
-                           int& outWidth,
-                           int& outRadius) const {
-            if (!sheet) {
-                return;
-            }
-            auto selectors = classHierarchy();
-            selectors.insert(selectors.begin(), "SwMenuPopup");
-            bool hasSwWidgetSelector = false;
-            for (const SwString& selector : selectors) {
-                if (selector == "SwWidget") {
-                    hasSwWidgetSelector = true;
-                    break;
-                }
-            }
-            if (!hasSwWidgetSelector) {
-                selectors.emplace_back("SwWidget");
-            }
-
-            for (int i = static_cast<int>(selectors.size()) - 1; i >= 0; --i) {
-                const SwString& selector = selectors[i];
-                if (selector.isEmpty()) {
-                    continue;
-                }
-
-                SwString borderColor = sheet->getStyleProperty(selector.toStdString(), "border-color");
-                if (!borderColor.isEmpty()) {
-                    try {
-                        SwColor resolved = const_cast<StyleSheet*>(sheet)->parseColor(borderColor.toStdString(), nullptr);
-                        outColor = clampColor(resolved);
-                    } catch (...) {
-                    }
-                }
-
-                SwString borderWidth = sheet->getStyleProperty(selector.toStdString(), "border-width");
-                if (!borderWidth.isEmpty()) {
-                    outWidth = clampInt(parsePixelValue(borderWidth, outWidth), 0, 20);
-                }
-
-                SwString borderRadius = sheet->getStyleProperty(selector.toStdString(), "border-radius");
-                if (!borderRadius.isEmpty()) {
-                    outRadius = clampInt(parsePixelValue(borderRadius, outRadius), 0, 32);
-                }
-            }
-        }
-
-        SwColor resolveTextColor(StyleSheet* sheet, const SwColor& fallback) const {
-            if (!sheet) {
-                return fallback;
-            }
-            auto selectors = classHierarchy();
-            selectors.insert(selectors.begin(), "SwMenuPopup");
-            bool hasSwWidgetSelector = false;
-            for (const SwString& selector : selectors) {
-                if (selector == "SwWidget") {
-                    hasSwWidgetSelector = true;
-                    break;
-                }
-            }
-            if (!hasSwWidgetSelector) {
-                selectors.emplace_back("SwWidget");
-            }
-            for (int i = static_cast<int>(selectors.size()) - 1; i >= 0; --i) {
-                const SwString& selector = selectors[i];
-                if (selector.isEmpty()) {
-                    continue;
-                }
-                SwString value = sheet->getStyleProperty(selector.toStdString(), "color");
-                if (value.isEmpty()) {
-                    continue;
-                }
-                try {
-                    SwColor resolved = sheet->parseColor(value.toStdString(), nullptr);
-                    return clampColor(resolved);
-                } catch (...) {
-                    return fallback;
-                }
-            }
-            return fallback;
-        }
-
+        /**
+         * @brief Returns the action-row index located at the given popup coordinates.
+         * @param px Horizontal coordinate in popup space.
+         * @param py Vertical coordinate in popup space.
+         * @return Zero-based row index, or `-1` when the point is outside actionable rows.
+         */
         int indexAt(int px, int py) const {
-            const SwRect bounds = getRect();
+            const SwRect bounds = rect();
             const int y0 = bounds.y + m_padding;
             const int x0 = bounds.x + m_padding;
             if (py < y0 || px < x0 || px > (x0 + std::max(0, bounds.width - 2 * m_padding))) {
@@ -697,6 +743,11 @@ private:
             return idx;
         }
 
+        /**
+         * @brief Returns the action associated with a row index.
+         * @param idx Zero-based row index.
+         * @return Matching action, or `nullptr` when the index is invalid.
+         */
         SwAction* actionAt(int idx) const {
             if (!m_owner || idx < 0 || idx >= m_owner->m_actions.size()) {
                 return nullptr;
@@ -704,6 +755,10 @@ private:
             return m_owner->m_actions[idx];
         }
 
+        /**
+         * @brief Moves keyboard / hover selection while skipping separator rows.
+         * @param delta Positive to move downward, negative to move upward.
+         */
         void moveHover(int delta) {
             if (!m_owner || m_owner->m_actions.size() == 0) {
                 return;
@@ -725,8 +780,13 @@ private:
             }
         }
 
+        /**
+         * @brief Returns the popup-space rectangle occupied by one row.
+         * @param idx Zero-based row index.
+         * @return Rectangle covering the requested row.
+         */
         SwRect rowRectForIndex_(int idx) const {
-            const SwRect bounds = getRect();
+            const SwRect bounds = rect();
             const int startY = bounds.y + m_padding;
             const int startX = bounds.x + m_padding;
             const int contentW = std::max(0, bounds.width - 2 * m_padding);
@@ -736,7 +796,7 @@ private:
         SwMenu* m_owner{nullptr};
         int m_hoverIndex{-1};
         int m_itemHeight{28};
-        int m_padding{8};
+        int m_padding{4};
         int m_minWidth{220};
         int m_textLeftPad{28};
         int m_textRightPad{12};
@@ -744,12 +804,20 @@ private:
         int m_cachedHeight{0};
     };
 
+    /**
+     * @brief Clamps an integer value into an inclusive range.
+     */
     static int clampInt(int value, int minValue, int maxValue) {
         if (value < minValue) return minValue;
         if (value > maxValue) return maxValue;
         return value;
     }
 
+    /**
+     * @brief Walks up the object hierarchy and returns the last widget ancestor found.
+     * @param start Object from which the search begins.
+     * @return Top-most widget ancestor, or `nullptr` when none exists.
+     */
     static SwWidget* findRootWidget(SwObject* start) {
         SwWidget* lastWidget = nullptr;
         for (SwObject* p = start; p; p = p->parent()) {
@@ -760,10 +828,19 @@ private:
         return lastWidget;
     }
 
+    /**
+     * @brief Returns whether a point lies inside a rectangle.
+     */
     static bool containsPoint_(const SwRect& r, int px, int py) {
         return px >= r.x && px <= (r.x + r.width) && py >= r.y && py <= (r.y + r.height);
     }
 
+    /**
+     * @brief Expands a rectangle uniformly in all directions.
+     * @param rect Source rectangle.
+     * @param margin Margin applied on each side.
+     * @return Inflated rectangle clamped to non-negative width and height.
+     */
     static SwRect inflate_(SwRect rect, int margin) {
         rect.x -= margin;
         rect.y -= margin;
@@ -772,8 +849,14 @@ private:
         return rect;
     }
 
+    /**
+     * @brief Returns the parent menu when this menu is nested inside another menu.
+     */
     SwMenu* parentMenu_() const { return dynamic_cast<SwMenu*>(parent()); }
 
+    /**
+     * @brief Returns the root menu at the top of the current submenu chain.
+     */
     SwMenu* rootMenu_() const {
         SwMenu* m = const_cast<SwMenu*>(this);
         while (m) {
@@ -786,6 +869,9 @@ private:
         return m;
     }
 
+    /**
+     * @brief Returns whether the pointer lies inside the configured hover keep-alive rectangle.
+     */
     bool isPointInsideHoverKeepAlive_(int px, int py) const {
         if (!m_hoverCloseEnabled) {
             return false;
@@ -793,9 +879,12 @@ private:
         return containsPoint_(m_hoverKeepAliveRect, px, py);
     }
 
+    /**
+     * @brief Recursively tests whether a point lies inside this popup or any open submenu popup.
+     */
     bool isPointInsideAnyPopupRecursive_(int px, int py) const {
         if (m_popup && m_popup->getVisible()) {
-            if (containsPoint_(m_popup->getRect(), px, py)) {
+            if (containsPoint_(m_popup->frameGeometry(), px, py)) {
                 return true;
             }
         }
@@ -805,17 +894,27 @@ private:
         return false;
     }
 
+    /**
+     * @brief Tests the full root menu tree for popup containment.
+     */
     bool isPointInsideAnyPopup_(int px, int py) const {
         const SwMenu* root = rootMenu_();
         return root ? root->isPointInsideAnyPopupRecursive_(px, py) : false;
     }
 
+    /**
+     * @brief Tests the bridge zone between a popup and its currently open submenu chain.
+     *
+     * @details
+     * This helper prevents immediate submenu dismissal while the pointer is traveling from the
+     * parent row toward the submenu popup.
+     */
     bool isPointInsideOpenSubMenuBridge_(int px, int py) const {
         if (!m_popup || !m_openSubMenu) {
             return false;
         }
 
-        SwRect bounds = m_popup->getRect();
+        SwRect bounds = m_popup->frameGeometry();
         int minX = bounds.x;
         int minY = bounds.y;
         int maxX = bounds.x + bounds.width;
@@ -823,7 +922,7 @@ private:
 
         const SwMenu* cur = m_openSubMenu;
         while (cur && cur->m_popup && cur->isVisible()) {
-            const SwRect r = cur->m_popup->getRect();
+            const SwRect r = cur->m_popup->frameGeometry();
             minX = std::min(minX, r.x);
             minY = std::min(minY, r.y);
             maxX = std::max(maxX, r.x + r.width);
@@ -835,6 +934,9 @@ private:
         return containsPoint_(inflate_(bounds, 8), px, py);
     }
 
+    /**
+     * @brief Closes the currently open submenu, if any.
+     */
     void closeSubMenu_() {
         if (!m_openSubMenu) {
             return;
@@ -844,6 +946,12 @@ private:
         m_openSubMenuIndex = -1;
     }
 
+    /**
+     * @brief Opens or repositions the submenu associated with an action row.
+     * @param action Action owning the submenu.
+     * @param row Rectangle occupied by the source row.
+     * @param index Index of the hovered or activated row.
+     */
     void openSubMenu_(SwAction* action, const SwRect& row, int index) {
         if (!action || !action->hasMenu()) {
             closeSubMenu_();
@@ -867,8 +975,8 @@ private:
             return;
         }
         sub->m_popup->updateGeometryFromActions();
-        const SwRect size = sub->m_popup->sizeHint();
-        const SwRect parentPopup = m_popup->getRect();
+        const SwSize size = sub->m_popup->sizeHint();
+        const SwRect parentPopup = m_popup->frameGeometry();
 
         int px = parentPopup.x + parentPopup.width + 4;
         const int leftCandidate = parentPopup.x - size.width - 4;
@@ -882,6 +990,11 @@ private:
         sub->popup(px, row.y);
     }
 
+    /**
+     * @brief Reacts to hover changes and decides whether a submenu should remain open.
+     * @param idx Hovered row index.
+     * @param row Rectangle occupied by the hovered row.
+     */
     void onPopupHoverChanged_(int idx, const SwRect& row) {
         if (idx < 0 || idx >= m_actions.size()) {
             closeSubMenu_();
@@ -899,6 +1012,9 @@ private:
         }
     }
 
+    /**
+     * @brief Lazily creates the timer used to close menu trees after hover leaves the safe region.
+     */
     void ensureHoverCloseTimer_() {
         if (m_hoverCloseTimer) {
             return;
@@ -916,6 +1032,9 @@ private:
         });
     }
 
+    /**
+     * @brief Starts the delayed hover-close timer when hover-close mode is enabled.
+     */
     void startHoverCloseTimer_() {
         if (!m_hoverCloseEnabled) {
             return;
@@ -926,12 +1045,20 @@ private:
         }
     }
 
+    /**
+     * @brief Stops the delayed hover-close timer if it is currently running.
+     */
     void stopHoverCloseTimer_() {
         if (m_hoverCloseTimer && m_hoverCloseTimer->isActive()) {
             m_hoverCloseTimer->stop();
         }
     }
 
+    /**
+     * @brief Updates the last known pointer position and hover-close timer state.
+     * @param px Horizontal pointer position in root-widget coordinates.
+     * @param py Vertical pointer position in root-widget coordinates.
+     */
     void onOverlayMouseMove_(int px, int py) {
         m_lastMouseX = px;
         m_lastMouseY = py;
@@ -947,6 +1074,13 @@ private:
         startHoverCloseTimer_();
     }
 
+    /**
+     * @brief Ensures that the popup and overlay widgets required by this menu exist.
+     *
+     * @details
+     * Root menus own the shared overlay. Submenus reuse that overlay and only create their own
+     * popup surface, keeping the whole menu tree within a single transient widget hierarchy.
+     */
     void ensurePopup() {
         if (m_popup && m_overlay && m_root) {
             return;
@@ -1007,3 +1141,4 @@ private:
     int m_lastMouseX{0};
     int m_lastMouseY{0};
 };
+

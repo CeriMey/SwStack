@@ -24,9 +24,10 @@ public:
     void setTimeText(const SwString& timeText);
     void setUnreadCount(int unread);
 
-    SwRect sizeHint() const override;
+    SwSize sizeHint() const override;
 
 protected:
+    void paintEvent(PaintEvent* event) override;
     void resizeEvent(ResizeEvent* event) override;
 
 private:

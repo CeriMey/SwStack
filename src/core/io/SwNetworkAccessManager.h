@@ -1,4 +1,28 @@
 #pragma once
+
+/**
+ * @file src/core/io/SwNetworkAccessManager.h
+ * @ingroup core_io
+ * @brief Declares the public interface exposed by SwNetworkAccessManager in the CoreSw IO layer.
+ *
+ * This header belongs to the CoreSw IO layer. It defines files, sockets, servers, descriptors,
+ * processes, and network helpers that sit directly at operating-system boundaries.
+ *
+ * Within that layer, this file focuses on the network access manager interface. The declarations
+ * exposed here define the stable surface that adjacent code can rely on while the implementation
+ * remains free to evolve behind the header.
+ *
+ * The main declarations in this header are SwNetworkAccessManager.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * IO-facing declarations here usually manage handles, readiness state, buffering, and error
+ * propagation while presenting a portable framework API.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -36,7 +60,7 @@ static constexpr const char* kSwLogCategory_SwNetworkAccessManager = "sw.core.io
  * @class SwNetworkAccessManager
  * @brief Lightweight asynchronous HTTP/HTTPS client built on top of SwTcpSocket.
  *
- * This class mimics the non-blocking single-threaded philosophy of Qt's QNetworkAccessManager.
+ * This class follows a non-blocking single-threaded request model.
  * All operations happen in the caller's thread and rely on the event loop plus SwTcpSocket's
  * signals to drive the state machine.
  */
@@ -44,22 +68,51 @@ class SwNetworkAccessManager : public SwObject {
     SW_OBJECT(SwNetworkAccessManager, SwObject)
 
 public:
+    /**
+     * @brief Constructs a `SwNetworkAccessManager` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     SwNetworkAccessManager(SwObject* parent = nullptr)
         : SwObject(parent) {
     }
 
+    /**
+     * @brief Destroys the `SwNetworkAccessManager` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~SwNetworkAccessManager() {
         abort();
     }
 
+    /**
+     * @brief Returns the current response Body.
+     * @return The current response Body.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwByteArray& responseBody() const {
         return m_lastResponseBody;
     }
 
+    /**
+     * @brief Returns the current response Body As String.
+     * @return The current response Body As String.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString responseBodyAsString() const {
         return SwString(m_lastResponseBody);
     }
 
+    /**
+     * @brief Returns the current response Headers.
+     * @return The current response Headers.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwString& responseHeaders() const {
         return m_lastResponseHeaders;
     }
@@ -67,7 +120,7 @@ public:
     /**
      * @brief Sets or updates a header that will be sent with the next request.
      *
-     * Headers persist between requests, similar to Qt's API.
+     * Headers persist between requests.
      */
     void setRawHeader(const SwString& key, const SwString& value) {
         m_headerMap[key] = value;
@@ -105,10 +158,10 @@ public:
             m_socket->useSsl(false);
         }
 
-        connect(m_socket, SIGNAL(connected), this, &SwNetworkAccessManager::onConnected);
-        connect(m_socket, SIGNAL(errorOccurred), this, &SwNetworkAccessManager::onError);
-        connect(m_socket, SIGNAL(disconnected), this, &SwNetworkAccessManager::onDisconnected);
-        connect(m_socket, SIGNAL(readyRead), this, &SwNetworkAccessManager::onReadyRead);
+        connect(m_socket, &SwTcpSocket::connected, this, &SwNetworkAccessManager::onConnected);
+        connect(m_socket, &SwTcpSocket::errorOccurred, this, &SwNetworkAccessManager::onError);
+        connect(m_socket, &SwTcpSocket::disconnected, this, &SwNetworkAccessManager::onDisconnected);
+        connect(m_socket, &SwTcpSocket::readyRead, this, &SwNetworkAccessManager::onReadyRead);
 
         if (!m_socket->connectToHost(m_host, m_port)) {
             cleanupSocket();
@@ -131,6 +184,9 @@ signals:
     DECLARE_SIGNAL(errorOccurred, int)
 
 private slots:
+    /**
+     * @brief Performs the `onConnected` operation.
+     */
     void onConnected() {
         swCDebug(kSwLogCategory_SwNetworkAccessManager) << "[SwNetworkAccessManager] connected, sending request";
         SwString request = buildRequest();
@@ -140,6 +196,9 @@ private slots:
         }
     }
 
+    /**
+     * @brief Performs the `onReadyRead` operation.
+     */
     void onReadyRead() {
         if (!m_socket) {
             return;
@@ -180,16 +239,26 @@ private slots:
         }
     }
 
+    /**
+     * @brief Performs the `onDisconnected` operation.
+     */
     void onDisconnected() {
         // Completion is handled in onReadyRead when the peer closes.
     }
 
+    /**
+     * @brief Performs the `onError` operation.
+     * @param err Value passed to the method.
+     */
     void onError(int err) {
         swCError(kSwLogCategory_SwNetworkAccessManager) << "[SwNetworkAccessManager] socket error " << err;
         cleanupSocket();
         emit errorOccurred(err);
     }
 
+    /**
+     * @brief Performs the `cleanupSocket` operation.
+     */
     void cleanupSocket() {
         if (m_socket) {
             m_socket->disconnectAllSlots();
@@ -204,6 +273,9 @@ private slots:
         m_https = false;
     }
 
+    /**
+     * @brief Resets the object to a baseline state.
+     */
     void resetResponseState() {
         m_buffer.clear();
         m_responseBody.clear();
@@ -213,6 +285,12 @@ private slots:
         m_bytesReceived = 0;
     }
 
+    /**
+     * @brief Returns the current request.
+     * @return The current request.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString buildRequest() const {
         SwString request = "GET " + (m_path.isEmpty() ? SwString("/") : m_path) + " HTTP/1.1\r\n";
         request += "Host: " + hostHeaderValue() + "\r\n";
@@ -240,6 +318,12 @@ private slots:
         return request;
     }
 
+    /**
+     * @brief Returns the current host Header Value.
+     * @return The current host Header Value.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString hostHeaderValue() const {
         bool defaultPort = (!m_https && m_port == 80) || (m_https && m_port == 443);
         if (defaultPort || m_port == 0) {
@@ -248,6 +332,9 @@ private slots:
         return m_host + ":" + SwString::number(static_cast<int>(m_port));
     }
 
+    /**
+     * @brief Performs the `processBuffer` operation.
+     */
     void processBuffer() {
         swCDebug(kSwLogCategory_SwNetworkAccessManager) << "[SwNetworkAccessManager] processBuffer called, buffer size=" << m_buffer.size()
                   << " headers=" << (m_headersReceived ? 1 : 0);
@@ -297,6 +384,10 @@ private slots:
         }
     }
 
+    /**
+     * @brief Performs the `parseHeaders` operation.
+     * @param headersPart Value passed to the method.
+     */
     void parseHeaders(const SwString& headersPart) {
         m_responseHeaders = headersPart;
         auto lines = headersPart.split("\r\n");
@@ -320,6 +411,9 @@ private slots:
         }
     }
 
+    /**
+     * @brief Performs the `finishRequest` operation.
+     */
     void finishRequest() {
         if (!m_socket) {
             return;
@@ -351,6 +445,15 @@ private slots:
         emit finished(m_lastResponseBody);
     }
 
+    /**
+     * @brief Performs the `parseUrl` operation.
+     * @param url Value passed to the method.
+     * @param scheme Value passed to the method.
+     * @param host Value passed to the method.
+     * @param port Local port used by the operation.
+     * @param path Path used by the operation.
+     * @return `true` on success; otherwise `false`.
+     */
     bool parseUrl(const SwString& url, SwString& scheme, SwString& host, uint16_t& port, SwString& path) {
         SwString lower = url.toLower();
         int offset = -1;

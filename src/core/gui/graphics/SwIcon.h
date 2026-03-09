@@ -1,4 +1,28 @@
 #pragma once
+
+/**
+ * @file src/core/gui/graphics/SwIcon.h
+ * @ingroup core_graphics
+ * @brief Declares the public interface exposed by SwIcon in the CoreSw graphics layer.
+ *
+ * This header belongs to the CoreSw graphics layer. It provides geometry types, painting
+ * primitives, images, scene-graph helpers, and rendering support consumed by widgets and views.
+ *
+ * Within that layer, this file focuses on the icon interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwIcon.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * Graphics-facing declarations here define the data flow from high-level UI state to lower-level
+ * rendering backends.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -21,23 +45,57 @@
  *
  ***************************************************************************************************/
 
+/**
+ * @file
+ * @brief Declares SwIcon, a small multi-resolution icon container.
+ *
+ * SwIcon groups one or more pixmaps that represent the same semantic asset at
+ * different sizes. The current implementation keeps selection logic simple by
+ * choosing the closest stored pixmap for a requested target size, which is
+ * sufficient for menus, buttons, and lightweight custom widgets.
+ */
+
 #include "graphics/SwPixmap.h"
 
 #include <vector>
 
+/**
+ * @brief Stores a set of pixmaps that can be queried by requested size.
+ */
 class SwIcon {
 public:
+    /**
+     * @brief Constructs a `SwIcon` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwIcon() = default;
+    /**
+     * @brief Constructs a `SwIcon` instance.
+     * @param pix Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     explicit SwIcon(const SwPixmap& pix) {
         addPixmap(pix);
     }
 
+    /**
+     * @brief Adds the specified pixmap.
+     * @param pix Value passed to the method.
+     */
     void addPixmap(const SwPixmap& pix) {
         if (!pix.isNull()) {
             m_pixmaps.push_back(pix);
         }
     }
 
+    /**
+     * @brief Performs the `pixmap` operation.
+     * @param w Width value.
+     * @param h Height value.
+     * @return The requested pixmap.
+     */
     SwPixmap pixmap(int w, int h) const {
         if (m_pixmaps.empty()) {
             return SwPixmap();
@@ -61,4 +119,3 @@ public:
 private:
     std::vector<SwPixmap> m_pixmaps;
 };
-

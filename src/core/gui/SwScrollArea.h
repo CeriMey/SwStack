@@ -1,4 +1,4 @@
-/***************************************************************************************************
+﻿/***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
  * Copyright (C) 2025 Ariya Consulting
@@ -22,8 +22,32 @@
 
 #pragma once
 
+/**
+ * @file src/core/gui/SwScrollArea.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwScrollArea in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the scroll area interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are SwScrollArea.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
 /***************************************************************************************************
- * SwScrollArea - Qt-like scroll area (≈ QScrollArea).
+ * SwScrollArea - scroll area.
  *
  * Requires painter clipping support to avoid drawing outside the viewport.
  **************************************************************************************************/
@@ -35,16 +59,31 @@ class SwScrollArea : public SwFrame {
     SW_OBJECT(SwScrollArea, SwFrame)
 
 public:
+    /**
+     * @brief Constructs a `SwScrollArea` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwScrollArea(SwWidget* parent = nullptr)
         : SwFrame(parent) {
         initDefaults();
     }
 
+    /**
+     * @brief Performs the `refreshLayout` operation.
+     */
     void refreshLayout() {
         updateLayout();
         update();
     }
 
+    /**
+     * @brief Sets the widget.
+     * @param widget Widget associated with the operation.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setWidget(SwWidget* widget) {
         if (m_widget == widget) {
             updateLayout();
@@ -66,8 +105,20 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the current widget.
+     * @return The current widget.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwWidget* widget() const { return m_widget; }
 
+    /**
+     * @brief Sets the widget Resizable.
+     * @param on Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setWidgetResizable(bool on) {
         if (m_widgetResizable == on) {
             return;
@@ -77,17 +128,47 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the current widget Resizable.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool widgetResizable() const { return m_widgetResizable; }
 
+    /**
+     * @brief Returns the current horizontal Scroll Bar.
+     * @return The current horizontal Scroll Bar.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwScrollBar* horizontalScrollBar() const { return m_hBar; }
+    /**
+     * @brief Returns the current vertical Scroll Bar.
+     * @return The current vertical Scroll Bar.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwScrollBar* verticalScrollBar() const { return m_vBar; }
 
 protected:
+    /**
+     * @brief Handles the resize Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void resizeEvent(ResizeEvent* event) override {
         SwFrame::resizeEvent(event);
         updateLayout();
     }
 
+    /**
+     * @brief Handles the wheel Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void wheelEvent(WheelEvent* event) override {
         if (!event) {
             return;
@@ -108,6 +189,7 @@ protected:
 
         const int stepY = std::max(1, std::max(24, (m_vBar ? (m_vBar->pageStep() / 10) : 0)));
         const int stepX = std::max(1, std::max(24, (m_hBar ? (m_hBar->pageStep() / 10) : 0)));
+        const bool horizontalRequest = event->isShiftPressed();
 
         auto scrollBy = [&](SwScrollBar* bar, int stepPx) -> bool {
             if (!bar || stepPx <= 0) {
@@ -119,11 +201,9 @@ protected:
         };
 
         bool scrolled = false;
-        if (event->isShiftPressed()) {
+        if (horizontalRequest) {
             if (m_hBar && m_hBar->getVisible()) {
                 scrolled = scrollBy(m_hBar, stepX);
-            } else if (m_vBar && m_vBar->getVisible()) {
-                scrolled = scrollBy(m_vBar, stepY);
             }
         } else {
             if (m_vBar && m_vBar->getVisible()) {
@@ -140,7 +220,12 @@ protected:
 
         // If a scrollbar is visible, keep the wheel focus on this scroll area even when already at
         // the boundary, to avoid "scroll chaining" to parent widgets.
-        if ((m_vBar && m_vBar->getVisible()) || (m_hBar && m_hBar->getVisible())) {
+        if (horizontalRequest) {
+            if (m_hBar && m_hBar->getVisible()) {
+                event->accept();
+                return;
+            }
+        } else if ((m_vBar && m_vBar->getVisible()) || (m_hBar && m_hBar->getVisible())) {
             event->accept();
             return;
         }
@@ -153,11 +238,23 @@ private:
         SW_OBJECT(Viewport, SwWidget)
 
     public:
+        /**
+         * @brief Constructs a `Viewport` instance.
+         * @param parent Optional parent object that owns this instance.
+         *
+         * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+         */
         explicit Viewport(SwWidget* parent = nullptr)
             : SwWidget(parent) {
             setStyleSheet("SwWidget { background-color: rgba(0,0,0,0); border-width: 0px; }");
         }
 
+        /**
+         * @brief Handles the paint Event forwarded by the framework.
+         * @param event Event object forwarded by the framework.
+         *
+         * @details Override this hook when the default framework behavior needs to be extended or replaced.
+         */
         void paintEvent(PaintEvent* event) override {
             if (!isVisibleInHierarchy()) {
                 return;
@@ -167,18 +264,12 @@ private:
                 return;
             }
 
-            const SwRect rect = getRect();
+            const SwRect rect = this->rect();
             painter->pushClipRect(rect);
             SwWidget::paintEvent(event);
             painter->popClipRect();
         }
     };
-
-    static int clampInt(int value, int minValue, int maxValue) {
-        if (value < minValue) return minValue;
-        if (value > maxValue) return maxValue;
-        return value;
-    }
 
     void initDefaults() {
         setFrameShape(Shape::Box);
@@ -217,24 +308,25 @@ private:
     }
 
     void updateLayoutOnce_() {
-        const SwRect outer = getRect();
+        const int selfW = width();
+        const int selfH = height();
         int borderWidth = lineWidth() > 0 ? lineWidth() : 1;
         int radius = 10;
         SwColor border{220, 224, 232};
         resolveBorder(getToolSheet(), border, borderWidth, radius);
         const int borderPad = std::max(0, borderWidth);
-        SwRect inner{outer.x + borderPad,
-                     outer.y + borderPad,
-                     std::max(0, outer.width - borderPad * 2),
-                     std::max(0, outer.height - borderPad * 2)};
+        SwRect inner{borderPad,
+                     borderPad,
+                     std::max(0, selfW - borderPad * 2),
+                     std::max(0, selfH - borderPad * 2)};
 
         const int thickness = m_scrollBarThickness;
 
         int hintW = 0;
         int hintH = 0;
         if (m_widget) {
-            const SwRect hint = m_widget->sizeHint();
-            const SwRect minHint = m_widget->minimumSizeHint();
+            const SwSize hint = m_widget->sizeHint();
+            const SwSize minHint = m_widget->minimumSizeHint();
             hintW = std::max(0, std::max(hint.width, minHint.width));
             hintH = std::max(0, std::max(hint.height, minHint.height));
         }
@@ -251,13 +343,13 @@ private:
         // Determine visible scrollbars with a small iteration (since adding one may require the other).
         for (int pass = 0; pass < 2; ++pass) {
             if (m_widgetResizable) {
-                // Qt-like: when resizable, the widget fills the viewport horizontally but keeps its
+                // When resizable, the widget fills the viewport horizontally but keeps its
                 // preferred/minimum height, so the scroll area provides a single (usually vertical)
                 // scrollbar when content is taller than the viewport.
                 contentW = std::max(0, viewportW);
                 contentH = std::max(viewportH, hintH);
             } else if (m_widget) {
-                SwRect r = m_widget->getRect();
+                SwRect r = m_widget->frameGeometry();
                 contentW = std::max(0, r.width);
                 contentH = std::max(0, r.height);
             } else {
@@ -280,14 +372,13 @@ private:
         if (m_widget && m_widgetResizable) {
             contentW = std::max(0, viewportRect.width);
             contentH = std::max(viewportRect.height, hintH);
-            m_widget->move(viewportRect.x, viewportRect.y);
             m_widget->resize(contentW, contentH);
         }
 
         // Scrollbars geometry
         if (showH) {
             m_hBar->show();
-            m_hBar->move(inner.x, inner.y + viewportH);
+            m_hBar->move(inner.x, inner.y + viewportH);  // inner is already local
             m_hBar->resize(viewportW, thickness);
         } else {
             m_hBar->hide();
@@ -296,7 +387,7 @@ private:
 
         if (showV) {
             m_vBar->show();
-            m_vBar->move(inner.x + viewportW, inner.y);
+            m_vBar->move(inner.x + viewportW, inner.y);  // inner is already local
             m_vBar->resize(thickness, viewportH);
         } else {
             m_vBar->hide();
@@ -325,9 +416,8 @@ private:
             return;
         }
 
-        const SwRect viewportRect = m_viewport->getRect();
-        const int x = viewportRect.x - m_hBar->value();
-        const int y = viewportRect.y - m_vBar->value();
+        const int x = -(m_hBar ? m_hBar->value() : 0);
+        const int y = -(m_vBar ? m_vBar->value() : 0);
         m_widget->move(x, y);
         m_viewport->update();
     }
@@ -341,3 +431,4 @@ private:
     bool m_inUpdateLayout{false};
     bool m_updateLayoutQueued{false};
 };
+

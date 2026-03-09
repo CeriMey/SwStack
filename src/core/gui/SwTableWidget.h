@@ -1,4 +1,17 @@
 #pragma once
+
+/**
+ * @file
+ * @ingroup core_gui
+ * @brief Declares `SwTableWidget`, a convenience table view backed by a standard model.
+ *
+ * The widget packages `SwTableView` together with an internal `SwStandardItemModel` so
+ * callers can populate cells without manually wiring a model first. It is the higher-level
+ * table API for editable grids, simple forms, and utility dialogs.
+ */
+
+
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -30,17 +43,47 @@ class SwTableWidget : public SwTableView {
     SW_OBJECT(SwTableWidget, SwTableView)
 
 public:
+    /**
+     * @brief Constructs a `SwTableWidget` instance.
+     * @param rows Value passed to the method.
+     * @param columns Value passed to the method.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwTableWidget(int rows = 0, int columns = 0, SwWidget* parent = nullptr)
         : SwTableView(parent) {
         m_model = new SwStandardItemModel(rows, std::max(1, columns), this);
         SwTableView::setModel(m_model);
     }
 
+    /**
+     * @brief Returns the current model.
+     * @return The current model.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwStandardItemModel* model() const { return m_model; }
 
+    /**
+     * @brief Performs the `rowCount` operation.
+     * @return The requested row Count.
+     */
     int rowCount() const { return m_model ? m_model->rowCount() : 0; }
+    /**
+     * @brief Performs the `columnCount` operation.
+     * @return The requested column Count.
+     */
     int columnCount() const { return m_model ? m_model->columnCount() : 0; }
 
+    /**
+     * @brief Sets the cell Widget.
+     * @param row Value passed to the method.
+     * @param column Value passed to the method.
+     * @param widget Widget associated with the operation.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setCellWidget(int row, int column, SwWidget* widget) {
         if (!m_model) {
             if (widget) {
@@ -52,6 +95,12 @@ public:
         SwTableView::setIndexWidget(idx, widget);
     }
 
+    /**
+     * @brief Sets the row Count.
+     * @param rows Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setRowCount(int rows) {
         if (!m_model) {
             return;
@@ -68,6 +117,12 @@ public:
         }
     }
 
+    /**
+     * @brief Sets the column Count.
+     * @param columns Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setColumnCount(int columns) {
         if (!m_model) {
             return;
@@ -85,6 +140,12 @@ public:
         }
     }
 
+    /**
+     * @brief Sets the horizontal Header Labels.
+     * @param labels Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setHorizontalHeaderLabels(const SwList<SwString>& labels) {
         if (!m_model) {
             return;
@@ -92,7 +153,21 @@ public:
         m_model->setHorizontalHeaderLabels(labels);
     }
 
+    /**
+     * @brief Performs the `item` operation.
+     * @param row Value passed to the method.
+     * @param column Value passed to the method.
+     * @return The requested item.
+     */
     SwStandardItem* item(int row, int column) const { return m_model ? m_model->item(row, column) : nullptr; }
+    /**
+     * @brief Sets the item.
+     * @param row Value passed to the method.
+     * @param column Value passed to the method.
+     * @param item Item affected by the operation.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setItem(int row, int column, SwStandardItem* item) {
         if (!m_model) {
             return;

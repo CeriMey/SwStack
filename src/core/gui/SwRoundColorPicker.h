@@ -1,4 +1,4 @@
-/***************************************************************************************************
+﻿/***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
  * Copyright (C) 2025 Ariya Consulting
@@ -22,14 +22,38 @@
 
 #pragma once
 
-/***************************************************************************************************
- * SwRoundColorPicker - Hue wheel + saturation/value disk (Qt-like).
+/**
+ * @file src/core/gui/SwRoundColorPicker.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwRoundColorPicker in the CoreSw GUI layer.
  *
- * No Qt dependency: rendering is done via SwPainter::drawImage on SwImage buffers.
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the round color picker interface. The declarations
+ * exposed here define the stable surface that adjacent code can rely on while the implementation
+ * remains free to evolve behind the header.
+ *
+ * The main declarations in this header are SwRoundColorPicker.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
+/***************************************************************************************************
+ * SwRoundColorPicker - Hue wheel + saturation/value disk.
+ *
+ * No external GUI dependency: rendering is done via SwPainter::drawImage on SwImage buffers.
  *
  * Interaction:
- * - Drag on the ring to change Hue (0..360°)
- * - Drag inside the disk to change Saturation/Value (mapped to a circle like the reference Qt code)
+ * - Drag on the ring to change Hue (0..360Â°)
+ * - Drag inside the disk to change Saturation/Value (mapped to a circular area like the reference implementation)
  **************************************************************************************************/
 
 #include "SwWidget.h"
@@ -43,6 +67,12 @@ class SwRoundColorPicker : public SwWidget {
     SW_OBJECT(SwRoundColorPicker, SwWidget)
 
 public:
+    /**
+     * @brief Constructs a `SwRoundColorPicker` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwRoundColorPicker(SwWidget* parent = nullptr)
         : SwWidget(parent) {
         setMinimumSize(140, 140);
@@ -54,6 +84,12 @@ public:
         setColor(SwColor{59, 130, 246});
     }
 
+    /**
+     * @brief Sets the color.
+     * @param color Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setColor(const SwColor& color) {
         if (sameColor(m_color, color)) {
             return;
@@ -65,11 +101,23 @@ public:
         colorChanged(m_color);
     }
 
+    /**
+     * @brief Returns the current color.
+     * @return The current color.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwColor color() const { return m_color; }
 
     DECLARE_SIGNAL(colorChanged, const SwColor&);
 
 protected:
+    /**
+     * @brief Handles the resize Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void resizeEvent(ResizeEvent* event) override {
         SwWidget::resizeEvent(event);
         updateMetrics();
@@ -77,13 +125,19 @@ protected:
         regenerateSvImage();
     }
 
+    /**
+     * @brief Handles the paint Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void paintEvent(PaintEvent* event) override {
         SwPainter* painter = event ? event->painter() : nullptr;
         if (!painter) {
             return;
         }
 
-        const SwRect rect = getRect();
+        const SwRect rect = this->rect();
         const int wheelSize = m_wheelSize;
         if (wheelSize <= 0) {
             return;
@@ -109,6 +163,12 @@ protected:
         drawSvCursor(painter, cx, cy);
     }
 
+    /**
+     * @brief Handles the mouse Press Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mousePressEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -133,6 +193,12 @@ protected:
         SwWidget::mousePressEvent(event);
     }
 
+    /**
+     * @brief Handles the mouse Move Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseMoveEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -152,6 +218,12 @@ protected:
         SwWidget::mouseMoveEvent(event);
     }
 
+    /**
+     * @brief Handles the mouse Release Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseReleaseEvent(MouseEvent* event) override {
         if (m_draggingHue || m_draggingSv) {
             m_draggingHue = false;
@@ -173,18 +245,6 @@ private:
 
     static bool sameColor(const SwColor& a, const SwColor& b) {
         return a.r == b.r && a.g == b.g && a.b == b.b;
-    }
-
-    static int clampInt(int value, int minValue, int maxValue) {
-        if (value < minValue) return minValue;
-        if (value > maxValue) return maxValue;
-        return value;
-    }
-
-    static double clampDouble(double value, double minValue, double maxValue) {
-        if (value < minValue) return minValue;
-        if (value > maxValue) return maxValue;
-        return value;
     }
 
     static std::uint32_t packArgb(int a, int r, int g, int b) {
@@ -440,7 +500,7 @@ private:
     }
 
     void updateHueFromPoint(int x, int y) {
-        const SwRect rect = getRect();
+        const SwRect rect = this->rect();
         const int wheelX = rect.x + (rect.width - m_wheelSize) / 2;
         const int wheelY = rect.y + (rect.height - m_wheelSize) / 2;
         const int cx = wheelX + m_wheelSize / 2;
@@ -463,7 +523,7 @@ private:
     }
 
     void updateSvFromPoint(int x, int y) {
-        const SwRect rect = getRect();
+        const SwRect rect = this->rect();
         const int wheelX = rect.x + (rect.width - m_wheelSize) / 2;
         const int wheelY = rect.y + (rect.height - m_wheelSize) / 2;
         const int cx = wheelX + m_wheelSize / 2;
@@ -508,7 +568,7 @@ private:
         if (m_wheelSize <= 0) {
             return 0;
         }
-        const SwRect rect = getRect();
+        const SwRect rect = this->rect();
         const int wheelX = rect.x + (rect.width - m_wheelSize) / 2;
         const int wheelY = rect.y + (rect.height - m_wheelSize) / 2;
         const int cx = wheelX + m_wheelSize / 2;

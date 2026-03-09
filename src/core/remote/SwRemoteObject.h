@@ -1,4 +1,29 @@
 #pragma once
+
+/**
+ * @file src/core/remote/SwRemoteObject.h
+ * @ingroup core_remote
+ * @brief Declares the public interface exposed by SwRemoteObject in the CoreSw remote and IPC
+ * layer.
+ *
+ * This header belongs to the CoreSw remote and IPC layer. It provides the abstractions used to
+ * expose objects across process boundaries and to transport data or signals between peers.
+ *
+ * Within that layer, this file focuses on the remote object interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are SwRemoteObject.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * Remote-facing declarations in this area usually coordinate identity, proxying, serialization,
+ * and synchronization across runtimes.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -31,13 +56,14 @@
 #include "SwIpcRpc.h"
 #include "SwTimer.h"
 
+#include "SwMutex.h"
 #include <atomic>
 #include <cctype>
 #include <cstdio>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <tuple>
 #include <type_traits>
@@ -56,6 +82,7 @@
    * You can override the root directory with setConfigRootDirectory().
    */
 class SwRemoteObject : public SwObject {
+    SW_OBJECT(SwRemoteObject, SwObject)
  public:
     enum class ConfigSavePolicy {
         SaveToDisk,
@@ -73,6 +100,15 @@ class SwRemoteObject : public SwObject {
     DECLARE_SIGNAL(remoteConfigReceived, uint64_t, const SwJsonObject&)
     DECLARE_SIGNAL(remoteConfigValueReceived, uint64_t, const SwString&)
 
+	    /**
+	     * @brief Constructs a `SwRemoteObject` instance.
+	     * @param sysName Value passed to the method.
+	     * @param nameSpace Value passed to the method.
+	     * @param objectName Value passed to the method.
+	     * @param parent Optional parent object that owns this instance.
+	     *
+	     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+	     */
 	    SwRemoteObject(const SwString& sysName,
 	                         const SwString& nameSpace,
 	                         const SwString& objectName,
@@ -93,40 +129,94 @@ class SwRemoteObject : public SwObject {
             (void)ipcExposeRpcT(SwString("system/resetFactory"), this, &SwRemoteObject::resetFactory);
  	        // Publish an initial snapshot so external tools (ex: SwBridge) can read it via IPC.
  	        {
- 	            std::lock_guard<std::mutex> lk(mutex_);
+ 	            SwMutexLocker lk(mutex_);
  	            if (shmConfigEnabled_) {
 	                shmConfig_.publish(publisherId_, effectiveConfigJson_locked_(SwJsonDocument::JsonFormat::Compact));
 	            }
 	        }
 	    }
 
+    /**
+     * @brief Destroys the `SwRemoteObject` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     virtual ~SwRemoteObject() {
         // Best-effort: flush pending debounced save before shutdown.
         {
-            std::lock_guard<std::mutex> lk(mutex_);
+            SwMutexLocker lk(mutex_);
             flushUserDocSave_locked_();
         }
         if (alive_) alive_->store(false, std::memory_order_relaxed);
         disableSharedMemoryConfig();
         stopAllIpcSubscriptions_();
         {
-            std::lock_guard<std::mutex> lk(rpcRespMutex_);
+            SwMutexLocker lk(rpcRespMutex_);
             rpcRespValueQueues_.clear();
             rpcRespVoidQueues_.clear();
         }
     }
 
+    /**
+     * @brief Sets the rpc Queue Capacity.
+     * @param capacity Value passed to the method.
+     * @return The requested rpc Queue Capacity.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
+    static void setRpcQueueCapacity(uint32_t capacity) {
+        sw::ipc::setRpcQueueCapacity(capacity);
+    }
+
+    /**
+     * @brief Returns the current rpc Queue Capacity.
+     * @return The current rpc Queue Capacity.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
+    static uint32_t rpcQueueCapacity() {
+        return sw::ipc::rpcQueueCapacity();
+    }
+
+    /**
+     * @brief Returns the current sys Name.
+     * @return The current sys Name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwString& sysName() const { return sysName_; }
+    /**
+     * @brief Returns the current name Space.
+     * @return The current name Space.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwString& nameSpace() const { return nameSpace_; }
+    /**
+     * @brief Performs the `objectName` operation.
+     * @return The requested object Name.
+     */
     SwString objectName() const { return getObjectName(); }
 
+    /**
+     * @brief Returns the current config Root Directory.
+     * @return The current config Root Directory.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString configRootDirectory() const { return configRoot_; }
 
+    /**
+     * @brief Sets the config Root Directory.
+     * @param rootDir Root directory used by the operation.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setConfigRootDirectory(const SwString& rootDir) {
         SwJsonObject mergedCopy;
         SwList<std::function<void()>> pending;
         {
-            std::lock_guard<std::mutex> lk(mutex_);
+            SwMutexLocker lk(mutex_);
             configRoot_ = rootDir.isEmpty() ? SwString("systemConfig") : rootDir;
             ensureConfigDirectories();
             loadConfig_locked();
@@ -137,6 +227,12 @@ class SwRemoteObject : public SwObject {
         emit configLoaded(mergedCopy);
     }
 
+    /**
+     * @brief Returns the current config Paths.
+     * @return The current config Paths.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     ConfigPaths configPaths() const {
         ConfigPaths out;
         out.globalPath = globalConfigPath();
@@ -145,17 +241,33 @@ class SwRemoteObject : public SwObject {
         return out;
     }
 
+    /**
+     * @brief Returns the current merged Config.
+     * @return The current merged Config.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwJsonObject mergedConfig() const {
-        std::lock_guard<std::mutex> lk(mutex_);
+        SwMutexLocker lk(mutex_);
         return mergedDoc_.isObject() ? mergedDoc_.object() : SwJsonObject{};
     }
 
+    /**
+     * @brief Performs the `ipcFullName` operation.
+     * @param leafName Value passed to the method.
+     * @return The requested ipc Full Name.
+     */
     SwString ipcFullName(const SwString& leafName) const {
         return buildFullName(sysName_, ipcRegistry_.object(), leafName);
     }
 
+    /**
+     * @brief Performs the `configValue` operation.
+     * @param path Path used by the operation.
+     * @return The requested config Value.
+     */
     SwJsonValue configValue(const SwString& path) const {
-        std::lock_guard<std::mutex> lk(mutex_);
+        SwMutexLocker lk(mutex_);
         SwJsonValue out;
         if (!tryFindValueNoLog_(mergedDoc_.toJsonValue(), path, out)) {
             return SwJsonValue();
@@ -163,11 +275,17 @@ class SwRemoteObject : public SwObject {
         return out;
     }
 
+    /**
+     * @brief Returns the current config.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool loadConfig() {
         SwJsonObject mergedCopy;
         SwList<std::function<void()>> pending;
         {
-            std::lock_guard<std::mutex> lk(mutex_);
+            SwMutexLocker lk(mutex_);
             loadConfig_locked();
             refreshRegisteredConfigs_locked_(pending);
             mergedCopy = mergedDoc_.isObject() ? mergedDoc_.object() : SwJsonObject{};
@@ -177,19 +295,35 @@ class SwRemoteObject : public SwObject {
         return true;
     }
 
+    /**
+     * @brief Performs the `saveLocalConfig` operation on the associated resource.
+     * @param pretty Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool saveLocalConfig(bool pretty = true) {
-        std::lock_guard<std::mutex> lk(mutex_);
+        SwMutexLocker lk(mutex_);
         return writeDocToFile_locked(localDoc_, localConfigPath(), pretty);
     }
 
+    /**
+     * @brief Performs the `saveUserConfig` operation on the associated resource.
+     * @param pretty Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool saveUserConfig(bool pretty = true) {
-        std::lock_guard<std::mutex> lk(mutex_);
+        SwMutexLocker lk(mutex_);
         userDocSavePending_ = false;
         if (userDocSaveTimer_) userDocSaveTimer_->stop();
         return writeUserDocToFile_locked_(pretty);
     }
 
     // Merge the current User layer into the Local ("factory") layer and write the local file.
+    /**
+     * @brief Returns the current as Factory.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool saveAsFactory() {
         SwJsonObject mergedCopy;
         SwList<std::function<void()>> pending;
@@ -198,7 +332,7 @@ class SwRemoteObject : public SwObject {
         bool ok = true;
         bool noOp = false;
         {
-            std::lock_guard<std::mutex> lk(mutex_);
+            SwMutexLocker lk(mutex_);
 
             const bool hasUserOverrides = (userDoc_.isObject() && !userDoc_.object().isEmpty());
             if (!hasUserOverrides) {
@@ -237,6 +371,12 @@ class SwRemoteObject : public SwObject {
     }
 
     // Reset to factory by deleting the User file and clearing in-memory overrides.
+    /**
+     * @brief Returns the current factory.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool resetFactory() {
         SwJsonObject mergedCopy;
         SwList<std::function<void()>> pending;
@@ -245,7 +385,7 @@ class SwRemoteObject : public SwObject {
         bool ok = true;
         bool noOp = false;
         {
-            std::lock_guard<std::mutex> lk(mutex_);
+            SwMutexLocker lk(mutex_);
 
             const SwString userPath = userConfigPath();
             const bool hasUserFile = SwFile::isFile(userPath);
@@ -301,7 +441,7 @@ class SwRemoteObject : public SwObject {
 	        SwList<std::function<void()>> publishes;
 	        bool changed = false;
 	        {
-	            std::lock_guard<std::mutex> lk(mutex_);
+	            SwMutexLocker lk(mutex_);
 	            SwJsonDocument candidateDoc = userDoc_;
 	            ensureObjectRoot(candidateDoc);
 	            candidateDoc.find(path, true) = value;
@@ -311,8 +451,8 @@ class SwRemoteObject : public SwObject {
 	            SwJsonValue prunedUserValue;
 	            SwJsonDocument nextUserDoc;
 	            if (buildUserOverrideValue_(candidateDoc.toJsonValue(), baselineValue, prunedUserValue, &userTouchedPaths_) &&
-	                prunedUserValue.isObject() && prunedUserValue.toObject()) {
-	                nextUserDoc.setObject(*prunedUserValue.toObject());
+	                prunedUserValue.isObject()) {
+	                nextUserDoc.setObject(prunedUserValue.toObject());
 	            } else {
 	                nextUserDoc.setObject(SwJsonObject{});
 	            }
@@ -349,8 +489,12 @@ class SwRemoteObject : public SwObject {
 	        return true;
 	    }
 
+    /**
+     * @brief Performs the `enableSharedMemoryConfig` operation.
+     * @param enable Value passed to the method.
+     */
     void enableSharedMemoryConfig(bool enable) {
-        std::lock_guard<std::mutex> lk(mutex_);
+        SwMutexLocker lk(mutex_);
         if (enable == shmConfigEnabled_) return;
         shmConfigEnabled_ = enable;
         if (shmConfigEnabled_) {
@@ -360,8 +504,11 @@ class SwRemoteObject : public SwObject {
         }
     }
 
+    /**
+     * @brief Performs the `disableSharedMemoryConfig` operation.
+     */
     void disableSharedMemoryConfig() {
-        std::lock_guard<std::mutex> lk(mutex_);
+        SwMutexLocker lk(mutex_);
         shmConfigEnabled_ = false;
         stopShmConfigSubscription_locked();
     }
@@ -370,6 +517,12 @@ class SwRemoteObject : public SwObject {
     // High-level IPC config API
     // ---------------------------------------------------------------------
     template <typename T>
+    /**
+     * @brief Performs the `ipcRegisterConfigT` operation.
+     * @param storage Value passed to the method.
+     * @param configName Value passed to the method.
+     * @param defaultValue Value passed to the method.
+     */
     void ipcRegisterConfigT(T& storage,
                             const SwString& configName,
                             const T& defaultValue) {
@@ -377,6 +530,13 @@ class SwRemoteObject : public SwObject {
     }
 
 		    template <typename T, typename Fn>
+		    /**
+		     * @brief Performs the `ipcRegisterConfigT` operation.
+		     * @param storage Value passed to the method.
+		     * @param configName Value passed to the method.
+		     * @param defaultValue Value passed to the method.
+		     * @param onChange Value passed to the method.
+		     */
 		    void ipcRegisterConfigT(T& storage,
 		                            const SwString& configName,
 		                            const T& defaultValue,
@@ -385,7 +545,7 @@ class SwRemoteObject : public SwObject {
 
 	        std::shared_ptr<sw::ipc::Signal<uint64_t, SwString>> configSignal;
 	        {
-	            std::lock_guard<std::mutex> lk(mutex_);
+	            SwMutexLocker lk(mutex_);
 	            const T initial = configValueFromDocs_<T>(mergedDoc_, configName, defaultValue);
 	            storage = initial;
 
@@ -449,6 +609,13 @@ class SwRemoteObject : public SwObject {
     }
 
     template <typename T>
+    /**
+     * @brief Performs the `ipcUpdateConfig` operation.
+     * @param configName Value passed to the method.
+     * @param value Value passed to the method.
+     * @param savePolicy Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool ipcUpdateConfig(const SwString& configName,
                          const T& value,
                          ConfigSavePolicy savePolicy = ConfigSavePolicy::SaveToDisk) {
@@ -460,6 +627,13 @@ class SwRemoteObject : public SwObject {
     // Remote update: publish a config value to another object (no local file write on this side).
     // The target object must have registered the config with ipcRegisterConfigT (so it applies remote updates).
     template <typename T>
+    /**
+     * @brief Performs the `ipcUpdateConfig` operation.
+     * @param targetObject Value passed to the method.
+     * @param configName Value passed to the method.
+     * @param value Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool ipcUpdateConfig(const SwString& targetObject,
                          const SwString& configName,
                          const T& value) {
@@ -474,11 +648,24 @@ class SwRemoteObject : public SwObject {
     // Bind a config value by full name: "ns/.../objectName#configPath" (configPath can contain '/')
     // Stores the subscription internally, returns a token usable with ipcDisconnect().
     template <typename T>
+    /**
+     * @brief Performs the `ipcBindConfigT` operation.
+     * @param storage Value passed to the method.
+     * @param configFullName Value passed to the method.
+     * @return The requested ipc Bind Config T.
+     */
     size_t ipcBindConfigT(T& storage, const SwString& configFullName) {
         return ipcBindConfigT<T>(storage, configFullName, std::function<void(const T&)>{});
     }
 
     template <typename T, typename Fn>
+    /**
+     * @brief Performs the `ipcBindConfigT` operation.
+     * @param storage Value passed to the method.
+     * @param configFullName Value passed to the method.
+     * @param onChange Value passed to the method.
+     * @return The requested ipc Bind Config T.
+     */
     size_t ipcBindConfigT(T& storage, const SwString& configFullName, Fn onChange) {
         SwString ns, obj, leaf;
         if (!splitFullName_(configFullName, ns, obj, leaf)) {
@@ -521,6 +708,13 @@ class SwRemoteObject : public SwObject {
     // Generic IPC connect by fullName: "ns/.../objectName/signalName"
     // Stores the subscription internally, returns a token usable with ipcDisconnect().
     template <typename Fn>
+    /**
+     * @brief Performs the `ipcConnectT` operation.
+     * @param fullName Value passed to the method.
+     * @param onSignal Value passed to the method.
+     * @param fireInitial Value passed to the method.
+     * @return The requested ipc Connect T.
+     */
     size_t ipcConnectT(const SwString& fullName, Fn onSignal, bool fireInitial = true) {
         using traits = function_traits<typename std::decay<Fn>::type>;
         using args_tuple = typename traits::args_tuple;
@@ -533,9 +727,18 @@ class SwRemoteObject : public SwObject {
     //       - relative: "objectName" (resolved as "<this->nameSpace()>/objectName")
     //   - leaf:         "signalName"
     //
-    // The connection is owned by `context` (like Qt's receiver-based connect):
+    // The connection is owned by `context` with receiver-based lifetime semantics:
     // it is automatically stopped when `context` is destroyed.
     template <typename Fn>
+    /**
+     * @brief Performs the `ipcConnectScopedT` operation.
+     * @param targetObject Value passed to the method.
+     * @param leaf Value passed to the method.
+     * @param context Value passed to the method.
+     * @param onSignal Value passed to the method.
+     * @param fireInitial Value passed to the method.
+     * @return The requested ipc Connect Scoped T.
+     */
     SwObject* ipcConnectScopedT(const SwString& targetObject,
                                 const SwString& leaf,
                                 SwObject* context,
@@ -553,6 +756,13 @@ class SwRemoteObject : public SwObject {
     //   - Ret(Args...)
     //   - Ret(sw::ipc::RpcContext, Args...)   // RpcContext is passed by value (decayed)
     template <typename Fn>
+    /**
+     * @brief Performs the `ipcExposeRpcT` operation.
+     * @param methodName Value passed to the method.
+     * @param handler Value passed to the method.
+     * @param fireInitial Value passed to the method.
+     * @return The requested ipc Expose Rpc T.
+     */
     size_t ipcExposeRpcT(const SwString& methodName, Fn handler, bool fireInitial = true) {
         sw::ipc::detail::ScopedSubscriberObject subScope(ipcRegistry_.object());
         using traits = function_traits<typename std::decay<Fn>::type>;
@@ -566,6 +776,12 @@ class SwRemoteObject : public SwObject {
     //   ipcExposeRpc(add, this, &MyClass::add);
     template <typename Obj, typename Ret, typename... Args>
     typename std::enable_if<!std::is_void<Ret>::value, size_t>::type
+    /**
+     * @brief Performs the `ipcExposeRpcT` operation.
+     * @param methodName Value passed to the method.
+     * @param obj Value passed to the method.
+     * @param fireInitial Value passed to the method.
+     */
     ipcExposeRpcT(const SwString& methodName,
                   Obj* obj,
                   Ret(Obj::*method)(Args...),
@@ -578,6 +794,12 @@ class SwRemoteObject : public SwObject {
 
     template <typename Obj, typename Ret, typename... Args>
     typename std::enable_if<std::is_void<Ret>::value, size_t>::type
+    /**
+     * @brief Performs the `ipcExposeRpcT` operation.
+     * @param methodName Value passed to the method.
+     * @param obj Value passed to the method.
+     * @param fireInitial Value passed to the method.
+     */
     ipcExposeRpcT(const SwString& methodName,
                   Obj* obj,
                   Ret(Obj::*method)(Args...),
@@ -590,6 +812,12 @@ class SwRemoteObject : public SwObject {
 
     template <typename Obj, typename Ret, typename... Args>
     typename std::enable_if<!std::is_void<Ret>::value, size_t>::type
+    /**
+     * @brief Performs the `ipcExposeRpcT` operation.
+     * @param methodName Value passed to the method.
+     * @param obj Value passed to the method.
+     * @param fireInitial Value passed to the method.
+     */
     ipcExposeRpcT(const SwString& methodName,
                   Obj* obj,
                   Ret(Obj::*method)(Args...) const,
@@ -602,6 +830,12 @@ class SwRemoteObject : public SwObject {
 
     template <typename Obj, typename Ret, typename... Args>
     typename std::enable_if<std::is_void<Ret>::value, size_t>::type
+    /**
+     * @brief Performs the `ipcExposeRpcT` operation.
+     * @param methodName Value passed to the method.
+     * @param obj Value passed to the method.
+     * @param fireInitial Value passed to the method.
+     */
     ipcExposeRpcT(const SwString& methodName,
                   Obj* obj,
                   Ret(Obj::*method)(Args...) const,
@@ -612,8 +846,13 @@ class SwRemoteObject : public SwObject {
         return ipcExposeRpcT(methodName, wrapper, fireInitial);
     }
 
+    /**
+     * @brief Performs the `ipcDisconnect` operation.
+     * @param token Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool ipcDisconnect(size_t token) {
-        std::lock_guard<std::mutex> lk(mutex_);
+        SwMutexLocker lk(mutex_);
         auto it = ipcSubscriptions_.find(token);
         if (it == ipcSubscriptions_.end()) return false;
         if (it->second) it->second->stop();
@@ -622,6 +861,11 @@ class SwRemoteObject : public SwObject {
     }
 
  protected:
+    /**
+     * @brief Performs the `rpcMethodNameFromMacro_` operation.
+     * @param s Value passed to the method.
+     * @return The requested rpc Method Name From Macro.
+     */
     static SwString rpcMethodNameFromMacro_(SwString s)
     {
         s = s.trimmed();
@@ -660,6 +904,11 @@ class SwRemoteObject : public SwObject {
     }
 
 
+    /**
+     * @brief Performs the `sanitizeSegment` operation.
+     * @param in Value passed to the method.
+     * @return The requested sanitize Segment.
+     */
     static SwString sanitizeSegment(const SwString& in) {
         std::string s = in.toStdString();
         for (size_t i = 0; i < s.size(); ++i) {
@@ -675,11 +924,24 @@ class SwRemoteObject : public SwObject {
         return SwString(s);
     }
 
+    /**
+     * @brief Builds the full Name requested by the caller.
+     * @param ns Value passed to the method.
+     * @param obj Value passed to the method.
+     * @param leaf Value passed to the method.
+     * @return The resulting full Name.
+     */
     static SwString buildFullName(const SwString& ns, const SwString& obj, const SwString& leaf) {
         return buildObjectFqn(ns, obj) + "#" + leaf;
     }
 
     // Human-readable "namespace/objectName" (no leading '/').
+    /**
+     * @brief Builds the object Fqn requested by the caller.
+     * @param ns Value passed to the method.
+     * @param obj Value passed to the method.
+     * @return The resulting object Fqn.
+     */
     static SwString buildObjectFqn(const SwString& ns, const SwString& obj) {
         std::string nsStd = ns.toStdString();
         for (size_t i = 0; i < nsStd.size(); ++i) {
@@ -692,6 +954,14 @@ class SwRemoteObject : public SwObject {
         return SwString(nsStd) + "/" + obj;
     }
 
+    /**
+     * @brief Performs the `splitFullName_` operation.
+     * @param fullName Value passed to the method.
+     * @param nsOut Value passed to the method.
+     * @param objOut Value passed to the method.
+     * @param leafOut Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool splitFullName_(const SwString& fullName, SwString& nsOut, SwString& objOut, SwString& leafOut) const {
         SwString path = fullName.trimmed();
         path.replace("\\", "/");
@@ -726,8 +996,7 @@ class SwRemoteObject : public SwObject {
             if (objPart.isEmpty()) return false;
 
             if (!hadLeadingSlash && !hadSysPrefix) {
-                const std::string objStd = objPart.toStdString();
-                if (objStd.find('/') == std::string::npos) {
+                if (!objPart.contains("/")) {
                     objPart = buildObjectFqn(nameSpace_, objPart);
                 }
             }
@@ -774,23 +1043,44 @@ class SwRemoteObject : public SwObject {
         return !objOut.isEmpty();
     }
 
+    /**
+     * @brief Returns the current global Config Path.
+     * @return The current global Config Path.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString globalConfigPath() const {
         const SwString o = sanitizeSegment(getObjectName());
         return configRootAbsolute_() + "/global/" + o + ".json";
     }
 
+    /**
+     * @brief Returns the current local Config Path.
+     * @return The current local Config Path.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString localConfigPath() const {
         const SwString sys = sanitizeNsForFile_(sysName_);
         const SwString obj = sanitizeNsForFile_(ipcRegistry_.object());
         return configRootAbsolute_() + "/local/" + sys + "_" + obj + ".json";
     }
 
+    /**
+     * @brief Returns the current user Config Path.
+     * @return The current user Config Path.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString userConfigPath() const {
         const SwString sys = sanitizeNsForFile_(sysName_);
         const SwString obj = sanitizeNsForFile_(ipcRegistry_.object());
         return configRootAbsolute_() + "/user/" + sys + "_" + obj + ".json";
     }
 
+    /**
+     * @brief Performs the `ensureConfigDirectories` operation.
+     */
     void ensureConfigDirectories() const {
         const SwString root = configRootAbsolute_();
         SwDir::mkpathAbsolute(root + "/global", /*normalizeInput=*/false);
@@ -798,23 +1088,40 @@ class SwRemoteObject : public SwObject {
         SwDir::mkpathAbsolute(root + "/user",   /*normalizeInput=*/false);
     }
 
+    /**
+     * @brief Performs the `ensureObjectRoot` operation.
+     * @param doc Value passed to the method.
+     * @return The requested ensure Object Root.
+     */
     static void ensureObjectRoot(SwJsonDocument& doc) {
         if (!doc.isObject()) {
             doc.setObject(SwJsonObject{});
         }
     }
 
+	    /**
+	     * @brief Performs the `mergeValueDeep_` operation.
+	     * @param target Value passed to the method.
+	     * @param src Value passed to the method.
+	     * @return The requested merge Value Deep.
+	     */
 	    static void mergeValueDeep_(SwJsonValue& target, const SwJsonValue& src) {
-	        if (target.isObject() && src.isObject() && target.toObject() && src.toObject()) {
-	            SwJsonObject t(*target.toObject());
-	            SwJsonObject s(*src.toObject());
+	        if (target.isObject() && src.isObject()) {
+	            SwJsonObject t(target.toObject());
+	            SwJsonObject s(src.toObject());
 	            mergeObjectDeep_(t, s);
-	            target = SwJsonValue(std::make_shared<SwJsonObject>(t));
+	            target = SwJsonValue(t);
 	            return;
 	        }
 	        target = src;
 	    }
 
+	    /**
+	     * @brief Performs the `mergeObjectDeep_` operation.
+	     * @param target Value passed to the method.
+	     * @param src Value passed to the method.
+	     * @return The requested merge Object Deep.
+	     */
 	    static void mergeObjectDeep_(SwJsonObject& target, const SwJsonObject& src) {
 	        SwJsonObject::Container data = src.data();
         for (SwJsonObject::Container::const_iterator it = data.begin(); it != data.end(); ++it) {
@@ -829,6 +1136,12 @@ class SwRemoteObject : public SwObject {
 	        }
 	    }
 	
+	    /**
+	     * @brief Performs the `jsonDeepEqual_` operation.
+	     * @param a Value passed to the method.
+	     * @param b Value passed to the method.
+	     * @return The requested json Deep Equal.
+	     */
 	    static bool jsonDeepEqual_(const SwJsonValue& a, const SwJsonValue& b) {
 	        // Treat numbers as equal even if stored as int vs float (ex: 3 vs 3.0).
 	        if (a.isDouble() && b.isDouble()) {
@@ -843,25 +1156,23 @@ class SwRemoteObject : public SwObject {
 	        if (a.isString() && b.isString()) return a.toString() == b.toString();
 	
 	        if (a.isObject() && b.isObject()) {
-	            const std::shared_ptr<SwJsonObject> ao = a.toObject();
-	            const std::shared_ptr<SwJsonObject> bo = b.toObject();
-	            if (!ao || !bo) return ao == bo;
-	            if (ao->size() != bo->size()) return false;
-	            for (auto it = ao->begin(); it != ao->end(); ++it) {
+	            const SwJsonObject ao = a.toObject();
+	            const SwJsonObject bo = b.toObject();
+	            if (ao.size() != bo.size()) return false;
+	            for (auto it = ao.begin(); it != ao.end(); ++it) {
 	                const SwString key = it.key();
-	                if (!bo->contains(key)) return false;
-	                if (!jsonDeepEqual_(it.value(), (*bo)[key])) return false;
+	                if (!bo.contains(key)) return false;
+	                if (!jsonDeepEqual_(it.value(), bo[key])) return false;
 	            }
 	            return true;
 	        }
-	
+
 	        if (a.isArray() && b.isArray()) {
-	            const std::shared_ptr<SwJsonArray> aa = a.toArray();
-	            const std::shared_ptr<SwJsonArray> ba = b.toArray();
-	            if (!aa || !ba) return aa == ba;
-	            if (aa->size() != ba->size()) return false;
-	            for (size_t i = 0; i < aa->size(); ++i) {
-	                if (!jsonDeepEqual_((*aa)[i], (*ba)[i])) return false;
+	            const SwJsonArray aa = a.toArray();
+	            const SwJsonArray ba = b.toArray();
+	            if (aa.size() != ba.size()) return false;
+	            for (size_t i = 0; i < aa.size(); ++i) {
+	                if (!jsonDeepEqual_(aa[i], ba[i])) return false;
 	            }
 	            return true;
 	        }
@@ -869,6 +1180,11 @@ class SwRemoteObject : public SwObject {
 	        return false;
 	    }
 	
+	    /**
+	     * @brief Performs the `normalizeConfigPath_` operation.
+	     * @param rawPath Value passed to the method.
+	     * @return The requested normalize Config Path.
+	     */
 	    static SwString normalizeConfigPath_(const SwString& rawPath) {
 	        SwString path = rawPath.trimmed();
 	        path.replace("\\", "/");
@@ -878,20 +1194,44 @@ class SwRemoteObject : public SwObject {
 	        return path;
 	    }
 	
+	    /**
+	     * @brief Returns the current user Meta Root Key.
+	     * @return The current user Meta Root Key.
+	     *
+	     * @details The returned value reflects the state currently stored by the instance.
+	     */
 	    static const char* userMetaRootKey_() { return "__swconfig__"; }
+	    /**
+	     * @brief Returns the current user Meta Touched Key.
+	     * @return The current user Meta Touched Key.
+	     *
+	     * @details The returned value reflects the state currently stored by the instance.
+	     */
 	    static const char* userMetaTouchedKey_() { return "touched"; }
+	    /**
+	     * @brief Returns the current user Meta Version.
+	     * @return The current user Meta Version.
+	     *
+	     * @details The returned value reflects the state currently stored by the instance.
+	     */
 	    static int userMetaVersion_() { return 1; }
 	
+	    /**
+	     * @brief Performs the `mergeTouchedPathsFromMeta_` operation.
+	     * @param metaVal Value passed to the method.
+	     * @param inOutTouched Value passed to the method.
+	     * @return The requested merge Touched Paths From Meta.
+	     */
 	    static void mergeTouchedPathsFromMeta_(const SwJsonValue& metaVal, SwMap<SwString, bool>& inOutTouched) {
-	        if (metaVal.isObject() && metaVal.toObject()) {
-	            const SwJsonObject metaObj(*metaVal.toObject());
+	        if (metaVal.isObject()) {
+	            const SwJsonObject metaObj(metaVal.toObject());
 	            mergeTouchedPathsFromMeta_(metaObj[userMetaTouchedKey_()], inOutTouched);
 	            return;
 	        }
-	        if (metaVal.isArray() && metaVal.toArray()) {
-	            const std::shared_ptr<SwJsonArray> arr = metaVal.toArray();
-	            for (size_t i = 0; i < arr->size(); ++i) {
-	                const SwJsonValue v = (*arr)[i];
+	        if (metaVal.isArray()) {
+	            const SwJsonArray arr = metaVal.toArray();
+	            for (size_t i = 0; i < arr.size(); ++i) {
+	                const SwJsonValue v = arr[i];
 	                if (!v.isString()) continue;
 	                const SwString p(v.toString());
 	                const SwString norm = normalizeConfigPath_(p);
@@ -900,6 +1240,12 @@ class SwRemoteObject : public SwObject {
 	        }
 	    }
 	
+	    /**
+	     * @brief Performs the `stripTouchedMetaFromDoc_` operation.
+	     * @param doc Value passed to the method.
+	     * @param inOutTouched Value passed to the method.
+	     * @return The requested strip Touched Meta From Doc.
+	     */
 	    static void stripTouchedMetaFromDoc_(SwJsonDocument& doc, SwMap<SwString, bool>* inOutTouched) {
 	        if (!doc.isObject()) return;
 	        SwJsonObject root = doc.object();
@@ -912,12 +1258,19 @@ class SwRemoteObject : public SwObject {
 	        doc.setObject(root);
 	    }
 	
+	    /**
+	     * @brief Performs the `collectLeafConfigPaths_` operation.
+	     * @param v Value passed to the method.
+	     * @param pathPrefix Value passed to the method.
+	     * @param outTouched Output value filled by the method.
+	     * @return The requested collect Leaf Config Paths.
+	     */
 	    static void collectLeafConfigPaths_(const SwJsonValue& v,
 	                                       const SwString& pathPrefix,
 	                                       SwMap<SwString, bool>& outTouched) {
-	        if (v.isObject() && v.toObject()) {
-	            const std::shared_ptr<SwJsonObject> obj = v.toObject();
-	            for (auto it = obj->begin(); it != obj->end(); ++it) {
+	        if (v.isObject()) {
+	            const SwJsonObject obj = v.toObject();
+	            for (auto it = obj.begin(); it != obj.end(); ++it) {
 	                const SwString key = it.key();
 	                if (key == SwString(userMetaRootKey_())) continue;
 	                const SwString next = pathPrefix.isEmpty() ? key : (pathPrefix + "/" + key);
@@ -929,6 +1282,14 @@ class SwRemoteObject : public SwObject {
 	        outTouched.insert(normalizeConfigPath_(pathPrefix), true);
 	    }
 
+	    /**
+	     * @brief Returns whether the object reports keep Path.
+	     * @param keepPaths Value passed to the method.
+	     * @param rawPath Value passed to the method.
+	     * @return The requested keep Path.
+	     *
+	     * @details This query does not modify the object state.
+	     */
 	    static bool shouldKeepPath_(const SwMap<SwString, bool>* keepPaths, const SwString& rawPath) {
 	        if (!keepPaths) return false;
 	        const SwString path = normalizeConfigPath_(rawPath);
@@ -936,12 +1297,20 @@ class SwRemoteObject : public SwObject {
 	        return keepPaths->contains(path);
 	    }
 	
+	    /**
+	     * @brief Performs the `markConfigPathTouched_locked_` operation.
+	     * @param rawPath Value passed to the method.
+	     */
 	    void markConfigPathTouched_locked_(const SwString& rawPath) {
 	        const SwString path = normalizeConfigPath_(rawPath);
 	        if (path.isEmpty()) return;
 	        userTouchedPaths_.insert(path, true);
 	    }
 	
+	    /**
+	     * @brief Performs the `injectTouchedMeta_locked_` operation.
+	     * @param doc Value passed to the method.
+	     */
 	    void injectTouchedMeta_locked_(SwJsonDocument& doc) const {
 	        ensureObjectRoot(doc);
 	        SwJsonObject root = doc.object();
@@ -964,25 +1333,34 @@ class SwRemoteObject : public SwObject {
 	    // Build a minimal "user override" JSON value by removing entries equal to the base value,
 	    // except for paths present in `keepPaths` (sticky persistence: keep keys that were set at least once).
 	    // Returns false if the candidate is entirely redundant (no entries remain).
+	    /**
+	     * @brief Builds the user Override Value requested by the caller.
+	     * @param candidate Value passed to the method.
+	     * @param base Value passed to the method.
+	     * @param outOverride Output value filled by the method.
+	     * @param keepPaths Value passed to the method.
+	     * @param pathPrefix Value passed to the method.
+	     * @return The resulting user Override Value.
+	     */
 	    static bool buildUserOverrideValue_(const SwJsonValue& candidate,
 	                                        const SwJsonValue& base,
 	                                        SwJsonValue& outOverride,
 	                                        const SwMap<SwString, bool>* keepPaths = nullptr,
 	                                        const SwString& pathPrefix = SwString()) {
-	        if (candidate.isObject() && candidate.toObject()) {
-	            const std::shared_ptr<SwJsonObject> candidateObj = candidate.toObject();
+	        if (candidate.isObject()) {
+	            const SwJsonObject candidateObj = candidate.toObject();
 	            if (!pathPrefix.isEmpty() && shouldKeepPath_(keepPaths, pathPrefix)) {
 	                outOverride = candidate;
 	                return true;
 	            }
-	            if (base.isObject() && base.toObject()) {
-	                const std::shared_ptr<SwJsonObject> baseObj = base.toObject();
+	            if (base.isObject()) {
+	                const SwJsonObject baseObj = base.toObject();
 	                SwJsonObject outObj;
-	                for (auto it = candidateObj->begin(); it != candidateObj->end(); ++it) {
+	                for (auto it = candidateObj.begin(); it != candidateObj.end(); ++it) {
 	                    const SwString key = it.key();
 	                    const SwJsonValue& candidateChild = it.value();
 	                    const SwJsonValue baseChild =
-	                        baseObj->contains(key) ? (*baseObj)[key] : SwJsonValue();
+	                        baseObj.contains(key) ? baseObj[key] : SwJsonValue();
 	
 	                    SwJsonValue prunedChild;
 	                    const SwString childPath = pathPrefix.isEmpty() ? key : (pathPrefix + "/" + key);
@@ -1000,7 +1378,7 @@ class SwRemoteObject : public SwObject {
 	            return true;
 	        }
 	
-	        if (candidate.isArray() && candidate.toArray()) {
+	        if (candidate.isArray()) {
 	            if (jsonDeepEqual_(candidate, base) && !shouldKeepPath_(keepPaths, pathPrefix)) return false;
 	            outOverride = candidate;
 	            return true;
@@ -1011,6 +1389,11 @@ class SwRemoteObject : public SwObject {
 	        return true;
 	    }
 	
+	    /**
+	     * @brief Performs the `effectiveConfigJson_locked_` operation.
+	     * @param format Value passed to the method.
+	     * @return The requested effective Config Json locked.
+	     */
 	    SwString effectiveConfigJson_locked_(SwJsonDocument::JsonFormat format) const {
 	        SwJsonObject effective = mergedDoc_.isObject() ? mergedDoc_.object() : SwJsonObject{};
 	        SwJsonDocument doc(effective);
@@ -1028,6 +1411,12 @@ class SwRemoteObject : public SwObject {
 	        return doc.toJson(format);
 	    }
 	
+	    /**
+	     * @brief Returns the current baseline Config Value locked.
+	     * @return The current baseline Config Value locked.
+	     *
+	     * @details The returned value reflects the state currently stored by the instance.
+	     */
 	    SwJsonValue baselineConfigValue_locked_() const {
 	        SwJsonObject base;
 	        if (globalDoc_.isObject()) mergeObjectDeep_(base, globalDoc_.object());
@@ -1044,6 +1433,13 @@ class SwRemoteObject : public SwObject {
 	        return baselineDoc.toJsonValue();
 	    }
 
+	    /**
+	     * @brief Performs the `tryFindValueNoLog_` operation.
+	     * @param root Value passed to the method.
+	     * @param rawPath Value passed to the method.
+	     * @param out Value passed to the method.
+	     * @return The requested try Find Value No Log.
+	     */
 	    static bool tryFindValueNoLog_(const SwJsonValue& root, const SwString& rawPath, SwJsonValue& out) {
 	        SwString path = rawPath;
 	        path.replace("\\", "/");
@@ -1053,15 +1449,21 @@ class SwRemoteObject : public SwObject {
         for (int i = 0; i < tokens.size(); ++i) {
             const SwString token = tokens[i];
             if (token.isEmpty()) continue;
-            if (!current.isObject() || !current.toObject()) return false;
-            std::shared_ptr<SwJsonObject> obj = current.toObject();
-            if (!obj->contains(token)) return false;
-            current = (*obj)[token];
+            if (!current.isObject()) return false;
+            SwJsonObject obj = current.toObject();
+            if (!obj.contains(token)) return false;
+            current = obj[token];
         }
         out = current;
         return true;
     }
 
+    /**
+     * @brief Performs the `loadDocFromFile_locked` operation on the associated resource.
+     * @param path Path used by the operation.
+     * @param outDoc Output value filled by the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool loadDocFromFile_locked(const SwString& path, SwJsonDocument& outDoc) const {
         if (!SwFile::isFile(path)) return false;
         SwFile f(path);
@@ -1078,6 +1480,13 @@ class SwRemoteObject : public SwObject {
         return true;
     }
 
+    /**
+     * @brief Performs the `writeDocToFile_locked` operation on the associated resource.
+     * @param doc Value passed to the method.
+     * @param path Path used by the operation.
+     * @param pretty Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool writeDocToFile_locked(const SwJsonDocument& doc, const SwString& path, bool pretty) const {
         SwJsonDocument toWrite = doc;
         ensureObjectRoot(toWrite);
@@ -1091,6 +1500,11 @@ class SwRemoteObject : public SwObject {
         return ok;
     }
 	
+	    /**
+	     * @brief Performs the `writeUserDocToFile_locked_` operation on the associated resource.
+	     * @param pretty Value passed to the method.
+	     * @return `true` on success; otherwise `false`.
+	     */
 	    bool writeUserDocToFile_locked_(bool pretty) {
 	        SwJsonDocument toWrite = userDoc_;
 	        ensureObjectRoot(toWrite);
@@ -1098,6 +1512,9 @@ class SwRemoteObject : public SwObject {
 	        return writeDocToFile_locked(toWrite, userConfigPath(), pretty);
 	    }
 
+    /**
+     * @brief Performs the `recomputeMerged_locked` operation.
+     */
     void recomputeMerged_locked() {
         SwJsonObject merged;
         if (globalDoc_.isObject()) mergeObjectDeep_(merged, globalDoc_.object());
@@ -1106,6 +1523,12 @@ class SwRemoteObject : public SwObject {
         mergedDoc_.setObject(merged);
     }
 
+    /**
+     * @brief Returns the current config locked.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool loadConfig_locked() {
         globalDoc_ = SwJsonDocument(SwJsonObject{});
         localDoc_  = SwJsonDocument(SwJsonObject{});
@@ -1134,12 +1557,17 @@ class SwRemoteObject : public SwObject {
         return true;
     }
 
+	    /**
+	     * @brief Performs the `applyRemoteConfig` operation.
+	     * @param remotePublisherId Value passed to the method.
+	     * @param json Value passed to the method.
+	     */
 	    void applyRemoteConfig(uint64_t remotePublisherId, const SwString& json) {
 	        SwJsonObject mergedCopy;
 	        SwList<std::function<void()>> pending;
 	        bool changed = false;
 	        {
-	            std::lock_guard<std::mutex> lk(mutex_);
+	            SwMutexLocker lk(mutex_);
 	            SwJsonDocument d;
 	            SwString err;
 	            if (!d.loadFromJson(json.toStdString(), err) || !d.isObject()) {
@@ -1151,8 +1579,8 @@ class SwRemoteObject : public SwObject {
 	            SwJsonValue prunedUserValue;
 	            SwJsonDocument nextUserDoc;
 	            if (buildUserOverrideValue_(d.toJsonValue(), baselineValue, prunedUserValue, &userTouchedPaths_) &&
-	                prunedUserValue.isObject() && prunedUserValue.toObject()) {
-	                nextUserDoc.setObject(*prunedUserValue.toObject());
+	                prunedUserValue.isObject()) {
+	                nextUserDoc.setObject(prunedUserValue.toObject());
 	            } else {
 	                nextUserDoc.setObject(SwJsonObject{});
 	            }
@@ -1177,6 +1605,11 @@ class SwRemoteObject : public SwObject {
 	        }
 	    }
 
+    /**
+     * @brief Starts the shm Config Subscription locked managed by the object.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     void startShmConfigSubscription_locked() {
         stopShmConfigSubscription_locked();
         std::shared_ptr<std::atomic_bool> alive = alive_;
@@ -1200,10 +1633,20 @@ class SwRemoteObject : public SwObject {
         }, /*fireInitial=*/true);
     }
 
+    /**
+     * @brief Stops the shm Config Subscription locked managed by the object.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     void stopShmConfigSubscription_locked() {
         shmConfigSub_.stop();
     }
 
+    /**
+     * @brief Performs the `sanitizeNsForFile_` operation.
+     * @param nsIn Value passed to the method.
+     * @return The requested sanitize Ns For File.
+     */
     static SwString sanitizeNsForFile_(const SwString& nsIn) {
         std::string s = nsIn.toStdString();
         for (size_t i = 0; i < s.size(); ++i) {
@@ -1216,6 +1659,12 @@ class SwRemoteObject : public SwObject {
         return sanitizeSegment(SwString(s));
     }
 
+    /**
+     * @brief Returns the current config Root Absolute.
+     * @return The current config Root Absolute.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString configRootAbsolute_() const {
         SwString root = configRoot_.isEmpty() ? SwString("systemConfig") : configRoot_;
         const std::string s = root.toStdString();
@@ -1238,8 +1687,18 @@ protected:
 
     class IpcConnection final : public SwObject {
      public:
+        /**
+         * @brief Destroys the `final` instance.
+         *
+         * @details Use this hook to release any resources that remain associated with the instance.
+         */
         ~IpcConnection() override { stop(); }
 
+        /**
+         * @brief Stops the underlying activity managed by the object.
+         *
+         * @details The call affects the runtime state associated with the underlying resource or service.
+         */
         void stop() {
             if (!sub_) return;
             sub_->stop();
@@ -1255,7 +1714,7 @@ protected:
     };
 
     void stopAllIpcSubscriptions_() {
-        std::lock_guard<std::mutex> lk(mutex_);
+        SwMutexLocker lk(mutex_);
         for (auto it = ipcSubscriptions_.begin(); it != ipcSubscriptions_.end(); ++it) {
             if (it.value()) it.value()->stop();
         }
@@ -1284,9 +1743,9 @@ protected:
             userDocSaveTimer_ = new SwTimer(userDocSaveDebounceMs_, this);
             userDocSaveTimer_->setSingleShot(true);
             std::shared_ptr<std::atomic_bool> alive = alive_;
-            userDocSaveTimer_->connect(userDocSaveTimer_, SIGNAL(timeout), [this, alive]() {
+            userDocSaveTimer_->connect(userDocSaveTimer_, &SwTimer::timeout, [this, alive]() {
                 if (!alive || !alive->load(std::memory_order_relaxed)) return;
-                std::lock_guard<std::mutex> lk(mutex_);
+                SwMutexLocker lk(mutex_);
                 flushUserDocSave_locked_();
             });
         }
@@ -1306,19 +1765,50 @@ protected:
 	        SwString configName;
 	        SwString fullName;
 	        SwJsonValue defaultJson;
+	        /**
+	         * @brief Performs the `function<void` operation.
+	         * @return The requested function<void.
+	         */
 	        std::function<void(SwList<std::function<void()>>&)> onMergedChanged;
+	        /**
+	         * @brief Returns the current function<void.
+	         * @return The current function<void.
+	         *
+	         * @details The returned value reflects the state currently stored by the instance.
+	         */
 	        std::function<void()> publish;
 	    };
 
     struct IIpcSubscription {
+        /**
+         * @brief Destroys the `IIpcSubscription` instance.
+         *
+         * @details Use this hook to release any resources that remain associated with the instance.
+         */
         virtual ~IIpcSubscription() {}
+        /**
+         * @brief Returns the current stop.
+         * @return The current stop.
+         *
+         * @details The returned value reflects the state currently stored by the instance.
+         */
         virtual void stop() = 0;
     };
 
     template <typename SubT>
     struct IpcSubscriptionHolder : IIpcSubscription {
         SubT sub;
+        /**
+         * @brief Constructs a `IpcSubscriptionHolder` instance.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
         explicit IpcSubscriptionHolder(SubT&& s) : sub(std::move(s)) {}
+        /**
+         * @brief Stops the underlying activity managed by the object.
+         *
+         * @details The call affects the runtime state associated with the underlying resource or service.
+         */
         void stop() override { sub.stop(); }
     };
 
@@ -1328,6 +1818,14 @@ protected:
     template <typename... A>
     struct IpcConnectHelper_<std::tuple<A...>> {
         template <typename Self, typename Fn>
+        /**
+         * @brief Performs the `connect` operation.
+         * @param self Value passed to the method.
+         * @param fullName Value passed to the method.
+         * @param cb Value passed to the method.
+         * @param fireInitial Value passed to the method.
+         * @return The requested connect.
+         */
         static size_t connect(Self* self, const SwString& fullName, Fn cb, bool fireInitial) {
             SwString ns, obj, leaf;
             if (!self || !self->splitFullName_(fullName, ns, obj, leaf)) {
@@ -1391,6 +1889,16 @@ protected:
     template <typename... A>
     struct IpcConnectScopedHelper_<std::tuple<A...>> {
         template <typename Self, typename Fn>
+        /**
+         * @brief Performs the `connect` operation.
+         * @param self Value passed to the method.
+         * @param targetObject Value passed to the method.
+         * @param leaf Value passed to the method.
+         * @param context Value passed to the method.
+         * @param cb Value passed to the method.
+         * @param fireInitial Value passed to the method.
+         * @return The requested connect.
+         */
         static SwObject* connect(Self* self,
                                  const SwString& targetObject,
                                  const SwString& leaf,
@@ -1427,6 +1935,14 @@ protected:
     template <typename Ret, typename... A>
     struct IpcExposeRpcHelper_<std::tuple<A...>, Ret> {
         template <typename Self, typename Fn>
+        /**
+         * @brief Performs the `expose` operation.
+         * @param self Value passed to the method.
+         * @param methodName Value passed to the method.
+         * @param handler Value passed to the method.
+         * @param fireInitial Value passed to the method.
+         * @return The requested expose.
+         */
         static size_t expose(Self* self, const SwString& methodName, Fn handler, bool fireInitial) {
             return self->template ipcExposeRpcNoCtx_<Ret, A...>(methodName, handler, fireInitial);
         }
@@ -1435,25 +1951,33 @@ protected:
     template <typename Ret, typename... A>
     struct IpcExposeRpcHelper_<std::tuple<sw::ipc::RpcContext, A...>, Ret> {
         template <typename Self, typename Fn>
+        /**
+         * @brief Performs the `expose` operation.
+         * @param self Value passed to the method.
+         * @param methodName Value passed to the method.
+         * @param handler Value passed to the method.
+         * @param fireInitial Value passed to the method.
+         * @return The requested expose.
+         */
         static size_t expose(Self* self, const SwString& methodName, Fn handler, bool fireInitial) {
             return self->template ipcExposeRpcWithCtx_<Ret, A...>(methodName, handler, fireInitial);
         }
     };
 
-    template <typename Ret>
+    template <size_t Capacity, typename Ret>
     typename std::enable_if<!std::is_void<Ret>::value, void>::type
-    rpcRespondValue_(const SwString& methodName,
-                     uint64_t callId,
-                     uint32_t clientPid,
-                     bool ok,
-                     const SwString& err,
-                     const Ret& value) {
-        typedef sw::ipc::RingQueue<10, uint64_t, bool, SwString, Ret> RespQueue;
+    rpcRespondValueCap_(const SwString& methodName,
+                        uint64_t callId,
+                        uint32_t clientPid,
+                        bool ok,
+                        const SwString& err,
+                        const Ret& value) {
+        typedef sw::ipc::RingQueue<Capacity, uint64_t, bool, SwString, Ret> RespQueue;
         const SwString queueName = sw::ipc::rpcResponseQueueName(methodName, clientPid);
 
         std::shared_ptr<void> holder;
         {
-            std::lock_guard<std::mutex> lk(rpcRespMutex_);
+            SwMutexLocker lk(rpcRespMutex_);
             auto it = rpcRespValueQueues_.find(queueName);
             if (it != rpcRespValueQueues_.end()) {
                 holder = it.value();
@@ -1470,18 +1994,37 @@ protected:
     }
 
     template <typename Ret>
+    typename std::enable_if<!std::is_void<Ret>::value, void>::type
+    rpcRespondValue_(const SwString& methodName,
+                     uint64_t callId,
+                     uint32_t clientPid,
+                     bool ok,
+                     const SwString& err,
+                     const Ret& value) {
+        switch (sw::ipc::rpcQueueCapacity()) {
+            case 10u:  rpcRespondValueCap_<10, Ret>(methodName, callId, clientPid, ok, err, value); break;
+            case 25u:  rpcRespondValueCap_<25, Ret>(methodName, callId, clientPid, ok, err, value); break;
+            case 50u:  rpcRespondValueCap_<50, Ret>(methodName, callId, clientPid, ok, err, value); break;
+            case 100u: rpcRespondValueCap_<100, Ret>(methodName, callId, clientPid, ok, err, value); break;
+            case 200u: rpcRespondValueCap_<200, Ret>(methodName, callId, clientPid, ok, err, value); break;
+            case 500u: rpcRespondValueCap_<500, Ret>(methodName, callId, clientPid, ok, err, value); break;
+            default:   rpcRespondValueCap_<100, Ret>(methodName, callId, clientPid, ok, err, value); break;
+        }
+    }
+
+    template <size_t Capacity, typename Ret>
     typename std::enable_if<std::is_void<Ret>::value, void>::type
-    rpcRespondVoid_(const SwString& methodName,
-                    uint64_t callId,
-                    uint32_t clientPid,
-                    bool ok,
-                    const SwString& err) {
-        typedef sw::ipc::RingQueue<10, uint64_t, bool, SwString> RespQueue;
+    rpcRespondVoidCap_(const SwString& methodName,
+                       uint64_t callId,
+                       uint32_t clientPid,
+                       bool ok,
+                       const SwString& err) {
+        typedef sw::ipc::RingQueue<Capacity, uint64_t, bool, SwString> RespQueue;
         const SwString queueName = sw::ipc::rpcResponseQueueName(methodName, clientPid);
 
         std::shared_ptr<void> holder;
         {
-            std::lock_guard<std::mutex> lk(rpcRespMutex_);
+            SwMutexLocker lk(rpcRespMutex_);
             auto it = rpcRespVoidQueues_.find(queueName);
             if (it != rpcRespVoidQueues_.end()) {
                 holder = it.value();
@@ -1495,6 +2038,24 @@ protected:
         RespQueue* resp = static_cast<RespQueue*>(holder.get());
         if (!resp) return;
         (void)resp->push(callId, ok, err);
+    }
+
+    template <typename Ret>
+    typename std::enable_if<std::is_void<Ret>::value, void>::type
+    rpcRespondVoid_(const SwString& methodName,
+                    uint64_t callId,
+                    uint32_t clientPid,
+                    bool ok,
+                    const SwString& err) {
+        switch (sw::ipc::rpcQueueCapacity()) {
+            case 10u:  rpcRespondVoidCap_<10, Ret>(methodName, callId, clientPid, ok, err); break;
+            case 25u:  rpcRespondVoidCap_<25, Ret>(methodName, callId, clientPid, ok, err); break;
+            case 50u:  rpcRespondVoidCap_<50, Ret>(methodName, callId, clientPid, ok, err); break;
+            case 100u: rpcRespondVoidCap_<100, Ret>(methodName, callId, clientPid, ok, err); break;
+            case 200u: rpcRespondVoidCap_<200, Ret>(methodName, callId, clientPid, ok, err); break;
+            case 500u: rpcRespondVoidCap_<500, Ret>(methodName, callId, clientPid, ok, err); break;
+            default:   rpcRespondVoidCap_<100, Ret>(methodName, callId, clientPid, ok, err); break;
+        }
     }
 
     template <typename Ret, typename Handler, typename... A>
@@ -1551,11 +2112,11 @@ protected:
         rpcRespondVoid_<Ret>(methodName, callId, clientPid, /*ok=*/true, SwString());
     }
 
-    template <typename Ret, typename... A, typename Fn>
-    size_t ipcExposeRpcNoCtx_(const SwString& methodName, Fn handler, bool fireInitial) {
+    template <size_t Capacity, typename Ret, typename... A, typename Fn>
+    size_t ipcExposeRpcNoCtxCap_(const SwString& methodName, Fn handler, bool fireInitial) {
         std::function<Ret(A...)> fn(handler);
-        sw::ipc::RingQueue<10, uint64_t, uint32_t, SwString, A...> req(ipcRegistry_,
-                                                                      sw::ipc::rpcRequestQueueName(methodName));
+        sw::ipc::RingQueue<Capacity, uint64_t, uint32_t, SwString, A...> req(
+            ipcRegistry_, sw::ipc::rpcRequestQueueName(methodName));
         std::shared_ptr<std::atomic_bool> alive = alive_;
         const SwString methodCopy = methodName;
 
@@ -1580,10 +2141,23 @@ protected:
     }
 
     template <typename Ret, typename... A, typename Fn>
-    size_t ipcExposeRpcWithCtx_(const SwString& methodName, Fn handler, bool fireInitial) {
+    size_t ipcExposeRpcNoCtx_(const SwString& methodName, Fn handler, bool fireInitial) {
+        switch (sw::ipc::rpcQueueCapacity()) {
+            case 10u:  return ipcExposeRpcNoCtxCap_<10, Ret, A...>(methodName, handler, fireInitial);
+            case 25u:  return ipcExposeRpcNoCtxCap_<25, Ret, A...>(methodName, handler, fireInitial);
+            case 50u:  return ipcExposeRpcNoCtxCap_<50, Ret, A...>(methodName, handler, fireInitial);
+            case 100u: return ipcExposeRpcNoCtxCap_<100, Ret, A...>(methodName, handler, fireInitial);
+            case 200u: return ipcExposeRpcNoCtxCap_<200, Ret, A...>(methodName, handler, fireInitial);
+            case 500u: return ipcExposeRpcNoCtxCap_<500, Ret, A...>(methodName, handler, fireInitial);
+            default:   return ipcExposeRpcNoCtxCap_<100, Ret, A...>(methodName, handler, fireInitial);
+        }
+    }
+
+    template <size_t Capacity, typename Ret, typename... A, typename Fn>
+    size_t ipcExposeRpcWithCtxCap_(const SwString& methodName, Fn handler, bool fireInitial) {
         std::function<Ret(sw::ipc::RpcContext, A...)> fn(handler);
-        sw::ipc::RingQueue<10, uint64_t, uint32_t, SwString, A...> req(ipcRegistry_,
-                                                                      sw::ipc::rpcRequestQueueName(methodName));
+        sw::ipc::RingQueue<Capacity, uint64_t, uint32_t, SwString, A...> req(
+            ipcRegistry_, sw::ipc::rpcRequestQueueName(methodName));
         std::shared_ptr<std::atomic_bool> alive = alive_;
         const SwString methodCopy = methodName;
 
@@ -1607,9 +2181,22 @@ protected:
         return storeIpcSubscription_(std::move(sub));
     }
 
+    template <typename Ret, typename... A, typename Fn>
+    size_t ipcExposeRpcWithCtx_(const SwString& methodName, Fn handler, bool fireInitial) {
+        switch (sw::ipc::rpcQueueCapacity()) {
+            case 10u:  return ipcExposeRpcWithCtxCap_<10, Ret, A...>(methodName, handler, fireInitial);
+            case 25u:  return ipcExposeRpcWithCtxCap_<25, Ret, A...>(methodName, handler, fireInitial);
+            case 50u:  return ipcExposeRpcWithCtxCap_<50, Ret, A...>(methodName, handler, fireInitial);
+            case 100u: return ipcExposeRpcWithCtxCap_<100, Ret, A...>(methodName, handler, fireInitial);
+            case 200u: return ipcExposeRpcWithCtxCap_<200, Ret, A...>(methodName, handler, fireInitial);
+            case 500u: return ipcExposeRpcWithCtxCap_<500, Ret, A...>(methodName, handler, fireInitial);
+            default:   return ipcExposeRpcWithCtxCap_<100, Ret, A...>(methodName, handler, fireInitial);
+        }
+    }
+
     template <typename SubT>
     size_t storeIpcSubscription_(SubT&& sub) {
-        std::lock_guard<std::mutex> lk(mutex_);
+        SwMutexLocker lk(mutex_);
         const size_t token = nextIpcToken_++;
         ipcSubscriptions_[token] = std::shared_ptr<IIpcSubscription>(
              new IpcSubscriptionHolder<typename std::decay<SubT>::type>(std::forward<SubT>(sub)));
@@ -1690,11 +2277,11 @@ protected:
     static SwString valueToString_(const SwAny& v) {
         SwJsonDocument d;
         const SwJsonValue j = valueToJson_(v);
-        if (j.isObject() && j.toObject()) d.setObject(*j.toObject());
-        else if (j.isArray() && j.toArray()) d.setArray(*j.toArray());
+        if (j.isObject()) d.setObject(j.toObject());
+        else if (j.isArray()) d.setArray(j.toArray());
         else if (j.isString()) return SwString(j.toString());
         else if (j.isBool()) return j.toBool() ? SwString("true") : SwString("false");
-        else if (j.isInt()) return SwString::number(j.toInt());
+        else if (j.isInt()) return SwString::number(j.toLongLong());
         else if (j.isDouble()) return SwString::number(j.toDouble());
         return d.toJson(SwJsonDocument::JsonFormat::Compact);
     }
@@ -1703,7 +2290,7 @@ protected:
     static SwString valueToString_(const SwList<T>& v) {
         SwJsonDocument d;
         const SwJsonValue j = valueToJson_(v);
-        if (j.isArray() && j.toArray()) d.setArray(*j.toArray());
+        if (j.isArray()) d.setArray(j.toArray());
         return d.toJson(SwJsonDocument::JsonFormat::Compact);
     }
 
@@ -1711,7 +2298,7 @@ protected:
     static SwString valueToString_(const SwMap<SwString, V>& v) {
         SwJsonDocument d;
         const SwJsonValue j = valueToJson_(v);
-        if (j.isObject() && j.toObject()) d.setObject(*j.toObject());
+        if (j.isObject()) d.setObject(j.toObject());
         return d.toJson(SwJsonDocument::JsonFormat::Compact);
     }
 
@@ -1738,7 +2325,7 @@ protected:
         }
         const SwJsonValue j = d.toJsonValue();
         if (j.isBool()) { out = SwAny(j.toBool()); return true; }
-        if (j.isInt()) { out = SwAny(j.toInt()); return true; }
+        if (j.isInt()) { out = SwAny(static_cast<long long>(j.toLongLong())); return true; }
         if (j.isDouble()) { out = SwAny(j.toDouble()); return true; }
         if (j.isString()) { out = SwAny(SwString(j.toString())); return true; }
         out = SwAny::from<SwJsonValue>(j);
@@ -1770,7 +2357,7 @@ protected:
     static bool jsonToValue_(const SwJsonValue& j, SwAny& out) {
         if (j.isNull()) { out = SwAny(); return true; }
         if (j.isBool()) { out = SwAny(j.toBool()); return true; }
-        if (j.isInt()) { out = SwAny(j.toInt()); return true; }
+        if (j.isInt()) { out = SwAny(static_cast<long long>(j.toLongLong())); return true; }
         if (j.isDouble()) { out = SwAny(j.toDouble()); return true; }
         if (j.isString()) { out = SwAny(SwString(j.toString())); return true; }
         out = SwAny::from<SwJsonValue>(j);
@@ -1780,13 +2367,13 @@ protected:
     template <typename T>
     static bool jsonToValue_(const SwJsonValue& j, SwList<T>& out) {
         if (j.isString()) return stringToValue_(SwString(j.toString()), out);
-        if (!j.isArray() || !j.toArray()) return false;
+        if (!j.isArray()) return false;
 
         out.clear();
-        const std::shared_ptr<SwJsonArray> a = j.toArray();
-        for (size_t i = 0; i < a->size(); ++i) {
+        const SwJsonArray a = j.toArray();
+        for (size_t i = 0; i < a.size(); ++i) {
             T item{};
-            if (!jsonToValue_((*a)[i], item)) return false;
+            if (!jsonToValue_(a[i], item)) return false;
             out.append(item);
         }
         return true;
@@ -1795,11 +2382,11 @@ protected:
     template <typename V>
     static bool jsonToValue_(const SwJsonValue& j, SwMap<SwString, V>& out) {
         if (j.isString()) return stringToValue_(SwString(j.toString()), out);
-        if (!j.isObject() || !j.toObject()) return false;
+        if (!j.isObject()) return false;
 
         out.clear();
-        const std::shared_ptr<SwJsonObject> o = j.toObject();
-        for (auto it = o->begin(); it != o->end(); ++it) {
+        const SwJsonObject o = j.toObject();
+        for (auto it = o.begin(); it != o.end(); ++it) {
             V vv{};
             if (!jsonToValue_(it.value(), vv)) return false;
             out.insert(it.key(), vv);
@@ -1814,7 +2401,7 @@ protected:
     }
     static bool jsonToValue_(const SwJsonValue& j, bool& out) {
         if (j.isBool()) { out = j.toBool(); return true; }
-        if (j.isInt()) { out = j.toInt() != 0; return true; }
+        if (j.isInt()) { out = j.toLongLong() != 0; return true; }
         if (j.isDouble()) { out = j.toDouble() != 0.0; return true; }
         if (j.isString()) { return stringToValue_<bool>(SwString(j.toString()), out); }
         return false;
@@ -1828,13 +2415,13 @@ protected:
     }
     static bool jsonToValue_(const SwJsonValue& j, float& out) {
         if (j.isDouble()) { out = static_cast<float>(j.toDouble()); return true; }
-        if (j.isInt()) { out = static_cast<float>(j.toInt()); return true; }
+        if (j.isInt()) { out = static_cast<float>(j.toLongLong()); return true; }
         if (j.isString()) { return stringToValue_<float>(SwString(j.toString()), out); }
         return false;
     }
     static bool jsonToValue_(const SwJsonValue& j, double& out) {
         if (j.isDouble()) { out = j.toDouble(); return true; }
-        if (j.isInt()) { out = static_cast<double>(j.toInt()); return true; }
+        if (j.isInt()) { out = static_cast<double>(j.toLongLong()); return true; }
         if (j.isString()) { return stringToValue_<double>(SwString(j.toString()), out); }
         return false;
     }
@@ -1860,7 +2447,7 @@ protected:
         return (pid << 32) ^ (salt * 0x9e3779b97f4a7c15ull);
     }
 
-    mutable std::mutex mutex_;
+    mutable SwMutex mutex_;
     SwJsonDocument globalDoc_;
     SwJsonDocument localDoc_;
     SwJsonDocument userDoc_;
@@ -1884,7 +2471,7 @@ protected:
     size_t nextIpcToken_{1};
     SwMap<size_t, std::shared_ptr<IIpcSubscription>> ipcSubscriptions_;
 
-    mutable std::mutex rpcRespMutex_;
+    mutable SwMutex rpcRespMutex_;
     SwMap<SwString, std::shared_ptr<void>> rpcRespValueQueues_;
     SwMap<SwString, std::shared_ptr<void>> rpcRespVoidQueues_;
 

@@ -1,5 +1,30 @@
 #pragma once
 
+/**
+ * @file src/core/gui/SwizioNodes/internal/ColorUtils.hpp
+ * @ingroup core_swizio_nodes
+ * @brief Declares the public interface exposed by ColorUtils in the CoreSw node-editor layer.
+ *
+ * This header belongs to the CoreSw node-editor layer. It contains the graph, geometry, style,
+ * and scene infrastructure used by the embedded node editor.
+ *
+ * Within that layer, this file focuses on the color utils interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * This header mainly contributes module-level utilities, helper declarations, or namespaced types
+ * that are consumed by the surrounding subsystem.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * Most declarations here are extension points or internal contracts that coordinate graph
+ * editing, visualization, and interaction.
+ *
+ */
+
+
 #include "core/types/SwString.h"
 #include "core/types/Sw.h"
 #include "core/types/SwJsonValue.h"
@@ -77,8 +102,8 @@ inline bool parseHexColor_(const std::string& s, SwColor* out)
 
 inline SwColor parseColorValue_(const SwJsonValue& v, SwColor fallback)
 {
-    if (v.isArray() && v.toArray()) {
-        const SwJsonArray& arr = *v.toArray();
+    if (v.isArray()) {
+        SwJsonArray arr = v.toArray();
         if (arr.size() >= 3) {
             int r = static_cast<int>(arr[0].toInt());
             int g = static_cast<int>(arr[1].toInt());
@@ -125,4 +150,3 @@ inline std::string toHex_(SwColor c)
 }
 
 } // namespace SwizioNodes
-

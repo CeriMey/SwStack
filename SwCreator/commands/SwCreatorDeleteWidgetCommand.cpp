@@ -1,6 +1,6 @@
 #include "SwCreatorDeleteWidgetCommand.h"
 
-#include "ui/SwCreatorFormCanvas.h"
+#include "designer/SwCreatorFormCanvas.h"
 #include "serialization/SwCreatorSwuiSerializer.h"
 
 #include "SwWidget.h"
@@ -39,4 +39,3 @@ void SwCreatorDeleteWidgetCommand::redo() {
     m_canvas->removeDesignWidget(m_widget);
     m_widget = nullptr;
 }
-

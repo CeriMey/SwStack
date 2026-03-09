@@ -22,8 +22,32 @@
 
 #pragma once
 
+/**
+ * @file src/core/gui/SwScrollBarPolicy.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwScrollBarPolicy in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the scroll bar policy interface. The declarations
+ * exposed here define the stable surface that adjacent code can rely on while the implementation
+ * remains free to evolve behind the header.
+ *
+ * The main declarations in this header are SwScrollBarPolicy.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
 /***************************************************************************************************
- * SwScrollBarPolicy - Qt-like scrollbar visibility policy (ƒ%^ Qt::ScrollBarPolicy).
+ * SwScrollBarPolicy - scrollbar visibility policy.
  **************************************************************************************************/
 
 enum class SwScrollBarPolicy {
@@ -31,4 +55,3 @@ enum class SwScrollBarPolicy {
     ScrollBarAlwaysOff,
     ScrollBarAlwaysOn
 };
-

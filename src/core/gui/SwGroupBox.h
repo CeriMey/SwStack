@@ -1,4 +1,4 @@
-/***************************************************************************************************
+﻿/***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
  * Copyright (C) 2025 Ariya Consulting
@@ -22,11 +22,35 @@
 
 #pragma once
 
+/**
+ * @file src/core/gui/SwGroupBox.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwGroupBox in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the group box interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwGroupBox.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
 /***************************************************************************************************
- * SwGroupBox - Qt-like group box (≈ QGroupBox).
+ * SwGroupBox - group box.
  *
  * Notes:
- * - Optional checkable header (like QGroupBox::setCheckable).
+ * - Optional checkable header.
  * - Does not automatically manage child layout margins; use a layout margin if needed.
  **************************************************************************************************/
 
@@ -37,20 +61,49 @@ class SwGroupBox : public SwFrame {
     SW_OBJECT(SwGroupBox, SwFrame)
 
 public:
+    /**
+     * @brief Constructs a `SwGroupBox` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwGroupBox(SwWidget* parent = nullptr)
         : SwFrame(parent) {
         initDefaults();
     }
 
+    /**
+     * @brief Constructs a `SwGroupBox` instance.
+     * @param title Title text applied by the operation.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     SwGroupBox(const SwString& title, SwWidget* parent = nullptr)
         : SwFrame(parent) {
         initDefaults();
         setTitle(title);
     }
 
+    /**
+     * @brief Sets the title.
+     * @param title Title text applied by the operation.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setTitle(const SwString& title) { setText(title); }
+    /**
+     * @brief Performs the `title` operation.
+     * @return The requested title.
+     */
     SwString title() const { return getText(); }
 
+    /**
+     * @brief Sets the checkable.
+     * @param on Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setCheckable(bool on) {
         if (m_checkable == on) {
             return;
@@ -60,8 +113,20 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns whether the object reports checkable.
+     * @return `true` when the object reports checkable; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isCheckable() const { return m_checkable; }
 
+    /**
+     * @brief Sets the checked.
+     * @param checked Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setChecked(bool checked) {
         if (m_checked == checked) {
             return;
@@ -72,17 +137,41 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns whether the object reports checked.
+     * @return `true` when the object reports checked; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isChecked() const { return m_checked; }
 
+    /**
+     * @brief Sets the accent Color.
+     * @param color Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setAccentColor(const SwColor& color) {
         m_accent = clampColor(color);
         update();
     }
 
+    /**
+     * @brief Returns the current accent Color.
+     * @return The current accent Color.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwColor accentColor() const { return m_accent; }
 
+    /**
+     * @brief Returns the current contents Rect.
+     * @return The current contents Rect.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwRect contentsRect() const {
-        const SwRect r = getRect();
+        const SwRect r = rect();
         const int top = r.y + titleHeight();
         return SwRect{r.x + m_padding,
                       top + m_padding,
@@ -96,6 +185,12 @@ protected:
     CUSTOM_PROPERTY(SwString, Text, "GroupBox") { update(); }
     CUSTOM_PROPERTY(bool, Pressed, false) { update(); }
 
+    /**
+     * @brief Handles the paint Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void paintEvent(PaintEvent* event) override {
         if (!isVisibleInHierarchy()) {
             return;
@@ -105,7 +200,7 @@ protected:
             return;
         }
 
-        const SwRect rect = getRect();
+        const SwRect rect = this->rect();
 
         StyleSheet* sheet = getToolSheet();
         SwColor bg{255, 255, 255};
@@ -133,7 +228,7 @@ protected:
         SwRect indicator = checkIndicatorRect(rect);
         SwRect titleRect = titleTextRect(rect);
 
-        // Break the frame line behind the title for a Qt-like look.
+        // Break the frame line behind the title for a cleaner look.
         if (paintBackground && bgAlpha > 0.0f) {
             SwRect patch = titleRect;
             patch.x -= 4;
@@ -173,6 +268,12 @@ protected:
         painter->finalize();
     }
 
+    /**
+     * @brief Handles the mouse Press Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mousePressEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -183,7 +284,7 @@ protected:
         }
 
         if (m_checkable) {
-            const SwRect rect = getRect();
+            const SwRect rect = this->rect();
             const SwRect indicator = checkIndicatorRect(rect);
             const SwRect titleRect = titleTextRect(rect);
             if (containsPoint(indicator, event->x(), event->y()) ||
@@ -197,6 +298,12 @@ protected:
         SwFrame::mousePressEvent(event);
     }
 
+    /**
+     * @brief Handles the mouse Release Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseReleaseEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -206,7 +313,7 @@ protected:
         setPressed(false);
 
         if (wasPressed && m_checkable) {
-            const SwRect rect = getRect();
+            const SwRect rect = this->rect();
             const SwRect indicator = checkIndicatorRect(rect);
             const SwRect titleRect = titleTextRect(rect);
             if (containsPoint(indicator, event->x(), event->y()) ||
@@ -221,27 +328,6 @@ protected:
     }
 
 private:
-    static int clampInt(int value, int minValue, int maxValue) {
-        if (value < minValue) return minValue;
-        if (value > maxValue) return maxValue;
-        return value;
-    }
-
-    static SwColor clampColor(const SwColor& c) {
-        return SwColor{clampInt(c.r, 0, 255), clampInt(c.g, 0, 255), clampInt(c.b, 0, 255)};
-    }
-
-    static int parsePixelValue(const SwString& value, int defaultValue) {
-        if (value.isEmpty()) {
-            return defaultValue;
-        }
-        SwString cleaned = value;
-        cleaned.replace("px", "");
-        bool ok = false;
-        int v = cleaned.toInt(&ok);
-        return ok ? v : defaultValue;
-    }
-
     static bool containsPoint(const SwRect& r, int px, int py) {
         return px >= r.x && px <= (r.x + r.width) && py >= r.y && py <= (r.y + r.height);
     }

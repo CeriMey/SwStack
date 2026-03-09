@@ -1,4 +1,4 @@
-/***************************************************************************************************
+﻿/***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
  * Copyright (C) 2025 Ariya Consulting
@@ -22,8 +22,32 @@
 
 #pragma once
 
+/**
+ * @file src/core/gui/SwScrollBar.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwScrollBar in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the scroll bar interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwScrollBar.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
 /***************************************************************************************************
- * SwScrollBar - Qt-like scrollbar widget (≈ QScrollBar).
+ * SwScrollBar - scrollbar widget.
  **************************************************************************************************/
 
 #include "SwWidget.h"
@@ -37,12 +61,26 @@ public:
         Vertical
     };
 
+    /**
+     * @brief Constructs a `SwScrollBar` instance.
+     * @param orientation Value passed to the method.
+     * @param parent Optional parent object that owns this instance.
+     * @param orientation Value passed to the method.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwScrollBar(Orientation orientation = Orientation::Vertical, SwWidget* parent = nullptr)
         : SwWidget(parent)
         , m_orientation(orientation) {
         initDefaults();
     }
 
+    /**
+     * @brief Sets the orientation.
+     * @param orientation Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setOrientation(Orientation orientation) {
         if (m_orientation == orientation) {
             return;
@@ -51,8 +89,21 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the current orientation.
+     * @return The current orientation.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     Orientation orientation() const { return m_orientation; }
 
+    /**
+     * @brief Sets the range.
+     * @param minimum Value passed to the method.
+     * @param maximum Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setRange(int minimum, int maximum) {
         if (minimum > maximum) {
             const int tmp = minimum;
@@ -66,25 +117,79 @@ public:
         update();
     }
 
+    /**
+     * @brief Sets the minimum.
+     * @param m_maximum Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setMinimum(int minimum) { setRange(minimum, m_maximum); }
+    /**
+     * @brief Sets the maximum.
+     * @param maximum Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setMaximum(int maximum) { setRange(m_minimum, maximum); }
 
+    /**
+     * @brief Returns the current minimum.
+     * @return The current minimum.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int minimum() const { return m_minimum; }
+    /**
+     * @brief Returns the current maximum.
+     * @return The current maximum.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int maximum() const { return m_maximum; }
 
+    /**
+     * @brief Sets the page Step.
+     * @param step Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setPageStep(int step) {
         m_pageStep = std::max(0, step);
         update();
     }
 
+    /**
+     * @brief Returns the current page Step.
+     * @return The current page Step.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int pageStep() const { return m_pageStep; }
 
+    /**
+     * @brief Sets the single Step.
+     * @param step Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setSingleStep(int step) {
         m_singleStep = std::max(1, step);
     }
 
+    /**
+     * @brief Returns the current single Step.
+     * @return The current single Step.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int singleStep() const { return m_singleStep; }
 
+    /**
+     * @brief Sets the value.
+     * @param value Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setValue(int value) {
         const int clamped = clampInt(value, m_minimum, m_maximum);
         if (m_value == clamped) {
@@ -95,8 +200,20 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the current value.
+     * @return The current value.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int value() const { return m_value; }
 
+    /**
+     * @brief Returns whether the object reports slider Down.
+     * @return `true` when the object reports slider Down; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isSliderDown() const { return m_dragging; }
 
     DECLARE_SIGNAL(valueChanged, int);
@@ -106,13 +223,19 @@ public:
     DECLARE_SIGNAL(sliderReleased, int);
 
 protected:
+    /**
+     * @brief Handles the paint Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void paintEvent(PaintEvent* event) override {
         SwPainter* painter = event ? event->painter() : nullptr;
         if (!painter) {
             return;
         }
 
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
         const SwRect groove = grooveRect(bounds);
         const SwRect thumb = thumbRect(bounds);
 
@@ -138,6 +261,12 @@ protected:
         painter->fillRoundedRect(thumb, radiusFor(thumb), thumbFill, thumbBorder, 1);
     }
 
+    /**
+     * @brief Handles the mouse Press Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mousePressEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -147,7 +276,7 @@ protected:
             return;
         }
 
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
         const SwRect thumb = thumbRect(bounds);
 
         if (containsPoint(thumb, event->x(), event->y())) {
@@ -185,6 +314,12 @@ protected:
         event->accept();
     }
 
+    /**
+     * @brief Handles the mouse Move Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseMoveEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -199,6 +334,12 @@ protected:
         event->accept();
     }
 
+    /**
+     * @brief Handles the mouse Release Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseReleaseEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -215,8 +356,20 @@ protected:
         SwWidget::mouseReleaseEvent(event);
     }
 
+    /**
+     * @brief Handles the wheel Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void wheelEvent(WheelEvent* event) override {
         if (!event) {
+            return;
+        }
+        const bool horizontalRequest = event->isShiftPressed();
+        if ((horizontalRequest && m_orientation != Orientation::Horizontal)
+            || (!horizontalRequest && m_orientation != Orientation::Vertical)) {
+            SwWidget::wheelEvent(event);
             return;
         }
         if (!getEnable() || !isPointInside(event->x(), event->y())) {
@@ -245,12 +398,6 @@ protected:
     }
 
 private:
-    static int clampInt(int value, int minValue, int maxValue) {
-        if (value < minValue) return minValue;
-        if (value > maxValue) return maxValue;
-        return value;
-    }
-
     static bool containsPoint(const SwRect& r, int px, int py) {
         return px >= r.x && px <= (r.x + r.width) && py >= r.y && py <= (r.y + r.height);
     }
@@ -311,7 +458,7 @@ private:
     }
 
     void updateValueFromPosition(int px, int py) {
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
         const SwRect groove = grooveRect(bounds);
         const int len = thumbLength(groove);
         const int r = range();
@@ -361,3 +508,4 @@ private:
     bool m_dragging{false};
     int m_dragOffset{0};
 };
+

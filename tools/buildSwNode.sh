@@ -99,11 +99,10 @@ copy_one() {
   fi
 }
 
-copy_one SwBridge "SwNode/SwAPI/SwBridge"
-copy_one swapi "SwNode/SwAPI/SwApi"
-copy_one SwLaunch "SwNode/SwLaunch"
-copy_one SwComponentContainer "SwNode/SwComponentContainer"
-copy_one SwBuild "SwNode/SwBuild"
+copy_one SwBridge "tools/SwNode/SwAPI/SwBridge"
+copy_one swapi "tools/SwNode/SwAPI/SwApi"
+copy_one SwLaunch "tools/SwNode/SwLaunch"
+copy_one SwComponentContainer "tools/SwNode/SwComponentContainer"
+copy_one SwBuild "tools/SwNode/SwBuild"
 
 echo "[OK] Termine."
-

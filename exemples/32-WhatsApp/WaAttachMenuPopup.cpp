@@ -1,4 +1,4 @@
-#include "WaAttachMenuPopup.h"
+﻿#include "WaAttachMenuPopup.h"
 
 #include "SwButton.h"
 
@@ -47,11 +47,11 @@ void WaAttachMenuPopup::buildUi_() {
         return;
     }
 
-    m_file = makeItem_("📄  Fichier", this);
-    m_media = makeItem_("🖼️  Photos / vidéos", this);
-    m_audio = makeItem_("🎵  Audio", this);
-    m_contact = makeItem_("👤  Contact", this);
-    m_location = makeItem_("📍  Localisation", this);
+    m_file = makeItem_("ðŸ“„  Fichier", this);
+    m_media = makeItem_("ðŸ–¼ï¸  Photos / vidÃ©os", this);
+    m_audio = makeItem_("ðŸŽµ  Audio", this);
+    m_contact = makeItem_("ðŸ‘¤  Contact", this);
+    m_location = makeItem_("ðŸ“  Localisation", this);
 
     SwObject::connect(m_file, &SwButton::clicked, [this]() { actionTriggered("file"); });
     SwObject::connect(m_media, &SwButton::clicked, [this]() { actionTriggered("media"); });
@@ -63,15 +63,15 @@ void WaAttachMenuPopup::buildUi_() {
 }
 
 void WaAttachMenuPopup::updateLayout_() {
-    const SwRect r = getRect();
+    const SwRect r = rect();
 
     const int innerW = std::max(0, r.width - 2 * m_pad);
-    int y = r.y + m_pad;
+    int y = m_pad;
     auto place = [&](SwButton* b) {
         if (!b) {
             return;
         }
-        b->move(r.x + m_pad, y);
+        b->move(m_pad, y);
         b->resize(innerW, m_itemH);
         y += m_itemH + m_gap;
     };
@@ -82,4 +82,5 @@ void WaAttachMenuPopup::updateLayout_() {
     place(m_contact);
     place(m_location);
 }
+
 

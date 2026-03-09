@@ -22,6 +22,31 @@
 
 #pragma once
 
+/**
+ * @file src/core/types/SwJsonValue.h
+ * @ingroup core_types
+ * @brief Declares the public interface exposed by SwJsonValue in the CoreSw fundamental types
+ * layer.
+ *
+ * This header belongs to the CoreSw fundamental types layer. It provides value types, containers,
+ * text and binary helpers, and lightweight serialization primitives shared across the stack.
+ *
+ * Within that layer, this file focuses on the JSON value interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwJsonValue.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * Interfaces in this area are intentionally reused by runtime, IO, GUI, remote, and media modules
+ * to keep cross-module semantics consistent.
+ *
+ */
+
+
 #include <string>
 #include <memory>
 #include <iostream>
@@ -254,19 +279,22 @@ public:
      * @brief Converts the value to a boolean.
      * @return The boolean representation of the value.
      */
-    bool toBool() const {
+    bool toBool(bool defaultValue = false) const {
         if (type_ == Type::Boolean) return boolValue_;
         if (type_ == Type::Integer) return intValue_ != 0;
         if (type_ == Type::Double) return doubleValue_ != 0.0;
-        return false;
+        return defaultValue;
     }
 
     /**
      * @brief Converts the value to an integer.
      * @return The integer representation of the value.
      */
-    int toInt() const {
-        return static_cast<int>(toLongLong());
+    int toInt(int defaultValue = 0) const {
+        if (type_ == Type::Integer) return static_cast<int>(intValue_);
+        if (type_ == Type::Boolean) return boolValue_ ? 1 : 0;
+        if (type_ == Type::Double) return static_cast<int>(doubleValue_);
+        return defaultValue;
     }
 
     /**
@@ -281,10 +309,30 @@ public:
     }
 
     /**
+     * @brief Compatibility alias for integer extraction on JSON values.
+     * @param defaultValue Value returned when the conversion is not applicable.
+     * @return The 64-bit integer representation of the value.
+     */
+    std::int64_t toInteger(std::int64_t defaultValue = 0) const {
+        if (type_ == Type::Integer || type_ == Type::Boolean || type_ == Type::Double) {
+            return toLongLong();
+        }
+        return defaultValue;
+    }
+
+    /**
+     * @brief Converts the value to a 64-bit integer.
+     * @return The 64-bit integer representation of the value.
+     */
+    std::int64_t toInt64() const {
+        return toLongLong();
+    }
+
+    /**
      * @brief Converts the value to a double.
      * @return The double representation of the value.
      */
-    double toDouble(int precision = -1) const {
+    double toDouble(double defaultValue = 0.0, int precision = -1) const {
         auto truncate = [precision](double value) -> double {
             if (precision <= 0) {
                 return value;
@@ -300,43 +348,35 @@ public:
             return static_cast<double>(intValue_);
         }
         if (type_ == Type::Boolean) return boolValue_ ? 1.0 : 0.0;
-        return 0.0;
+        return defaultValue;
     }
 
     /**
      * @brief Converts the value to a string.
      * @return The string representation of the value.
      */
-    std::string toString() const {
+    std::string toString(const std::string& defaultValue = "") const {
         if (type_ == Type::String) return stringValue_;
         if (type_ == Type::Boolean) return boolValue_ ? "true" : "false";
         if (type_ == Type::Integer) return std::to_string(intValue_);
         if (type_ == Type::Double) return std::to_string(doubleValue_);
         if (type_ == Type::Null) return "null";
-        return "{}";  // Pour Object et Array, retourne une structure vide
+        return defaultValue;
     }
 
     /**
-     * @brief Converts the value to a shared pointer to a JSON object.
-     * @return A shared pointer to the JSON object.
+     * @brief Converts the value to a JSON object.
+     * @return The JSON object, or an empty object if the value is not of Object type.
+     * @note Implementation provided in SwJsonObject.h (include it to use this method).
      */
-    std::shared_ptr<SwJsonObject> toObject() const {
-        if (type_ == Type::Object && objectValue_) {
-            return objectValue_;
-        }
-        return std::shared_ptr<SwJsonObject>();
-    }
+    SwJsonObject toObject() const;
 
     /**
-     * @brief Converts the value to a shared pointer to a JSON array.
-     * @return A shared pointer to the JSON array.
+     * @brief Converts the value to a JSON array.
+     * @return The JSON array, or an empty array if the value is not of Array type.
+     * @note Implementation provided in SwJsonObject.h (include it to use this method).
      */
-    std::shared_ptr<SwJsonArray> toArray() const {
-        if (type_ == Type::Array && arrayValue_) {
-            return arrayValue_;
-        }
-        return std::shared_ptr<SwJsonArray>();
-    }
+    SwJsonArray toArray() const;
 
     /**
      * @brief Converts the value to a JSON-formatted string.
@@ -461,7 +501,21 @@ public:
         return false;
     }
 
+    /**
+     * @brief Returns the internal shared pointer to the JSON object.
+     * @note Useful for in-place tree navigation where a stable pointer is needed.
+     */
+    std::shared_ptr<SwJsonObject> toObjectPtr() const { return objectValue_; }
+
+    /**
+     * @brief Returns the internal shared pointer to the JSON array.
+     * @note Useful for in-place tree navigation where a stable pointer is needed.
+     */
+    std::shared_ptr<SwJsonArray> toArrayPtr() const { return arrayValue_; }
+
 private:
+    friend class SwJsonDocument;
+
     Type type_ = Type::Null; ///< The type of the JSON value.
     bool boolValue_ = false; ///< The boolean value.
     std::int64_t intValue_ = 0; ///< The integer value.

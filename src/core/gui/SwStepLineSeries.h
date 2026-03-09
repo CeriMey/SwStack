@@ -1,3 +1,14 @@
+
+/**
+ * @file
+ * @ingroup core_gui
+ * @brief Declares the step-line series type used for piecewise-constant charts.
+ *
+ * `SwStepLineSeries` represents values that change at discrete boundaries rather than
+ * continuously between samples. Chart views can use it to render state transitions, digital
+ * signals, or metrics where the last value remains active until the next sample arrives.
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -22,15 +33,28 @@
 
 #pragma once
 
+
+
 #include "SwAbstractSeries.h"
 
 class SwStepLineSeries : public SwAbstractSeries {
     SW_OBJECT(SwStepLineSeries, SwAbstractSeries)
 
 public:
+    /**
+     * @brief Constructs a `SwStepLineSeries` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwStepLineSeries(SwObject* parent = nullptr)
         : SwAbstractSeries(parent) {}
 
+    /**
+     * @brief Returns the current type.
+     * @return The current type.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SeriesType type() const override { return SeriesType::StepLine; }
 };
-

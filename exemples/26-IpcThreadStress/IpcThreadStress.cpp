@@ -1,5 +1,6 @@
 #include "SwCoreApplication.h"
 #include "SwEventLoop.h"
+#include "SwIpcRpc.h"
 #include "SwProxyObject.h"
 #include "SwProcess.h"
 #include "SwRemoteObject.h"
@@ -48,6 +49,47 @@ static uint64_t toU64(const SwString& s, uint64_t def) {
     } catch (...) {
         return def;
     }
+}
+
+static uint32_t parseTickQueueCapacity(const SwString& s, uint32_t def) {
+    const uint64_t raw = toU64(s, static_cast<uint64_t>(def));
+    if (raw == 0u) return 1u;
+    const uint64_t capMax = static_cast<uint64_t>((std::numeric_limits<uint32_t>::max)());
+    if (raw > capMax) return (std::numeric_limits<uint32_t>::max)();
+    return static_cast<uint32_t>(raw);
+}
+
+static SwString tickQueueNameForCapacity(uint32_t capacity) {
+    return SwString("tickqv2|") + SwString::number(static_cast<unsigned long long>(capacity));
+}
+
+static void runTickQueueBenchmark_(uint32_t capacity,
+                                   const SwString& dom,
+                                   const SwString& obj,
+                                   int signalSamples,
+                                   std::vector<uint64_t>& latUs,
+                                   int& missed) {
+    const SwString queueName = tickQueueNameForCapacity(capacity);
+    sw::ipc::Registry reg(dom, obj);
+    sw::ipc::RingQueueDynamic<uint64_t, uint64_t, SwString> tickQ(reg, queueName, capacity);
+
+    uint64_t lastSeq = 0;
+    SwEventLoop loop;
+    auto sub = tickQ.connect([&](uint64_t seq, uint64_t sendUs, SwString /*sender*/) {
+        const uint64_t t = nowUs();
+        const uint64_t d = (t >= sendUs) ? (t - sendUs) : 0;
+        latUs.push_back(d);
+        if (lastSeq != 0 && seq != lastSeq + 1) {
+            missed += static_cast<int>(seq - (lastSeq + 1));
+        }
+        lastSeq = seq;
+        if (static_cast<int>(latUs.size()) >= signalSamples) {
+            loop.quit();
+        }
+    }, /*fireInitial=*/false);
+
+    loop.exec(0);
+    sub.stop();
 }
 
 static bool splitTarget(const SwString& fqn, SwString& domainOut, SwString& objectOut) {
@@ -122,26 +164,30 @@ static void usage() {
         << "Bench (spawns N client processes, in-process server):\n"
         << "  IpcThreadStress.exe --mode=bench [--ns=bench] [--clients=4] [--count=200] [--warmup=20]\n"
         << "                     [--timeout_ms=1000] [--signal_samples=50] [--tick_ms=5]\n"
+        << "                     [--tick_queue_capacity=100]\n"
         << "\n"
         << "Server only:\n"
-        << "  IpcThreadStress.exe --mode=server [--ns=bench] [--tick_ms=5]\n"
+        << "  IpcThreadStress.exe --mode=server [--ns=bench] [--tick_ms=5] [--tick_queue_capacity=100]\n"
         << "\n"
         << "Client only:\n"
         << "  IpcThreadStress.exe --mode=client --targets=bench/A,bench/B,bench/W1 --bench_target=bench/W1\n"
         << "                     [--count=200] [--warmup=20] [--timeout_ms=1000]\n"
-        << "                     [--signal_target=bench/W1] [--signal_samples=50]\n";
+        << "                     [--signal_target=bench/W1] [--signal_samples=50]\n"
+        << "                     [--tick_queue_capacity=100]\n";
 }
 
 } // namespace
 
 class BenchObject : public SwRemoteObject {
 public:
-    SW_REGISTER_SHM_SIGNAL(tick, uint64_t, uint64_t, SwString);
-
     BenchObject(const SwString& ns,
                 const SwString& objectName,
+                uint32_t tickQueueCapacity = 100u,
                 SwObject* parent = nullptr)
-        : SwRemoteObject(ns, /*nameSpace=*/SwString(), objectName, parent) {
+        : SwRemoteObject(ns, /*nameSpace=*/SwString(), objectName, parent),
+          tickRegistry_(ns, objectName),
+          tickQueueCapacity_(tickQueueCapacity == 0u ? 1u : tickQueueCapacity),
+          tickQueue_(tickRegistry_, tickQueueNameForCapacity(tickQueueCapacity_), tickQueueCapacity_) {
         ipcExposeRpc(add, [](int a, int b) { return a + b; });
         ipcExposeRpc(who, [this]() { return this->getObjectName(); });
         ipcExposeRpc(threadTag, []() { return threadTagNow(); });
@@ -158,7 +204,9 @@ public:
                 self->tickTimer_->setSingleShot(false);
                 self->tickTimer_->connect(self->tickTimer_, SIGNAL(timeout), [self]() {
                     const uint64_t seq = self->tickSeq_.fetch_add(1, std::memory_order_relaxed) + 1;
-                    self->tick.publish(seq, nowUs(), self->getObjectName());
+                    if (!self->tickQueue_.push(seq, nowUs(), self->getObjectName())) {
+                        self->tickDrops_.fetch_add(1, std::memory_order_relaxed);
+                    }
                 });
             }
             self->tickTimer_->start(intervalMs);
@@ -175,9 +223,16 @@ public:
         if (tickTimer_) tickTimer_->stop();
     }
 
+    uint32_t tickQueueCapacity() const { return tickQueueCapacity_; }
+    uint64_t tickDropCount() const { return tickDrops_.load(std::memory_order_relaxed); }
+
 private:
+    sw::ipc::Registry tickRegistry_;
+    uint32_t tickQueueCapacity_{100u};
+    sw::ipc::RingQueueDynamic<uint64_t, uint64_t, SwString> tickQueue_;
     SwTimer* tickTimer_ = nullptr;
     std::atomic<uint64_t> tickSeq_{0};
+    std::atomic<uint64_t> tickDrops_{0};
 };
 
 SW_PROXY_OBJECT_CLASS_BEGIN(BenchRemote)
@@ -197,6 +252,7 @@ static int clientMain(SwCoreApplication& app) {
 
     const int signalSamples = (std::max)(0, toInt(app.getArgument("signal_samples", "0"), 0));
     const SwString signalTargetArg = app.getArgument("signal_target", benchTargetArg);
+    const uint32_t tickQueueCapacity = parseTickQueueCapacity(app.getArgument("tick_queue_capacity", "100"), 100u);
 
     if (targetsArg.isEmpty()) {
         usage();
@@ -214,7 +270,7 @@ static int clientMain(SwCoreApplication& app) {
         benchTarget = targets.front();
     }
 
-    app.postEvent([&app, targets, benchTarget, clientId, count, warmup, timeoutMs, signalSamples, signalTargetArg]() mutable {
+    app.postEvent([&app, targets, benchTarget, clientId, count, warmup, timeoutMs, signalSamples, signalTargetArg, tickQueueCapacity]() mutable {
         const std::string prefix = std::string("[client ") + clientId.toStdString() + "] ";
 
         std::cout << prefix << "targets=" << targets.size()
@@ -223,6 +279,7 @@ static int clientMain(SwCoreApplication& app) {
                   << " warmup=" << warmup
                   << " timeout_ms=" << timeoutMs
                   << " signal_samples=" << signalSamples
+                  << " tick_queue_capacity=" << tickQueueCapacity
                   << "\n";
 
         // Quick routing validation on all targets.
@@ -251,36 +308,17 @@ static int clientMain(SwCoreApplication& app) {
             }
         }
 
-        // Optional signal benchmark (server -> clients).
+        // Optional tick queue benchmark (server -> clients).
         if (signalSamples > 0 && !signalTargetArg.isEmpty()) {
             SwString dom, obj;
             if (splitTarget(signalTargetArg, dom, obj)) {
-                sw::ipc::Registry reg(dom, obj);
-                sw::ipc::Signal<uint64_t, uint64_t, SwString> tick(reg, "tick");
-
                 std::vector<uint64_t> latUs;
                 latUs.reserve(static_cast<size_t>(signalSamples));
-                uint64_t lastSeq = 0;
                 int missed = 0;
+                runTickQueueBenchmark_(tickQueueCapacity, dom, obj, signalSamples, latUs, missed);
 
-                SwEventLoop loop;
-                auto sub = tick.connect([&](uint64_t seq, uint64_t sendUs, SwString sender) {
-                    const uint64_t t = nowUs();
-                    const uint64_t d = (t >= sendUs) ? (t - sendUs) : 0;
-                    latUs.push_back(d);
-                    if (lastSeq != 0 && seq != lastSeq + 1) {
-                        missed += static_cast<int>(seq - (lastSeq + 1));
-                    }
-                    lastSeq = seq;
-                    if (static_cast<int>(latUs.size()) >= signalSamples) {
-                        loop.quit();
-                    }
-                }, /*fireInitial=*/false);
-
-                loop.exec(0);
-                sub.stop();
-
-                std::cout << prefix << "signal tick from " << signalTargetArg.toStdString()
+                std::cout << prefix << "tick queue from " << signalTargetArg.toStdString()
+                          << " queue=" << tickQueueNameForCapacity(tickQueueCapacity).toStdString()
                           << " samples=" << latUs.size()
                           << " missed=" << missed
                           << "\n";
@@ -343,16 +381,17 @@ static int clientMain(SwCoreApplication& app) {
 static int serverMain(SwCoreApplication& app) {
     const SwString ns = app.getArgument("ns", "bench");
     const int tickMs = (std::max)(1, toInt(app.getArgument("tick_ms", "5"), 5));
+    const uint32_t tickQueueCapacity = parseTickQueueCapacity(app.getArgument("tick_queue_capacity", "100"), 100u);
 
     SwThread worker("BenchWorker");
     worker.start();
 
-    BenchObject a(ns, "A");
-    BenchObject b(ns, "B");
+    BenchObject a(ns, "A", tickQueueCapacity);
+    BenchObject b(ns, "B", tickQueueCapacity);
 
-    BenchObject w1(ns, "W1");
-    BenchObject w2(ns, "W2");
-    BenchObject moved(ns, "MOVED");
+    BenchObject w1(ns, "W1", tickQueueCapacity);
+    BenchObject w2(ns, "W2", tickQueueCapacity);
+    BenchObject moved(ns, "MOVED", tickQueueCapacity);
 
     w1.moveToThread(&worker);
     w2.moveToThread(&worker);
@@ -367,6 +406,8 @@ static int serverMain(SwCoreApplication& app) {
               << ns.toStdString() << "/W2,"
               << ns.toStdString() << "/MOVED"
               << " tick_ms=" << tickMs
+              << " tick_queue_capacity=" << tickQueueCapacity
+              << " tick_queue=" << tickQueueNameForCapacity(tickQueueCapacity).toStdString()
               << "\n";
 
     const int rc = app.exec();
@@ -384,16 +425,17 @@ static int benchMain(SwCoreApplication& app, const SwString& program) {
     const int timeoutMs = (std::max)(1, toInt(app.getArgument("timeout_ms", "1000"), 1000));
     const int signalSamples = (std::max)(0, toInt(app.getArgument("signal_samples", "50"), 50));
     const int tickMs = (std::max)(1, toInt(app.getArgument("tick_ms", "5"), 5));
+    const uint32_t tickQueueCapacity = parseTickQueueCapacity(app.getArgument("tick_queue_capacity", "100"), 100u);
 
     SwThread worker("BenchWorker");
     worker.start();
 
-    BenchObject a(ns, "A");
-    BenchObject b(ns, "B");
+    BenchObject a(ns, "A", tickQueueCapacity);
+    BenchObject b(ns, "B", tickQueueCapacity);
 
-    BenchObject w1(ns, "W1");
-    BenchObject w2(ns, "W2");
-    BenchObject moved(ns, "MOVED");
+    BenchObject w1(ns, "W1", tickQueueCapacity);
+    BenchObject w2(ns, "W2", tickQueueCapacity);
+    BenchObject moved(ns, "MOVED", tickQueueCapacity);
 
     w1.moveToThread(&worker);
     w2.moveToThread(&worker);
@@ -418,6 +460,8 @@ static int benchMain(SwCoreApplication& app, const SwString& program) {
               << " timeout_ms=" << timeoutMs
               << " signal_samples=" << signalSamples
               << " tick_ms=" << tickMs
+              << " tick_queue_capacity=" << tickQueueCapacity
+              << " tick_queue=" << tickQueueNameForCapacity(tickQueueCapacity).toStdString()
               << "\n";
 
     struct BenchState {
@@ -427,7 +471,7 @@ static int benchMain(SwCoreApplication& app, const SwString& program) {
     auto state = std::make_shared<BenchState>();
     state->remaining = clients;
 
-    app.postEvent([&app, state, program, ns, clients, targets, benchTarget, count, warmup, timeoutMs, signalSamples]() mutable {
+    app.postEvent([&app, state, program, ns, clients, targets, benchTarget, count, warmup, timeoutMs, signalSamples, tickQueueCapacity]() mutable {
         for (int i = 0; i < clients; ++i) {
             std::unique_ptr<SwProcess> p(new SwProcess());
             SwProcess* raw = p.get();
@@ -461,6 +505,7 @@ static int benchMain(SwCoreApplication& app, const SwString& program) {
             args.append(SwString("--count=") + SwString::number(count));
             args.append(SwString("--warmup=") + SwString::number(warmup));
             args.append(SwString("--timeout_ms=") + SwString::number(timeoutMs));
+            args.append(SwString("--tick_queue_capacity=") + SwString::number(static_cast<unsigned long long>(tickQueueCapacity)));
             if (signalSamples > 0) {
                 args.append(SwString("--signal_target=") + benchTarget);
                 args.append(SwString("--signal_samples=") + SwString::number(signalSamples));

@@ -1,4 +1,4 @@
-#include "WaEmojiPickerPopup.h"
+﻿#include "WaEmojiPickerPopup.h"
 
 #include "SwEmojiPicker.h"
 
@@ -45,7 +45,8 @@ void WaEmojiPickerPopup::updateLayout_() {
     if (!m_picker) {
         return;
     }
-    const SwRect r = getRect();
-    m_picker->move(r.x + m_pad, r.y + m_pad);
+    const SwRect r = rect();
+    m_picker->move(m_pad, m_pad);
     m_picker->resize(std::max(0, r.width - 2 * m_pad), std::max(0, r.height - 2 * m_pad));
 }
+

@@ -22,6 +22,29 @@
 
 #pragma once
 
+/**
+ * @file src/media/SwHttpMjpegSource.h
+ * @ingroup media
+ * @brief Declares the public interface exposed by SwHttpMjpegSource in the CoreSw media layer.
+ *
+ * This header belongs to the CoreSw media layer. It exposes video frames, packets, decoders,
+ * capture sources, and streaming-oriented helpers used by media pipelines.
+ *
+ * Within that layer, this file focuses on the HTTP mjpeg source interface. The declarations
+ * exposed here define the stable surface that adjacent code can rely on while the implementation
+ * remains free to evolve behind the header.
+ *
+ * The main declarations in this header are SwHttpMjpegSource.
+ *
+ * Source-oriented declarations here describe how data or media is produced over time, how
+ * consumers observe availability, and which lifetime guarantees apply to delivered payloads.
+ *
+ * Media-facing declarations here focus on packet and frame ownership, format description,
+ * decoding boundaries, and real-time source control.
+ *
+ */
+
+
 /***************************************************************************************************
  * Simple MJPEG-over-HTTP video source (multipart/x-mixed-replace).
  *
@@ -43,7 +66,7 @@
 #include <cstring>
 #include <gdiplus.h>
 #include <iostream>
-#include <mutex>
+#include "core/fs/SwMutex.h"
 #include <sstream>
 #include <string>
 #include <vector>
@@ -54,6 +77,14 @@ static constexpr const char* kSwLogCategory_SwHttpMjpegSource = "sw.media.swhttp
 
 class SwHttpMjpegSource : public SwVideoSource {
 public:
+    /**
+     * @brief Constructs a `SwHttpMjpegSource` instance.
+     * @param url Value passed to the method.
+     * @param parent Optional parent object that owns this instance.
+     * @param url Value passed to the method.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwHttpMjpegSource(const SwString& url, SwObject* parent = nullptr)
         : m_parent(parent), m_url(url) {
         parseUrl();
@@ -62,7 +93,7 @@ public:
         m_reconnectTimer = new SwTimer(1000, m_parent);
         SwObject::connect(m_pollTimer, &SwTimer::timeout, [this]() { poll(); });
         SwObject::connect(m_reconnectTimer, &SwTimer::timeout, [this]() { attemptReconnect(); });
-        SwObject::connect(m_socket, SIGNAL(connected), [this]() {
+        SwObject::connect(m_socket, &SwTcpSocket::connected, [this]() {
             m_requestSent = true;
             m_connecting.store(false);
             m_lastFrameTime = {};
@@ -74,26 +105,49 @@ public:
             sendRequest();
             swCDebug(kSwLogCategory_SwHttpMjpegSource) << "[SwHttpMjpegSource] Connected, request sent";
         });
-        SwObject::connect(m_socket, SIGNAL(disconnected), [this]() {
+        SwObject::connect(m_socket, &SwTcpSocket::disconnected, [this]() {
             swCWarning(kSwLogCategory_SwHttpMjpegSource) << "[SwHttpMjpegSource] Disconnected";
             handleDisconnect();
         });
-        SwObject::connect(m_socket, SIGNAL(errorOccurred), [this](int code) {
+        SwObject::connect(m_socket, &SwTcpSocket::errorOccurred, [this](int code) {
             swCError(kSwLogCategory_SwHttpMjpegSource) << "[SwHttpMjpegSource] Socket error: " << code;
             handleDisconnect();
         });
     }
 
+    /**
+     * @brief Destroys the `SwHttpMjpegSource` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~SwHttpMjpegSource() override {
         stop();
+        delete m_reconnectTimer;
         delete m_pollTimer;
         delete m_socket;
     }
 
-    std::string name() const override { return "SwHttpMjpegSource"; }
+    /**
+     * @brief Returns the current name.
+     * @return The current name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
+    SwString name() const override { return "SwHttpMjpegSource"; }
 
+    /**
+     * @brief Returns the current initialize.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool initialize() { return true; }
 
+    /**
+     * @brief Starts the underlying activity managed by the object.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     void start() override {
         if (isRunning()) {
             return;
@@ -109,6 +163,11 @@ public:
         attemptReconnect();
     }
 
+    /**
+     * @brief Stops the underlying activity managed by the object.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     void stop() override {
         if (m_stopping.exchange(true)) {
             return;
@@ -125,7 +184,7 @@ public:
             m_socket->close();
         }
         {
-            std::lock_guard<std::mutex> lock(m_bufferMutex);
+            SwMutexLocker lock(m_bufferMutex);
             m_buffer.clear();
             m_boundary.clear();
             m_headersParsed = false;
@@ -186,7 +245,7 @@ private:
                 break;
             }
             m_lastDataTime = std::chrono::steady_clock::now();
-            std::lock_guard<std::mutex> lock(m_bufferMutex);
+            SwMutexLocker lock(m_bufferMutex);
             m_buffer.append(chunk.toStdString());
         }
         if (!m_headersParsed && m_buffer.size() > 0) {
@@ -197,7 +256,7 @@ private:
     }
 
     void processBuffer() {
-        std::lock_guard<std::mutex> lock(m_bufferMutex);
+        SwMutexLocker lock(m_bufferMutex);
         if (!m_headersParsed) {
             auto pos = m_buffer.find("\r\n\r\n");
             if (pos == std::string::npos) {
@@ -411,7 +470,7 @@ private:
     SwTimer* m_pollTimer{nullptr};
     SwTimer* m_reconnectTimer{nullptr};
 
-    std::mutex m_bufferMutex;
+    SwMutex m_bufferMutex;
     std::string m_buffer;
     std::string m_boundary;
     std::string m_contentType;

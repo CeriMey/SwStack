@@ -1,4 +1,27 @@
 #pragma once
+
+/**
+ * @file src/core/io/SwWebSocket.h
+ * @ingroup core_io
+ * @brief Declares the public interface exposed by SwWebSocket in the CoreSw IO layer.
+ *
+ * This header belongs to the CoreSw IO layer. It defines files, sockets, servers, descriptors,
+ * processes, and network helpers that sit directly at operating-system boundaries.
+ *
+ * Within that layer, this file focuses on the web socket interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwWebSocket.
+ *
+ * Socket-oriented declarations here abstract OS-level descriptors and expose the read, write,
+ * connection, and readiness semantics that higher layers build upon.
+ *
+ * IO-facing declarations here usually manage handles, readiness state, buffering, and error
+ * propagation while presenting a portable framework API.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -48,7 +71,7 @@ static constexpr const char* kSwLogCategory_SwWebSocket = "sw.core.io.swwebsocke
  *
  * Goals:
  * - Header-only and cross-platform (Windows/Linux).
- * - Qt-like API surface (signals + open/close/sendTextMessage/sendBinaryMessage/ping).
+ * - Signal-driven API surface (open/close/sendTextMessage/sendBinaryMessage/ping).
  * - Uses Sw types (SwString/SwByteArray/SwList/SwMap) as much as possible.
  *
  * Notes:
@@ -78,96 +101,226 @@ public:
         CloseCodeInternalError    = 1011
     };
 
+    /**
+     * @brief Constructs a `SwWebSocket` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwWebSocket(SwObject* parent = nullptr)
         : SwObject(parent) {
     }
 
+    /**
+     * @brief Constructs a `SwWebSocket` instance.
+     * @param role Value passed to the method.
+     * @param parent Optional parent object that owns this instance.
+     * @param role Value passed to the method.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwWebSocket(Role role, SwObject* parent = nullptr)
         : SwObject(parent),
           m_role(role) {
     }
 
+    /**
+     * @brief Constructs a `SwWebSocket` instance.
+     * @param origin Value passed to the method.
+     * @param parent Optional parent object that owns this instance.
+     * @param origin Value passed to the method.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     SwWebSocket(const SwString& origin, SwObject* parent = nullptr)
         : SwObject(parent),
           m_origin(origin) {
     }
 
+    /**
+     * @brief Destroys the `SwWebSocket` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~SwWebSocket() override {
         abort();
     }
 
+    /**
+     * @brief Sets the origin.
+     * @param origin Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setOrigin(const SwString& origin) {
         m_origin = origin;
     }
 
+    /**
+     * @brief Returns the current origin.
+     * @return The current origin.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwString& origin() const {
         return m_origin;
     }
 
+    /**
+     * @brief Returns the current role.
+     * @return The current role.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     Role role() const {
         return m_role;
     }
 
+    /**
+     * @brief Sets the requested Subprotocols.
+     * @param subprotocols Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setRequestedSubprotocols(const SwList<SwString>& subprotocols) {
         m_requestedSubprotocols = subprotocols;
     }
 
+    /**
+     * @brief Returns the current requested Subprotocols.
+     * @return The current requested Subprotocols.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwList<SwString>& requestedSubprotocols() const {
         return m_requestedSubprotocols;
     }
 
     // Server-side subprotocol selection (intersection with client's Sec-WebSocket-Protocol offer).
+    /**
+     * @brief Sets the supported Subprotocols.
+     * @param subprotocols Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setSupportedSubprotocols(const SwList<SwString>& subprotocols) {
         m_supportedSubprotocols = subprotocols;
     }
 
+    /**
+     * @brief Returns the current supported Subprotocols.
+     * @return The current supported Subprotocols.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwList<SwString>& supportedSubprotocols() const {
         return m_supportedSubprotocols;
     }
 
+    /**
+     * @brief Returns the current subprotocol.
+     * @return The current subprotocol.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwString& subprotocol() const {
         return m_acceptedSubprotocol;
     }
 
+    /**
+     * @brief Sets the raw Header.
+     * @param key Value passed to the method.
+     * @param value Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setRawHeader(const SwString& key, const SwString& value) {
         m_requestHeaderMap[key] = value;
     }
 
+    /**
+     * @brief Sets the max Incoming Message Size.
+     * @param bytes Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setMaxIncomingMessageSize(uint64_t bytes) {
         m_maxIncomingMessageSize = bytes;
     }
 
+    /**
+     * @brief Returns the current max Incoming Message Size.
+     * @return The current max Incoming Message Size.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     uint64_t maxIncomingMessageSize() const {
         return m_maxIncomingMessageSize;
     }
 
+    /**
+     * @brief Sets the close Timeout Ms.
+     * @param ms Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setCloseTimeoutMs(int ms) {
         m_closeTimeoutMs = ms;
     }
 
+    /**
+     * @brief Returns the current timeout Ms.
+     * @return The current timeout Ms.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int closeTimeoutMs() const {
         return m_closeTimeoutMs;
     }
 
     // permessage-deflate (RFC7692). Enabled by default; negotiated during handshake.
+    /**
+     * @brief Sets the per Message Deflate Enabled.
+     * @param enabled Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setPerMessageDeflateEnabled(bool enabled) {
         m_pmd.requested = enabled;
     }
 
+    /**
+     * @brief Returns the current per Message Deflate Enabled.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool perMessageDeflateEnabled() const {
         return m_pmd.requested;
     }
 
+    /**
+     * @brief Returns whether the object reports per Message Deflate Negotiated.
+     * @return `true` when the object reports per Message Deflate Negotiated; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isPerMessageDeflateNegotiated() const {
         return m_pmd.negotiated;
     }
 
     // Raw value of Sec-WebSocket-Extensions returned by the peer (if any).
+    /**
+     * @brief Returns the current extensions.
+     * @return The current extensions.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString extensions() const {
         return m_acceptedExtensions;
     }
 
-    // Proxy (Qt-like: QNetworkProxy equivalent, simplified to HTTP CONNECT).
+    // Proxy configuration simplified to HTTP CONNECT.
     enum ProxyType {
         NoProxy,
         HttpProxy
@@ -181,10 +334,26 @@ public:
         SwString password;
     };
 
+    /**
+     * @brief Sets the proxy.
+     * @param proxy Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setProxy(const ProxySettings& proxy) {
         m_proxy = proxy;
     }
 
+    /**
+     * @brief Sets the proxy.
+     * @param type Value passed to the method.
+     * @param host Value passed to the method.
+     * @param port Local port used by the operation.
+     * @param username Value passed to the method.
+     * @param password Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setProxy(ProxyType type,
                   const SwString& host,
                   uint16_t port,
@@ -197,56 +366,133 @@ public:
         m_proxy.password = password;
     }
 
+    /**
+     * @brief Returns the current proxy.
+     * @return The current proxy.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     ProxySettings proxy() const {
         return m_proxy;
     }
 
+    /**
+     * @brief Sets the follow Redirects.
+     * @param enabled Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setFollowRedirects(bool enabled) {
         m_followRedirects = enabled;
     }
 
+    /**
+     * @brief Returns the current follow Redirects.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool followRedirects() const {
         return m_followRedirects;
     }
 
+    /**
+     * @brief Sets the maximum Redirects.
+     * @param maxRedirects Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setMaximumRedirects(int maxRedirects) {
         m_maxRedirects = maxRedirects;
     }
 
+    /**
+     * @brief Returns the current maximum Redirects.
+     * @return The current maximum Redirects.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int maximumRedirects() const {
         return m_maxRedirects;
     }
 
+    /**
+     * @brief Returns whether the object reports valid.
+     * @return `true` when the object reports valid; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isValid() const {
         return m_handshakeDone && m_socket && m_state == SwAbstractSocket::ConnectedState;
     }
 
+    /**
+     * @brief Returns the current state.
+     * @return The current state.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwAbstractSocket::SocketState state() const {
         return m_state;
     }
 
+    /**
+     * @brief Returns the current request Url.
+     * @return The current request Url.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwString& requestUrl() const {
         return m_requestUrl;
     }
 
+    /**
+     * @brief Returns the current code.
+     * @return The current code.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     uint16_t closeCode() const {
         return m_closeCode;
     }
 
+    /**
+     * @brief Returns the current reason.
+     * @return The current reason.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwString& closeReason() const {
         return m_closeReason;
     }
 
+    /**
+     * @brief Returns the current last Error.
+     * @return The current last Error.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int lastError() const {
         return m_lastError;
     }
 
+    /**
+     * @brief Opens the underlying resource managed by the object.
+     * @param url Value passed to the method.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     void open(const SwString& url) {
         openInternal_(url, false);
     }
 
     // Server-side: adopt an already-connected SwTcpSocket and perform the server handshake.
     // The socket will be re-parented to this SwWebSocket instance.
+    /**
+     * @brief Performs the `accept` operation.
+     * @param socket Socket instance affected by the operation.
+     * @return `true` on success; otherwise `false`.
+     */
     bool accept(SwTcpSocket* socket) {
         if (!socket) {
             reportError_(kErrorConnectFailed);
@@ -260,9 +506,9 @@ public:
         m_socket = socket;
         m_socket->setParent(this);
 
-        connect(m_socket, SIGNAL(disconnected), this, &SwWebSocket::onTcpDisconnected);
-        connect(m_socket, SIGNAL(errorOccurred), this, &SwWebSocket::onTcpError);
-        connect(m_socket, SIGNAL(readyRead), this, &SwWebSocket::onTcpReadyRead);
+        connect(m_socket, &SwTcpSocket::disconnected, this, &SwWebSocket::onTcpDisconnected);
+        connect(m_socket, &SwTcpSocket::errorOccurred, this, &SwWebSocket::onTcpError);
+        connect(m_socket, &SwTcpSocket::readyRead, this, &SwWebSocket::onTcpReadyRead);
 
         m_handshakeDone = false;
         m_handshakeStage = StageWebSocketHandshake;
@@ -272,6 +518,13 @@ public:
         return true;
     }
 
+    /**
+     * @brief Closes the underlying resource and stops active work.
+     * @param code Value passed to the method.
+     * @param reason Value passed to the method.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     void close(CloseCode code = CloseCodeNormal, const SwString& reason = SwString()) {
         if (!m_socket) {
             return;
@@ -292,6 +545,9 @@ public:
         startCloseTimer_();
     }
 
+    /**
+     * @brief Performs the `abort` operation.
+     */
     void abort() {
         stopCloseTimer_();
         stopCloseReplyTimer_();
@@ -301,6 +557,11 @@ public:
         setState(SwAbstractSocket::UnconnectedState);
     }
 
+    /**
+     * @brief Performs the `sendTextMessage` operation.
+     * @param message Value passed to the method.
+     * @return The requested send Text Message.
+     */
     int64_t sendTextMessage(const SwString& message) {
         SwByteArray payload(message.toStdString());
         bool rsv1 = false;
@@ -316,6 +577,11 @@ public:
         return sendDataFrame(kOpText, payload, rsv1);
     }
 
+    /**
+     * @brief Performs the `sendBinaryMessage` operation.
+     * @param message Value passed to the method.
+     * @return The requested send Binary Message.
+     */
     int64_t sendBinaryMessage(const SwByteArray& message) {
         SwByteArray payload = message;
         bool rsv1 = false;
@@ -331,6 +597,10 @@ public:
         return sendDataFrame(kOpBinary, payload, rsv1);
     }
 
+    /**
+     * @brief Performs the `ping` operation.
+     * @param payload Value passed to the method.
+     */
     void ping(const SwByteArray& payload = SwByteArray()) {
         if (!m_socket || !m_handshakeDone) {
             return;
@@ -828,10 +1098,10 @@ private:
             m_socket->useSsl(m_secure, m_host);
         }
 
-        connect(m_socket, SIGNAL(connected), this, &SwWebSocket::onTcpConnected);
-        connect(m_socket, SIGNAL(disconnected), this, &SwWebSocket::onTcpDisconnected);
-        connect(m_socket, SIGNAL(errorOccurred), this, &SwWebSocket::onTcpError);
-        connect(m_socket, SIGNAL(readyRead), this, &SwWebSocket::onTcpReadyRead);
+        connect(m_socket, &SwTcpSocket::connected, this, &SwWebSocket::onTcpConnected);
+        connect(m_socket, &SwTcpSocket::disconnected, this, &SwWebSocket::onTcpDisconnected);
+        connect(m_socket, &SwTcpSocket::errorOccurred, this, &SwWebSocket::onTcpError);
+        connect(m_socket, &SwTcpSocket::readyRead, this, &SwWebSocket::onTcpReadyRead);
 
         m_handshakeStage = StageTcpConnecting;
         setState(SwAbstractSocket::ConnectingState);
@@ -1851,7 +2121,7 @@ private:
         if (!m_closeTimer) {
             m_closeTimer = new SwTimer(this);
             m_closeTimer->setSingleShot(true);
-            connect(m_closeTimer, SIGNAL(timeout), this, &SwWebSocket::onCloseTimeout_);
+            connect(m_closeTimer, &SwTimer::timeout, this, &SwWebSocket::onCloseTimeout_);
         }
         m_closeTimer->stop();
         m_closeTimer->start(m_closeTimeoutMs);
@@ -1871,7 +2141,7 @@ private:
         if (!m_closeReplyTimer) {
             m_closeReplyTimer = new SwTimer(this);
             m_closeReplyTimer->setSingleShot(true);
-            connect(m_closeReplyTimer, SIGNAL(timeout), this, &SwWebSocket::onCloseReplyTimeout_);
+            connect(m_closeReplyTimer, &SwTimer::timeout, this, &SwWebSocket::onCloseReplyTimeout_);
         }
         m_closeReplyTimer->stop();
         m_closeReplyTimer->start(m_closeReplyDelayMs);

@@ -1,3 +1,14 @@
+
+/**
+ * @file
+ * @ingroup core_gui
+ * @brief Declares a console-driven menu shell built on the stack type system.
+ *
+ * `SwGuiConsoleApplication` organizes actions in a tree of paths and renders a simple
+ * interactive textual navigator on standard input and output. It is useful for tooling or
+ * demos that want structured navigation without bringing up a native windowing backend.
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -22,6 +33,9 @@
 
 #pragma once
 
+
+
+
 #include "SwString.h"
 #include "SwVector.h"
 #include "SwDebug.h"
@@ -33,8 +47,17 @@
 static constexpr const char* kSwLogCategory_SwGuiConsoleApplication = "sw.core.gui.swguiconsoleapplication";
 
 
+/**
+ * @brief Runs a navigable console menu composed of nodes and callback actions.
+ */
 class SwGuiConsoleApplication {
 public:
+    /**
+     * @brief Constructs a `SwGuiConsoleApplication` instance.
+     * @param true Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwGuiConsoleApplication()
         : m_root(new Node())
         , m_running(true)
@@ -45,6 +68,11 @@ public:
         m_storage.push_back(m_root);
     }
 
+    /**
+     * @brief Destroys the `SwGuiConsoleApplication` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~SwGuiConsoleApplication()
     {
         for (Node* node : m_storage) {
@@ -52,10 +80,34 @@ public:
         }
     }
 
+    /**
+     * @brief Sets the title.
+     * @param title Title text applied by the operation.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setTitle(const SwString& title) { m_title = title; }
+    /**
+     * @brief Sets the footer.
+     * @param footer Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setFooter(const SwString& footer) { m_footer = footer; }
+    /**
+     * @brief Sets the status Message.
+     * @param message Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setStatusMessage(const SwString& message) { m_status = message; }
 
+    /**
+     * @brief Adds the specified entry.
+     * @param path Path used by the operation.
+     * @param label Value passed to the method.
+     * @param action Value passed to the method.
+     */
     void addEntry(const SwString& path,
                   const SwString& label,
                   std::function<void()> action = std::function<void()>())
@@ -66,6 +118,12 @@ public:
         }
     }
 
+    /**
+     * @brief Performs the `showModal` operation.
+     * @param title Title text applied by the operation.
+     * @param body Value passed to the method.
+     * @param waitForEnter Value passed to the method.
+     */
     void showModal(const SwString& title,
                    const std::function<void()>& body,
                    bool waitForEnter = true)
@@ -84,6 +142,12 @@ public:
         }
     }
 
+    /**
+     * @brief Returns the current exec.
+     * @return The current exec.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int exec()
     {
         Node* current = m_root;
@@ -141,6 +205,12 @@ private:
         SwString label;
         Node* parent{nullptr};
         SwVector<Node*> children;
+        /**
+         * @brief Returns the current function<void.
+         * @return The current function<void.
+         *
+         * @details The returned value reflects the state currently stored by the instance.
+         */
         std::function<void()> action;
     };
 

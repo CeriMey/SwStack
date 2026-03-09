@@ -1,3 +1,14 @@
+
+/**
+ * @file
+ * @ingroup core_gui
+ * @brief Declares the candlestick series type used for OHLC-style charts.
+ *
+ * `SwCandlestickSeries` stores open, high, low, and close values per X position and keeps
+ * the data normalized for rendering and bounds calculation. It is the chart-side model
+ * used when financial or range-based data must be drawn as candle bodies and wicks.
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -22,6 +33,8 @@
 
 #pragma once
 
+
+
 #include "SwAbstractSeries.h"
 
 #include <algorithm>
@@ -40,11 +53,31 @@ public:
         double close{0.0};
     };
 
+    /**
+     * @brief Constructs a `SwCandlestickSeries` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwCandlestickSeries(SwObject* parent = nullptr)
         : SwAbstractSeries(parent) {}
 
+    /**
+     * @brief Returns the current type.
+     * @return The current type.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SeriesType type() const override { return SeriesType::Candlestick; }
 
+    /**
+     * @brief Performs the `append` operation.
+     * @param x Horizontal coordinate.
+     * @param open Value passed to the method.
+     * @param high Value passed to the method.
+     * @param low Value passed to the method.
+     * @param close Value passed to the method.
+     */
     void append(double x, double open, double high, double low, double close) {
         if (!std::isfinite(x) || !std::isfinite(open) || !std::isfinite(high) || !std::isfinite(low) ||
             !std::isfinite(close)) {
@@ -71,8 +104,15 @@ public:
         updated();
     }
 
+    /**
+     * @brief Performs the `count` operation.
+     * @return The current count value.
+     */
     int count() const override { return m_candles.size(); }
 
+    /**
+     * @brief Clears the current object state.
+     */
     void clear() override {
         if (m_candles.isEmpty()) {
             return;
@@ -81,6 +121,14 @@ public:
         updated();
     }
 
+    /**
+     * @brief Performs the `computeBounds` operation.
+     * @param minX Value passed to the method.
+     * @param maxX Value passed to the method.
+     * @param minY Value passed to the method.
+     * @param maxY Value passed to the method.
+     * @param hasPoint Value passed to the method.
+     */
     void computeBounds(double& minX,
                        double& maxX,
                        double& minY,
@@ -105,6 +153,11 @@ public:
         }
     }
 
+    /**
+     * @brief Performs the `lastX` operation.
+     * @param outX Output value filled by the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool lastX(double& outX) const override {
         if (m_candles.isEmpty()) {
             return false;
@@ -117,8 +170,20 @@ public:
         return true;
     }
 
+    /**
+     * @brief Returns whether the object reports dles.
+     * @return The current dles.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwVector<Candle>& candles() const { return m_candles; }
 
+    /**
+     * @brief Sets the candle Width.
+     * @param width Width value.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setCandleWidth(double width) {
         if (!std::isfinite(width)) {
             return;
@@ -134,20 +199,50 @@ public:
     }
 
     // Width in X axis units. 0 == auto.
+    /**
+     * @brief Returns whether the object reports dle Width.
+     * @return The current dle Width.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     double candleWidth() const { return m_candleWidth; }
 
+    /**
+     * @brief Sets the increasing Color.
+     * @param color Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setIncreasingColor(const SwColor& color) {
         m_increasing = clampColor_(color);
         updated();
     }
 
+    /**
+     * @brief Returns the current increasing Color.
+     * @return The current increasing Color.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwColor increasingColor() const { return m_increasing; }
 
+    /**
+     * @brief Sets the decreasing Color.
+     * @param color Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setDecreasingColor(const SwColor& color) {
         m_decreasing = clampColor_(color);
         updated();
     }
 
+    /**
+     * @brief Returns the current decreasing Color.
+     * @return The current decreasing Color.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwColor decreasingColor() const { return m_decreasing; }
 
 private:
@@ -156,4 +251,3 @@ private:
     SwColor m_increasing{16, 185, 129};
     SwColor m_decreasing{239, 68, 68};
 };
-

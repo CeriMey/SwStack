@@ -1,4 +1,17 @@
 #pragma once
+
+/**
+ * @file
+ * @ingroup core_gui
+ * @brief Declares `SwChart`, the in-memory chart model used by chart widgets.
+ *
+ * `SwChart` owns the series and presentation state that describe a chart scene.
+ * Views such as `SwChartView` consume this object to render axes, titles, legends,
+ * and data series without coupling the drawing code to a specific dataset type.
+ */
+
+
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -21,6 +34,8 @@
  *
  ***************************************************************************************************/
 
+
+
 #include "SwAbstractSeries.h"
 #include "SwString.h"
 #include "SwValueAxis.h"
@@ -30,6 +45,12 @@ class SwChart : public SwObject {
     SW_OBJECT(SwChart, SwObject)
 
 public:
+    /**
+     * @brief Constructs a `SwChart` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwChart(SwObject* parent = nullptr)
         : SwObject(parent) {
         m_axisX = new SwValueAxis(this);
@@ -39,11 +60,35 @@ public:
         SwObject::connect(m_axisY, &SwValueAxis::changed, this, &SwChart::onAxisChanged_);
     }
 
+    /**
+     * @brief Returns the current axis X.
+     * @return The current axis X.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwValueAxis* axisX() const { return m_axisX; }
+    /**
+     * @brief Returns the current axis Y.
+     * @return The current axis Y.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwValueAxis* axisY() const { return m_axisY; }
 
+    /**
+     * @brief Returns the current series.
+     * @return The current series.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwVector<SwAbstractSeries*>& series() const { return m_series; }
 
+    /**
+     * @brief Sets the title.
+     * @param title Title text applied by the operation.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setTitle(const SwString& title) {
         if (m_title == title) {
             return;
@@ -52,8 +97,18 @@ public:
         changed();
     }
 
+    /**
+     * @brief Returns the current title.
+     * @return The current title.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString title() const { return m_title; }
 
+    /**
+     * @brief Adds the specified series.
+     * @param serie Value passed to the method.
+     */
     void addSeries(SwAbstractSeries* serie) {
         if (!serie) {
             return;
@@ -72,6 +127,10 @@ public:
         changed();
     }
 
+    /**
+     * @brief Removes the specified series.
+     * @param serie Value passed to the method.
+     */
     void removeSeries(SwAbstractSeries* serie) {
         if (!serie) {
             return;
@@ -92,12 +151,18 @@ public:
         changed();
     }
 
+    /**
+     * @brief Removes the specified all Series.
+     */
     void removeAllSeries() {
         while (!m_series.isEmpty()) {
             removeSeries(m_series.back());
         }
     }
 
+    /**
+     * @brief Creates the requested default Axes.
+     */
     void createDefaultAxes() {
         if (m_axisX) {
             m_axisX->setAutoRange(true);
@@ -135,4 +200,3 @@ private:
     SwValueAxis* m_axisY{nullptr};
     SwVector<SwAbstractSeries*> m_series{};
 };
-

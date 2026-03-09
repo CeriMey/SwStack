@@ -22,6 +22,31 @@
 
 #ifndef SWBYTEARRAY_H
 #define SWBYTEARRAY_H
+
+/**
+ * @file src/core/types/SwByteArray.h
+ * @ingroup core_types
+ * @brief Declares the public interface exposed by SwByteArray in the CoreSw fundamental types
+ * layer.
+ *
+ * This header belongs to the CoreSw fundamental types layer. It provides value types, containers,
+ * text and binary helpers, and lightweight serialization primitives shared across the stack.
+ *
+ * Within that layer, this file focuses on the byte array interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwByteArray.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * Interfaces in this area are intentionally reused by runtime, IO, GUI, remote, and media modules
+ * to keep cross-module semantics consistent.
+ *
+ */
+
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -49,34 +74,168 @@ public:
 
     static constexpr int npos = -1;
 
+    /**
+     * @brief Constructs a `SwByteArray` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwByteArray();
+    /**
+     * @brief Constructs a `SwByteArray` instance.
+     * @param str Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     explicit SwByteArray(const char* str);
+    /**
+     * @brief Constructs a `SwByteArray` instance.
+     * @param data Value passed to the method.
+     * @param size Size value used by the operation.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwByteArray(const char* data, size_t size);
+    /**
+     * @brief Constructs a `SwByteArray` instance.
+     * @param str Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwByteArray(const std::string& str);
+    /**
+     * @brief Constructs a `SwByteArray` instance.
+     * @param size Size value used by the operation.
+     * @param ch Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwByteArray(size_t size, char ch);
+    /**
+     * @brief Constructs a `SwByteArray` instance.
+     * @param list Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwByteArray(std::initializer_list<char> list);
+    /**
+     * @brief Constructs a `SwByteArray` instance.
+     * @param other Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwByteArray(const SwByteArray& other);
+    /**
+     * @brief Constructs a `SwByteArray` instance.
+     * @param other Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwByteArray(SwByteArray&& other) noexcept;
+    /**
+     * @brief Destroys the `SwByteArray` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~SwByteArray() = default;
 
+    /**
+     * @brief Performs the `operator=` operation.
+     * @param other Value passed to the method.
+     * @return The requested operator =.
+     */
     SwByteArray& operator=(const SwByteArray& other);
+    /**
+     * @brief Performs the `operator=` operation.
+     * @param other Value passed to the method.
+     * @return The requested operator =.
+     */
     SwByteArray& operator=(SwByteArray&& other) noexcept;
+    /**
+     * @brief Performs the `operator=` operation.
+     * @param str Value passed to the method.
+     * @return The requested operator =.
+     */
     SwByteArray& operator=(const char* str);
+    /**
+     * @brief Performs the `operator=` operation.
+     * @param str Value passed to the method.
+     * @return The requested operator =.
+     */
     SwByteArray& operator=(const std::string& str);
+    /**
+     * @brief Performs the `operator=` operation.
+     * @param list Value passed to the method.
+     * @return The requested operator =.
+     */
     SwByteArray& operator=(std::initializer_list<char> list);
 
+    /**
+     * @brief Performs the `operator[]` operation.
+     * @param index Value passed to the method.
+     * @return The requested operator [].
+     */
     char& operator[](size_t index);
+    /**
+     * @brief Performs the `operator[]` operation.
+     * @param index Value passed to the method.
+     * @return The requested operator [].
+     */
     const char& operator[](size_t index) const;
 
+    /**
+     * @brief Performs the `operator==` operation.
+     * @param other Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool operator==(const SwByteArray& other) const;
+    /**
+     * @brief Performs the `operator!=` operation.
+     * @param this Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool operator!=(const SwByteArray& other) const { return !(*this == other); }
+    /**
+     * @brief Performs the `operator<` operation.
+     * @param other Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool operator<(const SwByteArray& other) const;
+    /**
+     * @brief Performs the `operator>` operation.
+     * @param other Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool operator>(const SwByteArray& other) const { return other < *this; }
+    /**
+     * @brief Performs the `operator<=` operation.
+     * @param this Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool operator<=(const SwByteArray& other) const { return !(other < *this); }
+    /**
+     * @brief Performs the `operator>=` operation.
+     * @param other Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool operator>=(const SwByteArray& other) const { return !(*this < other); }
 
+    /**
+     * @brief Performs the `operator+=` operation.
+     * @param other Value passed to the method.
+     * @return The requested operator +=.
+     */
     SwByteArray& operator+=(const SwByteArray& other);
+    /**
+     * @brief Performs the `operator+=` operation.
+     * @param str Value passed to the method.
+     * @return The requested operator +=.
+     */
     SwByteArray& operator+=(const char* str);
+    /**
+     * @brief Performs the `operator+=` operation.
+     * @param ch Value passed to the method.
+     * @return The requested operator +=.
+     */
     SwByteArray& operator+=(char ch);
 
     friend SwByteArray operator+(const SwByteArray& lhs, const SwByteArray& rhs) {
@@ -97,136 +256,705 @@ public:
         return tmp;
     }
 
+    /**
+     * @brief Returns the current begin.
+     * @return The current begin.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     iterator begin();
+    /**
+     * @brief Returns the current end.
+     * @return The current end.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     iterator end();
+    /**
+     * @brief Returns the current begin.
+     * @return The current begin.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const_iterator begin() const;
+    /**
+     * @brief Returns the current end.
+     * @return The current end.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const_iterator end() const;
+    /**
+     * @brief Performs the `cbegin` operation.
+     * @return The requested cbegin.
+     */
     const_iterator cbegin() const { return begin(); }
+    /**
+     * @brief Performs the `cend` operation.
+     * @return The requested cend.
+     */
     const_iterator cend() const { return end(); }
+    /**
+     * @brief Returns the current rbegin.
+     * @return The current rbegin.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     reverse_iterator rbegin();
+    /**
+     * @brief Returns the current rend.
+     * @return The current rend.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     reverse_iterator rend();
+    /**
+     * @brief Returns the current rbegin.
+     * @return The current rbegin.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const_reverse_iterator rbegin() const;
+    /**
+     * @brief Returns the current rend.
+     * @return The current rend.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const_reverse_iterator rend() const;
 
+    /**
+     * @brief Returns the current size.
+     * @return The current size.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     size_t size() const { return size_; }
+    /**
+     * @brief Returns the current length.
+     * @return The current length.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     size_t length() const { return size_; }
+    /**
+     * @brief Returns whether the object reports empty.
+     * @return `true` when the object reports empty; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isEmpty() const { return size_ == 0; }
+    /**
+     * @brief Returns whether the object reports null.
+     * @return `true` when the object reports null; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isNull() const { return null_; }
+    /**
+     * @brief Performs the `capacity` operation.
+     * @return The requested capacity.
+     */
     size_t capacity() const { return buffer_.capacity() > 0 ? buffer_.capacity() - 1 : 0; }
 
+    /**
+     * @brief Performs the `constData` operation.
+     * @return The requested const Data.
+     */
     const char* constData() const { return null_ ? nullptr : buffer_.data(); }
+    /**
+     * @brief Performs the `data` operation.
+     * @return The requested data.
+     */
     const char* data() const { return constData(); }
+    /**
+     * @brief Returns the current data.
+     * @return The current data.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     char* data();
+    /**
+     * @brief Performs the `char*` operation.
+     * @return The requested char*.
+     */
     operator const char*() const { return constData(); }
 
+    /**
+     * @brief Returns the current to Std String.
+     * @return The current to Std String.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     std::string toStdString() const {
         if (null_) return std::string();
         return std::string(buffer_.begin(), buffer_.begin() + static_cast<std::ptrdiff_t>(size_));
     }
 
+    /**
+     * @brief Performs the `fromStdString` operation.
+     * @param str Value passed to the method.
+     * @return The requested from Std String.
+     */
     static SwByteArray fromStdString(const std::string& str) { return SwByteArray(str); }
 
+    /**
+     * @brief Performs the `at` operation.
+     * @param index Value passed to the method.
+     * @return The requested at.
+     */
     char at(size_t index) const;
+    /**
+     * @brief Returns the current front.
+     * @return The current front.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     char front() const;
+    /**
+     * @brief Returns the current back.
+     * @return The current back.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     char back() const;
 
+    /**
+     * @brief Clears the current object state.
+     */
     void clear();
+    /**
+     * @brief Performs the `reserve` operation.
+     * @param capacity Value passed to the method.
+     */
     void reserve(size_t capacity);
+    /**
+     * @brief Performs the `squeeze` operation.
+     */
     void squeeze();
+    /**
+     * @brief Performs the `resize` operation.
+     * @param newSize Value passed to the method.
+     * @param fillChar Value passed to the method.
+     */
     void resize(size_t newSize, char fillChar = '\0');
+    /**
+     * @brief Performs the `fill` operation.
+     * @param ch Value passed to the method.
+     * @param size Size value used by the operation.
+     * @return The requested fill.
+     */
     SwByteArray& fill(char ch, int size = -1);
 
+    /**
+     * @brief Performs the `append` operation.
+     * @param other Value passed to the method.
+     * @return The requested append.
+     */
     SwByteArray& append(const SwByteArray& other);
+    /**
+     * @brief Performs the `append` operation.
+     * @param data Value passed to the method.
+     * @param len Value passed to the method.
+     * @return The requested append.
+     */
     SwByteArray& append(const char* data, size_t len);
+    /**
+     * @brief Performs the `append` operation.
+     * @param str Value passed to the method.
+     * @return The requested append.
+     */
     SwByteArray& append(const char* str);
+    /**
+     * @brief Performs the `append` operation.
+     * @return The requested append.
+     */
     SwByteArray& append(const std::string& str) { return append(str.data(), str.size()); }
+    /**
+     * @brief Performs the `append` operation.
+     * @param ch Value passed to the method.
+     * @return The requested append.
+     */
     SwByteArray& append(char ch);
 
+    /**
+     * @brief Performs the `prepend` operation.
+     * @param other Value passed to the method.
+     * @return The requested prepend.
+     */
     SwByteArray& prepend(const SwByteArray& other);
+    /**
+     * @brief Performs the `prepend` operation.
+     * @param data Value passed to the method.
+     * @param len Value passed to the method.
+     * @return The requested prepend.
+     */
     SwByteArray& prepend(const char* data, size_t len);
+    /**
+     * @brief Performs the `prepend` operation.
+     * @param str Value passed to the method.
+     * @return The requested prepend.
+     */
     SwByteArray& prepend(const char* str);
+    /**
+     * @brief Performs the `prepend` operation.
+     * @param ch Value passed to the method.
+     * @return The requested prepend.
+     */
     SwByteArray& prepend(char ch);
 
+    /**
+     * @brief Performs the `insert` operation.
+     * @param index Value passed to the method.
+     * @param ch Value passed to the method.
+     * @return The requested insert.
+     */
     SwByteArray& insert(int index, char ch);
+    /**
+     * @brief Performs the `insert` operation.
+     * @param index Value passed to the method.
+     * @param other Value passed to the method.
+     * @return The requested insert.
+     */
     SwByteArray& insert(int index, const SwByteArray& other);
+    /**
+     * @brief Performs the `insert` operation.
+     * @param index Value passed to the method.
+     * @param data Value passed to the method.
+     * @param len Value passed to the method.
+     * @return The requested insert.
+     */
     SwByteArray& insert(int index, const char* data, size_t len);
 
+    /**
+     * @brief Removes the specified remove.
+     * @param index Value passed to the method.
+     * @param len Value passed to the method.
+     * @return The requested remove.
+     */
     SwByteArray& remove(int index, int len);
+    /**
+     * @brief Performs the `replace` operation.
+     * @param index Value passed to the method.
+     * @param len Value passed to the method.
+     * @param with Value passed to the method.
+     * @return The requested replace.
+     */
     SwByteArray& replace(int index, int len, const SwByteArray& with);
+    /**
+     * @brief Performs the `replace` operation.
+     * @param index Value passed to the method.
+     * @param len Value passed to the method.
+     * @param data Value passed to the method.
+     * @param dataLen Value passed to the method.
+     * @return The requested replace.
+     */
     SwByteArray& replace(int index, int len, const char* data, size_t dataLen);
+    /**
+     * @brief Performs the `replace` operation.
+     * @param before Value passed to the method.
+     * @param after Value passed to the method.
+     * @return The requested replace.
+     */
     SwByteArray& replace(const SwByteArray& before, const SwByteArray& after);
+    /**
+     * @brief Performs the `replace` operation.
+     * @param before Value passed to the method.
+     * @param after Value passed to the method.
+     * @return The requested replace.
+     */
     SwByteArray& replace(const char* before, const char* after);
+    /**
+     * @brief Performs the `replace` operation.
+     * @param before Value passed to the method.
+     * @param after Value passed to the method.
+     * @return The requested replace.
+     */
     SwByteArray& replace(char before, char after);
 
+    /**
+     * @brief Performs the `push_back` operation.
+     * @param ch Value passed to the method.
+     * @return The requested push back.
+     */
     SwByteArray& push_back(char ch) { return append(ch); }
+    /**
+     * @brief Performs the `push_front` operation.
+     * @param ch Value passed to the method.
+     * @return The requested push front.
+     */
     SwByteArray& push_front(char ch) { return prepend(ch); }
+    /**
+     * @brief Performs the `pop_back` operation.
+     */
     void pop_back();
+    /**
+     * @brief Performs the `pop_front` operation.
+     */
     void pop_front();
 
+    /**
+     * @brief Performs the `chop` operation.
+     * @param len Value passed to the method.
+     * @return The requested chop.
+     */
     SwByteArray& chop(int len);
+    /**
+     * @brief Performs the `truncate` operation.
+     * @param len Value passed to the method.
+     * @return The requested truncate.
+     */
     SwByteArray& truncate(int len);
+    /**
+     * @brief Performs the `chopped` operation.
+     * @param len Value passed to the method.
+     * @return The requested chopped.
+     */
     SwByteArray chopped(int len) const;
+    /**
+     * @brief Performs the `truncated` operation.
+     * @param len Value passed to the method.
+     * @return The requested truncated.
+     */
     SwByteArray truncated(int len) const;
+    /**
+     * @brief Performs the `left` operation.
+     * @param len Value passed to the method.
+     * @return The requested left.
+     */
     SwByteArray left(int len) const;
+    /**
+     * @brief Performs the `right` operation.
+     * @param len Value passed to the method.
+     * @return The requested right.
+     */
     SwByteArray right(int len) const;
+    /**
+     * @brief Performs the `mid` operation.
+     * @param pos Position used by the operation.
+     * @param len Value passed to the method.
+     * @return The requested mid.
+     */
     SwByteArray mid(int pos, int len = -1) const;
+    /**
+     * @brief Performs the `first` operation.
+     * @param len Value passed to the method.
+     * @return The requested first.
+     */
     SwByteArray first(int len) const { return left(len); }
+    /**
+     * @brief Performs the `last` operation.
+     * @param len Value passed to the method.
+     * @return The requested last.
+     */
     SwByteArray last(int len) const { return right(len); }
+    /**
+     * @brief Performs the `repeated` operation.
+     * @param times Value passed to the method.
+     * @return The requested repeated.
+     */
     SwByteArray repeated(int times) const;
+    /**
+     * @brief Returns the current reversed.
+     * @return The current reversed.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwByteArray reversed() const;
 
+    /**
+     * @brief Returns the current trimmed.
+     * @return The current trimmed.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwByteArray trimmed() const;
+    /**
+     * @brief Returns the current simplified.
+     * @return The current simplified.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwByteArray simplified() const;
+    /**
+     * @brief Returns the current to Lower.
+     * @return The current to Lower.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwByteArray toLower() const;
+    /**
+     * @brief Returns the current to Upper.
+     * @return The current to Upper.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwByteArray toUpper() const;
 
+    /**
+     * @brief Starts the s With managed by the object.
+     * @param other Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     bool startsWith(const SwByteArray& other) const;
+    /**
+     * @brief Starts the s With managed by the object.
+     * @param str Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     bool startsWith(const char* str) const;
+    /**
+     * @brief Starts the s With managed by the object.
+     * @param ch Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     bool startsWith(char ch) const;
+    /**
+     * @brief Performs the `endsWith` operation.
+     * @param other Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool endsWith(const SwByteArray& other) const;
+    /**
+     * @brief Performs the `endsWith` operation.
+     * @param str Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool endsWith(const char* str) const;
+    /**
+     * @brief Performs the `endsWith` operation.
+     * @param ch Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool endsWith(char ch) const;
 
+    /**
+     * @brief Performs the `contains` operation.
+     * @param other Value passed to the method.
+     * @return `true` when the object reports contains; otherwise `false`.
+     */
     bool contains(const SwByteArray& other) const { return indexOf(other) != npos; }
+    /**
+     * @brief Performs the `contains` operation.
+     * @param str Value passed to the method.
+     * @return `true` when the object reports contains; otherwise `false`.
+     */
     bool contains(const char* str) const { return indexOf(str) != npos; }
+    /**
+     * @brief Performs the `contains` operation.
+     * @param ch Value passed to the method.
+     * @return `true` when the object reports contains; otherwise `false`.
+     */
     bool contains(char ch) const { return indexOf(ch) != npos; }
 
+    /**
+     * @brief Performs the `indexOf` operation.
+     * @param other Value passed to the method.
+     * @param from Value passed to the method.
+     * @return The requested index Of.
+     */
     int indexOf(const SwByteArray& other, int from = 0) const;
+    /**
+     * @brief Performs the `indexOf` operation.
+     * @param str Value passed to the method.
+     * @param from Value passed to the method.
+     * @return The requested index Of.
+     */
     int indexOf(const char* str, int from = 0) const;
+    /**
+     * @brief Performs the `indexOf` operation.
+     * @param ch Value passed to the method.
+     * @param from Value passed to the method.
+     * @return The requested index Of.
+     */
     int indexOf(char ch, int from = 0) const;
+    /**
+     * @brief Performs the `lastIndexOf` operation.
+     * @param other Value passed to the method.
+     * @param from Value passed to the method.
+     * @return The requested last Index Of.
+     */
     int lastIndexOf(const SwByteArray& other, int from = -1) const;
+    /**
+     * @brief Performs the `lastIndexOf` operation.
+     * @param str Value passed to the method.
+     * @param from Value passed to the method.
+     * @return The requested last Index Of.
+     */
     int lastIndexOf(const char* str, int from = -1) const;
+    /**
+     * @brief Performs the `lastIndexOf` operation.
+     * @param ch Value passed to the method.
+     * @param from Value passed to the method.
+     * @return The requested last Index Of.
+     */
     int lastIndexOf(char ch, int from = -1) const;
 
+    /**
+     * @brief Performs the `count` operation.
+     * @param other Value passed to the method.
+     * @return The current count value.
+     */
     int count(const SwByteArray& other) const;
+    /**
+     * @brief Performs the `count` operation.
+     * @param str Value passed to the method.
+     * @return The current count value.
+     */
     int count(const char* str) const;
+    /**
+     * @brief Performs the `count` operation.
+     * @param ch Value passed to the method.
+     * @return The current count value.
+     */
     int count(char ch) const;
 
+    /**
+     * @brief Performs the `split` operation.
+     * @param delimiter Value passed to the method.
+     * @param keepEmptyParts Value passed to the method.
+     * @return The requested split.
+     */
     SwList<SwByteArray> split(char delimiter, bool keepEmptyParts = true) const;
 
+    /**
+     * @brief Returns the current to Hex.
+     * @return The current to Hex.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwByteArray toHex() const;
+    /**
+     * @brief Performs the `fromHex` operation.
+     * @param hex Value passed to the method.
+     * @return The requested from Hex.
+     */
     static SwByteArray fromHex(const SwByteArray& hex);
+    /**
+     * @brief Returns the current to Base64.
+     * @return The current to Base64.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwByteArray toBase64() const;
+    /**
+     * @brief Performs the `fromBase64` operation.
+     * @param base64 Value passed to the method.
+     * @return The requested from Base64.
+     */
     static SwByteArray fromBase64(const SwByteArray& base64);
 
+    /**
+     * @brief Performs the `toLongLong` operation.
+     * @param ok Optional flag updated to report success.
+     * @param base Value passed to the method.
+     * @return The requested to Long Long.
+     */
     long long toLongLong(bool* ok = nullptr, int base = 10) const;
+    /**
+     * @brief Performs the `toULongLong` operation.
+     * @param ok Optional flag updated to report success.
+     * @param base Value passed to the method.
+     * @return The requested to ULong Long.
+     */
     unsigned long long toULongLong(bool* ok = nullptr, int base = 10) const;
+    /**
+     * @brief Performs the `toInt` operation.
+     * @param ok Optional flag updated to report success.
+     * @param base Value passed to the method.
+     * @return The requested to Int.
+     */
     int toInt(bool* ok = nullptr, int base = 10) const;
+    /**
+     * @brief Performs the `toDouble` operation.
+     * @param ok Optional flag updated to report success.
+     * @return The requested to Double.
+     */
     double toDouble(bool* ok = nullptr) const;
 
+    /**
+     * @brief Sets the num.
+     * @param value Value passed to the method.
+     * @param base Value passed to the method.
+     * @return The requested num.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     SwByteArray& setNum(long long value, int base = 10);
+    /**
+     * @brief Sets the num.
+     * @param value Value passed to the method.
+     * @param base Value passed to the method.
+     * @return The requested num.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     SwByteArray& setNum(unsigned long long value, int base = 10);
+    /**
+     * @brief Sets the num.
+     * @param value Value passed to the method.
+     * @param format Value passed to the method.
+     * @param precision Value passed to the method.
+     * @return The requested num.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     SwByteArray& setNum(double value, char format = 'g', int precision = 6);
 
+    /**
+     * @brief Performs the `number` operation.
+     * @param value Value passed to the method.
+     * @param base Value passed to the method.
+     * @return The requested number.
+     */
     static SwByteArray number(long long value, int base = 10);
+    /**
+     * @brief Performs the `number` operation.
+     * @param value Value passed to the method.
+     * @param base Value passed to the method.
+     * @return The requested number.
+     */
     static SwByteArray number(unsigned long long value, int base = 10);
+    /**
+     * @brief Performs the `number` operation.
+     * @param value Value passed to the method.
+     * @param format Value passed to the method.
+     * @param precision Value passed to the method.
+     * @return The requested number.
+     */
     static SwByteArray number(double value, char format = 'g', int precision = 6);
 
+    /**
+     * @brief Performs the `fromRawData` operation.
+     * @param data Value passed to the method.
+     * @param len Value passed to the method.
+     * @return The requested from Raw Data.
+     */
     static SwByteArray fromRawData(const char* data, size_t len) { return SwByteArray(data, len); }
 
+    /**
+     * @brief Performs the `compare` operation.
+     * @param other Value passed to the method.
+     * @return The requested compare.
+     */
     int compare(const SwByteArray& other) const;
+    /**
+     * @brief Performs the `compare` operation.
+     * @param str Value passed to the method.
+     * @return The requested compare.
+     */
     int compare(const char* str) const;
 
+    /**
+     * @brief Performs the `swap` operation.
+     * @param other Value passed to the method.
+     */
     void swap(SwByteArray& other) noexcept;
 
     friend std::ostream& operator<<(std::ostream& os, const SwByteArray& array) {
@@ -292,10 +1020,10 @@ inline SwByteArray::SwByteArray(const std::string& str)
 }
 
 inline SwByteArray::SwByteArray(size_t size, char ch)
-    : buffer_(size + 1, '\0'),
+    : buffer_(size + 1, ch),
       size_(size),
       null_(false) {
-    std::fill(buffer_.begin(), buffer_.begin() + static_cast<std::ptrdiff_t>(size_), ch);
+    buffer_[size] = '\0';
 }
 
 inline SwByteArray::SwByteArray(std::initializer_list<char> list)
@@ -1234,6 +1962,6 @@ inline size_t SwByteArray::sanitizePosition(int pos, size_t limit) {
 
 #ifndef QT_CORE_LIB
 using QByteArray = SwByteArray;
-#endif // QT_CORE_LIB
+#endif // optional core-lib interop
 
 #endif // SWBYTEARRAY_H

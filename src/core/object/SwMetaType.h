@@ -1,4 +1,27 @@
 #pragma once
+
+/**
+ * @file src/core/object/SwMetaType.h
+ * @ingroup core_object
+ * @brief Declares the public interface exposed by SwMetaType in the CoreSw object model layer.
+ *
+ * This header belongs to the CoreSw object model layer. It defines parent and child ownership,
+ * runtime typing, and the signal-slot machinery that many other modules build upon.
+ *
+ * Within that layer, this file focuses on the meta type interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwMetaType.
+ *
+ * Type-oriented declarations here establish shared vocabulary for the surrounding subsystem so
+ * multiple components can exchange data and configuration without ad-hoc conventions.
+ *
+ * Object-model declarations here establish how instances are identified, connected, owned, and
+ * moved across execution contexts.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -53,6 +76,11 @@ public:
         Any
     };
 
+    /**
+     * @brief Performs the `fromName` operation.
+     * @param name Value passed to the method.
+     * @return The requested from Name.
+     */
     static Type fromName(const std::string& name) {
         if (name.empty()) return UnknownType;
 
@@ -77,6 +105,12 @@ public:
     }
 
     template<typename T>
+    /**
+     * @brief Returns the current id.
+     * @return The current id.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static Type id() {
         return fromName(typeid(T).name());
     }

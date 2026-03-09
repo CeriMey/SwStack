@@ -1,4 +1,4 @@
-/***************************************************************************************************
+﻿/***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
  * Copyright (C) 2025 Ariya Consulting
@@ -22,10 +22,34 @@
 
 #pragma once
 
-/***************************************************************************************************
- * SwProgressBar - Qt-like progress bar widget.
+/**
+ * @file src/core/gui/SwProgressBar.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwProgressBar in the CoreSw GUI layer.
  *
- * Supported format tokens (Qt-like):
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the progress bar interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are SwProgressBar.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
+/***************************************************************************************************
+ * SwProgressBar - progress bar widget.
+ *
+ * Supported format tokens:
  * - %p : percentage (0-100)
  * - %v : current value
  * - %m : maximum value
@@ -42,11 +66,24 @@ public:
         Vertical
     };
 
+    /**
+     * @brief Constructs a `SwProgressBar` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwProgressBar(SwWidget* parent = nullptr)
         : SwWidget(parent) {
         initDefaults();
     }
 
+    /**
+     * @brief Sets the range.
+     * @param minimum Value passed to the method.
+     * @param maximum Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setRange(int minimum, int maximum) {
         if (minimum > maximum) {
             const int tmp = minimum;
@@ -59,12 +96,42 @@ public:
         update();
     }
 
+    /**
+     * @brief Sets the minimum.
+     * @param m_maximum Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setMinimum(int minimum) { setRange(minimum, m_maximum); }
+    /**
+     * @brief Sets the maximum.
+     * @param maximum Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setMaximum(int maximum) { setRange(m_minimum, maximum); }
 
+    /**
+     * @brief Returns the current minimum.
+     * @return The current minimum.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int minimum() const { return m_minimum; }
+    /**
+     * @brief Returns the current maximum.
+     * @return The current maximum.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int maximum() const { return m_maximum; }
 
+    /**
+     * @brief Sets the value.
+     * @param value Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setValue(int value) {
         const int clamped = clampInt(value, m_minimum, m_maximum);
         if (m_value == clamped) {
@@ -75,8 +142,20 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the current value.
+     * @return The current value.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int value() const { return m_value; }
 
+    /**
+     * @brief Sets the text Visible.
+     * @param on Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setTextVisible(bool on) {
         if (m_textVisible == on) {
             return;
@@ -85,15 +164,39 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns whether the object reports text Visible.
+     * @return `true` when the object reports text Visible; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isTextVisible() const { return m_textVisible; }
 
+    /**
+     * @brief Sets the format.
+     * @param format Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setFormat(const SwString& format) {
         m_format = format;
         update();
     }
 
+    /**
+     * @brief Returns the current format.
+     * @return The current format.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString format() const { return m_format; }
 
+    /**
+     * @brief Returns the current text.
+     * @return The current text.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString text() const {
         SwString out = m_format;
         out.replace("%p", SwString::number(percent()));
@@ -102,6 +205,12 @@ public:
         return out;
     }
 
+    /**
+     * @brief Sets the orientation.
+     * @param orientation Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setOrientation(Orientation orientation) {
         if (m_orientation == orientation) {
             return;
@@ -110,25 +219,49 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the current orientation.
+     * @return The current orientation.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     Orientation orientation() const { return m_orientation; }
 
+    /**
+     * @brief Sets the accent Color.
+     * @param color Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setAccentColor(const SwColor& color) {
         m_accent = clampColor(color);
         update();
     }
 
+    /**
+     * @brief Returns the current accent Color.
+     * @return The current accent Color.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwColor accentColor() const { return m_accent; }
 
     DECLARE_SIGNAL(valueChanged, int);
 
 protected:
+    /**
+     * @brief Handles the paint Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void paintEvent(PaintEvent* event) override {
         SwPainter* painter = event ? event->painter() : nullptr;
         if (!painter) {
             return;
         }
 
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
         const int radius = clampInt(bounds.height / 3, 6, 10);
 
         SwColor frame{172, 172, 172};
@@ -183,20 +316,10 @@ protected:
     }
 
 private:
-    static int clampInt(int value, int minValue, int maxValue) {
-        if (value < minValue) return minValue;
-        if (value > maxValue) return maxValue;
-        return value;
-    }
-
     static long long clampLL(long long value, long long minValue, long long maxValue) {
         if (value < minValue) return minValue;
         if (value > maxValue) return maxValue;
         return value;
-    }
-
-    static SwColor clampColor(const SwColor& c) {
-        return SwColor{clampInt(c.r, 0, 255), clampInt(c.g, 0, 255), clampInt(c.b, 0, 255)};
     }
 
     int percent() const {

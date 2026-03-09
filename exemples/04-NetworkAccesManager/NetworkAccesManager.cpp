@@ -10,6 +10,7 @@
 #endif
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <functional>
@@ -26,6 +27,15 @@ static void ensureDirectory(const std::string& path) {
 #else
     mkdir(path.c_str(), 0755);
 #endif
+}
+
+static std::string mapboxTerrainUrlTemplate() {
+    const char* token = std::getenv("MAPBOX_ACCESS_TOKEN");
+    if (!token || !token[0]) {
+        return std::string();
+    }
+
+    return std::string("https://api.mapbox.com/v4/mapbox.terrain-rgb/%1/%2/%3.pngraw?access_token=") + token;
 }
 
 #if defined(_WIN32)
@@ -87,7 +97,7 @@ static bool downloadWithWinHttp(const std::string& url, const std::string& heade
             rawHeaders.resize(size / sizeof(wchar_t));
             if (WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_RAW_HEADERS_CRLF, WINHTTP_HEADER_NAME_BY_INDEX,
                                     rawHeaders.empty() ? nullptr : &rawHeaders[0], &size, WINHTTP_NO_HEADER_INDEX)) {
-                headers.assign(rawHeaders.begin(), rawHeaders.end());
+                headers = SwString::fromWCharArray(rawHeaders.c_str()).toStdString();
             }
         }
     }
@@ -139,8 +149,7 @@ int main(int argc, char* argv[]) {
     nam.setRawHeader("Accept", "image/png,image/*;q=0.8");
 
     // Liste des fournisseurs et URL modèles (z/x/y à 1/1/1 pour la première tuile)
-    const std::vector<std::pair<std::string, std::string>> sources = {
-        {"elevation", "https://api.mapbox.com/v4/mapbox.terrain-rgb/%1/%2/%3.pngraw?access_token=pk.eyJ1IjoiZXltZXJpYyIsImEiOiJjbWd0a24ydHkwNDdpMmxzOG5scTJxcWVoIn0.wwYIKczafPghDK_tc7eYXQ"},
+    std::vector<std::pair<std::string, std::string>> sources = {
         {"voyage", "https://cartodb-basemaps-a.global.ssl.fastly.net/rastertiles/voyager/{z}/{x}/{y}.png"},
         {"satellite", "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"},
         {"worldstreet", "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}"},
@@ -150,6 +159,13 @@ int main(int argc, char* argv[]) {
         {"physicalworld", "https://server.arcgisonline.com/ArcGIS/rest/services/World_Physical_Map/MapServer/tile/{z}/{y}/{x}"},
         {"osm", "https://tile.openstreetmap.org/{z}/{x}/{y}.png"}
     };
+
+    const std::string mapboxTerrain = mapboxTerrainUrlTemplate();
+    if (!mapboxTerrain.empty()) {
+        sources.insert(sources.begin(), std::make_pair(std::string("elevation"), mapboxTerrain));
+    } else {
+        std::cout << "MAPBOX_ACCESS_TOKEN not set, skipping elevation source." << std::endl;
+    }
 
     const int z = 1, x = 1, y = 1;
     const std::string outDir = "example4_tiles";

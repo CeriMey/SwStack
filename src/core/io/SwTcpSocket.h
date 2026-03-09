@@ -1,4 +1,27 @@
 #pragma once
+
+/**
+ * @file src/core/io/SwTcpSocket.h
+ * @ingroup core_io
+ * @brief Declares the public interface exposed by SwTcpSocket in the CoreSw IO layer.
+ *
+ * This header belongs to the CoreSw IO layer. It defines files, sockets, servers, descriptors,
+ * processes, and network helpers that sit directly at operating-system boundaries.
+ *
+ * Within that layer, this file focuses on the TCP socket interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwTcpSocket.
+ *
+ * Socket-oriented declarations here abstract OS-level descriptors and expose the read, write,
+ * connection, and readiness semantics that higher layers build upon.
+ *
+ * IO-facing declarations here usually manage handles, readiness state, buffering, and error
+ * propagation while presenting a portable framework API.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -25,6 +48,7 @@
 #include "SwEventLoop.h"
 #include "SwBackendSsl.h"
 #include "SwDebug.h"
+#include "SwByteArray.h"
 
 #include <memory>
 static constexpr const char* kSwLogCategory_SwTcpSocket = "sw.core.io.swtcpsocket";
@@ -176,6 +200,12 @@ public:
         return true;
     }
 
+    /**
+     * @brief Returns whether the object reports remote Closed.
+     * @return `true` when the object reports remote Closed; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isRemoteClosed() const {
         return m_remoteClosed;
     }
@@ -249,24 +279,22 @@ public:
         }
 
         // Résolution du nom d'hôte
-        std::string hostAnsi = host.toStdString();
         struct addrinfo hints = {0};
         hints.ai_family = AF_INET;          // IPv4
         hints.ai_socktype = SOCK_STREAM;    // TCP
         hints.ai_protocol = IPPROTO_TCP;
 
         struct addrinfo* result = nullptr;
-        std::string portStr = std::to_string(port);
-        int rc = getaddrinfo(hostAnsi.c_str(), portStr.c_str(), &hints, &result);
+        int rc = getaddrinfo(host.toStdString().c_str(), SwString::number(port).toStdString().c_str(), &hints, &result);
         if (rc != 0 || !result) {
-            swCError(kSwLogCategory_SwTcpSocket) << "[SwTcpSocket] getaddrinfo failed for host: " << hostAnsi
+            swCError(kSwLogCategory_SwTcpSocket) << "[SwTcpSocket] getaddrinfo failed for host: " << host.toStdString()
                       << ", port: " << port << " Error: " << rc;
             emit errorOccurred(-1); // Erreur de résolution DNS
             close();
             return false;
         }
 
-        swCDebug(kSwLogCategory_SwTcpSocket) << "[SwTcpSocket] Résolution DNS réussie pour " << hostAnsi << ":" << port;
+        swCDebug(kSwLogCategory_SwTcpSocket) << "[SwTcpSocket] Résolution DNS réussie pour " << host.toStdString() << ":" << port;
 
         // On tente la connexion avec la première adresse retournée
         sockaddr_in* addr_in = reinterpret_cast<sockaddr_in*>(result->ai_addr);
@@ -374,10 +402,10 @@ public:
             return "";
 
         if (m_useTls && m_tlsMode == TlsState::Established && m_useOpenSslBackend) {
-            if (m_tlsDecryptedBuffer.empty()) {
+            if (m_tlsDecryptedBuffer.isEmpty()) {
                 pumpOpenSslRead();
             }
-            if (m_tlsDecryptedBuffer.empty()) {
+            if (m_tlsDecryptedBuffer.isEmpty()) {
                 return "";
             }
 
@@ -385,23 +413,23 @@ public:
                                 ? (size_t)maxSize
                                 : m_tlsDecryptedBuffer.size();
             SwString result = SwString::fromLatin1(m_tlsDecryptedBuffer.data(), (int)toRead);
-            m_tlsDecryptedBuffer.erase(0, toRead);
-            if (m_remoteClosed && m_tlsDecryptedBuffer.empty()) {
+            m_tlsDecryptedBuffer.remove(0, (int)toRead);
+            if (m_remoteClosed && m_tlsDecryptedBuffer.isEmpty()) {
                 close();
             }
             return result;
         }
 
         if (m_useTls && m_tlsMode == TlsState::Established) {
-            if (m_tlsDecryptedBuffer.empty()) {
+            if (m_tlsDecryptedBuffer.isEmpty()) {
                 receiveTlsData();
             }
-            if (m_tlsDecryptedBuffer.empty()) {
+            if (m_tlsDecryptedBuffer.isEmpty()) {
                 // If the peer has closed, try one last decrypt pass before giving up.
-                if (m_remoteClosed && !m_tlsRecvBuffer.empty()) {
+                if (m_remoteClosed && !m_tlsRecvBuffer.isEmpty()) {
                     decryptPendingTlsRecords();
                 }
-                if (m_tlsDecryptedBuffer.empty()) {
+                if (m_tlsDecryptedBuffer.isEmpty()) {
                     if (m_remoteClosed) {
                         swCDebug(kSwLogCategory_SwTcpSocket) << "[SwTcpSocket] TLS remote closed with no decrypted data, recvBuffer="
                                   << m_tlsRecvBuffer.size();
@@ -415,8 +443,8 @@ public:
                                 : m_tlsDecryptedBuffer.size();
             SwString result = SwString::fromLatin1(m_tlsDecryptedBuffer.data(), (int)toRead);
             swCDebug(kSwLogCategory_SwTcpSocket) << "[SwTcpSocket] returning decrypted chunk size=" << toRead;
-            m_tlsDecryptedBuffer.erase(0, toRead);
-            if (m_remoteClosed && m_tlsDecryptedBuffer.empty()) {
+            m_tlsDecryptedBuffer.remove(0, (int)toRead);
+            if (m_remoteClosed && m_tlsDecryptedBuffer.isEmpty()) {
                 close();
             }
             return result;
@@ -493,7 +521,7 @@ public:
         int timeout = (msecs < 0) ? -1 : msecs;
 
         // Tant qu'il reste des données à envoyer
-        while (!m_writeBuffer.empty() || !m_tlsEncryptedBuffer.empty()) {
+        while (!m_writeBuffer.isEmpty() || !m_tlsEncryptedBuffer.isEmpty()) {
             // Calcul du temps restant
             int remainingTime = -1;
             if (timeout >= 0) {
@@ -619,7 +647,7 @@ protected:
 private:
     SOCKET m_socket;               ///< The Winsock socket handle used for TCP communication.
     WSAEVENT m_event;              ///< The event handle used for monitoring socket events.
-    std::string m_writeBuffer;     ///< Internal buffer to store data for partial writes in non-blocking mode.
+    SwByteArray m_writeBuffer;     ///< Internal buffer to store data for partial writes in non-blocking mode.
     bool m_useTls = false;
 
     enum class TlsState {
@@ -636,10 +664,10 @@ private:
     bool m_credentialsReady = false;
     bool m_contextReady = false;
     SecPkgContext_StreamSizes m_streamSizes{};
-    std::vector<char> m_tlsRecvBuffer;
-    std::string m_tlsDecryptedBuffer;
-    std::string m_tlsEncryptedBuffer;
-    std::string m_tlsHandshakeBuffer;
+    SwByteArray m_tlsRecvBuffer;
+    SwByteArray m_tlsDecryptedBuffer;
+    SwByteArray m_tlsEncryptedBuffer;
+    SwByteArray m_tlsHandshakeBuffer;
     std::unique_ptr<SwBackendSsl> m_sslBackend;
     bool m_useOpenSslBackend = false;
     SwString m_lastHost;
@@ -767,7 +795,7 @@ private:
                             if (!pumpOpenSslRead()) {
                                 return false;
                             }
-                            if (!m_tlsDecryptedBuffer.empty()) {
+                            if (!m_tlsDecryptedBuffer.isEmpty()) {
                                 emit readyRead();
                             }
                         }
@@ -781,7 +809,7 @@ private:
                             if (!receiveTlsData()) {
                                 return false;
                             }
-                            if (!m_tlsDecryptedBuffer.empty()) {
+                            if (!m_tlsDecryptedBuffer.isEmpty()) {
                                 emit readyRead();
                             }
                         }
@@ -819,8 +847,8 @@ private:
         }
 
         // If the peer has closed and there is nothing left to decrypt or send, close cleanly now.
-        if (m_remoteClosed && m_tlsRecvBuffer.empty() && m_tlsDecryptedBuffer.empty() &&
-            m_tlsEncryptedBuffer.empty() && m_writeBuffer.empty() && state() != UnconnectedState) {
+        if (m_remoteClosed && m_tlsRecvBuffer.isEmpty() && m_tlsDecryptedBuffer.isEmpty() &&
+            m_tlsEncryptedBuffer.isEmpty() && m_writeBuffer.isEmpty() && state() != UnconnectedState) {
             close();
         }
 
@@ -834,7 +862,7 @@ private:
         if (m_socket == INVALID_SOCKET) {
             return false;
         }
-        while (!m_tlsHandshakeBuffer.empty()) {
+        while (!m_tlsHandshakeBuffer.isEmpty()) {
             int sent = ::send(m_socket, m_tlsHandshakeBuffer.data(), (int)m_tlsHandshakeBuffer.size(), 0);
             if (sent == SOCKET_ERROR) {
                 int err = WSAGetLastError();
@@ -844,7 +872,7 @@ private:
                 emit errorOccurred(err);
                 return false;
             }
-            m_tlsHandshakeBuffer.erase(0, sent);
+            m_tlsHandshakeBuffer.remove(0, (int)sent);
         }
         return true;
     }
@@ -985,11 +1013,11 @@ private:
             if (!m_sslBackend) {
                 return;
             }
-            while (!m_writeBuffer.empty()) {
+            while (!m_writeBuffer.isEmpty()) {
                 int written = 0;
                 auto res = m_sslBackend->write(m_writeBuffer.data(), (int)m_writeBuffer.size(), written);
                 if (res == SwBackendSsl::IoResult::Ok && written > 0) {
-                    m_writeBuffer.erase(0, (size_t)written);
+                    m_writeBuffer.remove(0, (int)written);
                     continue;
                 }
                 if (res == SwBackendSsl::IoResult::WantRead || res == SwBackendSsl::IoResult::WantWrite) {
@@ -1004,7 +1032,7 @@ private:
                 close();
                 return;
             }
-            if (m_writeBuffer.empty()) {
+            if (m_writeBuffer.isEmpty()) {
                 emit writeFinished();
             }
             return;
@@ -1015,7 +1043,7 @@ private:
                 return;
             }
 
-            if (m_tlsEncryptedBuffer.empty() && !m_writeBuffer.empty()) {
+            if (m_tlsEncryptedBuffer.isEmpty() && !m_writeBuffer.isEmpty()) {
                 size_t chunk = std::min<size_t>(m_streamSizes.cbMaximumMessage, m_writeBuffer.size());
                 if (!enqueueEncryptedChunk(chunk)) {
                     return;
@@ -1023,13 +1051,13 @@ private:
                 sendPendingEncrypted();
             }
 
-            if (m_writeBuffer.empty() && m_tlsEncryptedBuffer.empty()) {
+            if (m_writeBuffer.isEmpty() && m_tlsEncryptedBuffer.isEmpty()) {
                 emit writeFinished();
             }
             return;
         }
 
-        if (m_writeBuffer.empty()) {
+        if (m_writeBuffer.isEmpty()) {
             return;
         }
 
@@ -1038,8 +1066,8 @@ private:
 
         int ret = ::send(m_socket, dataPtr, dataSize, 0);
         if (ret > 0) {
-            m_writeBuffer.erase(0, ret);
-            if (m_writeBuffer.empty()) {
+            m_writeBuffer.remove(0, (int)ret);
+            if (m_writeBuffer.isEmpty()) {
                 emit writeFinished();
             }
         } else if (ret == SOCKET_ERROR) {
@@ -1225,7 +1253,7 @@ private:
             targetPtr = targetNameW.c_str();
         }
 
-        std::vector<char> inData;
+        SwByteArray inData;
         auto recvMore = [&](int timeoutMs) -> bool {
             fd_set readfds;
             FD_ZERO(&readfds);
@@ -1242,7 +1270,7 @@ private:
             if (ret <= 0) {
                 return false;
             }
-            inData.insert(inData.end(), buf, buf + ret);
+            inData.append(buf, static_cast<size_t>(ret));
             return true;
         };
 
@@ -1250,7 +1278,7 @@ private:
         while (true) {
             SecBuffer inBuffers[2];
             inBuffers[0].BufferType = SECBUFFER_TOKEN;
-            inBuffers[0].pvBuffer = inData.empty() ? nullptr : inData.data();
+            inBuffers[0].pvBuffer = inData.isEmpty() ? nullptr : inData.data();
             inBuffers[0].cbBuffer = (ULONG)inData.size();
             inBuffers[1].BufferType = SECBUFFER_EMPTY;
             inBuffers[1].pvBuffer = nullptr;
@@ -1271,7 +1299,7 @@ private:
                 contextReq,
                 0,
                 SECURITY_NATIVE_DREP,
-                inData.empty() ? nullptr : &inDesc,
+                inData.isEmpty() ? nullptr : &inDesc,
                 0,
                 &m_ctxtHandle,
                 &outDesc,
@@ -1298,7 +1326,7 @@ private:
                     goto handshake_fail;
                 }
                 m_tlsMode = TlsState::Established;
-                m_tlsRecvBuffer.assign(inData.begin(), inData.end()); // any leftover bytes
+                m_tlsRecvBuffer = inData; // any leftover bytes
                 m_tlsDecryptedBuffer.clear();
                 setState(ConnectedState);
                 emit connected();
@@ -1321,13 +1349,14 @@ private:
                     }
                 }
                 if (extra > 0 && extraPtr) {
-                    std::vector<char> rest(extra);
+                    SwByteArray rest;
+                    rest.resize(extra);
                     memcpy(rest.data(), extraPtr, extra);
-                    inData.swap(rest);
+                    inData = std::move(rest);
                 } else {
                     inData.clear();
                 }
-                if (inData.empty()) {
+                if (inData.isEmpty()) {
                     if (!recvMore(5000)) {
                         m_tlsMode = TlsState::Disabled;
                         goto handshake_fail;
@@ -1358,7 +1387,7 @@ private:
 
     bool continueTlsHandshake(const char* inputData, size_t inputSize) {
         if (inputData && inputSize > 0) {
-            m_tlsRecvBuffer.insert(m_tlsRecvBuffer.end(), inputData, inputData + inputSize);
+            m_tlsRecvBuffer.append(inputData, inputSize);
         }
 
         size_t inputBefore = m_tlsRecvBuffer.size();
@@ -1370,7 +1399,7 @@ private:
 
         SecBuffer inBuffers[2];
         inBuffers[0].BufferType = SECBUFFER_TOKEN;
-        inBuffers[0].pvBuffer = m_tlsRecvBuffer.empty() ? nullptr : m_tlsRecvBuffer.data();
+        inBuffers[0].pvBuffer = m_tlsRecvBuffer.isEmpty() ? nullptr : m_tlsRecvBuffer.data();
         inBuffers[0].cbBuffer = (ULONG)m_tlsRecvBuffer.size();
         inBuffers[1].BufferType = SECBUFFER_EMPTY;
         inBuffers[1].pvBuffer = nullptr;
@@ -1401,7 +1430,7 @@ private:
             contextReq,
             0,
             SECURITY_NATIVE_DREP,
-            m_tlsRecvBuffer.empty() ? nullptr : &inDesc,
+            m_tlsRecvBuffer.isEmpty() ? nullptr : &inDesc,
             0,
             &m_ctxtHandle,
             &outDesc,
@@ -1438,9 +1467,10 @@ private:
 
         // Prepare input buffer for next call
         if (extra > 0 && extraPtr) {
-            std::vector<char> rest(extra);
+            SwByteArray rest;
+            rest.resize(extra);
             memcpy(rest.data(), extraPtr, extra);
-            m_tlsRecvBuffer.assign(rest.begin(), rest.end());
+            m_tlsRecvBuffer = std::move(rest);
         } else if (status == SEC_E_INCOMPLETE_MESSAGE) {
             // keep existing data; server has not sent a full record yet
         } else {
@@ -1458,7 +1488,7 @@ private:
             m_tlsHandshakeBuffer.clear();
             setState(ConnectedState);
             emit connected();
-            if (!m_tlsRecvBuffer.empty()) {
+            if (!m_tlsRecvBuffer.isEmpty()) {
                 decryptPendingTlsRecords();
             }
             return true;
@@ -1466,9 +1496,10 @@ private:
 
         if (status == SEC_I_CONTINUE_NEEDED || status == SEC_E_INCOMPLETE_MESSAGE) {
             if (extra > 0 && extraPtr) {
-                std::vector<char> rest(extra);
+                SwByteArray rest;
+                rest.resize(extra);
                 memcpy(rest.data(), extraPtr, extra);
-                m_tlsRecvBuffer.assign(rest.begin(), rest.end());
+                m_tlsRecvBuffer = std::move(rest);
             } else if (status == SEC_E_INCOMPLETE_MESSAGE) {
                 // keep partial data
             } else {
@@ -1477,7 +1508,7 @@ private:
             return true;
         }
 
-        if (!m_tlsRecvBuffer.empty()) {
+        if (!m_tlsRecvBuffer.isEmpty()) {
             size_t previewLen = std::min<size_t>(m_tlsRecvBuffer.size(), 64);
             std::string previewHex;
             previewHex.reserve(previewLen * 2);
@@ -1507,7 +1538,7 @@ private:
         }
 
         auto processBuffered = [this]() -> bool {
-            if (m_tlsRecvBuffer.empty()) {
+            if (m_tlsRecvBuffer.isEmpty()) {
                 return true;
             }
             return continueTlsHandshake(nullptr, 0);
@@ -1540,7 +1571,7 @@ private:
         }
 
         // Some handshakes complete fully with a single packet that contains extra data.
-        while (m_tlsMode == TlsState::Negotiating && !m_tlsRecvBuffer.empty()) {
+        while (m_tlsMode == TlsState::Negotiating && !m_tlsRecvBuffer.isEmpty()) {
             size_t before = m_tlsRecvBuffer.size();
             if (!continueTlsHandshake(nullptr, 0)) {
                 return false;
@@ -1554,7 +1585,7 @@ private:
     }
 
     bool decryptPendingTlsRecords() {
-        while (!m_tlsRecvBuffer.empty()) {
+        while (!m_tlsRecvBuffer.isEmpty()) {
             SecBuffer buffers[4];
             buffers[0].BufferType = SECBUFFER_DATA;
             buffers[0].pvBuffer = m_tlsRecvBuffer.data();
@@ -1593,9 +1624,10 @@ private:
             }
 
             if (extra > 0 && extraPtr) {
-                std::vector<char> rest(extra);
+                SwByteArray rest;
+                rest.resize(extra);
                 memcpy(rest.data(), extraPtr, extra);
-                m_tlsRecvBuffer.assign(rest.begin(), rest.end());
+                m_tlsRecvBuffer = std::move(rest);
             } else {
                 m_tlsRecvBuffer.clear();
             }
@@ -1615,11 +1647,11 @@ private:
 
     bool receiveTlsData() {
         // Dechiffrer tout ce qui est déjà en attente
-        if (!m_tlsRecvBuffer.empty()) {
+        if (!m_tlsRecvBuffer.isEmpty()) {
             if (!decryptPendingTlsRecords()) {
                 return false;
             }
-            if (!m_tlsDecryptedBuffer.empty()) {
+            if (!m_tlsDecryptedBuffer.isEmpty()) {
                 swCDebug(kSwLogCategory_SwTcpSocket) << "[SwTcpSocket] decrypted buffer after pending=" << m_tlsDecryptedBuffer.size();
                 return true;
             }
@@ -1647,18 +1679,18 @@ private:
             }
 
             readSomething = true;
-            m_tlsRecvBuffer.insert(m_tlsRecvBuffer.end(), buffer, buffer + ret);
+            m_tlsRecvBuffer.append(buffer, static_cast<size_t>(ret));
             swCDebug(kSwLogCategory_SwTcpSocket) << "[SwTcpSocket] TLS recv read " << ret << " bytes";
         }
 
-        if (!m_tlsRecvBuffer.empty()) {
+        if (!m_tlsRecvBuffer.isEmpty()) {
             return decryptPendingTlsRecords();
         }
         return true;
     }
 
     bool sendPendingEncrypted() {
-        while (!m_tlsEncryptedBuffer.empty()) {
+        while (!m_tlsEncryptedBuffer.isEmpty()) {
             int sent = ::send(m_socket, m_tlsEncryptedBuffer.data(), (int)m_tlsEncryptedBuffer.size(), 0);
             if (sent == SOCKET_ERROR) {
                 int err = WSAGetLastError();
@@ -1668,7 +1700,7 @@ private:
                 emit errorOccurred(err);
                 return false;
             }
-            m_tlsEncryptedBuffer.erase(0, sent);
+            m_tlsEncryptedBuffer.remove(0, (int)sent);
         }
         return true;
     }
@@ -1678,7 +1710,8 @@ private:
             return true;
 
         size_t totalSize = m_streamSizes.cbHeader + plainSize + m_streamSizes.cbTrailer;
-        std::vector<char> out(totalSize);
+        SwByteArray out;
+        out.resize(totalSize);
 
         memcpy(out.data() + m_streamSizes.cbHeader, m_writeBuffer.data(), plainSize);
 
@@ -1704,7 +1737,7 @@ private:
         }
 
         m_tlsEncryptedBuffer.append(out.data(), buffers[0].cbBuffer + buffers[1].cbBuffer + buffers[2].cbBuffer);
-        m_writeBuffer.erase(0, plainSize);
+        m_writeBuffer.remove(0, (int)plainSize);
         return true;
     }
 
@@ -1730,6 +1763,13 @@ class SwTcpSocket : public SwAbstractSocket
     SW_OBJECT(SwTcpSocket, SwAbstractSocket)
 
 public:
+    /**
+     * @brief Constructs a `SwTcpSocket` instance.
+     * @param parent Optional parent object that owns this instance.
+     * @param false Value passed to the method.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     SwTcpSocket(SwObject *parent = nullptr)
         : SwAbstractSocket(parent),
           m_socket(-1),
@@ -1738,12 +1778,22 @@ public:
         startMonitoring();
     }
 
+    /**
+     * @brief Destroys the `SwTcpSocket` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~SwTcpSocket() override
     {
         stopMonitoring();
         close();
     }
 
+    /**
+     * @brief Performs the `useSsl` operation.
+     * @param enabled Value passed to the method.
+     * @param host Value passed to the method.
+     */
     void useSsl(bool enabled, const SwString& host = SwString()) {
         m_useTls = enabled;
         if (!host.isEmpty()) {
@@ -1752,6 +1802,13 @@ public:
     }
 
     // StartTLS for already-connected sockets (useful after an HTTP proxy CONNECT tunnel).
+    /**
+     * @brief Starts the client Tls managed by the object.
+     * @param host Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     bool startClientTls(const SwString& host = SwString()) {
         if (m_socket < 0 || state() != ConnectedState) {
             return false;
@@ -1772,13 +1829,26 @@ public:
         return true;
     }
 
+    /**
+     * @brief Returns whether the object reports remote Closed.
+     * @return `true` when the object reports remote Closed; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isRemoteClosed() const {
         return m_remoteClosed;
     }
 
+    /**
+     * @brief Performs the `connectToHost` operation.
+     * @param host Value passed to the method.
+     * @param port Local port used by the operation.
+     * @return `true` on success; otherwise `false`.
+     */
     bool connectToHost(const SwString &host, uint16_t port) override
     {
         close();
+        m_lastHost = host;
 
         struct addrinfo hints = {};
         hints.ai_family = AF_INET; // prefer IPv4 like Windows path to avoid v6 stalls on unavailable stacks
@@ -1786,8 +1856,7 @@ public:
         hints.ai_protocol = IPPROTO_TCP;
 
         struct addrinfo *result = nullptr;
-        std::string portStr = std::to_string(port);
-        if (getaddrinfo(host.toStdString().c_str(), portStr.c_str(), &hints, &result) != 0 || result == nullptr)
+        if (getaddrinfo(host.toStdString().c_str(), SwString::number(port).toStdString().c_str(), &hints, &result) != 0 || result == nullptr)
         {
             swCError(kSwLogCategory_SwTcpSocket) << "[SwTcpSocket] getaddrinfo failed for " << host.toStdString() << ":" << port << " err=" << errno;
             emit errorOccurred(errno);
@@ -1862,16 +1931,31 @@ public:
         return true;
     }
 
+    /**
+     * @brief Performs the `waitForConnected` operation.
+     * @param msecs Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool waitForConnected(int msecs = 30000) override
     {
         return waitForCondition([this]() { return state() == ConnectedState; }, msecs);
     }
 
+    /**
+     * @brief Performs the `waitForBytesWritten` operation.
+     * @param msecs Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool waitForBytesWritten(int msecs = 30000) override
     {
-        return waitForCondition([this]() { return m_writeBuffer.empty(); }, msecs);
+        return waitForCondition([this]() { return m_writeBuffer.isEmpty(); }, msecs);
     }
 
+    /**
+     * @brief Performs the `shutdownWrite` operation.
+     * @param lingerSeconds Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool shutdownWrite(int lingerSeconds = 5)
     {
         if (m_socket < 0 || state() != ConnectedState)
@@ -1887,6 +1971,11 @@ public:
         return true;
     }
 
+    /**
+     * @brief Closes the underlying resource and stops active work.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     void close() override
     {
         if (m_closing)
@@ -1913,6 +2002,11 @@ public:
         m_closing = false;
     }
 
+    /**
+     * @brief Performs the `read` operation on the associated resource.
+     * @param maxSize Value passed to the method.
+     * @return The resulting read.
+     */
     SwString read(int64_t maxSize = 0) override
     {
         if (m_socket < 0)
@@ -1922,11 +2016,11 @@ public:
 
         if (m_useTls && m_tlsMode == TlsState::Established && m_sslBackend)
         {
-            if (m_tlsDecryptedBuffer.empty())
+            if (m_tlsDecryptedBuffer.isEmpty())
             {
                 pumpOpenSslRead();
             }
-            if (m_tlsDecryptedBuffer.empty())
+            if (m_tlsDecryptedBuffer.isEmpty())
             {
                 return SwString();
             }
@@ -1936,15 +2030,16 @@ public:
             SwString result;
             result.resize((int)toRead);
             memcpy(result.data(), m_tlsDecryptedBuffer.data(), toRead);
-            m_tlsDecryptedBuffer.erase(0, toRead);
-            if (m_remoteClosed && m_tlsDecryptedBuffer.empty()) {
+            m_tlsDecryptedBuffer.remove(0, (int)toRead);
+            if (m_remoteClosed && m_tlsDecryptedBuffer.isEmpty()) {
                 close();
             }
             return result;
         }
 
         size_t bufferSize = (maxSize > 0 && maxSize < 4096) ? static_cast<size_t>(maxSize) : 4096;
-        std::vector<char> buffer(bufferSize);
+        SwByteArray buffer;
+        buffer.resize(bufferSize);
         ssize_t received = ::recv(m_socket, buffer.data(), buffer.size(), 0);
 
         if (received > 0)
@@ -1967,15 +2062,24 @@ public:
         return SwString();
     }
 
+    /**
+     * @brief Performs the `write` operation on the associated resource.
+     * @param data Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool write(const SwString &data) override
     {
         swCDebug(kSwLogCategory_SwTcpSocket) << "[SwTcpSocket] queue write size=" << data.size() << " tls=" << (m_useTls ? 1 : 0)
                   << " state=" << static_cast<int>(state());
-        m_writeBuffer += data.toStdString();
+        m_writeBuffer.append(data.toStdString());
         tryFlushWriteBuffer();
         return true;
     }
 
+    /**
+     * @brief Performs the `adoptSocket` operation.
+     * @param fd Value passed to the method.
+     */
     void adoptSocket(int fd)
     {
         close();
@@ -1987,6 +2091,9 @@ public:
     }
 
 protected:
+    /**
+     * @brief Performs the `onTimerDescriptor` operation.
+     */
     void onTimerDescriptor() override
     {
         SwIODevice::onTimerDescriptor();
@@ -2011,7 +2118,7 @@ private:
         }
 
         short events = POLLIN | POLLERR | POLLHUP;
-        if (m_connecting || !m_writeBuffer.empty())
+        if (m_connecting || !m_writeBuffer.isEmpty())
         {
             events |= POLLOUT;
         }
@@ -2062,7 +2169,7 @@ private:
                 {
                     return;
                 }
-                if (!m_tlsDecryptedBuffer.empty())
+                if (!m_tlsDecryptedBuffer.isEmpty())
                 {
                     emit readyRead();
                 }
@@ -2073,7 +2180,7 @@ private:
             }
         }
 
-        if (!m_writeBuffer.empty() && (pfd.revents & POLLOUT))
+        if (!m_writeBuffer.isEmpty() && (pfd.revents & POLLOUT))
         {
             tryFlushWriteBuffer();
         }
@@ -2090,21 +2197,21 @@ private:
 
     void tryFlushWriteBuffer()
     {
-        if (m_socket < 0 || m_writeBuffer.empty() || state() != ConnectedState)
+        if (m_socket < 0 || m_writeBuffer.isEmpty() || state() != ConnectedState)
         {
             return;
         }
 
         if (m_useTls && m_tlsMode == TlsState::Established && m_sslBackend)
         {
-            while (!m_writeBuffer.empty())
+            while (!m_writeBuffer.isEmpty())
             {
                 int written = 0;
                 auto res = m_sslBackend->write(m_writeBuffer.data(), (int)m_writeBuffer.size(), written);
             if (res == SwBackendSsl::IoResult::Ok && written > 0)
             {
                  swCDebug(kSwLogCategory_SwTcpSocket) << "[SwTcpSocket] TLS wrote " << written << " bytes";
-                m_writeBuffer.erase(0, (size_t)written);
+                m_writeBuffer.remove(0, (int)written);
                 continue;
             }
             if (res == SwBackendSsl::IoResult::WantRead || res == SwBackendSsl::IoResult::WantWrite)
@@ -2122,7 +2229,7 @@ private:
                 close();
                 return;
             }
-            if (m_writeBuffer.empty())
+            if (m_writeBuffer.isEmpty())
             {
                 emit writeFinished();
             }
@@ -2132,8 +2239,8 @@ private:
         ssize_t written = ::send(m_socket, m_writeBuffer.data(), m_writeBuffer.size(), 0);
         if (written > 0)
         {
-            m_writeBuffer.erase(0, static_cast<size_t>(written));
-            if (m_writeBuffer.empty())
+            m_writeBuffer.remove(0, (int)written);
+            if (m_writeBuffer.isEmpty())
             {
                 emit writeFinished();
             }
@@ -2179,15 +2286,16 @@ private:
 
     int m_socket;
     bool m_connecting;
-    std::string m_writeBuffer;
+    SwByteArray m_writeBuffer;
 
     bool m_useTls = false;
     enum class TlsState { Disabled, Negotiating, Established };
     TlsState m_tlsMode = TlsState::Disabled;
     SwString m_tlsHost;
     SwString m_effectiveTlsHost;
+    SwString m_lastHost;
     std::unique_ptr<SwBackendSsl> m_sslBackend;
-    std::string m_tlsDecryptedBuffer;
+    SwByteArray m_tlsDecryptedBuffer;
     bool m_remoteClosed = false;
     bool m_closing = false;
 

@@ -1,4 +1,4 @@
-/***************************************************************************************************
+﻿/***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
  * Copyright (C) 2025 Ariya Consulting
@@ -22,15 +22,24 @@
 
 #pragma once
 
-/***************************************************************************************************
- * SwHeaderView - Qt-like header view (≈ QHeaderView).
+/**
+ * @file SwHeaderView.h
+ * @ingroup core_gui
+ * @brief Declares `SwHeaderView`, a custom header widget for model-backed views.
  *
- * Scope (v1):
- * - Horizontal/vertical headers backed by a SwAbstractItemModel (headerData()).
- * - Section sizing (fixed + optional "fit to width" using stretch weights).
- * - Interactive resizing (drag section dividers).
- * - Clickable sections (emits sectionClicked) and sort indicator helpers.
- **************************************************************************************************/
+ * @details
+ * `SwHeaderView` renders horizontal or vertical section headers using data obtained from
+ * `SwAbstractItemModel::headerData()`. It is designed as a lightweight companion for item views
+ * that need explicit control over header painting, section metrics, and interaction policy.
+ *
+ * The implementation supports:
+ * - fixed per-section sizes,
+ * - optional width redistribution through stretch weights,
+ * - optional expansion of the last visible section,
+ * - interactive divider dragging,
+ * - clickable sections for sorting or custom behaviors,
+ * - sort indicator painting managed entirely by the toolkit.
+ */
 
 #include "SwAbstractItemModel.h"
 #include "SwPainter.h"
@@ -45,16 +54,40 @@
 #include <string>
 #include <vector>
 
+/**
+ * @class SwHeaderView
+ * @brief Paints and manages interactive header sections for a model-backed view.
+ *
+ * @details
+ * The widget keeps enough layout state to answer geometry queries without depending on a specific
+ * table or tree implementation. Section count may come from the bound model or from an explicit
+ * hint when no model is attached yet. Size calculation follows this order:
+ * - explicit per-section sizes when present,
+ * - computed stretch sizes when "fit to width" mode is enabled,
+ * - optional last-section expansion to consume remaining viewport space.
+ *
+ * Mouse interaction is also handled locally. Divider hit testing enables manual resizing, while
+ * section hit testing emits `sectionClicked` and tracks hover state for richer painting.
+ */
 class SwHeaderView : public SwWidget {
     SW_OBJECT(SwHeaderView, SwWidget)
 
 public:
+    /**
+     * @brief Constructs a header view for the requested orientation.
+     * @param orientation `Horizontal` for column headers or `Vertical` for row headers.
+     * @param parent Optional parent widget.
+     */
     explicit SwHeaderView(SwOrientation orientation, SwWidget* parent = nullptr)
         : SwWidget(parent)
         , m_orientation(orientation) {
         initDefaults_();
     }
 
+    /**
+     * @brief Sets a fallback number of sections when no model is attached.
+     * @param count Non-negative logical section count hint.
+     */
     void setSectionCountHint(int count) {
         count = std::max(0, count);
         if (m_sectionCountHint == count) {
@@ -66,8 +99,20 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the explicit section-count hint.
+     * @return Fallback count used when the widget has no model.
+     */
     int sectionCountHint() const { return m_sectionCountHint; }
 
+    /**
+     * @brief Binds the header to a model that provides section count and header labels.
+     * @param model Model whose row or column metadata should be rendered.
+     *
+     * @details
+     * The header reconnects to `modelReset` so section buffers and cached geometry stay aligned with
+     * model structure changes.
+     */
     void setModel(SwAbstractItemModel* model) {
         if (m_model == model) {
             ensureSectionBuffers_();
@@ -88,8 +133,16 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the currently bound model.
+     * @return Model pointer, or `nullptr` when no model is attached.
+     */
     SwAbstractItemModel* model() const { return m_model; }
 
+    /**
+     * @brief Sets the scroll offset applied when mapping viewport positions to logical sections.
+     * @param px Offset in pixels.
+     */
     void setOffset(int px) {
         px = std::max(0, px);
         if (m_offset == px) {
@@ -99,10 +152,18 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the current pixel offset.
+     * @return Horizontal or vertical header offset depending on orientation.
+     */
     int offset() const { return m_offset; }
 
+    /**
+     * @brief Sets the default size used for sections without an explicit override.
+     * @param px Requested section size in pixels.
+     */
     void setDefaultSectionSize(int px) {
-        px = clampInt_(px, 24, 10000);
+        px = clampInt(px, 24, 10000);
         if (m_defaultSectionSize == px) {
             return;
         }
@@ -111,10 +172,18 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the default section size.
+     * @return Default section extent in pixels.
+     */
     int defaultSectionSize() const { return m_defaultSectionSize; }
 
+    /**
+     * @brief Sets the minimum size allowed for any section.
+     * @param px Minimum size in pixels.
+     */
     void setMinimumSectionSize(int px) {
-        px = clampInt_(px, 12, 10000);
+        px = clampInt(px, 12, 10000);
         if (m_minSectionSize == px) {
             return;
         }
@@ -125,10 +194,18 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the minimum section size.
+     * @return Minimum extent in pixels.
+     */
     int minimumSectionSize() const { return m_minSectionSize; }
 
+    /**
+     * @brief Sets the maximum size allowed for any section.
+     * @param px Maximum size in pixels.
+     */
     void setMaximumSectionSize(int px) {
-        px = clampInt_(px, 12, 50000);
+        px = clampInt(px, 12, 50000);
         if (m_maxSectionSize == px) {
             return;
         }
@@ -139,8 +216,16 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the maximum section size.
+     * @return Maximum extent in pixels.
+     */
     int maximumSectionSize() const { return m_maxSectionSize; }
 
+    /**
+     * @brief Enables or disables grid-line painting between sections.
+     * @param on `true` to draw divider lines.
+     */
     void setShowGrid(bool on) {
         if (m_showGrid == on) {
             return;
@@ -149,11 +234,33 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns whether grid lines are painted.
+     * @return `true` when section dividers are drawn as part of the header.
+     */
     bool showGrid() const { return m_showGrid; }
 
+    /**
+     * @brief Enables or disables click activation on sections.
+     * @param on `true` to emit `sectionClicked` when the user clicks a section body.
+     */
     void setSectionsClickable(bool on) { m_sectionsClickable = on; }
+
+    /**
+     * @brief Returns whether section clicks are currently enabled.
+     * @return `true` when click hit testing on section bodies is active.
+     */
     bool sectionsClickable() const { return m_sectionsClickable; }
 
+    /**
+     * @brief Enables automatic redistribution of section sizes to fill the viewport length.
+     * @param on `true` to compute stretched sizes from the configured weights.
+     *
+     * @details
+     * When enabled, the fixed section-size buffer is treated as the baseline and
+     * `updateStretchedSections_()` computes a derived set of visible sizes. Disabling the feature
+     * clears the derived cache and returns to fixed sizing.
+     */
     void setSectionsFitToWidth(bool on) {
         if (m_sectionsFitToWidth == on) {
             return;
@@ -166,9 +273,20 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns whether width-fitting mode is enabled.
+     * @return `true` when section sizes are redistributed to match the viewport length.
+     */
     bool sectionsFitToWidth() const { return m_sectionsFitToWidth; }
 
-    // Qt-like behavior: if true, the last section expands to consume remaining space (no scaling/shrinking).
+    /**
+     * @brief Enables or disables last-section expansion in non-stretched mode.
+     * @param on `true` to let the last section absorb leftover viewport space.
+     *
+     * @details
+     * Unlike `setSectionsFitToWidth()`, this does not rescale every section. Only the final visible
+     * section grows when the sum of fixed sizes is smaller than the available viewport length.
+     */
     void setStretchLastSection(bool on) {
         if (m_stretchLastSection == on) {
             return;
@@ -177,16 +295,32 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns whether the last section may expand to fill slack space.
+     * @return `true` when last-section stretching is enabled.
+     */
     bool stretchLastSection() const { return m_stretchLastSection; }
 
+    /**
+     * @brief Sets per-section stretch weights used by width-fitting mode.
+     * @param stretches Weight list aligned with logical section indices.
+     */
     void setSectionStretches(const SwList<int>& stretches) {
         m_sectionStretches = stretches;
         updateStretchedSections_();
         update();
     }
 
+    /**
+     * @brief Returns the configured stretch weights.
+     * @return Weight list used when width-fitting mode is active.
+     */
     SwList<int> sectionStretches() const { return m_sectionStretches; }
 
+    /**
+     * @brief Sets the viewport length used for width redistribution calculations.
+     * @param px Available viewport size in pixels.
+     */
     void setViewportLength(int px) {
         px = std::max(0, px);
         if (m_cachedViewportLength == px) {
@@ -197,8 +331,17 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the cached viewport length.
+     * @return Viewport size used by stretch calculations, or a negative value when not preset.
+     */
     int viewportLength() const { return m_cachedViewportLength; }
 
+    /**
+     * @brief Returns the current logical section count.
+     * @return Number of columns for a horizontal header, rows for a vertical header, or the fallback
+     *         hint when no model is attached.
+     */
     int sectionCount() const {
         if (!m_model) {
             return std::max(0, m_sectionCountHint);
@@ -209,6 +352,11 @@ public:
         return std::max(0, m_model->rowCount());
     }
 
+    /**
+     * @brief Returns the visible size of one logical section.
+     * @param logicalIndex Zero-based section index.
+     * @return Section extent in pixels after fixed-size and stretch rules have been applied.
+     */
     int sectionSize(int logicalIndex) const {
         if (logicalIndex < 0) {
             return m_defaultSectionSize;
@@ -264,6 +412,15 @@ public:
         return base;
     }
 
+    /**
+     * @brief Assigns an explicit size to one section.
+     * @param logicalIndex Zero-based section index.
+     * @param px Requested size in pixels.
+     *
+     * @details
+     * In width-fitting mode the stretched cache is first materialized back into the fixed-size
+     * buffer so the explicit user resize becomes the new baseline.
+     */
     void setSectionSize(int logicalIndex, int px) {
         if (logicalIndex < 0) {
             return;
@@ -279,7 +436,7 @@ public:
         if (px <= 0) {
             px = 0; // 0 means "use default section size"
         } else {
-            px = clampInt_(px, m_minSectionSize, m_maxSectionSize);
+            px = clampInt(px, m_minSectionSize, m_maxSectionSize);
         }
         if (m_sectionSizes[idx] == px && !m_sectionsFitToWidth) {
             return;
@@ -298,6 +455,10 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the cumulative visible length of all sections.
+     * @return Total header length in pixels.
+     */
     int length() const {
         const int n = sectionCount();
         int total = 0;
@@ -307,6 +468,11 @@ public:
         return total;
     }
 
+    /**
+     * @brief Returns the starting pixel coordinate of a section.
+     * @param logicalIndex Zero-based section index.
+     * @return Pixel coordinate relative to the unshifted header content.
+     */
     int sectionStart(int logicalIndex) const {
         if (logicalIndex <= 0) {
             return 0;
@@ -319,6 +485,11 @@ public:
         return x;
     }
 
+    /**
+     * @brief Returns the logical section covering a content-space position.
+     * @param position Pixel position relative to the header content.
+     * @return Section index, or `-1` when the position is outside all sections.
+     */
     int sectionAt(int position) const {
         if (position < 0) {
             return -1;
@@ -335,6 +506,10 @@ public:
         return -1;
     }
 
+    /**
+     * @brief Enables or disables sort-indicator painting.
+     * @param on `true` to paint the current sort arrow.
+     */
     void setSortIndicatorShown(bool on) {
         if (m_sortIndicatorShown == on) {
             return;
@@ -343,8 +518,17 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns whether the sort indicator is currently visible.
+     * @return `true` when sort-arrow painting is enabled.
+     */
     bool isSortIndicatorShown() const { return m_sortIndicatorShown; }
 
+    /**
+     * @brief Sets the section and order represented by the sort indicator.
+     * @param section Section index that should show the indicator.
+     * @param order Sort direction to paint.
+     */
     void setSortIndicator(int section, SwSortOrder order) {
         if (m_sortSection == section && m_sortOrder == order) {
             return;
@@ -354,25 +538,44 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the section that currently owns the sort indicator.
+     * @return Logical section index, or `-1` when no section is selected for sorting.
+     */
     int sortIndicatorSection() const { return m_sortSection; }
+
+    /**
+     * @brief Returns the direction represented by the sort indicator.
+     * @return Current sort order used for arrow painting.
+     */
     SwSortOrder sortIndicatorOrder() const { return m_sortOrder; }
 
 signals:
-    DECLARE_SIGNAL(sectionClicked, int);
-    DECLARE_SIGNAL(sectionResized, int, int, int);
+    DECLARE_SIGNAL(sectionClicked, int);          ///< Emitted when the user clicks a logical section.
+    DECLARE_SIGNAL(sectionResized, int, int, int); ///< Emitted after a user resize with section, old size, and new size.
 
 protected:
+    /**
+     * @brief Recomputes stretched sizes when the header widget is resized.
+     * @param event Resize event forwarded by the widget system.
+     */
     void resizeEvent(ResizeEvent* event) override {
         SwWidget::resizeEvent(event);
         updateStretchedSections_();
     }
 
+    /**
+     * @brief Handles the paint Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void paintEvent(PaintEvent* event) override {
         if (!event || !event->painter() || !isVisibleInHierarchy()) {
             return;
         }
         SwPainter* painter = event->painter();
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
         if (bounds.width <= 0 || bounds.height <= 0) {
             return;
         }
@@ -403,36 +606,36 @@ protected:
 
         SwString bw = styleValue_(sheet, hierarchy, "border-width");
         if (!bw.isEmpty()) {
-            borderWidth = clampInt_(parsePixelValue_(bw, borderWidth), 0, 20);
+            borderWidth = clampInt(parsePixelValue(bw, borderWidth), 0, 20);
         }
 
         SwString brv = styleValue_(sheet, hierarchy, "border-radius");
         if (!brv.isEmpty()) {
-            radius = clampInt_(parsePixelValue_(brv, radius), 0, 64);
+            radius = clampInt(parsePixelValue(brv, radius), 0, 64);
         }
         tl = tr = br = bl = radius;
 
         SwString v = styleValue_(sheet, hierarchy, "border-top-left-radius");
-        if (!v.isEmpty()) tl = clampInt_(parsePixelValue_(v, tl), 0, 64);
+        if (!v.isEmpty()) tl = clampInt(parsePixelValue(v, tl), 0, 64);
         v = styleValue_(sheet, hierarchy, "border-top-right-radius");
-        if (!v.isEmpty()) tr = clampInt_(parsePixelValue_(v, tr), 0, 64);
+        if (!v.isEmpty()) tr = clampInt(parsePixelValue(v, tr), 0, 64);
         v = styleValue_(sheet, hierarchy, "border-bottom-right-radius");
-        if (!v.isEmpty()) br = clampInt_(parsePixelValue_(v, br), 0, 64);
+        if (!v.isEmpty()) br = clampInt(parsePixelValue(v, br), 0, 64);
         v = styleValue_(sheet, hierarchy, "border-bottom-left-radius");
-        if (!v.isEmpty()) bl = clampInt_(parsePixelValue_(v, bl), 0, 64);
+        if (!v.isEmpty()) bl = clampInt(parsePixelValue(v, bl), 0, 64);
 
         SwString pad = styleValue_(sheet, hierarchy, "padding");
         if (!pad.isEmpty()) {
             padding = parsePadding_(pad);
         }
         v = styleValue_(sheet, hierarchy, "padding-left");
-        if (!v.isEmpty()) padding.left = clampInt_(parsePixelValue_(v, padding.left), 0, 128);
+        if (!v.isEmpty()) padding.left = clampInt(parsePixelValue(v, padding.left), 0, 128);
         v = styleValue_(sheet, hierarchy, "padding-right");
-        if (!v.isEmpty()) padding.right = clampInt_(parsePixelValue_(v, padding.right), 0, 128);
+        if (!v.isEmpty()) padding.right = clampInt(parsePixelValue(v, padding.right), 0, 128);
         v = styleValue_(sheet, hierarchy, "padding-top");
-        if (!v.isEmpty()) padding.top = clampInt_(parsePixelValue_(v, padding.top), 0, 128);
+        if (!v.isEmpty()) padding.top = clampInt(parsePixelValue(v, padding.top), 0, 128);
         v = styleValue_(sheet, hierarchy, "padding-bottom");
-        if (!v.isEmpty()) padding.bottom = clampInt_(parsePixelValue_(v, padding.bottom), 0, 128);
+        if (!v.isEmpty()) padding.bottom = clampInt(parsePixelValue(v, padding.bottom), 0, 128);
 
         // Header background
         paintRoundedRectWithCorners_(painter, bounds, tl, tr, br, bl, bg, border, borderWidth);
@@ -521,6 +724,12 @@ protected:
         }
     }
 
+    /**
+     * @brief Handles the mouse Press Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mousePressEvent(MouseEvent* event) override {
         if (!event || !isPointInside(event->x(), event->y())) {
             SwWidget::mousePressEvent(event);
@@ -554,6 +763,12 @@ protected:
         SwWidget::mousePressEvent(event);
     }
 
+    /**
+     * @brief Handles the mouse Move Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseMoveEvent(MouseEvent* event) override {
         SwWidget::mouseMoveEvent(event);
         if (!event) {
@@ -563,7 +778,7 @@ protected:
         if (m_resizing && m_resizeSection >= 0) {
             const int contentPos = contentPos_(event->x(), event->y());
             const int delta = contentPos - m_resizeStartPos;
-            const int newSize = clampInt_(m_resizeStartSize + delta, m_minSectionSize, m_maxSectionSize);
+            const int newSize = clampInt(m_resizeStartSize + delta, m_minSectionSize, m_maxSectionSize);
             setSectionSize(m_resizeSection, newSize);
             event->accept();
             return;
@@ -589,6 +804,12 @@ protected:
         setCursor(CursorType::Arrow);
     }
 
+    /**
+     * @brief Handles the mouse Release Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseReleaseEvent(MouseEvent* event) override {
         SwWidget::mouseReleaseEvent(event);
         if (!event) {
@@ -599,33 +820,32 @@ protected:
     }
 
 private:
-    static int clampInt_(int v, int lo, int hi) {
-        if (v < lo) return lo;
-        if (v > hi) return hi;
-        return v;
-    }
-
-    static int parsePixelValue_(const SwString& value, int defaultValue) {
-        if (value.isEmpty()) {
-            return defaultValue;
-        }
-        std::string s = value.toStdString();
-        size_t pos = s.find_first_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ%");
-        if (pos != std::string::npos) {
-            s = s.substr(0, pos);
-        }
-        try {
-            return std::stoi(s);
-        } catch (...) {
-            return defaultValue;
-        }
-    }
-
     struct Padding {
         int top{0};
         int right{0};
         int bottom{0};
         int left{0};
+
+        /**
+         * @brief Constructs a `Padding` instance.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
+        Padding() {}
+        /**
+         * @brief Constructs a `Padding` instance.
+         * @param topValue Value passed to the method.
+         * @param rightValue Value passed to the method.
+         * @param bottomValue Value passed to the method.
+         * @param leftValue Value passed to the method.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
+        Padding(int topValue, int rightValue, int bottomValue, int leftValue)
+            : top(topValue)
+            , right(rightValue)
+            , bottom(bottomValue)
+            , left(leftValue) {}
     };
 
     static Padding parsePadding_(const SwString& value) {
@@ -680,7 +900,7 @@ private:
     }
 
     static SwString styleValue_(const StyleSheet* sheet,
-                               const std::vector<SwString>& hierarchy,
+                               const SwList<SwString>& hierarchy,
                                const char* propertyName) {
         if (!sheet || !propertyName) {
             return SwString();
@@ -692,7 +912,7 @@ private:
             if (selector.isEmpty()) {
                 continue;
             }
-            SwString v = sheet->getStyleProperty(selector.toStdString(), propertyName);
+            SwString v = sheet->getStyleProperty(selector, propertyName);
             if (!v.isEmpty()) {
                 out = v;
             }
@@ -705,15 +925,11 @@ private:
             return false;
         }
         try {
-            out = clampColor_(const_cast<StyleSheet*>(sheet)->parseColor(value.toStdString(), nullptr));
+            out = clampColor(const_cast<StyleSheet*>(sheet)->parseColor(value, nullptr));
             return true;
         } catch (...) {
             return false;
         }
-    }
-
-    static SwColor clampColor_(const SwColor& c) {
-        return SwColor{clampInt_(c.r, 0, 255), clampInt_(c.g, 0, 255), clampInt_(c.b, 0, 255)};
     }
 
     static void paintRoundedRectWithCorners_(SwPainter* painter,
@@ -736,7 +952,7 @@ private:
         }
 
         const int maxRadius = std::max(0, std::min(rect.width, rect.height) / 2);
-        r = clampInt_(r, 0, maxRadius);
+        r = clampInt(r, 0, maxRadius);
         if (r <= 0) {
             painter->fillRect(rect, fill, border, borderWidth);
             return;
@@ -823,7 +1039,7 @@ private:
     }
 
     int contentPos_(int px, int py) const {
-        const SwRect r = getRect();
+        const SwRect r = rect();
         if (m_orientation == SwOrientation::Horizontal) {
             return (px - r.x) + std::max(0, m_offset);
         }
@@ -834,7 +1050,7 @@ private:
         if (!m_model) {
             return -1;
         }
-        const SwRect r = getRect();
+        const SwRect r = rect();
         if (r.width <= 0 || r.height <= 0) {
             return -1;
         }
@@ -907,7 +1123,7 @@ private:
         for (int i = 0; i < n; ++i) {
             const size_t idx = static_cast<size_t>(i);
             if (idx < m_sectionSizes.size() && idx < m_stretchedSectionSizes.size()) {
-                m_sectionSizes[idx] = clampInt_(m_stretchedSectionSizes[idx], m_minSectionSize, m_maxSectionSize);
+                m_sectionSizes[idx] = clampInt(m_stretchedSectionSizes[idx], m_minSectionSize, m_maxSectionSize);
             }
         }
     }
@@ -1029,3 +1245,4 @@ private:
 
     int m_hoverSection{-1};
 };
+

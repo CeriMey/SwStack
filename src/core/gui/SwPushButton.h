@@ -1,3 +1,14 @@
+﻿
+/**
+ * @file
+ * @ingroup core_gui
+ * @brief Declares `SwPushButton`, the clickable command button widget.
+ *
+ * The widget layers button-specific text, checked state, and press handling on top of the
+ * generic widget base. It is the primary action trigger used by dialogs and forms, with
+ * optional checkable behavior for toggle-style commands.
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -21,6 +32,8 @@
  ***************************************************************************************************/
 
 #pragma once
+
+
 
 #include "SwWidget.h"
 #include <iostream>
@@ -47,6 +60,13 @@ class SwPushButton : public SwWidget {
         update();
     }
 public:
+    /**
+     * @brief Constructs a `SwPushButton` instance.
+     * @param text Value passed to the method.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     SwPushButton(const SwString& text, SwWidget* parent = nullptr)
         : SwWidget(parent){
         resize(150, 50);
@@ -76,8 +96,20 @@ public:
         this->setStyleSheet(css);
     }
 
+    /**
+     * @brief Returns whether the object reports checkable.
+     * @return `true` when the object reports checkable; otherwise `false`.
+     *
+     * @details This query does not modify the object state.
+     */
     bool isCheckable() const { return getCheckable(); }
 
+    /**
+     * @brief Sets the checked.
+     * @param checked Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setChecked(bool checked) {
         if (!getCheckable()) {
             checked = false;
@@ -90,17 +122,34 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns whether the object reports checked.
+     * @return `true` when the object reports checked; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isChecked() const { return m_checked; }
 
+    /**
+     * @brief Performs the `toggle` operation.
+     * @param m_checked Value passed to the method.
+     */
     void toggle() { setChecked(!m_checked); }
 
+    /**
+     * @brief Handles the paint Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     * @return The requested paint Event.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     virtual void paintEvent(PaintEvent* event) override {
         SwPainter* painter = event->painter();
         if (!painter) {
             return;
         }
 
-        SwRect rect = getRect();
+        SwRect rect = this->rect();
 
         WidgetState state = WidgetState::Normal;
         if (getPressed()) {
@@ -126,12 +175,26 @@ public:
 
 
 
-    // Gérer le survol de la souris
+    // GÃ©rer le survol de la souris
+    /**
+     * @brief Handles the mouse Move Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     * @return The requested mouse Move Event.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     virtual void mouseMoveEvent(MouseEvent* event) override {
         SwWidget::mouseMoveEvent(event);
     }
 
-    // Gérer le clic sur le bouton
+    // GÃ©rer le clic sur le bouton
+    /**
+     * @brief Handles the mouse Press Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     * @return The requested mouse Press Event.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     virtual void mousePressEvent(MouseEvent* event) override {
         if (isPointInside(event->x(), event->y())) {
             setPressed(true);
@@ -140,10 +203,17 @@ public:
         SwWidget::mousePressEvent(event);
     }
 
-    // Gérer le relâchement du bouton
+    // GÃ©rer le relÃ¢chement du bouton
+    /**
+     * @brief Handles the mouse Release Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     * @return The requested mouse Release Event.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     virtual void mouseReleaseEvent(MouseEvent* event) override {
         if (getPressed() && isPointInside(event->x(), event->y())) {
-            emit clicked();  // Émettre le signal 'clicked'
+            emit clicked();  // Ã‰mettre le signal 'clicked'
             event->accept();
             if (getCheckable()) {
                 setChecked(!m_checked);
@@ -153,18 +223,24 @@ public:
         SwWidget::mouseReleaseEvent(event);
     }
 
-    virtual SwRect sizeHint() const override {
-        SwRect rect = getRect();
-        rect.width = width();
-        rect.height = height();
-        return rect;
+    /**
+     * @brief Returns the current size Hint.
+     * @return The current size Hint.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
+    virtual SwSize sizeHint() const override {
+        return SwSize{width(), height()};
     }
 
-    virtual SwRect minimumSizeHint() const override {
-        SwRect rect = sizeHint();
-        rect.width = width();
-        rect.height = height();
-        return rect;
+    /**
+     * @brief Returns the current minimum Size Hint.
+     * @return The current minimum Size Hint.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
+    virtual SwSize minimumSizeHint() const override {
+        return sizeHint();
     }
 
 signals:
@@ -175,3 +251,4 @@ private:
     bool m_checked{false};
 
 };
+

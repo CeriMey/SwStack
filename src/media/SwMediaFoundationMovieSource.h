@@ -22,6 +22,30 @@
 
 #pragma once
 
+/**
+ * @file src/media/SwMediaFoundationMovieSource.h
+ * @ingroup media
+ * @brief Declares the public interface exposed by SwMediaFoundationMovieSource in the CoreSw
+ * media layer.
+ *
+ * This header belongs to the CoreSw media layer. It exposes video frames, packets, decoders,
+ * capture sources, and streaming-oriented helpers used by media pipelines.
+ *
+ * Within that layer, this file focuses on the media foundation movie source interface. The
+ * declarations exposed here define the stable surface that adjacent code can rely on while the
+ * implementation remains free to evolve behind the header.
+ *
+ * The main declarations in this header are SwMediaFoundationMovieSource.
+ *
+ * Source-oriented declarations here describe how data or media is produced over time, how
+ * consumers observe availability, and which lifetime guarantees apply to delivered payloads.
+ *
+ * Media-facing declarations here focus on packet and frame ownership, format description,
+ * decoding boundaries, and real-time source control.
+ *
+ */
+
+
 /***************************************************************************************************
  * SwMediaFoundationMovieSource
  * Media Foundation backed SwVideoSource that streams frames from a file on Windows.
@@ -42,7 +66,7 @@
 #include <chrono>
 #include <cstring>
 #include <fstream>
-#include <mutex>
+#include "core/fs/SwMutex.h"
 #include <string>
 #include <vector>
 #include <iostream>
@@ -60,20 +84,43 @@ static constexpr const char* kSwLogCategory_SwMediaFoundationMovieSource = "sw.m
 
 class SwMediaFoundationMovieSource : public SwVideoSource {
 public:
+    /**
+     * @brief Constructs a `SwMediaFoundationMovieSource` instance.
+     * @param filePath Path of the target file.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     explicit SwMediaFoundationMovieSource(const std::wstring& filePath)
         : m_path(filePath) {}
 
+    /**
+     * @brief Destroys the `SwMediaFoundationMovieSource` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~SwMediaFoundationMovieSource() override {
         stop();
         releaseResources();
     }
 
-    std::string name() const override {
+    /**
+     * @brief Returns the current name.
+     * @return The current name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
+    SwString name() const override {
         return "SwMediaFoundationMovieSource";
     }
 
+    /**
+     * @brief Returns the current initialize.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool initialize() {
-        std::lock_guard<std::mutex> lock(m_stateMutex);
+        SwMutexLocker lock(m_stateMutex);
         if (m_initialized) {
             return true;
         }
@@ -177,6 +224,11 @@ public:
         return true;
     }
 
+    /**
+     * @brief Starts the underlying activity managed by the object.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     void start() override {
         if (isRunning()) {
             return;
@@ -192,6 +244,11 @@ public:
         m_captureThread->start();
     }
 
+    /**
+     * @brief Stops the underlying activity managed by the object.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     void stop() override {
         if (!isRunning()) {
             return;
@@ -204,6 +261,12 @@ public:
         }
     }
 
+    /**
+     * @brief Sets the loop.
+     * @param loop Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setLoop(bool loop) {
         m_loop.store(loop);
     }
@@ -557,10 +620,19 @@ private:
 
     class MovieCaptureThread : public SwThread {
     public:
+        /**
+         * @brief Constructs a `MovieCaptureThread` instance.
+         * @param owner Value passed to the method.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
         explicit MovieCaptureThread(SwMediaFoundationMovieSource* owner)
             : SwThread("SwMediaFoundationMovieSourceThread"), m_owner(owner) {}
 
     protected:
+        /**
+         * @brief Performs the `run` operation.
+         */
         void run() override {
             if (m_owner) {
                 m_owner->readLoop();
@@ -574,7 +646,7 @@ private:
     std::wstring m_path;
     Microsoft::WRL::ComPtr<IMFSourceReader> m_reader;
     std::unique_ptr<MovieCaptureThread> m_captureThread;
-    std::mutex m_stateMutex;
+    SwMutex m_stateMutex;
     int m_frameWidth{0};
     int m_frameHeight{0};
     int m_defaultStride{0};
@@ -592,10 +664,37 @@ private:
 
 class SwMediaFoundationMovieSource : public SwVideoSource {
 public:
+    /**
+     * @brief Constructs a `SwMediaFoundationMovieSource` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     explicit SwMediaFoundationMovieSource(const std::wstring&) {}
-    std::string name() const override { return "SwMediaFoundationMovieSourceStub"; }
+    /**
+     * @brief Returns the current name.
+     * @return The current name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
+    SwString name() const override { return "SwMediaFoundationMovieSourceStub"; }
+    /**
+     * @brief Returns the current initialize.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool initialize() { return false; }
+    /**
+     * @brief Starts the underlying activity managed by the object.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     void start() override {}
+    /**
+     * @brief Stops the underlying activity managed by the object.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     void stop() override {}
 };
 

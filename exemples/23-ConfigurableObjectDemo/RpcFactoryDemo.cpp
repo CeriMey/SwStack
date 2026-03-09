@@ -36,8 +36,8 @@ static SwStringList registryObjects_(const SwString& domain) {
     std::map<std::string, bool> uniq;
     for (size_t i = 0; i < snap.size(); ++i) {
         const SwJsonValue v = snap[i];
-        if (!v.isObject() || !v.toObject()) continue;
-        const SwJsonObject o(*v.toObject());
+        if (!v.isObject()) continue;
+        const SwJsonObject o(v.toObject());
         const SwString obj(o["object"].toString());
         if (obj.isEmpty()) continue;
         if (obj == SwString("__sw_ipc__")) continue;

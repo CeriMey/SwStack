@@ -22,8 +22,32 @@
 
 #pragma once
 
+/**
+ * @file src/core/gui/SwKeySequence.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwKeySequence in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the key sequence interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are SwKey and SwKeySequence.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
 /***************************************************************************************************
- * SwKeySequence - Qt-like key sequence helper (≈ QKeySequence).
+ * SwKeySequence - key sequence helper.
  *
  * Scope (v1):
  * - Stores a single key + modifiers (Ctrl/Shift/Alt).
@@ -55,8 +79,23 @@ enum class SwKey {
 
 class SwKeySequence {
 public:
+    /**
+     * @brief Constructs a `SwKeySequence` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwKeySequence() = default;
 
+    /**
+     * @brief Constructs a `SwKeySequence` instance.
+     * @param ch Value passed to the method.
+     * @param ctrl Value passed to the method.
+     * @param shift Value passed to the method.
+     * @param alt Value passed to the method.
+     * @param alt Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwKeySequence(char ch, bool ctrl = false, bool shift = false, bool alt = false)
         : m_key(SwKey::Character)
         , m_char(ch)
@@ -64,12 +103,28 @@ public:
         , m_shift(shift)
         , m_alt(alt) {}
 
+    /**
+     * @brief Constructs a `SwKeySequence` instance.
+     * @param key Value passed to the method.
+     * @param ctrl Value passed to the method.
+     * @param shift Value passed to the method.
+     * @param alt Value passed to the method.
+     * @param alt Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwKeySequence(SwKey key, bool ctrl = false, bool shift = false, bool alt = false)
         : m_key(key)
         , m_ctrl(ctrl)
         , m_shift(shift)
         , m_alt(alt) {}
 
+    /**
+     * @brief Returns whether the object reports valid.
+     * @return `true` when the object reports valid; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isValid() const {
         if (m_key == SwKey::Unknown) {
             return false;
@@ -80,18 +135,64 @@ public:
         return true;
     }
 
+    /**
+     * @brief Returns the current key.
+     * @return The current key.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwKey key() const { return m_key; }
+    /**
+     * @brief Returns the current character.
+     * @return The current character.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     char character() const { return m_char; }
+    /**
+     * @brief Returns the current ctrl.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool ctrl() const { return m_ctrl; }
+    /**
+     * @brief Returns the current shift.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool shift() const { return m_shift; }
+    /**
+     * @brief Returns the current alt.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool alt() const { return m_alt; }
 
+    /**
+     * @brief Sets the enabled Modifiers.
+     * @param ctrl Value passed to the method.
+     * @param shift Value passed to the method.
+     * @param alt Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setEnabledModifiers(bool ctrl, bool shift, bool alt) {
         m_ctrl = ctrl;
         m_shift = shift;
         m_alt = alt;
     }
 
+    /**
+     * @brief Performs the `matches` operation.
+     * @param keyCode Value passed to the method.
+     * @param ctrlPressed Value passed to the method.
+     * @param shiftPressed Value passed to the method.
+     * @param altPressed Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool matches(int keyCode, bool ctrlPressed, bool shiftPressed, bool altPressed) const {
         if (!isValid()) {
             return false;
@@ -126,6 +227,12 @@ public:
         return false;
     }
 
+    /**
+     * @brief Returns the current to String.
+     * @return The current to String.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString toString() const {
         if (!isValid()) {
             return SwString();
@@ -139,6 +246,11 @@ public:
         return out;
     }
 
+    /**
+     * @brief Performs the `fromString` operation.
+     * @param text Value passed to the method.
+     * @return The requested from String.
+     */
     static SwKeySequence fromString(const SwString& text) {
         const SwString cleaned = text.trimmed();
         if (cleaned.isEmpty()) {
@@ -204,6 +316,11 @@ public:
         return SwKeySequence(key, ctrl, shift, alt);
     }
 
+    /**
+     * @brief Performs the `operator==` operation.
+     * @param other Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool operator==(const SwKeySequence& other) const {
         return m_key == other.m_key &&
                m_char == other.m_char &&
@@ -212,6 +329,11 @@ public:
                m_alt == other.m_alt;
     }
 
+    /**
+     * @brief Performs the `operator!=` operation.
+     * @param this Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool operator!=(const SwKeySequence& other) const { return !(*this == other); }
 
 private:
@@ -240,4 +362,3 @@ private:
     bool m_shift{false};
     bool m_alt{false};
 };
-

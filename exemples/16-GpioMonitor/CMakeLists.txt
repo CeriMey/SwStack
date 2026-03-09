@@ -13,10 +13,6 @@ target_include_directories(GpioMonitorExample PRIVATE
     ${CMAKE_SOURCE_DIR}/src/core
 )
 
-find_package(OpenSSL REQUIRED)
-
 if(WIN32)
-    target_link_libraries(GpioMonitorExample PRIVATE ws2_32 OpenSSL::Crypto)
-else()
-    target_link_libraries(GpioMonitorExample PRIVATE OpenSSL::Crypto)
+    target_link_libraries(GpioMonitorExample PRIVATE ws2_32)
 endif()

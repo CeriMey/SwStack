@@ -22,6 +22,29 @@
 
 #pragma once
 
+/**
+ * @file src/media/SwRtspUdpSource.h
+ * @ingroup media
+ * @brief Declares the public interface exposed by SwRtspUdpSource in the CoreSw media layer.
+ *
+ * This header belongs to the CoreSw media layer. It exposes video frames, packets, decoders,
+ * capture sources, and streaming-oriented helpers used by media pipelines.
+ *
+ * Within that layer, this file focuses on the RTSP UDP source interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are SwRtspUdpSource.
+ *
+ * Source-oriented declarations here describe how data or media is produced over time, how
+ * consumers observe availability, and which lifetime guarantees apply to delivered payloads.
+ *
+ * Media-facing declarations here focus on packet and frame ownership, format description,
+ * decoding boundaries, and real-time source control.
+ *
+ */
+
+
 /***************************************************************************************************
  * Minimal RTSP (RTP over UDP) video source.
  *
@@ -66,6 +89,14 @@ static constexpr const char* kSwLogCategory_SwRtspUdpSource = "sw.media.swrtspud
 
 class SwRtspUdpSource : public SwVideoSource {
 public:
+    /**
+     * @brief Constructs a `SwRtspUdpSource` instance.
+     * @param url Value passed to the method.
+     * @param parent Optional parent object that owns this instance.
+     * @param url Value passed to the method.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     SwRtspUdpSource(const SwString& url, SwObject* parent = nullptr)
         : m_parent(parent), m_url(url) {
         parseUrl();
@@ -81,14 +112,14 @@ public:
 
         SwObject::connect(m_keepAliveTimer, &SwTimer::timeout, [this]() { sendKeepAlive(); });
 
-        SwObject::connect(m_rtspSocket, SIGNAL(connected), [this]() {
+        SwObject::connect(m_rtspSocket, &SwTcpSocket::connected, [this]() {
             m_ctrlBuffer.clear();
             m_cseq = 0;
             m_sessionId.clear();
             m_state = RtspStep::Options;
             sendOptions();
         });
-        SwObject::connect(m_rtspSocket, SIGNAL(disconnected), [this]() {
+        SwObject::connect(m_rtspSocket, &SwTcpSocket::disconnected, [this]() {
             if (m_rtspDisconnectSuppress.load() > 0) {
                 return;
             }
@@ -96,13 +127,18 @@ public:
             stopStreaming(false);
             scheduleReconnect("RTSP disconnected");
         });
-        SwObject::connect(m_rtspSocket, SIGNAL(errorOccurred), [this](int code) {
+        SwObject::connect(m_rtspSocket, &SwTcpSocket::errorOccurred, [this](int code) {
             swCError(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] RTSP socket error: " << code;
             stopStreaming(false);
             scheduleReconnect("RTSP socket error");
         });
     }
 
+    /**
+     * @brief Performs the `base64Decode` operation.
+     * @param input Value passed to the method.
+     * @return The requested base64 Decode.
+     */
     static std::vector<uint8_t> base64Decode(const std::string& input) {
         static const int8_t table[256] = {
             -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
@@ -142,6 +178,10 @@ public:
         return out;
     }
 
+    /**
+     * @brief Performs the `parseH265Fmtp` operation.
+     * @param fmtp Value passed to the method.
+     */
     void parseH265Fmtp(const std::string& fmtp) {
         if (fmtp.empty()) {
             return;
@@ -181,6 +221,11 @@ public:
         }
     }
 
+    /**
+     * @brief Destroys the `SwRtspUdpSource` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~SwRtspUdpSource() override {
         stop();
         delete m_keepAliveTimer;
@@ -190,19 +235,54 @@ public:
         delete m_rtcpSocket;
     }
 
-    std::string name() const override { return "SwRtspUdpSource"; }
+    /**
+     * @brief Returns the current name.
+     * @return The current name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
+    SwString name() const override { return "SwRtspUdpSource"; }
 
+    /**
+     * @brief Returns the current initialize.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool initialize() { return true; }
 
+    /**
+     * @brief Sets the local Address.
+     * @param addr Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setLocalAddress(const SwString& addr) { m_bindAddress = addr; }
+    /**
+     * @brief Sets the use Tcp Transport.
+     * @param enable Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setUseTcpTransport(bool enable) { m_useTcpTransport = enable; }
 
+    /**
+     * @brief Performs the `forceLocalBind` operation.
+     * @param addr Value passed to the method.
+     * @param rtpPort Value passed to the method.
+     * @param rtcpPort Value passed to the method.
+     */
     void forceLocalBind(const SwString& addr, uint16_t rtpPort, uint16_t rtcpPort) {
         m_bindAddress = addr;
         m_forcedClientRtpPort = rtpPort;
         m_forcedClientRtcpPort = rtcpPort;
     }
 
+    /**
+     * @brief Starts the underlying activity managed by the object.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     void start() override {
         m_autoReconnect.store(true);
         if (!isRunning()) {
@@ -211,6 +291,11 @@ public:
         initiateConnection();
     }
 
+    /**
+     * @brief Stops the underlying activity managed by the object.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     void stop() override {
         m_autoReconnect.store(false);
         cancelReconnect();
@@ -235,13 +320,29 @@ private:
 
     class PollWorkerThread : public SwThread {
     public:
+        /**
+         * @brief Constructs a `PollWorkerThread` instance.
+         * @param owner Value passed to the method.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
         PollWorkerThread(SwRtspUdpSource* owner, int intervalMs)
             : SwThread("SwRtspWorker", nullptr),
               m_owner(owner),
               m_intervalMs(intervalMs > 0 ? intervalMs : 1) {
         }
 
+        /**
+         * @brief Performs the `requestStop` operation.
+         * @param false Value passed to the method.
+         */
         void requestStop() { m_active.store(false); }
+        /**
+         * @brief Sets the interval.
+         * @param intervalMs Value passed to the method.
+         *
+         * @details Call this method to replace the currently stored value with the caller-provided one.
+         */
         void setInterval(int intervalMs) {
             if (intervalMs <= 0) {
                 intervalMs = 1;
@@ -250,6 +351,9 @@ private:
         }
 
     protected:
+        /**
+         * @brief Performs the `run` operation.
+         */
         void run() override {
             while (m_active.load()) {
                 if (!m_owner) {
@@ -955,30 +1059,15 @@ private:
 
     void selfProbeUdp(const SwString& bindAddr, uint16_t port) {
 #if defined(_WIN32)
-        SOCKET probe = INVALID_SOCKET;
-        probe = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        if (probe == INVALID_SOCKET) {
-            swCError(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] UDP self-probe socket creation failed: " << WSAGetLastError();
-            return;
-        }
-        sockaddr_in target{};
-        std::string addrStr = bindAddr.isEmpty() ? "127.0.0.1" : bindAddr.toStdString();
-        if (addrStr == "0.0.0.0") {
-            addrStr = "127.0.0.1";
-        }
-        target.sin_family = AF_INET;
-        target.sin_port = htons(port);
-        if (!stringToInAddr(addrStr, target.sin_addr)) {
-            stringToInAddr("127.0.0.1", target.sin_addr);
-        }
+        SwString addrStr = (bindAddr.isEmpty() || bindAddr == "0.0.0.0") ? "127.0.0.1" : bindAddr;
+        SwUdpSocket probeSocket;
         const char* msg = "probe";
-        int ret = sendto(probe, msg, 5, 0, reinterpret_cast<sockaddr*>(&target), sizeof(target));
+        int64_t ret = probeSocket.writeDatagram(msg, 5, addrStr, port);
         if (ret <= 0) {
-            swCError(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] UDP self-probe sendto failed: " << WSAGetLastError();
+            swCError(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] UDP self-probe sendto failed";
         } else {
             swCDebug(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] UDP self-probe sent to " << addrStr << ":" << port;
         }
-        closesocket(probe);
 #else
         (void)bindAddr;
         (void)port;
@@ -1716,6 +1805,9 @@ private:
         bool hasPesPts{false};
         bool hevcStream{false};
 
+        /**
+         * @brief Resets the object to a baseline state.
+         */
         void reset() {
             patParsed = false;
             pmtParsed = false;
@@ -1733,6 +1825,13 @@ private:
             hevcStream = false;
         }
 
+        /**
+         * @brief Returns whether the object reports start Code H264 Idr.
+         * @param data Value passed to the method.
+         * @return The requested start Code H264 Idr.
+         *
+         * @details This query does not modify the object state.
+         */
         static bool hasStartCodeH264Idr(const std::vector<uint8_t>& data) {
             for (size_t i = 0; i + 4 < data.size(); ++i) {
                 if (data[i] == 0x00 && data[i + 1] == 0x00 && data[i + 2] == 0x00 && data[i + 3] == 0x01) {
@@ -1750,6 +1849,13 @@ private:
             return false;
         }
 
+        /**
+         * @brief Returns whether the object reports start Code Hevc Idr.
+         * @param data Value passed to the method.
+         * @return The requested start Code Hevc Idr.
+         *
+         * @details This query does not modify the object state.
+         */
         static bool hasStartCodeHevcIdr(const std::vector<uint8_t>& data) {
             for (size_t i = 0; i + 5 < data.size(); ++i) {
                 if (data[i] == 0x00 && data[i + 1] == 0x00 &&
@@ -1767,8 +1873,21 @@ private:
             return false;
         }
 
+        /**
+         * @brief Returns whether the object reports hevc.
+         * @return `true` when the object reports hevc; otherwise `false`.
+         *
+         * @details The returned value reflects the state currently stored by the instance.
+         */
         bool isHevc() const { return hevcStream; }
 
+        /**
+         * @brief Performs the `feed` operation.
+         * @param data Value passed to the method.
+         * @param size Size value used by the operation.
+         * @param rtpTs Value passed to the method.
+         * @param emitFrame Value passed to the method.
+         */
         void feed(const uint8_t* data, size_t size, uint32_t rtpTs,
                   const std::function<void(const std::vector<uint8_t>&, bool, uint32_t)>& emitFrame) {
             if (!data || size == 0) {
@@ -1821,6 +1940,12 @@ private:
             }
         }
 
+        /**
+         * @brief Performs the `parsePAT` operation.
+         * @param data Value passed to the method.
+         * @param size Size value used by the operation.
+         * @param payloadStart Value passed to the method.
+         */
         void parsePAT(const uint8_t* data, size_t size, bool payloadStart) {
             if (!payloadStart || size < 8 || patParsed) {
                 return;
@@ -1849,6 +1974,12 @@ private:
             swCDebug(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource][TS] PAT found PMT PID=" << programMapPid << " (total PMTs=" << pmtPids.size() << ")";
         }
 
+        /**
+         * @brief Performs the `parsePMT` operation.
+         * @param data Value passed to the method.
+         * @param size Size value used by the operation.
+         * @param payloadStart Value passed to the method.
+         */
         void parsePMT(const uint8_t* data, size_t size, bool payloadStart) {
             if (!payloadStart || size < 12) {
                 return;
@@ -1897,6 +2028,13 @@ private:
             }
         }
 
+        /**
+         * @brief Performs the `parsePts` operation.
+         * @param data Value passed to the method.
+         * @param size Size value used by the operation.
+         * @param ptsOut Value passed to the method.
+         * @return The requested parse Pts.
+         */
         static bool parsePts(const uint8_t* data, size_t size, uint64_t& ptsOut) {
             if (size < 14) {
                 return false;
@@ -1918,6 +2056,14 @@ private:
             return true;
         }
 
+        /**
+         * @brief Performs the `handlePES` operation.
+         * @param data Value passed to the method.
+         * @param size Size value used by the operation.
+         * @param payloadStart Value passed to the method.
+         * @param rtpTs Value passed to the method.
+         * @param emitFrame Value passed to the method.
+         */
         void handlePES(const uint8_t* data, size_t size, bool payloadStart, uint32_t rtpTs,
                        const std::function<void(const std::vector<uint8_t>&, bool, uint32_t)>& emitFrame) {
             if (payloadStart) {

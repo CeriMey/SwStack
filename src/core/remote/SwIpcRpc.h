@@ -1,4 +1,29 @@
 #pragma once
+
+/**
+ * @file src/core/remote/SwIpcRpc.h
+ * @ingroup core_remote
+ * @brief Declares the public interface exposed by SwIpcRpc in the CoreSw remote and IPC layer.
+ *
+ * This header belongs to the CoreSw remote and IPC layer. It provides the abstractions used to
+ * expose objects across process boundaries and to transport data or signals between peers.
+ *
+ * Within that layer, this file focuses on the IPC rpc interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * This header mainly contributes module-level utilities, helper declarations, or namespaced types
+ * that are consumed by the surrounding subsystem.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * Remote-facing declarations in this area usually coordinate identity, proxying, serialization,
+ * and synchronization across runtimes.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -43,17 +68,54 @@ struct RpcContext {
     SwString clientInfo;
 };
 
+inline uint32_t normalizeRpcQueueCapacity(uint32_t requested) {
+    if (requested <= 10u) return 10u;
+    if (requested <= 25u) return 25u;
+    if (requested <= 50u) return 50u;
+    if (requested <= 100u) return 100u;
+    if (requested <= 200u) return 200u;
+    return 500u;
+}
+
+inline std::atomic<uint32_t>& rpcQueueCapacityStorage_() {
+    static std::atomic<uint32_t> cap(100u);
+    return cap;
+}
+
+inline uint32_t rpcQueueCapacity() {
+    return rpcQueueCapacityStorage_().load(std::memory_order_acquire);
+}
+
+inline void setRpcQueueCapacity(uint32_t capacity) {
+    const uint32_t normalized = normalizeRpcQueueCapacity(capacity == 0u ? 1u : capacity);
+    rpcQueueCapacityStorage_().store(normalized, std::memory_order_release);
+}
+
+inline SwString rpcQueueCapacityTag() {
+    return SwString::number(static_cast<int>(rpcQueueCapacity()));
+}
+
 inline SwString rpcRequestQueueName(const SwString& methodName) {
-    return SwString("__rpc__|") + methodName;
+    return SwString("__rpc__|") + rpcQueueCapacityTag() + "|" + methodName;
 }
 
 inline SwString rpcResponseQueueName(const SwString& methodName, uint32_t clientPid) {
-    return SwString("__rpc_ret__|") + methodName + "|" + SwString::number(static_cast<int>(clientPid));
+    return SwString("__rpc_ret__|") + rpcQueueCapacityTag() + "|" + methodName + "|" +
+           SwString::number(static_cast<int>(clientPid));
 }
 
 template <typename Ret, typename... Args>
 class RpcMethodClient {
 public:
+    /**
+     * @brief Constructs a `RpcMethodClient` instance.
+     * @param domain Value passed to the method.
+     * @param object Value passed to the method.
+     * @param methodName Value passed to the method.
+     * @param clientInfo Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     RpcMethodClient(const SwString& domain,
                     const SwString& object,
                     const SwString& methodName,
@@ -62,26 +124,51 @@ public:
           method_(methodName),
           clientInfo_(clientInfo),
           alive_(new std::atomic_bool(true)),
-          pid_(detail::currentPid()),
-          req_(reg_, rpcRequestQueueName(method_)),
-          resp_(reg_, rpcResponseQueueName(method_, pid_)) {
+          pid_(detail::currentPid()) {
+        initQueues_();
         startResponseListener_();
     }
 
+    /**
+     * @brief Destroys the `RpcMethodClient` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~RpcMethodClient() {
         if (alive_) alive_->store(false, std::memory_order_release);
         stopResponseListener_();
     }
 
+    /**
+     * @brief Constructs a `RpcMethodClient` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     RpcMethodClient(const RpcMethodClient&) = delete;
+    /**
+     * @brief Performs the `operator=` operation.
+     * @return The requested operator =.
+     */
     RpcMethodClient& operator=(const RpcMethodClient&) = delete;
 
+    /**
+     * @brief Returns the current last Error.
+     * @return The current last Error.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString lastError() const {
         std::lock_guard<std::mutex> lk(mutex_);
         return lastError_;
     }
 
     // Blocking call (fiber-friendly if SwCoreApplication is running).
+    /**
+     * @brief Performs the `call` operation.
+     * @param args Value passed to the method.
+     * @param timeoutMs Timeout expressed in milliseconds.
+     * @return The requested call.
+     */
     Ret call(const Args&... args, int timeoutMs = 2000) {
         clearLastError_();
 
@@ -93,7 +180,7 @@ public:
             pending_[callId] = Pending(callId, &waiter);
         }
 
-        if (!req_.push(callId, pid_, clientInfo_, args...)) {
+        if (!reqPush_ || !reqPush_(callId, pid_, clientInfo_, args...)) {
             erasePending_(callId);
             setLastError_("rpc: request queue full (or payload too large)");
             return Ret();
@@ -122,7 +209,7 @@ public:
                 if (timeoutMs > 0 && std::chrono::steady_clock::now() >= deadline) break;
 
 #if defined(_WIN32)
-                HANDLE h = resp_.wakeEvent();
+                HANDLE h = respWakeEvent_ ? respWakeEvent_() : NULL;
                 DWORD waitMs = INFINITE;
                 if (timeoutMs > 0) {
                     const auto now = std::chrono::steady_clock::now();
@@ -164,6 +251,12 @@ public:
     }
 
     // Async call: onOk is called only on success.
+    /**
+     * @brief Performs the `callAsync` operation.
+     * @param args Value passed to the method.
+     * @param onOk Value passed to the method.
+     * @param timeoutMs Timeout expressed in milliseconds.
+     */
     void callAsync(const Args&... args,
                    std::function<void(const Ret&)> onOk,
                    int timeoutMs = 2000) {
@@ -175,7 +268,7 @@ public:
             pending_[callId] = Pending(callId, std::move(onOk));
         }
 
-        if (!req_.push(callId, pid_, clientInfo_, args...)) {
+        if (!reqPush_ || !reqPush_(callId, pid_, clientInfo_, args...)) {
             erasePending_(callId);
             setLastError_("rpc: request queue full (or payload too large)");
             return;
@@ -199,6 +292,12 @@ private:
         SwString error;
         Ret value{};
 
+        /**
+         * @brief Performs the `wake` operation.
+         * @param okIn Value passed to the method.
+         * @param errIn Value passed to the method.
+         * @param vIn Value passed to the method.
+         */
         void wake(bool okIn, const SwString& errIn, const Ret& vIn) {
             done = true;
             ok = okIn;
@@ -211,21 +310,91 @@ private:
     struct Pending {
         uint64_t callId{0};
         Waiter* waiter{nullptr};
+        /**
+         * @brief Performs the `function<void` operation.
+         * @return The requested function<void.
+         */
         std::function<void(const Ret&)> onOk;
 
+        /**
+         * @brief Constructs a `Pending` instance.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
         Pending() {}
+        /**
+         * @brief Constructs a `Pending` instance.
+         * @param id Value passed to the method.
+         * @param w Width value.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
         Pending(uint64_t id, Waiter* w) : callId(id), waiter(w) {}
+        /**
+         * @brief Constructs a `Pending` instance.
+         * @param id Value passed to the method.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
         Pending(uint64_t id, std::function<void(const Ret&)> cb) : callId(id), waiter(nullptr), onOk(std::move(cb)) {}
     };
 
+    template <size_t Capacity>
+    void initQueuesCap_() {
+        typedef RingQueue<Capacity, uint64_t, uint32_t, SwString, Args...> ReqQueue;
+        typedef RingQueue<Capacity, uint64_t, bool, SwString, Ret> RespQueue;
+
+        std::shared_ptr<ReqQueue> req(new ReqQueue(reg_, rpcRequestQueueName(method_)));
+        std::shared_ptr<RespQueue> resp(new RespQueue(reg_, rpcResponseQueueName(method_, pid_)));
+
+        reqHolder_ = req;
+        respHolder_ = resp;
+
+        reqPush_ = [req](uint64_t callId, uint32_t pid, const SwString& clientInfo, const Args&... argsIn) -> bool {
+            return req->push(callId, pid, clientInfo, argsIn...);
+        };
+
+#if defined(_WIN32)
+        respWakeEvent_ = [resp]() -> HANDLE { return resp->wakeEvent(); };
+#endif
+
+        startResponseListenerFn_ = [this, resp]() {
+            typedef typename RespQueue::Subscription SubT;
+            std::shared_ptr<SubT> sub(new SubT(resp->connect(
+                [this](uint64_t callId, bool ok, SwString err, Ret value) {
+                    onResponse_(callId, ok, err, value);
+                },
+                /*fireInitial=*/true)));
+            loopSubHolder_ = sub;
+            stopResponseListenerFn_ = [sub]() { sub->stop(); };
+        };
+    }
+
+    void initQueues_() {
+        const uint32_t cap = rpcQueueCapacity();
+        switch (cap) {
+            case 10u:  initQueuesCap_<10>(); break;
+            case 25u:  initQueuesCap_<25>(); break;
+            case 50u:  initQueuesCap_<50>(); break;
+            case 100u: initQueuesCap_<100>(); break;
+            case 200u: initQueuesCap_<200>(); break;
+            case 500u: initQueuesCap_<500>(); break;
+            default:   initQueuesCap_<100>(); break;
+        }
+    }
+
     void startResponseListener_() {
-        loopSub_ = resp_.connect([this](uint64_t callId, bool ok, SwString err, Ret value) {
-            onResponse_(callId, ok, err, value);
-        }, /*fireInitial=*/true);
+        if (startResponseListenerFn_) {
+            startResponseListenerFn_();
+        }
     }
 
     void stopResponseListener_() {
-        loopSub_.stop();
+        if (stopResponseListenerFn_) {
+            stopResponseListenerFn_();
+            stopResponseListenerFn_ = std::function<void()>();
+        }
+        loopSubHolder_.reset();
     }
 
     void onResponse_(uint64_t callId, bool ok, const SwString& err, const Ret& value) {
@@ -269,10 +438,15 @@ private:
     std::shared_ptr<std::atomic_bool> alive_;
     uint32_t pid_{0};
 
-    RingQueue<10, uint64_t, uint32_t, SwString, Args...> req_;
-    RingQueue<10, uint64_t, bool, SwString, Ret> resp_;
-
-    typename RingQueue<10, uint64_t, bool, SwString, Ret>::Subscription loopSub_;
+    std::shared_ptr<void> reqHolder_;
+    std::shared_ptr<void> respHolder_;
+    std::shared_ptr<void> loopSubHolder_;
+    std::function<bool(uint64_t, uint32_t, const SwString&, const Args&...)> reqPush_;
+    std::function<void()> startResponseListenerFn_;
+    std::function<void()> stopResponseListenerFn_;
+#if defined(_WIN32)
+    std::function<HANDLE()> respWakeEvent_;
+#endif
 
     mutable std::mutex mutex_;
     mutable SwString lastError_;
@@ -284,6 +458,13 @@ private:
 template <typename... Args>
 class RpcMethodClient<void, Args...> {
 public:
+    /**
+     * @brief Performs the `RpcMethodClient` operation.
+     * @param domain Value passed to the method.
+     * @param object Value passed to the method.
+     * @param methodName Value passed to the method.
+     * @param clientInfo Value passed to the method.
+     */
     RpcMethodClient(const SwString& domain,
                     const SwString& object,
                     const SwString& methodName,
@@ -292,25 +473,48 @@ public:
           method_(methodName),
           clientInfo_(clientInfo),
           alive_(new std::atomic_bool(true)),
-          pid_(detail::currentPid()),
-          req_(reg_, rpcRequestQueueName(method_)),
-          resp_(reg_, rpcResponseQueueName(method_, pid_)) {
+          pid_(detail::currentPid()) {
+        initQueues_();
         startResponseListener_();
     }
 
+    /**
+     * @brief Destroys the `Args` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~RpcMethodClient() {
         if (alive_) alive_->store(false, std::memory_order_release);
         stopResponseListener_();
     }
 
+    /**
+     * @brief Performs the `RpcMethodClient` operation.
+     */
     RpcMethodClient(const RpcMethodClient&) = delete;
+    /**
+     * @brief Performs the `operator=` operation.
+     * @return The requested operator =.
+     */
     RpcMethodClient& operator=(const RpcMethodClient&) = delete;
 
+    /**
+     * @brief Returns the current last Error.
+     * @return The current last Error.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString lastError() const {
         std::lock_guard<std::mutex> lk(mutex_);
         return lastError_;
     }
 
+    /**
+     * @brief Performs the `call` operation.
+     * @param args Value passed to the method.
+     * @param timeoutMs Timeout expressed in milliseconds.
+     * @return `true` on success; otherwise `false`.
+     */
     bool call(const Args&... args, int timeoutMs = 2000) {
         clearLastError_();
 
@@ -322,7 +526,7 @@ public:
             pending_[callId] = Pending(callId, &waiter);
         }
 
-        if (!req_.push(callId, pid_, clientInfo_, args...)) {
+        if (!reqPush_ || !reqPush_(callId, pid_, clientInfo_, args...)) {
             erasePending_(callId);
             setLastError_("rpc: request queue full (or payload too large)");
             return false;
@@ -351,7 +555,7 @@ public:
                 if (timeoutMs > 0 && std::chrono::steady_clock::now() >= deadline) break;
 
 #if defined(_WIN32)
-                HANDLE h = resp_.wakeEvent();
+                HANDLE h = respWakeEvent_ ? respWakeEvent_() : NULL;
                 DWORD waitMs = INFINITE;
                 if (timeoutMs > 0) {
                     const auto now = std::chrono::steady_clock::now();
@@ -389,6 +593,12 @@ public:
         return true;
     }
 
+    /**
+     * @brief Performs the `callAsync` operation.
+     * @param args Value passed to the method.
+     * @param onDone Value passed to the method.
+     * @param timeoutMs Timeout expressed in milliseconds.
+     */
     void callAsync(const Args&... args, std::function<void(bool ok)> onDone, int timeoutMs = 2000) {
         clearLastError_();
         const uint64_t callId = nextCallId_++;
@@ -397,7 +607,7 @@ public:
             pending_[callId] = Pending(callId, std::move(onDone));
         }
 
-        if (!req_.push(callId, pid_, clientInfo_, args...)) {
+        if (!reqPush_ || !reqPush_(callId, pid_, clientInfo_, args...)) {
             erasePending_(callId);
             setLastError_("rpc: request queue full (or payload too large)");
             return;
@@ -420,6 +630,11 @@ private:
         bool ok{false};
         SwString error;
 
+        /**
+         * @brief Performs the `wake` operation.
+         * @param okIn Value passed to the method.
+         * @param errIn Value passed to the method.
+         */
         void wake(bool okIn, const SwString& errIn) {
             done = true;
             ok = okIn;
@@ -431,21 +646,92 @@ private:
     struct Pending {
         uint64_t callId{0};
         Waiter* waiter{nullptr};
+        /**
+         * @brief Performs the `function<void` operation.
+         * @param ok Optional flag updated to report success.
+         * @return The requested function<void.
+         */
         std::function<void(bool ok)> onDone;
 
+        /**
+         * @brief Constructs a `Pending` instance.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
         Pending() {}
+        /**
+         * @brief Constructs a `Pending` instance.
+         * @param id Value passed to the method.
+         * @param w Width value.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
         Pending(uint64_t id, Waiter* w) : callId(id), waiter(w) {}
+        /**
+         * @brief Constructs a `Pending` instance.
+         * @param id Value passed to the method.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
         Pending(uint64_t id, std::function<void(bool)> cb) : callId(id), waiter(nullptr), onDone(std::move(cb)) {}
     };
 
+    template <size_t Capacity>
+    void initQueuesCap_() {
+        typedef RingQueue<Capacity, uint64_t, uint32_t, SwString, Args...> ReqQueue;
+        typedef RingQueue<Capacity, uint64_t, bool, SwString> RespQueue;
+
+        std::shared_ptr<ReqQueue> req(new ReqQueue(reg_, rpcRequestQueueName(method_)));
+        std::shared_ptr<RespQueue> resp(new RespQueue(reg_, rpcResponseQueueName(method_, pid_)));
+
+        reqHolder_ = req;
+        respHolder_ = resp;
+
+        reqPush_ = [req](uint64_t callId, uint32_t pid, const SwString& clientInfo, const Args&... argsIn) -> bool {
+            return req->push(callId, pid, clientInfo, argsIn...);
+        };
+
+#if defined(_WIN32)
+        respWakeEvent_ = [resp]() -> HANDLE { return resp->wakeEvent(); };
+#endif
+
+        startResponseListenerFn_ = [this, resp]() {
+            typedef typename RespQueue::Subscription SubT;
+            std::shared_ptr<SubT> sub(new SubT(resp->connect(
+                [this](uint64_t callId, bool ok, SwString err) {
+                    onResponse_(callId, ok, err);
+                },
+                /*fireInitial=*/true)));
+            loopSubHolder_ = sub;
+            stopResponseListenerFn_ = [sub]() { sub->stop(); };
+        };
+    }
+
+    void initQueues_() {
+        const uint32_t cap = rpcQueueCapacity();
+        switch (cap) {
+            case 10u:  initQueuesCap_<10>(); break;
+            case 25u:  initQueuesCap_<25>(); break;
+            case 50u:  initQueuesCap_<50>(); break;
+            case 100u: initQueuesCap_<100>(); break;
+            case 200u: initQueuesCap_<200>(); break;
+            case 500u: initQueuesCap_<500>(); break;
+            default:   initQueuesCap_<100>(); break;
+        }
+    }
+
     void startResponseListener_() {
-        loopSub_ = resp_.connect([this](uint64_t callId, bool ok, SwString err) {
-            onResponse_(callId, ok, err);
-        }, /*fireInitial=*/true);
+        if (startResponseListenerFn_) {
+            startResponseListenerFn_();
+        }
     }
 
     void stopResponseListener_() {
-        loopSub_.stop();
+        if (stopResponseListenerFn_) {
+            stopResponseListenerFn_();
+            stopResponseListenerFn_ = std::function<void()>();
+        }
+        loopSubHolder_.reset();
     }
 
     void onResponse_(uint64_t callId, bool ok, const SwString& err) {
@@ -489,10 +775,15 @@ private:
     std::shared_ptr<std::atomic_bool> alive_;
     uint32_t pid_{0};
 
-    RingQueue<10, uint64_t, uint32_t, SwString, Args...> req_;
-    RingQueue<10, uint64_t, bool, SwString> resp_;
-
-    typename RingQueue<10, uint64_t, bool, SwString>::Subscription loopSub_;
+    std::shared_ptr<void> reqHolder_;
+    std::shared_ptr<void> respHolder_;
+    std::shared_ptr<void> loopSubHolder_;
+    std::function<bool(uint64_t, uint32_t, const SwString&, const Args&...)> reqPush_;
+    std::function<void()> startResponseListenerFn_;
+    std::function<void()> stopResponseListenerFn_;
+#if defined(_WIN32)
+    std::function<HANDLE()> respWakeEvent_;
+#endif
 
     mutable std::mutex mutex_;
     mutable SwString lastError_;

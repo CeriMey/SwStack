@@ -22,6 +22,32 @@
 
 #pragma once
 
+/**
+ * @file src/platform/x11/SwX11PlatformIntegration.h
+ * @ingroup platform_backends
+ * @brief Declares the public interface exposed by SwX11PlatformIntegration in the CoreSw X11
+ * platform integration layer.
+ *
+ * This header belongs to the CoreSw X11 platform integration layer. It binds portable framework
+ * abstractions to concrete X11 windowing, painting, and input services.
+ *
+ * Within that layer, this file focuses on the X11 platform integration interface. The
+ * declarations exposed here define the stable surface that adjacent code can rely on while the
+ * implementation remains free to evolve behind the header.
+ *
+ * The main declarations in this header are SwX11PlatformImage, SwX11PlatformPainter,
+ * SwX11PlatformWindow, and SwX11PlatformIntegration.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * Types here define the seam between portable APIs and the native event and rendering loop on X11
+ * systems.
+ *
+ */
+
+
 /***************************************************************************************************
  * This header introduces the Linux/X11 backend skeleton for the Sw platform abstraction layer.
  * The implementation purposefully focuses on structure and extensibility rather than feature
@@ -30,6 +56,7 @@
 
 #include "platform/SwPlatformIntegration.h"
 #include "core/gui/SwWidgetPlatformAdapter.h"
+#include "core/runtime/SwCoreApplication.h"
 
 #include <algorithm>
 #include <chrono>
@@ -57,6 +84,13 @@ class SwX11PlatformIntegration;
 
 class SwX11PlatformImage : public SwPlatformImage {
 public:
+    /**
+     * @brief Constructs a `SwX11PlatformImage` instance.
+     * @param size Size value used by the operation.
+     * @param format Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwX11PlatformImage(const SwPlatformSize& size, SwPixelFormat format)
         : m_size(size), m_format(format) {
         const int bytesPerPixel = (format == SwPixelFormat::RGB24 || format == SwPixelFormat::BGR24) ? 3 : 4;
@@ -64,12 +98,42 @@ public:
         m_pixels.resize(static_cast<std::size_t>(m_pitch) * size.height);
     }
 
+    /**
+     * @brief Returns the current size.
+     * @return The current size.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwPlatformSize size() const override { return m_size; }
+    /**
+     * @brief Returns the current format.
+     * @return The current format.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwPixelFormat format() const override { return m_format; }
+    /**
+     * @brief Returns the current pitch.
+     * @return The current pitch.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int pitch() const override { return m_pitch; }
+    /**
+     * @brief Performs the `pixels` operation.
+     * @return The requested pixels.
+     */
     std::uint8_t* pixels() override { return m_pixels.empty() ? nullptr : m_pixels.data(); }
+    /**
+     * @brief Performs the `pixels` operation.
+     * @return The requested pixels.
+     */
     const std::uint8_t* pixels() const override { return m_pixels.empty() ? nullptr : m_pixels.data(); }
 
+    /**
+     * @brief Clears the current object state.
+     * @param argb Value passed to the method.
+     */
     void clear(std::uint32_t argb) override {
         if (m_pixels.empty()) {
             return;
@@ -116,14 +180,42 @@ private:
 
 class SwX11PlatformPainter : public SwPlatformPainter {
 public:
+    /**
+     * @brief Constructs a `SwX11PlatformPainter` instance.
+     * @param display Value passed to the method.
+     * @param screen Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwX11PlatformPainter(Display* display, int screen);
 
+    /**
+     * @brief Performs the `begin` operation.
+     * @param surface Value passed to the method.
+     */
     void begin(void* surface) override;
+    /**
+     * @brief Performs the `end` operation.
+     */
     void end() override;
+    /**
+     * @brief Performs the `flush` operation.
+     */
     void flush() override;
+    /**
+     * @brief Performs the `drawImage` operation.
+     * @param image Value passed to the method.
+     * @param srcRect Value passed to the method.
+     * @param dstPoint Value passed to the method.
+     */
     void drawImage(const SwPlatformImage& image,
                    const SwPlatformRect& srcRect,
                    const SwPlatformPoint& dstPoint) override;
+    /**
+     * @brief Performs the `fillRect` operation.
+     * @param rect Rectangle used by the operation.
+     * @param argb Value passed to the method.
+     */
     void fillRect(const SwPlatformRect& rect, std::uint32_t argb) override;
 
     ::Window targetWindow() const { return m_targetWindow; }
@@ -282,6 +374,18 @@ inline bool SwX11PlatformPainter::buildXImage(const SwPlatformImage& image, XIma
 
 class SwX11PlatformWindow : public SwPlatformWindow {
 public:
+    /**
+     * @brief Constructs a `SwX11PlatformWindow` instance.
+     * @param integration Value passed to the method.
+     * @param display Value passed to the method.
+     * @param screen Value passed to the method.
+     * @param title Title text applied by the operation.
+     * @param width Width value.
+     * @param height Height value.
+     * @param callbacks Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwX11PlatformWindow(SwX11PlatformIntegration* integration,
                         Display* display,
                         int screen,
@@ -290,21 +394,80 @@ public:
                         int height,
                         const SwWindowCallbacks& callbacks);
 
+    /**
+     * @brief Destroys the `SwX11PlatformWindow` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~SwX11PlatformWindow() override;
 
+    /**
+     * @brief Performs the `show` operation.
+     */
     void show() override;
+    /**
+     * @brief Performs the `hide` operation.
+     */
     void hide() override;
+    /**
+     * @brief Sets the title.
+     * @param title Title text applied by the operation.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setTitle(const std::string& title) override;
+    /**
+     * @brief Performs the `resize` operation.
+     * @param width Width value.
+     * @param height Height value.
+     */
     void resize(int width, int height) override;
+    /**
+     * @brief Performs the `move` operation.
+     * @param x Horizontal coordinate.
+     * @param y Vertical coordinate.
+     */
     void move(int x, int y) override;
+    /**
+     * @brief Performs the `requestUpdate` operation.
+     */
     void requestUpdate() override;
+    /**
+     * @brief Returns the current native Handle.
+     * @return The current native Handle.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     void* nativeHandle() const override;
 
     ::Window handle() const { return m_window; }
+    /**
+     * @brief Returns the current display.
+     * @return The current display.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     Display* display() const { return m_display; }
+    /**
+     * @brief Returns the current callbacks.
+     * @return The current callbacks.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwWindowCallbacks& callbacks() const { return m_callbacks; }
+    /**
+     * @brief Sets the callbacks.
+     * @param callbacks Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setCallbacks(const SwWindowCallbacks& callbacks) { m_callbacks = callbacks; }
 
+    /**
+     * @brief Updates the size managed by the object.
+     * @param width Width value.
+     * @param height Height value.
+     */
     void updateSize(int width, int height) { m_size = {width, height}; }
 
 private:
@@ -321,17 +484,48 @@ private:
 
 class SwX11PlatformIntegration : public SwPlatformIntegration {
 public:
+    /**
+     * @brief Constructs a `SwX11PlatformIntegration` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwX11PlatformIntegration() = default;
+    /**
+     * @brief Destroys the `SwX11PlatformIntegration` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~SwX11PlatformIntegration() override { shutdown(); }
 
+    /**
+     * @brief Performs the `initialize` operation.
+     * @param app Value passed to the method.
+     */
     void initialize(SwGuiApplication* app) override;
+    /**
+     * @brief Performs the `shutdown` operation.
+     */
     void shutdown() override;
 
+    /**
+     * @brief Creates the requested window.
+     * @param title Title text applied by the operation.
+     * @param width Width value.
+     * @param height Height value.
+     * @param callbacks Value passed to the method.
+     * @return The resulting window.
+     */
     std::unique_ptr<SwPlatformWindow> createWindow(const std::string& title,
                                                    int width,
                                                    int height,
                                                    const SwWindowCallbacks& callbacks) override;
 
+    /**
+     * @brief Returns the current painter.
+     * @return The current painter.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     std::unique_ptr<SwPlatformPainter> createPainter() override {
         if (!m_display) {
             throw std::runtime_error("X11 backend must be initialized before creating a painter.");
@@ -339,6 +533,12 @@ public:
         return std::unique_ptr<SwPlatformPainter>(new SwX11PlatformPainter(m_display, m_screen));
     }
 
+    /**
+     * @brief Creates the requested image.
+     * @param size Size value used by the operation.
+     * @param format Value passed to the method.
+     * @return The resulting image.
+     */
     std::unique_ptr<SwPlatformImage> createImage(const SwPlatformSize& size,
                                                  SwPixelFormat format) override {
         SwPixelFormat resolved = (format == SwPixelFormat::Unknown) ? SwPixelFormat::ARGB32 : format;
@@ -351,13 +551,25 @@ public:
         return std::unique_ptr<SwPlatformImage>(new SwX11PlatformImage(size, resolved));
     }
 
+    /**
+     * @brief Performs the `processPlatformEvents` operation.
+     */
     void processPlatformEvents() override;
+    /**
+     * @brief Performs the `wakeUpGuiThread` operation.
+     */
     void wakeUpGuiThread() override {
         if (m_display) {
             XFlush(m_display);
         }
     }
 
+    /**
+     * @brief Returns the current available Screens.
+     * @return The current available Screens.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     std::vector<std::string> availableScreens() const override {
         std::vector<std::string> screens;
         if (!m_display) {
@@ -376,17 +588,61 @@ public:
         return screens;
     }
 
+    /**
+     * @brief Returns the current name.
+     * @return The current name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const char* name() const override { return "x11"; }
 
+    /**
+     * @brief Returns the current clipboard Text.
+     * @return The current clipboard Text.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString clipboardText() override;
 
+    /**
+     * @brief Sets the clipboard Text.
+     * @param text Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setClipboardText(const SwString& text) override;
 
+    /**
+     * @brief Returns the current display.
+     * @return The current display.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     Display* display() const { return m_display; }
+    /**
+     * @brief Returns the current delete Window Atom.
+     * @return The current delete Window Atom.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     Atom deleteWindowAtom() const { return m_deleteWindowAtom; }
 
+    /**
+     * @brief Performs the `registerWindow` operation.
+     * @param windowId Value passed to the method.
+     * @param window Value passed to the method.
+     */
     void registerWindow(::Window windowId, SwX11PlatformWindow* window);
+    /**
+     * @brief Performs the `unregisterWindow` operation.
+     * @param windowId Value passed to the method.
+     */
     void unregisterWindow(::Window windowId);
+    /**
+     * @brief Performs the `findWindow` operation.
+     * @param windowId Value passed to the method.
+     * @return The requested find Window.
+     */
     SwX11PlatformWindow* findWindow(::Window windowId) const;
 
 private:
@@ -412,7 +668,19 @@ private:
         Atom selection{None};
         Atom property{None};
 
+        /**
+         * @brief Constructs a `SelectionWaitContext` instance.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
         SelectionWaitContext() = default;
+        /**
+         * @brief Constructs a `SelectionWaitContext` instance.
+         * @param sel Value passed to the method.
+         * @param prop Value passed to the method.
+         *
+         * @details The instance is initialized and prepared for immediate use.
+         */
         SelectionWaitContext(Atom sel, Atom prop)
             : selection(sel), property(prop) {}
     };
@@ -439,6 +707,7 @@ private:
 
     SwString m_clipboard;
     mutable std::mutex m_clipboardMutex;
+    size_t m_eventFdWaitableId{0};
 };
 
 inline SwX11PlatformWindow::SwX11PlatformWindow(SwX11PlatformIntegration* integration,
@@ -457,7 +726,8 @@ inline SwX11PlatformWindow::SwX11PlatformWindow(SwX11PlatformIntegration* integr
     const unsigned int clampedHeight = static_cast<unsigned int>(std::max(1, height));
 
     XSetWindowAttributes attributes{};
-    attributes.background_pixmap = None; // avoid server clears that cause visible flicker
+    // Windows 11 default surface: rgb(249, 249, 249)
+    attributes.background_pixel = (249u << 16) | (249u << 8) | 249u;
     attributes.border_pixel = BlackPixel(m_display, screen);
     attributes.event_mask = ExposureMask | KeyPressMask | ButtonPressMask | ButtonReleaseMask |
                             PointerMotionMask | StructureNotifyMask;
@@ -472,7 +742,7 @@ inline SwX11PlatformWindow::SwX11PlatformWindow(SwX11PlatformIntegration* integr
                              DefaultDepth(m_display, screen),
                              InputOutput,
                              DefaultVisual(m_display, screen),
-                             CWBackPixmap | CWBorderPixel | CWEventMask,
+                             CWBackPixel | CWBorderPixel | CWEventMask,
                              &attributes);
 
     if (!m_window) {
@@ -581,9 +851,22 @@ inline void SwX11PlatformIntegration::initialize(SwGuiApplication* app) {
     m_textAtom = XInternAtom(m_display, "TEXT", False);
     m_clipboardProperty = XInternAtom(m_display, "SW_INTERNAL_CLIPBOARD", False);
     ensureClipboardWindow();
+    if (SwCoreApplication* coreApp = SwCoreApplication::instance(false)) {
+        const int x11Fd = ConnectionNumber(m_display);
+        m_eventFdWaitableId = coreApp->addWaitFd(x11Fd, [this]() {
+            processPlatformEvents();
+        });
+    }
 }
 
 inline void SwX11PlatformIntegration::shutdown() {
+    if (m_eventFdWaitableId) {
+        if (SwCoreApplication* coreApp = SwCoreApplication::instance(false)) {
+            coreApp->removeWaitable(m_eventFdWaitableId);
+        }
+        m_eventFdWaitableId = 0;
+    }
+
     {
         std::lock_guard<std::mutex> lock(m_windowMutex);
         for (auto& entry : m_windows) {
@@ -606,6 +889,7 @@ inline void SwX11PlatformIntegration::shutdown() {
     m_utf8StringAtom = 0;
     m_textAtom = 0;
     m_clipboardProperty = 0;
+    m_eventFdWaitableId = 0;
 }
 
 inline std::unique_ptr<SwPlatformWindow> SwX11PlatformIntegration::createWindow(
@@ -1066,12 +1350,24 @@ inline SwMouseButton SwX11PlatformIntegration::translateButton(unsigned int xBut
 
 class SwX11PlatformIntegration : public SwPlatformIntegration {
 public:
+    /**
+     * @brief Performs the `initialize` operation.
+     */
     void initialize(SwGuiApplication*) override {
         throw std::runtime_error("X11 backend is only available on Linux.");
     }
 
+    /**
+     * @brief Performs the `shutdown` operation.
+     */
     void shutdown() override {}
 
+    /**
+     * @brief Creates the requested window.
+     * @param int Value passed to the method.
+     * @param int Value passed to the method.
+     * @return The resulting window.
+     */
     std::unique_ptr<SwPlatformWindow> createWindow(const std::string&,
                                                    int,
                                                    int,
@@ -1079,19 +1375,59 @@ public:
         throw std::runtime_error("X11 backend is not available on this platform.");
     }
 
+    /**
+     * @brief Returns the current painter.
+     * @return The current painter.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     std::unique_ptr<SwPlatformPainter> createPainter() override {
         throw std::runtime_error("X11 backend is not available on this platform.");
     }
 
+    /**
+     * @brief Creates the requested image.
+     * @param SwPixelFormat Value passed to the method.
+     * @return The resulting image.
+     */
     std::unique_ptr<SwPlatformImage> createImage(const SwPlatformSize&, SwPixelFormat) override {
         throw std::runtime_error("X11 backend is not available on this platform.");
     }
 
+    /**
+     * @brief Performs the `processPlatformEvents` operation.
+     */
     void processPlatformEvents() override {}
+    /**
+     * @brief Performs the `wakeUpGuiThread` operation.
+     */
     void wakeUpGuiThread() override {}
+    /**
+     * @brief Returns the current available Screens.
+     * @return The current available Screens.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     std::vector<std::string> availableScreens() const override { return {}; }
+    /**
+     * @brief Returns the current clipboard Text.
+     * @return The current clipboard Text.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString clipboardText() override { return {}; }
+    /**
+     * @brief Sets the clipboard Text.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setClipboardText(const SwString&) override {}
+    /**
+     * @brief Returns the current name.
+     * @return The current name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const char* name() const override { return "x11"; }
 };
 

@@ -1,4 +1,29 @@
 #pragma once
+
+/**
+ * @file src/core/runtime/SwEventLoop.h
+ * @ingroup core_runtime
+ * @brief Declares the public interface exposed by SwEventLoop in the CoreSw runtime layer.
+ *
+ * This header belongs to the CoreSw runtime layer. It coordinates application lifetime, event
+ * delivery, timers, threads, crash handling, and other process-level services consumed by the
+ * rest of the stack.
+ *
+ * Within that layer, this file focuses on the event loop interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwEventLoop.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * Runtime declarations in this area define lifecycle and threading contracts that higher-level
+ * modules depend on for safe execution and orderly shutdown.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -118,7 +143,7 @@ static constexpr const char* kSwLogCategory_SwEventLoop = "sw.core.runtime.sweve
  * @class SwEventLoop
  * @brief A local event loop mechanism built on top of the SwCoreApplication fiber system.
  *
- * This class provides a local event loop similar to QEventLoop. It allows you to start a nested
+ * This class provides a local event loop. It allows you to start a nested
  * event loop and block execution until `quit()` or `exit()` is called, at which point it returns
  * control back to the caller of `exec()`.
  *
@@ -169,6 +194,7 @@ static constexpr const char* kSwLogCategory_SwEventLoop = "sw.core.runtime.sweve
  * @since 1.0
  */
 class SwEventLoop : public SwObject {
+    SW_OBJECT(SwEventLoop, SwObject)
 public:
     /**
      * @brief Constructs a new SwEventLoop.
@@ -327,6 +353,11 @@ public:
      */
     using RuntimeHandle = std::shared_ptr<std::atomic<bool>>;
 
+    /**
+     * @brief Performs the `installRuntime` operation.
+     * @param fn Value passed to the method.
+     * @return The requested install Runtime.
+     */
     static RuntimeHandle installRuntime(std::function<void()> fn) {
         auto handle = std::make_shared<std::atomic<bool>>(true);
         SwCoreApplication* app = SwCoreApplication::instance(false);
@@ -401,6 +432,11 @@ public:
         return handle;
     }
 
+    /**
+     * @brief Performs the `uninstallRuntime` operation.
+     * @param handle Value passed to the method.
+     * @return The requested uninstall Runtime.
+     */
     static void uninstallRuntime(const RuntimeHandle& handle) {
         if (handle) {
             handle->store(false, std::memory_order_release);

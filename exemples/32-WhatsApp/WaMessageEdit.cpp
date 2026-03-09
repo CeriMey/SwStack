@@ -1,4 +1,4 @@
-#include "WaMessageEdit.h"
+﻿#include "WaMessageEdit.h"
 
 #include "SwScrollBar.h"
 #include "SwWidgetPlatformAdapter.h"
@@ -97,7 +97,7 @@ int WaMessageEdit::visibleLines_() {
         return 1;
     }
 
-    const SwRect bounds = getRect();
+    const SwRect bounds = rect();
     StyleSheet* sheet = getToolSheet();
 
     SwColor border{220, 224, 232};
@@ -121,15 +121,15 @@ void WaMessageEdit::updateScrollBarGeometry_() {
         return;
     }
 
-    const SwRect bounds = getRect();
+    const SwRect bounds = rect();
     if (bounds.width <= 0 || bounds.height <= 0) {
         return;
     }
 
     const int sbW = 10;
     const int margin = 4;
-    const int x = bounds.x + bounds.width - sbW - margin;
-    const int y = bounds.y + margin;
+    const int x = bounds.width - sbW - margin;
+    const int y = margin;
     const int h = std::max(0, bounds.height - 2 * margin);
     m_scrollBar->move(x, y);
     m_scrollBar->resize(sbW, h);
@@ -152,3 +152,4 @@ void WaMessageEdit::updateScrollBar_() {
     m_scrollBar->setVisible(maxFirst > 0);
     updateScrollBarGeometry_();
 }
+

@@ -1,5 +1,31 @@
 #pragma once
 
+/**
+ * @file src/core/gui/SwizioNodes/internal/AbstractNodeGeometry.hpp
+ * @ingroup core_swizio_nodes
+ * @brief Declares the public interface exposed by AbstractNodeGeometry in the CoreSw node-editor
+ * layer.
+ *
+ * This header belongs to the CoreSw node-editor layer. It contains the graph, geometry, style,
+ * and scene infrastructure used by the embedded node editor.
+ *
+ * Within that layer, this file focuses on the abstract node geometry interface. The declarations
+ * exposed here define the stable surface that adjacent code can rely on while the implementation
+ * remains free to evolve behind the header.
+ *
+ * This header mainly contributes module-level utilities, helper declarations, or namespaced types
+ * that are consumed by the surrounding subsystem.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * Most declarations here are extension points or internal contracts that coordinate graph
+ * editing, visualization, and interaction.
+ *
+ */
+
+
 #include "Export.hpp"
 
 #include "SwizioNodes/internal/AbstractGraphModel.hpp"
@@ -16,11 +42,22 @@ namespace SwizioNodes {
 class SWIZIO_NODES_PUBLIC AbstractNodeGeometry
 {
 public:
+    /**
+     * @brief Constructs a `AbstractNodeGeometry` instance.
+     * @param graphModel Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     explicit AbstractNodeGeometry(AbstractGraphModel& graphModel)
         : m_graphModel(&graphModel)
     {
     }
 
+    /**
+     * @brief Destroys the `AbstractNodeGeometry` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     virtual ~AbstractNodeGeometry() = default;
 
     /**
@@ -81,6 +118,13 @@ public:
     /// Position for an embedded widget. Return any value if you don't embed.
     virtual SwPointF widgetPosition(NodeId const nodeId) const = 0;
 
+    /**
+     * @brief Performs the `checkPortHit` operation.
+     * @param nodeId Value passed to the method.
+     * @param portType Value passed to the method.
+     * @param nodePoint Value passed to the method.
+     * @return The requested check Port Hit.
+     */
     virtual PortIndex checkPortHit(NodeId const nodeId,
                                    PortType const portType,
                                    SwPointF const nodePoint) const
@@ -114,6 +158,11 @@ public:
         return result;
     }
 
+    /**
+     * @brief Performs the `resizeHandleRect` operation.
+     * @param nodeId Value passed to the method.
+     * @return The requested resize Handle Rect.
+     */
     virtual SwRect resizeHandleRect(NodeId const nodeId) const = 0;
 
 protected:
@@ -121,4 +170,3 @@ protected:
 };
 
 } // namespace SwizioNodes
-

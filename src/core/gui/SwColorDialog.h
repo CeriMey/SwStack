@@ -1,4 +1,4 @@
-/***************************************************************************************************
+﻿/***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
  * Copyright (C) 2025 Ariya Consulting
@@ -22,8 +22,32 @@
 
 #pragma once
 
+/**
+ * @file src/core/gui/SwColorDialog.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwColorDialog in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the color dialog interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are SwColorDialog.
+ *
+ * Dialog-oriented declarations here usually describe a bounded modal interaction: configuration
+ * enters through setters or constructor state, the user edits the state through child widgets,
+ * and the caller retrieves the accepted result through the public API.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
 /***************************************************************************************************
- * SwColorDialog - Qt-like color dialog (≈ QColorDialog).
+ * SwColorDialog - color dialog.
  *
  * V3 scope:
  * - Snapshot-friendly color dialog UI.
@@ -47,21 +71,49 @@ class SwColorDialog : public SwDialog {
     SW_OBJECT(SwColorDialog, SwDialog)
 
 public:
+    /**
+     * @brief Constructs a `SwColorDialog` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwColorDialog(SwWidget* parent = nullptr)
         : SwDialog(parent) {
-        setMinimumSize(560, 460);
-        resize(620, 480);
+        setMinimumSize(400, 320);
+        resize(440, 340);
         setWindowTitle("Select color");
         buildUi();
         setCurrentColor(SwColor{59, 130, 246});
     }
 
+    /**
+     * @brief Sets the current Color.
+     * @param color Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setCurrentColor(const SwColor& color) {
         setCurrentColorInternal(color, /*syncPicker=*/true);
     }
 
+    /**
+     * @brief Returns the current current Color.
+     * @return The current current Color.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwColor currentColor() const { return m_current; }
 
+    /**
+     * @brief Performs the `getColor` operation.
+     * @param initial Value passed to the method.
+     * @param parent Optional parent object that owns this instance.
+     * @param ok Optional flag updated to report success.
+     * @param title Title text applied by the operation.
+     * @return The requested color.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static SwColor getColor(const SwColor& initial,
                             SwWidget* parent = nullptr,
                             bool* ok = nullptr,
@@ -77,6 +129,12 @@ public:
     }
 
 protected:
+    /**
+     * @brief Handles the resize Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void resizeEvent(ResizeEvent* event) override {
         SwDialog::resizeEvent(event);
         updateLayout();
@@ -87,18 +145,31 @@ private:
         SW_OBJECT(PreviewWidget, SwWidget)
 
     public:
+        /**
+         * @brief Performs the `PreviewWidget` operation.
+         * @param owner Value passed to the method.
+         * @param parent Optional parent object that owns this instance.
+         * @param owner Value passed to the method.
+         * @return The requested preview Widget.
+         */
         explicit PreviewWidget(SwColorDialog* owner, SwWidget* parent = nullptr)
             : SwWidget(parent)
             , m_owner(owner) {
             setStyleSheet("SwWidget { background-color: rgba(0,0,0,0); border-width: 0px; }");
         }
 
+        /**
+         * @brief Handles the paint Event forwarded by the framework.
+         * @param event Event object forwarded by the framework.
+         *
+         * @details Override this hook when the default framework behavior needs to be extended or replaced.
+         */
         void paintEvent(PaintEvent* event) override {
             SwPainter* painter = event ? event->painter() : nullptr;
             if (!painter) {
                 return;
             }
-            const SwRect r = getRect();
+            const SwRect r = rect();
             const SwColor c = m_owner ? m_owner->m_current : SwColor{0, 0, 0};
             painter->fillRoundedRect(r, 12, c, SwColor{226, 232, 240}, 1);
         }
@@ -111,6 +182,14 @@ private:
         SW_OBJECT(ColorSwatch, SwWidget)
 
     public:
+        /**
+         * @brief Performs the `ColorSwatch` operation.
+         * @param c Value passed to the method.
+         * @param valid Value passed to the method.
+         * @param owner Value passed to the method.
+         * @param parent Optional parent object that owns this instance.
+         * @param owner Value passed to the method.
+         */
         ColorSwatch(const SwColor& c, bool valid, SwColorDialog* owner, SwWidget* parent = nullptr)
             : SwWidget(parent)
             , m_color(c)
@@ -120,11 +199,23 @@ private:
             setStyleSheet("SwWidget { background-color: rgba(0,0,0,0); border-width: 0px; }");
         }
 
+        /**
+         * @brief Sets the color.
+         * @param c Value passed to the method.
+         *
+         * @details Call this method to replace the currently stored value with the caller-provided one.
+         */
         void setColor(const SwColor& c) {
             m_color = c;
             update();
         }
 
+        /**
+         * @brief Sets the valid.
+         * @param valid Value passed to the method.
+         *
+         * @details Call this method to replace the currently stored value with the caller-provided one.
+         */
         void setValid(bool valid) {
             if (m_valid == valid) {
                 return;
@@ -134,16 +225,34 @@ private:
             update();
         }
 
+        /**
+         * @brief Returns the current color.
+         * @return The current color.
+         *
+         * @details The returned value reflects the state currently stored by the instance.
+         */
         SwColor color() const { return m_color; }
+        /**
+         * @brief Returns whether the object reports valid.
+         * @return `true` when the object reports valid; otherwise `false`.
+         *
+         * @details The returned value reflects the state currently stored by the instance.
+         */
         bool isValid() const { return m_valid; }
 
+        /**
+         * @brief Handles the paint Event forwarded by the framework.
+         * @param event Event object forwarded by the framework.
+         *
+         * @details Override this hook when the default framework behavior needs to be extended or replaced.
+         */
         void paintEvent(PaintEvent* event) override {
             SwPainter* painter = event ? event->painter() : nullptr;
             if (!painter) {
                 return;
             }
-            const SwRect r = getRect();
-            const int radius = std::min(14, std::max(1, std::min(r.width, r.height) / 2));
+            const SwRect r = rect();
+            const int radius = std::min(6, std::max(1, std::min(r.width, r.height) / 4));
 
             if (!m_valid) {
                 painter->fillRoundedRect(r, radius, SwColor{255, 255, 255}, SwColor{226, 232, 240}, 1);
@@ -155,6 +264,12 @@ private:
             painter->fillRoundedRect(r, radius, m_color, border, selected ? 2 : 1);
         }
 
+        /**
+         * @brief Handles the mouse Press Event forwarded by the framework.
+         * @param event Event object forwarded by the framework.
+         *
+         * @details Override this hook when the default framework behavior needs to be extended or replaced.
+         */
         void mousePressEvent(MouseEvent* event) override {
             if (!event || !m_owner || !m_valid) {
                 return;
@@ -314,8 +429,14 @@ private:
 
         m_ok = new SwPushButton("OK", bar);
         m_cancel = new SwPushButton("Cancel", bar);
-        m_ok->resize(120, 40);
-        m_cancel->resize(120, 40);
+        m_ok->resize(90, 34);
+        m_cancel->resize(90, 34);
+        m_ok->setStyleSheet(R"(
+            SwPushButton { background-color: rgb(59, 130, 246); color: #FFFFFF; border-radius: 8px; border-width: 0px; font-size: 13px; }
+        )");
+        m_cancel->setStyleSheet(R"(
+            SwPushButton { background-color: rgb(241, 245, 249); color: rgb(51, 65, 85); border-radius: 8px; border-color: rgb(203, 213, 225); border-width: 1px; font-size: 13px; }
+        )");
 
         SwObject::connect(m_ok, &SwPushButton::clicked, this, [this]() {
             pushRecentColor_(m_current);
@@ -376,6 +497,9 @@ private:
             sw->setValid(valid[i]);
             if (valid[i]) {
                 sw->setColor(colors[i]);
+                sw->show();
+            } else {
+                sw->hide();
             }
         }
     }
@@ -401,11 +525,10 @@ private:
             return;
         }
 
-        const SwRect cr = content->getRect();
-        const int x = cr.x;
-        const int y = cr.y;
-        const int availW = std::max(0, cr.width);
-        const int availH = std::max(0, cr.height);
+        const int x = 0;
+        const int y = 0;
+        const int availW = std::max(0, content->width());
+        const int availH = std::max(0, content->height());
 
         // Layout target (matches the reference image):
         // - Top row: 3x5 palette on the left, wheel on the right.
@@ -413,19 +536,19 @@ private:
 
         const int cols = 3;
         const int rows = 5;
-        const int groupGapX = 24;
-        const int rowGapY = 24;
+        const int groupGapX = 12;
+        const int rowGapY = 10;
 
-        const int previewW = 90;
-        const int previewH = 46;
+        const int previewW = 70;
+        const int previewH = 36;
         const int bottomRowH = previewH;
 
         const int hexH = 34;
         const int hexW = 120;
 
-        const int baseCellW = 72;
-        const int baseCellH = 44;
-        const int baseGap = 12;
+        const int baseCellW = 52;
+        const int baseCellH = 34;
+        const int baseGap = 6;
         const int basePaletteW = cols * baseCellW + (cols - 1) * baseGap;
         const int basePaletteH = rows * baseCellH + (rows - 1) * baseGap;
 
@@ -444,20 +567,20 @@ private:
             scale = 0.6;
         }
 
-        const int cellW = std::max(44, static_cast<int>(std::round(baseCellW * scale)));
-        const int cellH = std::max(34, static_cast<int>(std::round(baseCellH * scale)));
-        const int gap = std::max(8, static_cast<int>(std::round(baseGap * scale)));
+        const int cellW = std::max(32, static_cast<int>(std::round(baseCellW * scale)));
+        const int cellH = std::max(26, static_cast<int>(std::round(baseCellH * scale)));
+        const int gap = std::max(4, static_cast<int>(std::round(baseGap * scale)));
 
         const int paletteW = cols * cellW + (cols - 1) * gap;
         const int paletteH = rows * cellH + (rows - 1) * gap;
-        const int wheelSize = std::max(0, std::min(paletteH, availW - paletteW - groupGapX));
+        const int wheelSpace = std::max(0, availW - paletteW - groupGapX);
+        const int wheelSize = std::max(0, std::min(paletteH, wheelSpace));
 
-        const int groupW = paletteW + groupGapX + wheelSize;
         const int groupX = x;
         const int topY = y;
 
         const int paletteX = groupX;
-        const int wheelX = paletteX + paletteW + groupGapX;
+        const int wheelX = paletteX + paletteW + groupGapX + (wheelSpace - wheelSize) / 2;
 
         // Top palette (3x5).
         const int paletteCount = std::min(cols * rows, m_paletteSwatches.size());
@@ -476,46 +599,39 @@ private:
         m_picker->move(wheelX, topY);
         m_picker->resize(wheelSize, wheelSize);
 
-        // Bottom row.
+        // Bottom row: hex field, then preview, then recent swatches â€” all left-justified.
         const int topH = std::max(paletteH, wheelSize);
         const int rowY = topY + topH + rowGapY;
 
-        m_preview->move(paletteX, rowY);
-        m_preview->resize(previewW, previewH);
+        int rx = paletteX;
 
-        const int hexX = groupX + groupW - hexW;
         const int hexY = rowY + (previewH - hexH) / 2;
-        m_hexEdit->move(hexX, hexY);
+        m_hexEdit->move(rx, hexY);
         m_hexEdit->resize(hexW, hexH);
+        rx += hexW + gap;
+
+        m_preview->move(rx, rowY);
+        m_preview->resize(previewW, previewH);
+        rx += previewW + gap;
 
         const int recentCount = std::min(5, m_recentSwatches.size());
         const int recentGap = gap;
-        const int recentStartX = paletteX + previewW + gap;
-        const int recentEndX = hexX - gap;
-        const int recentAreaW = std::max(0, recentEndX - recentStartX);
-        int recentW = 0;
-        if (recentCount > 0) {
-            recentW = (recentAreaW - (recentCount - 1) * recentGap) / recentCount;
-            recentW = std::max(26, std::min(recentW, cellW));
-        }
-
+        int recentW = std::max(26, std::min(previewH, cellW));
         const int recentH = previewH;
         for (int i = 0; i < recentCount; ++i) {
             SwWidget* sw = m_recentSwatches[i];
             if (!sw) {
                 continue;
             }
-            sw->move(recentStartX + i * (recentW + recentGap), rowY);
+            sw->move(rx + i * (recentW + recentGap), rowY);
             sw->resize(recentW, recentH);
         }
 
-        const SwRect br = bar->getRect();
-        const int by = br.y + 6;
-        int bx = br.x + br.width;
+        int bx = bar->width();
         bx -= m_ok->width();
-        m_ok->move(bx, by);
+        m_ok->move(bx, 6);
         bx -= m_spacing + m_cancel->width();
-        m_cancel->move(bx, by);
+        m_cancel->move(bx, 6);
     }
 
     void setCurrentColorInternal(const SwColor& color, bool syncPicker) {
@@ -552,3 +668,4 @@ private:
     bool m_syncingPicker{false};
     bool m_syncingHex{false};
 };
+

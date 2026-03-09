@@ -1,5 +1,30 @@
 #ifndef SWSERIALINFO_H
 #define SWSERIALINFO_H
+
+/**
+ * @file src/core/hw/SwSerialInfo.h
+ * @ingroup core_hw
+ * @brief Declares the public interface exposed by SwSerialInfo in the CoreSw hardware description
+ * layer.
+ *
+ * This header belongs to the CoreSw hardware description layer. It provides lightweight
+ * descriptors for serial devices, pin mappings, and other hardware-facing metadata.
+ *
+ * Within that layer, this file focuses on the serial info interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are SwSerialInfo.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * These declarations focus on transportable metadata and capability description rather than
+ * direct device access.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -52,37 +77,175 @@
 
 class SwSerialInfo {
 public:
+    /**
+     * @brief Constructs a `SwSerialInfo` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwSerialInfo();
+    /**
+     * @brief Constructs a `SwSerialInfo` instance.
+     * @param portName Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     explicit SwSerialInfo(const SwString& portName);
+    /**
+     * @brief Constructs a `SwSerialInfo` instance.
+     * @param serial Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwSerialInfo(const SwSerial& serial);
 
+    /**
+     * @brief Constructs a `SwSerialInfo` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwSerialInfo(const SwSerialInfo&) = default;
+    /**
+     * @brief Constructs a `SwSerialInfo` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwSerialInfo(SwSerialInfo&&) noexcept = default;
+    /**
+     * @brief Performs the `operator=` operation.
+     * @return The requested operator =.
+     */
     SwSerialInfo& operator=(const SwSerialInfo&) = default;
+    /**
+     * @brief Performs the `operator=` operation.
+     * @return The requested operator =.
+     */
     SwSerialInfo& operator=(SwSerialInfo&&) noexcept = default;
+    /**
+     * @brief Destroys the `SwSerialInfo` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~SwSerialInfo() = default;
 
+    /**
+     * @brief Performs the `swap` operation.
+     * @param other Value passed to the method.
+     */
     void swap(SwSerialInfo& other) noexcept;
 
+    /**
+     * @brief Returns whether the object reports null.
+     * @return `true` when the object reports null; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isNull() const;
+    /**
+     * @brief Returns whether the object reports valid.
+     * @return `true` when the object reports valid; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isValid() const;
+    /**
+     * @brief Returns whether the object reports busy.
+     * @return `true` when the object reports busy; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isBusy() const;
 
+    /**
+     * @brief Returns the current port Name.
+     * @return The current port Name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString portName() const;
+    /**
+     * @brief Returns the current system Location.
+     * @return The current system Location.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString systemLocation() const;
+    /**
+     * @brief Returns the current description.
+     * @return The current description.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString description() const;
+    /**
+     * @brief Returns the current manufacturer.
+     * @return The current manufacturer.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString manufacturer() const;
+    /**
+     * @brief Returns the current serial Number.
+     * @return The current serial Number.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString serialNumber() const;
 
+    /**
+     * @brief Returns whether the object reports vendor Identifier.
+     * @return `true` when the object reports vendor Identifier; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool hasVendorIdentifier() const;
+    /**
+     * @brief Returns the current vendor Identifier.
+     * @return The current vendor Identifier.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     uint16_t vendorIdentifier() const;
+    /**
+     * @brief Returns whether the object reports product Identifier.
+     * @return `true` when the object reports product Identifier; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool hasProductIdentifier() const;
+    /**
+     * @brief Returns the current product Identifier.
+     * @return The current product Identifier.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     uint16_t productIdentifier() const;
 
+    /**
+     * @brief Performs the `operator==` operation.
+     * @param other Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool operator==(const SwSerialInfo& other) const;
+    /**
+     * @brief Performs the `operator!=` operation.
+     * @param this Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool operator!=(const SwSerialInfo& other) const { return !(*this == other); }
 
+    /**
+     * @brief Returns the current available Ports.
+     * @return The current available Ports.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static SwList<SwSerialInfo> availablePorts();
+    /**
+     * @brief Returns the current standard Baud Rates.
+     * @return The current standard Baud Rates.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static SwList<int> standardBaudRates();
 
 private:

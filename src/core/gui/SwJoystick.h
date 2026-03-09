@@ -1,4 +1,4 @@
-/***************************************************************************************************
+﻿/***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
  * Copyright (C) 2025 Ariya Consulting
@@ -21,6 +21,30 @@
  ***************************************************************************************************/
 
 #pragma once
+
+/**
+ * @file src/core/gui/SwJoystick.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwJoystick in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the joystick interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwJoystick.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
 
 /***************************************************************************************************
  * Virtual joystick widget built on SwWidget.
@@ -46,6 +70,13 @@ public:
         Repeat
     };
 
+    /**
+     * @brief Constructs a `SwJoystick` instance.
+     * @param parent Optional parent object that owns this instance.
+     * @param false Value passed to the method.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwJoystick(SwWidget* parent = nullptr)
         : SwWidget(parent)
         , m_tiltX(0.0f)
@@ -68,6 +99,12 @@ public:
         });
     }
 
+    /**
+     * @brief Sets the repeat Mode.
+     * @param mode Mode value that controls the operation.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setRepeatMode(RepeatMode mode) {
         if (m_repeatMode == mode) {
             return;
@@ -76,8 +113,20 @@ public:
         updateRepeatTimerState();
     }
 
+    /**
+     * @brief Returns the current repeat Mode.
+     * @return The current repeat Mode.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     RepeatMode repeatMode() const { return m_repeatMode; }
 
+    /**
+     * @brief Sets the repeat Interval.
+     * @param intervalMs Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setRepeatInterval(int intervalMs) {
         if (intervalMs <= 0) {
             return;
@@ -87,15 +136,45 @@ public:
         updateRepeatTimerState();
     }
 
+    /**
+     * @brief Returns the current repeat Interval.
+     * @return The current repeat Interval.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int repeatInterval() const { return m_repeatInterval; }
 
+    /**
+     * @brief Returns the current horizontal Value.
+     * @return The current horizontal Value.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     float horizontalValue() const { return m_tiltX; }
+    /**
+     * @brief Returns the current vertical Value.
+     * @return The current vertical Value.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     float verticalValue() const { return m_tiltY; }
 
+    /**
+     * @brief Returns the current magnitude.
+     * @return The current magnitude.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     float magnitude() const {
         return std::min(1.0f, std::sqrt(m_tiltX * m_tiltX + m_tiltY * m_tiltY));
     }
 
+    /**
+     * @brief Returns the current angle Degrees.
+     * @return The current angle Degrees.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     float angleDegrees() const {
         constexpr float kRadToDeg = 57.2957795f;
         if (magnitude() < 1e-3f) {
@@ -108,13 +187,19 @@ public:
     DECLARE_SIGNAL(directionChanged, float, float);
 
 protected:
+    /**
+     * @brief Handles the paint Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void paintEvent(PaintEvent* event) override {
         SwPainter* painter = event->painter();
         if (!painter) {
             return;
         }
 
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
 
         // Keep the joystick circular even if the widget is rectangular.
         const int diameter = std::max(10, std::min(bounds.width, bounds.height));
@@ -172,6 +257,12 @@ protected:
                                  0);
     }
 
+    /**
+     * @brief Handles the mouse Press Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mousePressEvent(MouseEvent* event) override {
         if (!isPointInside(event->x(), event->y())) {
             SwWidget::mousePressEvent(event);
@@ -184,6 +275,12 @@ protected:
         event->accept();
     }
 
+    /**
+     * @brief Handles the mouse Move Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseMoveEvent(MouseEvent* event) override {
         if (m_dragging) {
             updateTiltFromPoint(event->x(), event->y());
@@ -193,6 +290,12 @@ protected:
         SwWidget::mouseMoveEvent(event);
     }
 
+    /**
+     * @brief Handles the mouse Release Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseReleaseEvent(MouseEvent* event) override {
         if (m_dragging) {
             m_dragging = false;
@@ -203,6 +306,12 @@ protected:
         SwWidget::mouseReleaseEvent(event);
     }
 
+    /**
+     * @brief Handles the resize Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void resizeEvent(ResizeEvent* event) override {
         SwWidget::resizeEvent(event);
         m_knobRadius = std::max(20, std::min(width(), height()) / 8);
@@ -211,7 +320,7 @@ protected:
 
 private:
     SwRect baseRect() const {
-        SwRect bounds = getRect();
+        SwRect bounds = rect();
         int diameter = std::min(bounds.width, bounds.height) - m_zonePadding * 2;
         if (diameter < 10) {
             diameter = 10;
@@ -321,3 +430,4 @@ private:
     SwTimer* m_repeatTimer;
     bool m_dirty;
 };
+

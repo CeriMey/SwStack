@@ -1,4 +1,30 @@
 #pragma once
+
+/**
+ * @file src/core/remote/SwIpcNoCopyRingBuffer.h
+ * @ingroup core_remote
+ * @brief Declares the public interface exposed by SwIpcNoCopyRingBuffer in the CoreSw remote and
+ * IPC layer.
+ *
+ * This header belongs to the CoreSw remote and IPC layer. It provides the abstractions used to
+ * expose objects across process boundaries and to transport data or signals between peers.
+ *
+ * Within that layer, this file focuses on the IPC no copy ring buffer interface. The declarations
+ * exposed here define the stable surface that adjacent code can rely on while the implementation
+ * remains free to evolve behind the header.
+ *
+ * This header mainly contributes module-level utilities, helper declarations, or namespaced types
+ * that are consumed by the surrounding subsystem.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * Remote-facing declarations in this area usually coordinate identity, proxying, serialization,
+ * and synchronization across runtimes.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -136,32 +162,68 @@ inline size_t alignUpSize(size_t v, size_t align) {
 
 template <typename T, typename = void>
 struct NoCopyMetaTypeName_ {
+    /**
+     * @brief Performs the `name` operation.
+     * @return The requested name.
+     */
     static const char* name() { return typeid(T).name(); }
 };
 
 template <typename T>
 struct NoCopyMetaTypeName_<T, decltype((void)T::kTypeName, void())> {
+    /**
+     * @brief Returns the current name.
+     * @return The current name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static const char* name() { return T::kTypeName; }
 };
 
 class ShmMappingDyn {
 public:
+    /**
+     * @brief Opens the existing handled by the object.
+     * @param shmName Value passed to the method.
+     * @return The requested existing.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     static std::shared_ptr<ShmMappingDyn> openExisting(const SwString& shmName) {
         bool created = false;
         return openOrCreate_(shmName, /*createBytes=*/0, /*allowCreate=*/false, created);
     }
 
+    /**
+     * @brief Opens the or Create handled by the object.
+     * @param shmName Value passed to the method.
+     * @param createBytes Value passed to the method.
+     * @param createdOut Value passed to the method.
+     * @return The requested or Create.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     static std::shared_ptr<ShmMappingDyn> openOrCreate(const SwString& shmName, size_t createBytes, bool& createdOut) {
         createdOut = false;
         return openOrCreate_(shmName, createBytes, /*allowCreate=*/true, createdOut);
     }
 
 #ifndef _WIN32
+    /**
+     * @brief Destroys the specified destroy.
+     * @param shmName Value passed to the method.
+     * @return The requested destroy.
+     */
     static void destroy(const SwString& shmName) {
         ::shm_unlink(shmName.toStdString().c_str());
     }
 #endif
 
+    /**
+     * @brief Destroys the `ShmMappingDyn` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~ShmMappingDyn() {
 #ifdef _WIN32
         if (mem_) {
@@ -177,8 +239,26 @@ public:
 #endif
     }
 
+    /**
+     * @brief Returns the current data.
+     * @return The current data.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     void* data() const { return mem_; }
+    /**
+     * @brief Returns the current size.
+     * @return The current size.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     size_t size() const { return size_; }
+    /**
+     * @brief Returns the current name.
+     * @return The current name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwString& name() const { return name_; }
 
 private:
@@ -309,41 +389,183 @@ public:
     class ReadLease;
     class WriteLease;
 
+    /**
+     * @brief Constructs a `NoCopyRingBuffer` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     NoCopyRingBuffer() = default;
+    /**
+     * @brief Constructs a `NoCopyRingBuffer` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     NoCopyRingBuffer(const NoCopyRingBuffer&) = delete;
+    /**
+     * @brief Performs the `operator=` operation.
+     * @return The requested operator =.
+     */
     NoCopyRingBuffer& operator=(const NoCopyRingBuffer&) = delete;
+    /**
+     * @brief Constructs a `NoCopyRingBuffer` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     NoCopyRingBuffer(NoCopyRingBuffer&&) noexcept = default;
+    /**
+     * @brief Performs the `operator=` operation.
+     * @return The requested operator =.
+     */
     NoCopyRingBuffer& operator=(NoCopyRingBuffer&&) noexcept = default;
 
+    /**
+     * @brief Constructs a `NoCopyRingBuffer` instance.
+     * @param reg Value passed to the method.
+     * @param streamName Value passed to the method.
+     * @param capacity Value passed to the method.
+     * @param maxBytes Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     NoCopyRingBuffer(Registry& reg, const SwString& streamName, uint32_t capacity, uint32_t maxBytes);
 
+    /**
+     * @brief Creates the requested create.
+     * @param reg Value passed to the method.
+     * @param streamName Value passed to the method.
+     * @param capacity Value passed to the method.
+     * @param maxBytes Value passed to the method.
+     * @return The resulting create.
+     */
     static NoCopyRingBuffer create(Registry& reg, const SwString& streamName, uint32_t capacity, uint32_t maxBytes);
+    /**
+     * @brief Opens the underlying resource managed by the object.
+     * @param reg Value passed to the method.
+     * @param streamName Value passed to the method.
+     * @return The requested open.
+     *
+     * @details The call affects the runtime state associated with the underlying resource or service.
+     */
     static NoCopyRingBuffer open(Registry& reg, const SwString& streamName);
 
+    /**
+     * @brief Performs the `streamsInRegistry` operation.
+     * @param domain Value passed to the method.
+     * @param object Value passed to the method.
+     * @return The requested streams In Registry.
+     */
     static SwStringList streamsInRegistry(const SwString& domain, const SwString& object);
 
+    /**
+     * @brief Returns whether the object reports valid.
+     * @return `true` when the object reports valid; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isValid() const { return map_ != nullptr; }
 
+    /**
+     * @brief Performs the `capacity` operation.
+     * @return The requested capacity.
+     */
     uint32_t capacity() const { return header_() ? header_()->capacity : 0; }
+    /**
+     * @brief Performs the `maxBytesPerItem` operation.
+     * @return The requested max Bytes Per Item.
+     */
     uint32_t maxBytesPerItem() const { return header_() ? header_()->maxBytes : 0; }
+    /**
+     * @brief Performs the `lastSeq` operation.
+     * @param lastSeq Value passed to the method.
+     * @return The requested last Seq.
+     */
     uint64_t lastSeq() const { return header_() ? detail::atomic_load_u64(&header_()->lastSeq) : 0; }
+    /**
+     * @brief Performs the `droppedCount` operation.
+     * @param dropped Value passed to the method.
+     * @return The requested dropped Count.
+     */
     uint64_t droppedCount() const { return header_() ? detail::atomic_load_u64(&header_()->dropped) : 0; }
+    /**
+     * @brief Performs the `maxConsumers` operation.
+     * @return The requested max Consumers.
+     */
     uint32_t maxConsumers() const { return header_() ? header_()->maxConsumers : 0; }
+    /**
+     * @brief Performs the `consumerTtlMs` operation.
+     * @return The requested consumer Ttl Ms.
+     */
     uint32_t consumerTtlMs() const { return header_() ? header_()->consumerTtlMs : 0; }
 
+    /**
+     * @brief Returns the current shm Name.
+     * @return The current shm Name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString shmName() const { return shmName_; }
+    /**
+     * @brief Returns the current notify Signal Name.
+     * @return The current notify Signal Name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString notifySignalName() const { return notifySignalName_; }
+    /**
+     * @brief Returns the current registry Signal Name.
+     * @return The current registry Signal Name.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwString registrySignalName() const { return rbRegistrySignalName_; }
 
+    /**
+     * @brief Returns the current consumer.
+     * @return The current consumer.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     Consumer consumer() const;
 
+    /**
+     * @brief Returns the current begin Write.
+     * @return The current begin Write.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     WriteLease beginWrite();
+    /**
+     * @brief Performs the `publishCopy` operation.
+     * @param data Value passed to the method.
+     * @param bytes Value passed to the method.
+     * @param meta Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool publishCopy(const void* data, uint32_t bytes, const MetaT& meta);
 
+    /**
+     * @brief Performs the `acquire` operation.
+     * @param seq Value passed to the method.
+     * @return The requested acquire.
+     */
     ReadLease acquire(uint64_t seq) const;
+    /**
+     * @brief Returns the current latest.
+     * @return The current latest.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     ReadLease readLatest() const;
 
     template <typename Fn>
+    /**
+     * @brief Performs the `connect` operation.
+     * @param c Value passed to the method.
+     * @param cb Value passed to the method.
+     * @param fireInitial Value passed to the method.
+     * @param timeoutMs Timeout expressed in milliseconds.
+     * @return The requested connect.
+     */
     sw::ipc::Signal<uint64_t>::Subscription connect(Consumer& c, Fn cb, bool fireInitial = true, int timeoutMs = 0) {
         if (!notify_ || !c.isValid()) return sw::ipc::Signal<uint64_t>::Subscription();
         return notify_->connect([&c, cb](uint64_t seq) mutable {
@@ -353,7 +575,15 @@ public:
         }, fireInitial, timeoutMs);
     }
 
+    /**
+     * @brief Performs the `notifier` operation.
+     * @return The requested notifier.
+     */
     sw::ipc::Signal<uint64_t>* notifier() { return notify_.get(); }
+    /**
+     * @brief Performs the `notifier` operation.
+     * @return The requested notifier.
+     */
     const sw::ipc::Signal<uint64_t>* notifier() const { return notify_.get(); }
 
 private:
@@ -458,11 +688,30 @@ struct NoCopyRingBuffer<MetaT, MaxConsumers>::SlotMeta {
 template <typename MetaT, uint32_t MaxConsumers>
 class NoCopyRingBuffer<MetaT, MaxConsumers>::WriteLease {
 public:
+    /**
+     * @brief Performs the `WriteLease` operation on the associated resource.
+     */
     WriteLease() = default;
+    /**
+     * @brief Performs the `WriteLease` operation on the associated resource.
+     */
     WriteLease(const WriteLease&) = delete;
+    /**
+     * @brief Performs the `operator=` operation.
+     * @return The requested operator =.
+     */
     WriteLease& operator=(const WriteLease&) = delete;
 
+    /**
+     * @brief Performs the `WriteLease` operation on the associated resource.
+     * @param this Value passed to the method.
+     */
     WriteLease(WriteLease&& o) noexcept { *this = std::move(o); }
+    /**
+     * @brief Performs the `operator=` operation.
+     * @param o Value passed to the method.
+     * @return The requested operator =.
+     */
     WriteLease& operator=(WriteLease&& o) noexcept {
         if (this == &o) return *this;
         cancel();
@@ -487,21 +736,78 @@ public:
         return *this;
     }
 
+    /**
+     * @brief Destroys the `MaxConsumers` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~WriteLease() { cancel(); }
 
+    /**
+     * @brief Returns whether the object reports valid.
+     * @return `true` when the object reports valid; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isValid() const { return owner_ && slot_ && data_ && seq_ != 0 && !committed_; }
+    /**
+     * @brief Returns the current seq.
+     * @return The current seq.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     uint64_t seq() const { return seq_; }
+    /**
+     * @brief Returns the current data.
+     * @return The current data.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     uint8_t* data() { return data_; }
+    /**
+     * @brief Returns the current data.
+     * @return The current data.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const uint8_t* data() const { return data_; }
+    /**
+     * @brief Returns the current capacity Bytes.
+     * @return The current capacity Bytes.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     uint32_t capacityBytes() const { return capacityBytes_; }
+    /**
+     * @brief Returns the current meta.
+     * @return The current meta.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     MetaT& meta() { return slot_->meta; }
+    /**
+     * @brief Returns the current meta.
+     * @return The current meta.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const MetaT& meta() const { return slot_->meta; }
 
+    /**
+     * @brief Performs the `commit` operation.
+     * @param bytes Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool commit(uint32_t bytes) {
         if (!isValid()) return false;
         return owner_->commitWrite_(*this, bytes);
     }
 
+    /**
+     * @brief Returns whether the object reports cel.
+     *
+     * @details This query does not modify the object state.
+     */
     void cancel() {
         if (!owner_ || committed_) return;
         owner_->cancelWrite_(*this);
@@ -525,11 +831,30 @@ private:
 template <typename MetaT, uint32_t MaxConsumers>
 class NoCopyRingBuffer<MetaT, MaxConsumers>::ReadLease {
 public:
+    /**
+     * @brief Performs the `ReadLease` operation on the associated resource.
+     */
     ReadLease() = default;
+    /**
+     * @brief Performs the `ReadLease` operation on the associated resource.
+     */
     ReadLease(const ReadLease&) = delete;
+    /**
+     * @brief Performs the `operator=` operation.
+     * @return The requested operator =.
+     */
     ReadLease& operator=(const ReadLease&) = delete;
 
+    /**
+     * @brief Performs the `ReadLease` operation on the associated resource.
+     * @param this Value passed to the method.
+     */
     ReadLease(ReadLease&& o) noexcept { *this = std::move(o); }
+    /**
+     * @brief Performs the `operator=` operation.
+     * @param o Value passed to the method.
+     * @return The requested operator =.
+     */
     ReadLease& operator=(ReadLease&& o) noexcept {
         if (this == &o) return *this;
         release_();
@@ -548,15 +873,68 @@ public:
         return *this;
     }
 
+    /**
+     * @brief Destroys the `MaxConsumers` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~ReadLease() { release_(); }
 
+    /**
+     * @brief Returns whether the object reports valid.
+     * @return `true` when the object reports valid; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isValid() const { return map_ && slot_ && data_ && seq_ != 0; }
+    /**
+     * @brief Returns the current seq.
+     * @return The current seq.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     uint64_t seq() const { return seq_; }
+    /**
+     * @brief Returns the current data.
+     * @return The current data.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const uint8_t* data() const { return data_; }
+    /**
+     * @brief Returns the current data.
+     * @return The current data.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     uint8_t* data() { return data_; }
+    /**
+     * @brief Returns the current bytes.
+     * @return The current bytes.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     uint32_t bytes() const { return slot_ ? slot_->bytes : 0; }
+    /**
+     * @brief Returns the current meta.
+     * @return The current meta.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const MetaT& meta() const { return slot_->meta; }
+    /**
+     * @brief Returns the current meta.
+     * @return The current meta.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     MetaT& meta() { return slot_->meta; }
+    /**
+     * @brief Returns the current publish Time Us.
+     * @return The current publish Time Us.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     uint64_t publishTimeUs() const { return slot_ ? slot_->publishTimeUs : 0; }
 
 private:
@@ -606,16 +984,50 @@ private:
 template <typename MetaT, uint32_t MaxConsumers>
 class NoCopyRingBuffer<MetaT, MaxConsumers>::Consumer {
 public:
+    /**
+     * @brief Performs the `Consumer` operation.
+     */
     Consumer() = default;
+    /**
+     * @brief Performs the `Consumer` operation.
+     */
     Consumer(const Consumer&) = delete;
+    /**
+     * @brief Performs the `operator=` operation.
+     * @return The requested operator =.
+     */
     Consumer& operator=(const Consumer&) = delete;
+    /**
+     * @brief Performs the `Consumer` operation.
+     */
     Consumer(Consumer&&) noexcept = default;
+    /**
+     * @brief Performs the `operator=` operation.
+     * @return The requested operator =.
+     */
     Consumer& operator=(Consumer&&) noexcept = default;
 
+    /**
+     * @brief Destroys the `MaxConsumers` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~Consumer() { unregister(); }
 
+    /**
+     * @brief Returns whether the object reports valid.
+     * @return `true` when the object reports valid; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isValid() const { return map_ && consumerId_ != 0 && consumerIndex_ != ReadLease::kInvalidIndex; }
 
+    /**
+     * @brief Returns the current cursor.
+     * @return The current cursor.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     uint64_t cursor() const {
         if (!isValid()) return 0;
         Header* H = static_cast<Header*>(map_->data());
@@ -625,6 +1037,10 @@ public:
         return detail::atomic_load_u64(&e->cursor);
     }
 
+    /**
+     * @brief Performs the `keepUp` operation.
+     * @param nextSeq Value passed to the method.
+     */
     void keepUp(uint64_t nextSeq) {
         if (!ensureRegistered_()) return;
         if (nextSeq == 0) return;
@@ -641,6 +1057,11 @@ public:
         detail::atomic_store_u64(&e->lastSeenMs, detail::nowMs());
     }
 
+    /**
+     * @brief Performs the `acquire` operation.
+     * @param seq Value passed to the method.
+     * @return The requested acquire.
+     */
     ReadLease acquire(uint64_t seq) {
         ReadLease out;
         if (!ensureRegistered_()) return out;
@@ -675,6 +1096,12 @@ public:
         return ReadLease(map_, slot, data, seq, consumerIndex_, consumerId_);
     }
 
+    /**
+     * @brief Returns the current latest.
+     * @return The current latest.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     ReadLease readLatest() {
         if (!ensureRegistered_()) return ReadLease();
         Header* H = static_cast<Header*>(map_->data());
@@ -683,6 +1110,9 @@ public:
         return acquire(seq);
     }
 
+    /**
+     * @brief Performs the `unregister` operation.
+     */
     void unregister() {
         if (!map_) return;
 
@@ -1079,8 +1509,8 @@ SwStringList NoCopyRingBuffer<MetaT, MaxConsumers>::streamsInRegistry(const SwSt
     std::vector<std::string> names;
     for (size_t i = 0; i < all.size(); ++i) {
         const SwJsonValue v = all[i];
-        if (!v.isObject() || !v.toObject()) continue;
-        const SwJsonObject o(*v.toObject());
+        if (!v.isObject()) continue;
+        const SwJsonObject o(v.toObject());
         if (SwString(o["object"].toString()) != object) continue;
 
         const std::string sig = SwString(o["signal"].toString()).toStdString();

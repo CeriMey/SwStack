@@ -22,6 +22,30 @@
 
 #pragma once
 
+/**
+ * @file src/media/SwVideoTypes.h
+ * @ingroup media
+ * @brief Declares the public interface exposed by SwVideoTypes in the CoreSw media layer.
+ *
+ * This header belongs to the CoreSw media layer. It exposes video frames, packets, decoders,
+ * capture sources, and streaming-oriented helpers used by media pipelines.
+ *
+ * Within that layer, this file focuses on the video types interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are SwVideoPixelFormat, SwVideoColorSpace,
+ * SwVideoRotation, and SwVideoFormatInfo.
+ *
+ * Type-oriented declarations here establish shared vocabulary for the surrounding subsystem so
+ * multiple components can exchange data and configuration without ad-hoc conventions.
+ *
+ * Media-facing declarations here focus on packet and frame ownership, format description,
+ * decoding boundaries, and real-time source control.
+ *
+ */
+
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -64,14 +88,32 @@ struct SwVideoFormatInfo {
     std::array<std::size_t, 4> planeOffsets{};
     std::size_t dataSize{0};
 
+    /**
+     * @brief Returns whether the object reports valid.
+     * @return `true` when the object reports valid; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isValid() const {
         return format != SwVideoPixelFormat::Unknown && width > 0 && height > 0;
     }
 
+    /**
+     * @brief Returns whether the object reports planar.
+     * @return `true` when the object reports planar; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isPlanar() const {
         return planeCount > 1;
     }
 
+    /**
+     * @brief Returns whether the object reports packed.
+     * @return `true` when the object reports packed; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isPacked() const {
         return planeCount <= 1;
     }

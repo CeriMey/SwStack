@@ -1,4 +1,4 @@
-/***************************************************************************************************
+﻿/***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
  * Copyright (C) 2025 Ariya Consulting
@@ -22,6 +22,30 @@
 
 #pragma once
 
+/**
+ * @file src/core/gui/SwLineEdit.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwLineEdit in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the line edit interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwLineEdit.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
 #include "SwFrame.h"
 #include "Sw.h"
 #include "SwGuiApplication.h"
@@ -32,7 +56,7 @@
 #include <vector>
 #include "SwTimer.h"
 
-// echo mode ●●●●●●●●●●
+// echo mode â—â—â—â—â—â—â—â—â—â—
 class SwLineEdit : public SwFrame {
 
     SW_OBJECT(SwLineEdit, SwFrame)
@@ -78,15 +102,23 @@ class SwLineEdit : public SwFrame {
     }
 
 public:
+    /**
+     * @brief Constructs a `SwLineEdit` instance.
+     * @param placeholderText Value passed to the method.
+     * @param parent Optional parent object that owns this instance.
+     * @param false Value passed to the method.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     SwLineEdit(const SwString& placeholderText = SwString(), SwWidget* parent = nullptr)
         : SwFrame(parent), cursorPos(0),
           selectionStart(0), selectionEnd(0), isSelecting(false) {
         resize(300, 30);
         setCursor(CursorType::IBeam);
         setPlaceholder(placeholderText);
-        connect(this, SIGNAL(TextChanged), std::function<void(SwString)>([&](SwString text) {
+        connect(this, &SwLineEdit::TextChanged, [this](const SwString& text) {
             setDisplayText(text);
-        }));
+        });
         this->setFocusPolicy(FocusPolicyEnum::Strong);
         SwString css = R"(
             SwLineEdit {
@@ -101,14 +133,14 @@ public:
         this->setStyleSheet(css);
 
         monitorTimer = new SwTimer(500, this);
-        connect(monitorTimer, SIGNAL(timeout), std::function<void()>([&]() {
+        connect(monitorTimer, &SwTimer::timeout, this, [this]() {
             if (this->getFocus() == true) {
                 m_caretVisible = !m_caretVisible;
                 update();
             }
-            }));
+        });
 
-        connect(this, SIGNAL(FocusChanged), std::function<void(bool)>([&](bool focus) {
+        connect(this, &SwWidget::FocusChanged, this, [this](bool focus) {
             m_caretVisible = true;
             if (focus == true) {
                 monitorTimer->start();
@@ -117,9 +149,16 @@ public:
                 monitorTimer->stop();
             }
             update();
-            }));
+        });
     }
 
+    /**
+     * @brief Constructs a `SwLineEdit` instance.
+     * @param parent Optional parent object that owns this instance.
+     * @param false Value passed to the method.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     SwLineEdit(SwWidget* parent = nullptr)
         : SwFrame(parent), cursorPos(0),
         selectionStart(0), selectionEnd(0), isSelecting(false) {
@@ -138,19 +177,19 @@ public:
 
         resize(300, 30);
         setCursor(CursorType::IBeam);
-        connect(this, SIGNAL(TextChanged), std::function<void(SwString)>([&](SwString text) {
+        connect(this, &SwLineEdit::TextChanged, [this](const SwString& text) {
             setDisplayText(text);
-        }));
+        });
 
         monitorTimer = new SwTimer(500, this);
-        connect(monitorTimer, SIGNAL(timeout), std::function<void()>([&]() {
+        connect(monitorTimer, &SwTimer::timeout, this, [this]() {
             if (this->getFocus() == true) {
                 m_caretVisible = !m_caretVisible;
                 update();
             }
-        }));
+        });
 
-        connect(this, SIGNAL(FocusChanged), std::function<void(bool)>([&](bool focus) {
+        connect(this, &SwWidget::FocusChanged, this, [this](bool focus) {
             m_caretVisible = true;
             if (focus == true) {
                 monitorTimer->start();
@@ -158,9 +197,14 @@ public:
                 monitorTimer->stop();
             }
             update();
-        }));
+        });
     }
 
+    /**
+     * @brief Destroys the `SwLineEdit` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~SwLineEdit() override {
         if (monitorTimer) {
             monitorTimer->stop();
@@ -168,7 +212,14 @@ public:
     }
 
 
-    // Redéfinir la méthode paintEvent pour dessiner le champ de texte
+    // RedÃ©finir la mÃ©thode paintEvent pour dessiner le champ de texte
+    /**
+     * @brief Handles the paint Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     * @return The requested paint Event.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     virtual void paintEvent(PaintEvent* event) override {
         if (!isVisibleInHierarchy()) {
             return;
@@ -179,7 +230,7 @@ public:
             return;
         }
 
-        const SwRect rect = getRect();
+        const SwRect rect = this->rect();
         StyleSheet* sheet = getToolSheet();
 
         SwColor bg{255, 255, 255};
@@ -283,7 +334,14 @@ public:
         painter->popClipRect();
         painter->finalize();
     }
-    // Gérer les événements de pression de touche
+    // GÃ©rer les Ã©vÃ©nements de pression de touche
+    /**
+     * @brief Handles the key Press Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     * @return The requested key Press Event.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     virtual void keyPressEvent(KeyEvent* event) override {
         if (!getFocus()) {
             return;
@@ -380,13 +438,39 @@ public:
             if (selectionStart != selectionEnd) {
                 deleteSelection();
             }
-            char inserted{};
-            if (SwWidgetPlatformAdapter::translateCharacter(keyCode,
-                                                            event->isShiftPressed(),
-                                                            capsLockActive,
-                                                            inserted)) {
-                m_Text.insert(cursorPos, 1, inserted);
-                cursorPos++;
+            // Use the Unicode character provided by the platform (handles AZERTY, QWERTZ,
+            // dead-key composition like ^+eâ†’Ãª, AltGr, etc.).
+            // When textProvided is true the platform translated the key; skip the hardcoded
+            // QWERTY fallback table â€” it would insert garbage for dead-key presses.
+            wchar_t wc = event->text();
+            if (wc == L'\0' && !event->isTextProvided()) {
+                char ascii = '\0';
+                if (SwWidgetPlatformAdapter::translateCharacter(keyCode,
+                                                               event->isShiftPressed(),
+                                                               capsLockActive,
+                                                               ascii)) {
+                    wc = static_cast<wchar_t>(static_cast<unsigned char>(ascii));
+                }
+            }
+            if (wc != L'\0') {
+                // Encode as UTF-8 (1 byte for ASCII, 2 bytes for Latin-1 like Ãª/Ã /Ã©, 3 for BMP)
+                char utf8[4] = {};
+                int utf8len = 0;
+                if (wc < 0x80) {
+                    utf8[0] = static_cast<char>(wc);
+                    utf8len = 1;
+                } else if (wc < 0x800) {
+                    utf8[0] = static_cast<char>(0xC0 | (wc >> 6));
+                    utf8[1] = static_cast<char>(0x80 | (wc & 0x3F));
+                    utf8len = 2;
+                } else {
+                    utf8[0] = static_cast<char>(0xE0 | (wc >> 12));
+                    utf8[1] = static_cast<char>(0x80 | ((wc >> 6) & 0x3F));
+                    utf8[2] = static_cast<char>(0x80 | (wc & 0x3F));
+                    utf8len = 3;
+                }
+                m_Text.insert(static_cast<size_t>(cursorPos), std::string(utf8, static_cast<size_t>(utf8len)));
+                cursorPos += utf8len;
                 selectionStart = selectionEnd = cursorPos;
                 emit TextChanged(m_Text);
                 if (firstVisibleCharacter > m_Text.length()) {
@@ -398,7 +482,14 @@ public:
         event->accept();
     }
 
-    // Gérer le clic de souris pour le focus et le positionnement du curseur
+    // GÃ©rer le clic de souris pour le focus et le positionnement du curseur
+    /**
+     * @brief Handles the mouse Press Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     * @return The requested mouse Press Event.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     virtual void mousePressEvent(MouseEvent* event) override {
         if (!getReadOnly()) {
             this->setFocus(true);
@@ -417,6 +508,13 @@ public:
         SwWidget::mousePressEvent(event);
     }
 
+    /**
+     * @brief Handles the mouse Double Click Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     * @return The requested mouse Double Click Event.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     virtual void mouseDoubleClickEvent(MouseEvent* event) override {
         selectionStart = 0;
         selectionEnd = getText().size();
@@ -425,7 +523,14 @@ public:
         update();
     }
 
-    // Gérer la sélection avec la souris
+    // GÃ©rer la sÃ©lection avec la souris
+    /**
+     * @brief Handles the mouse Move Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     * @return The requested mouse Move Event.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     virtual void mouseMoveEvent(MouseEvent* event) override {
         if (isSelecting) {
             size_t newPos = getCharacterIndexAtPosition(event->x());
@@ -444,7 +549,14 @@ public:
         SwWidget::mouseMoveEvent(event);
     }
 
-    // Terminer la sélection à la libération de la souris
+    // Terminer la sÃ©lection Ã  la libÃ©ration de la souris
+    /**
+     * @brief Handles the mouse Release Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     * @return The requested mouse Release Event.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     virtual void mouseReleaseEvent(MouseEvent* event) override {
         if (isSelecting) {
             event->accept();
@@ -459,9 +571,9 @@ public:
 
 private:
     size_t cursorPos;          // Position du curseur
-    size_t selectionStart;     // Début de la sélection
-    size_t selectionEnd;       // Fin de la sélection
-    bool isSelecting;          // Indique si une sélection est en cours
+    size_t selectionStart;     // DÃ©but de la sÃ©lection
+    size_t selectionEnd;       // Fin de la sÃ©lection
+    bool isSelecting;          // Indique si une sÃ©lection est en cours
     bool capsLockActive{false};
     SwTimer* monitorTimer{nullptr};
     bool m_caretVisible{true};
@@ -480,7 +592,7 @@ private:
         int left{5};
     };
 
-    // Obtenir l'index du caractère à une position x
+    // Obtenir l'index du caractÃ¨re Ã  une position x
     size_t getCharacterIndexAtPosition(int xPos) {
         Padding padding = resolvePadding();
         SwRect textRect = contentRect(padding);
@@ -504,7 +616,7 @@ private:
                                                                  targetPx,
                                                                  (std::max)(1, textRect.width));
     }
-    // Supprimer la sélection
+    // Supprimer la sÃ©lection
     void deleteSelection() {
 		size_t start = (std::min)(selectionStart, selectionEnd);
 		size_t end = (std::max)(selectionStart, selectionEnd);
@@ -516,10 +628,10 @@ private:
         }
     }
 
-    // Copier la sélection dans le presse-papiers
+    // Copier la sÃ©lection dans le presse-papiers
     void copySelectionToClipboard() {
         if (selectionStart == selectionEnd) {
-            return;  // Rien à copier
+            return;  // Rien Ã  copier
         }
 
 		size_t start = (std::min)(selectionStart, selectionEnd);
@@ -565,7 +677,7 @@ private:
 
         auto hierarchy = classHierarchy();
         for (int i = static_cast<int>(hierarchy.size()) - 1; i >= 0; --i) {
-            std::string selector = hierarchy[i].toStdString();
+            const SwString& selector = hierarchy[i];
             SwString pad = sheet->getStyleProperty(selector, "padding");
             if (!pad.isEmpty()) {
                 paddingValue = pad;
@@ -643,176 +755,6 @@ private:
         return current;
     }
 
-    static int parsePixelValue(const SwString& value, int fallback) {
-        if (value.isEmpty()) {
-            return fallback;
-        }
-        std::string s = value.toStdString();
-        size_t pos = s.find_first_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ%");
-        if (pos != std::string::npos) {
-            s = s.substr(0, pos);
-        }
-        try {
-            return std::stoi(s);
-        } catch (...) {
-            return fallback;
-        }
-    }
-
-    static int clampInt(int value, int minValue, int maxValue) {
-        if (value < minValue) return minValue;
-        if (value > maxValue) return maxValue;
-        return value;
-    }
-
-    static SwColor clampColor(const SwColor& c) {
-        return SwColor{clampInt(c.r, 0, 255), clampInt(c.g, 0, 255), clampInt(c.b, 0, 255)};
-    }
-
-    void resolveBackground(StyleSheet* sheet,
-                           SwColor& outColor,
-                           float& outAlpha,
-                           bool& outPaint) const {
-        if (!sheet) {
-            return;
-        }
-
-        auto selectors = classHierarchy();
-        bool hasSwWidgetSelector = false;
-        for (const SwString& selector : selectors) {
-            if (selector == "SwWidget") {
-                hasSwWidgetSelector = true;
-                break;
-            }
-        }
-        if (!hasSwWidgetSelector) {
-            selectors.emplace_back("SwWidget");
-        }
-
-        for (const SwString& selector : selectors) {
-            if (selector.isEmpty()) {
-                continue;
-            }
-            SwString value = sheet->getStyleProperty(selector.toStdString(), "background-color");
-            if (value.isEmpty()) {
-                continue;
-            }
-            float alpha = 1.0f;
-            try {
-                SwColor resolved = sheet->parseColor(value.toStdString(), &alpha);
-                if (alpha <= 0.0f) {
-                    outPaint = false;
-                } else {
-                    outPaint = true;
-                    outColor = clampColor(resolved);
-                }
-                outAlpha = alpha;
-            } catch (...) {
-                // ignore invalid colors
-            }
-            return;
-        }
-    }
-
-    void resolveBorder(StyleSheet* sheet,
-                       SwColor& outColor,
-                       int& outWidth,
-                       int& outRadius) const {
-        if (!sheet) {
-            return;
-        }
-
-        auto selectors = classHierarchy();
-        bool hasSwWidgetSelector = false;
-        for (const SwString& selector : selectors) {
-            if (selector == "SwWidget") {
-                hasSwWidgetSelector = true;
-                break;
-            }
-        }
-        if (!hasSwWidgetSelector) {
-            selectors.emplace_back("SwWidget");
-        }
-
-        bool haveColor = false;
-        bool haveWidth = false;
-        bool haveRadius = false;
-
-        for (const SwString& selector : selectors) {
-            if (selector.isEmpty()) {
-                continue;
-            }
-            const std::string key = selector.toStdString();
-
-            if (!haveColor) {
-                SwString borderColor = sheet->getStyleProperty(key, "border-color");
-                if (!borderColor.isEmpty()) {
-                    try {
-                        SwColor resolved = sheet->parseColor(borderColor.toStdString(), nullptr);
-                        outColor = clampColor(resolved);
-                        haveColor = true;
-                    } catch (...) {
-                    }
-                }
-            }
-
-            if (!haveWidth) {
-                SwString borderWidth = sheet->getStyleProperty(key, "border-width");
-                if (!borderWidth.isEmpty()) {
-                    outWidth = clampInt(parsePixelValue(borderWidth, outWidth), 0, 20);
-                    haveWidth = true;
-                }
-            }
-
-            if (!haveRadius) {
-                SwString borderRadius = sheet->getStyleProperty(key, "border-radius");
-                if (!borderRadius.isEmpty()) {
-                    outRadius = clampInt(parsePixelValue(borderRadius, outRadius), 0, 32);
-                    haveRadius = true;
-                }
-            }
-
-            if (haveColor && haveWidth && haveRadius) {
-                break;
-            }
-        }
-    }
-
-    SwColor resolveTextColor(StyleSheet* sheet, const SwColor& fallback) const {
-        if (!sheet) {
-            return fallback;
-        }
-
-        auto selectors = classHierarchy();
-        bool hasSwWidgetSelector = false;
-        for (const SwString& selector : selectors) {
-            if (selector == "SwWidget") {
-                hasSwWidgetSelector = true;
-                break;
-            }
-        }
-        if (!hasSwWidgetSelector) {
-            selectors.emplace_back("SwWidget");
-        }
-
-        for (const SwString& selector : selectors) {
-            if (selector.isEmpty()) {
-                continue;
-            }
-            SwString value = sheet->getStyleProperty(selector.toStdString(), "color");
-            if (value.isEmpty()) {
-                continue;
-            }
-            try {
-                SwColor resolved = sheet->parseColor(value.toStdString(), nullptr);
-                return clampColor(resolved);
-            } catch (...) {
-                return fallback;
-            }
-        }
-        return fallback;
-    }
-
     int resolvedBorderWidth() const {
         StyleSheet* sheet = const_cast<SwLineEdit*>(this)->getToolSheet();
         if (!sheet) {
@@ -827,7 +769,7 @@ private:
 
     SwRect contentRect(const Padding& padding) const {
         const int bw = resolvedBorderWidth();
-        SwRect rect = getRect();
+        SwRect rect = this->rect();
         rect.x += bw + padding.left;
         rect.y += bw + padding.top;
         rect.width = std::max(1, rect.width - 2 * bw - (padding.left + padding.right));
@@ -887,3 +829,4 @@ private:
         }
     }
 };
+

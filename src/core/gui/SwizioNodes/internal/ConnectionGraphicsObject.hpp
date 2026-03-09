@@ -1,5 +1,18 @@
 #pragma once
 
+/**
+ * @file
+ * @ingroup core_swizio_nodes
+ * @brief Declares the scene item responsible for visualizing a node-editor connection.
+ *
+ * This graphics object tracks one logical edge from the graph model and turns it into a
+ * selectable, paintable scene primitive. It sits between the abstract connection state and
+ * the `SwGraphicsScene`, handling geometry refresh, hit testing, and repaint requests.
+ */
+
+
+
+
 #include "Export.hpp"
 
 #include "SwizioNodes/internal/ConnectionPainter.hpp"
@@ -21,6 +34,13 @@ class BasicGraphicsScene;
 class SWIZIO_NODES_PUBLIC ConnectionGraphicsObject : public SwGraphicsItem
 {
 public:
+    /**
+     * @brief Constructs a `ConnectionGraphicsObject` instance.
+     * @param scene Value passed to the method.
+     * @param scene Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     ConnectionGraphicsObject(BasicGraphicsScene& scene, ConnectionId const connectionId)
         : m_connectionId(connectionId)
         , m_scene(&scene) {
@@ -28,12 +48,36 @@ public:
         setZValue(-10.0);
     }
 
+    /**
+     * @brief Destroys the `ConnectionGraphicsObject` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~ConnectionGraphicsObject() override = default;
 
+    /**
+     * @brief Returns the current connection Id.
+     * @return The current connection Id.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     ConnectionId const& connectionId() const { return m_connectionId; }
 
+    /**
+     * @brief Returns the current node Scene.
+     * @return The current node Scene.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     BasicGraphicsScene* nodeScene() const { return m_scene; }
 
+    /**
+     * @brief Sets the out Endpoint.
+     * @param node Value passed to the method.
+     * @param port Local port used by the operation.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setOutEndpoint(NodeGraphicsObject* node, int port) {
         m_outNode = node;
         m_outPort = port;
@@ -41,6 +85,13 @@ public:
         update();
     }
 
+    /**
+     * @brief Sets the in Endpoint.
+     * @param node Value passed to the method.
+     * @param port Local port used by the operation.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setInEndpoint(NodeGraphicsObject* node, int port) {
         m_inNode = node;
         m_inPort = port;
@@ -48,19 +99,61 @@ public:
         update();
     }
 
+    /**
+     * @brief Sets the scene End Point.
+     * @param scenePos Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setSceneEndPoint(const SwPointF& scenePos) {
         m_sceneEndPoint = scenePos;
         m_hasSceneEndPoint = true;
         update();
     }
 
+    /**
+     * @brief Returns whether the object reports complete.
+     * @return `true` when the object reports complete; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isComplete() const { return m_outNode && m_inNode; }
 
+    /**
+     * @brief Returns the current out Node.
+     * @return The current out Node.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     NodeGraphicsObject* outNode() const { return m_outNode; }
+    /**
+     * @brief Returns the current in Node.
+     * @return The current in Node.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     NodeGraphicsObject* inNode() const { return m_inNode; }
+    /**
+     * @brief Returns the current out Port.
+     * @return The current out Port.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int outPort() const { return m_outPort; }
+    /**
+     * @brief Returns the current in Port.
+     * @return The current in Port.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int inPort() const { return m_inPort; }
 
+    /**
+     * @brief Sets the hovered.
+     * @param on Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setHovered(bool on) {
         if (m_hovered == on) {
             return;
@@ -69,8 +162,20 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns whether the object reports hovered.
+     * @return `true` when the object reports hovered; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isHovered() const { return m_hovered; }
 
+    /**
+     * @brief Sets the flow Pulse Duration Ms.
+     * @param ms Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setFlowPulseDurationMs(int ms) {
         m_flowPulseDurationMs = std::max(0, ms);
         if (m_flowPulseDurationMs == 0) {
@@ -78,8 +183,17 @@ public:
         }
     }
 
+    /**
+     * @brief Returns the current flow Pulse Duration Ms.
+     * @return The current flow Pulse Duration Ms.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int flowPulseDurationMs() const { return m_flowPulseDurationMs; }
 
+    /**
+     * @brief Performs the `notifyDataFlow` operation.
+     */
     void notifyDataFlow() {
         if (!isComplete() || m_flowPulseDurationMs <= 0) {
             return;
@@ -93,6 +207,9 @@ public:
         update();
     }
 
+    /**
+     * @brief Clears the current object state.
+     */
     void clearFlow() {
         if (!m_flowActive) {
             return;
@@ -101,6 +218,11 @@ public:
         update();
     }
 
+    /**
+     * @brief Performs the `tickFlow` operation.
+     * @param now Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool tickFlow(const std::chrono::steady_clock::time_point& now) {
         if (!m_flowActive) {
             return false;
@@ -120,6 +242,12 @@ public:
         return true;
     }
 
+    /**
+     * @brief Returns the current bounding Rect.
+     * @return The current bounding Rect.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwRectF boundingRect() const override {
         const SwPointF a = startScene_();
         const SwPointF b = endScene_();
@@ -131,6 +259,11 @@ public:
         return SwRectF(minX - pad, minY - pad, (maxX - minX) + pad * 2.0, (maxY - minY) + pad * 2.0);
     }
 
+    /**
+     * @brief Performs the `paint` operation.
+     * @param painter Value passed to the method.
+     * @param ctx Value passed to the method.
+     */
     void paint(SwPainter* painter, const SwGraphicsRenderContext& ctx) override {
         if (!painter || (!m_outNode && !m_inNode)) {
             return;

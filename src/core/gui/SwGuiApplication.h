@@ -22,9 +22,42 @@
 
 #pragma once
 
+/**
+ * @file src/core/gui/SwGuiApplication.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwGuiApplication in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the GUI application interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are SwGuiApplication.
+ *
+ * Application-oriented declarations here define the top-level lifecycle surface for startup,
+ * shutdown, event processing, and integration with the rest of the framework.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
 /***************************************************************************************************
  * SwGuiApplication now acts as a thin wrapper around the platform abstraction layer.
  ***************************************************************************************************/
+
+/**
+ * @file
+ * @brief Declares the GUI application entry point for the SwStack widget runtime.
+ *
+ * SwGuiApplication extends SwCoreApplication with the pieces needed by visual
+ * applications: it creates the active platform integration, lets that backend
+ * pump native window-system events, and interleaves those events with the core
+ * event loop maintained by SwCoreApplication.
+ */
 
 #include "SwCoreApplication.h"
 #include "platform/SwPlatformFactory.h"
@@ -36,8 +69,20 @@
 #include <stdexcept>
 #include <thread>
 
+/**
+ * @brief Coordinates the core event loop with the selected GUI platform backend.
+ *
+ * A SwGuiApplication owns the process-wide platform integration object and keeps
+ * native input, paint, and windowing events flowing alongside the framework's
+ * own timers, posted events, and waitable objects.
+ */
 class SwGuiApplication : public SwCoreApplication {
 public:
+    /**
+     * @brief Constructs a `SwGuiApplication` instance.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
     SwGuiApplication() {
         instance(false) = this;
         m_platformIntegration = SwCreateDefaultPlatformIntegration();
@@ -47,12 +92,22 @@ public:
         m_platformIntegration->initialize(this);
     }
 
+    /**
+     * @brief Destroys the `SwGuiApplication` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~SwGuiApplication() override {
         if (m_platformIntegration) {
             m_platformIntegration->shutdown();
         }
     }
 
+    /**
+     * @brief Performs the `instance` operation.
+     * @param create Value passed to the method.
+     * @return The requested instance.
+     */
     static SwGuiApplication*& instance(bool create = true) {
         static SwGuiApplication* s_instance = nullptr;
         if (!s_instance && create) {
@@ -61,6 +116,11 @@ public:
         return s_instance;
     }
 
+    /**
+     * @brief Performs the `exec` operation.
+     * @param maxDurationMicroseconds Value passed to the method.
+     * @return The requested exec.
+     */
     int exec(int maxDurationMicroseconds = 0) override {
         setHighThreadPriority();
         auto startTime = std::chrono::steady_clock::now();
@@ -117,6 +177,12 @@ public:
         return exitCode;
     }
 
+    /**
+     * @brief Returns the current platform Integration.
+     * @return The current platform Integration.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwPlatformIntegration* platformIntegration() const {
         return m_platformIntegration.get();
     }

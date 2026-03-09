@@ -1,4 +1,4 @@
-/***************************************************************************************************
+﻿/***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
  * Copyright (C) 2025 Ariya Consulting
@@ -22,11 +22,35 @@
 
 #pragma once
 
+/**
+ * @file src/core/gui/SwCheckBox.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwCheckBox in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the check box interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are SwCheckBox.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
+
 /***************************************************************************************************
- * SwCheckBox - Qt-like checkbox widget.
+ * SwCheckBox - checkbox widget.
  *
  * API goals:
- * - Similar naming to QCheckBox (setChecked/isChecked, setText/text, stateChanged/toggled/clicked).
+ * - Familiar naming (setChecked/isChecked, setText/text, stateChanged/toggled/clicked).
  * - Minimal dependencies (prefer Sw* types, avoid std:: in widget code).
  **************************************************************************************************/
 
@@ -42,24 +66,55 @@ public:
         Checked = 2
     };
 
+    /**
+     * @brief Constructs a `SwCheckBox` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwCheckBox(SwWidget* parent = nullptr)
         : SwWidget(parent) {
         initDefaults();
     }
 
+    /**
+     * @brief Constructs a `SwCheckBox` instance.
+     * @param text Value passed to the method.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     SwCheckBox(const SwString& text, SwWidget* parent = nullptr)
         : SwWidget(parent) {
         initDefaults();
         setText(text);
     }
 
+    /**
+     * @brief Sets the accent Color.
+     * @param color Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setAccentColor(const SwColor& color) {
         m_accent = clampColor(color);
         update();
     }
 
+    /**
+     * @brief Returns the current accent Color.
+     * @return The current accent Color.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     SwColor accentColor() const { return m_accent; }
 
+    /**
+     * @brief Sets the tristate.
+     * @param on Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setTristate(bool on) {
         if (m_tristate == on) {
             return;
@@ -71,8 +126,20 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns whether the object reports tristate.
+     * @return `true` when the object reports tristate; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isTristate() const { return m_tristate; }
 
+    /**
+     * @brief Sets the check State.
+     * @param state Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setCheckState(CheckState state) {
         if (state != Unchecked && state != PartiallyChecked && state != Checked) {
             state = Unchecked;
@@ -93,11 +160,32 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns the current check State.
+     * @return The current check State.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     CheckState checkState() const { return m_state; }
 
+    /**
+     * @brief Sets the checked.
+     * @param Unchecked Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setChecked(bool checked) { setCheckState(checked ? Checked : Unchecked); }
+    /**
+     * @brief Returns whether the object reports checked.
+     * @return `true` when the object reports checked; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isChecked() const { return m_state == Checked; }
 
+    /**
+     * @brief Performs the `toggle` operation.
+     */
     void toggle() {
         if (m_tristate) {
             switch (m_state) {
@@ -110,6 +198,10 @@ public:
         setCheckState(isChecked() ? Unchecked : Checked);
     }
 
+    /**
+     * @brief Performs the `text` operation.
+     * @return The requested text.
+     */
     SwString text() const { return getText(); }
 
     DECLARE_SIGNAL(stateChanged, int);
@@ -125,13 +217,19 @@ protected:
         update();
     }
 
+    /**
+     * @brief Handles the paint Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void paintEvent(PaintEvent* event) override {
         SwPainter* painter = event ? event->painter() : nullptr;
         if (!painter) {
             return;
         }
 
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
         const int indicatorSize = clampInt(m_indicatorSize, 12, 28);
         const int indicatorRadius = clampInt(indicatorSize / 4, 2, 8);
         const int indicatorX = bounds.x;
@@ -195,6 +293,12 @@ protected:
         }
     }
 
+    /**
+     * @brief Handles the mouse Press Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mousePressEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -207,6 +311,12 @@ protected:
         event->accept();
     }
 
+    /**
+     * @brief Handles the mouse Release Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseReleaseEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -225,21 +335,17 @@ protected:
         SwWidget::mouseReleaseEvent(event);
     }
 
+    /**
+     * @brief Handles the mouse Move Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseMoveEvent(MouseEvent* event) override {
         SwWidget::mouseMoveEvent(event);
     }
 
 private:
-    static int clampInt(int value, int minValue, int maxValue) {
-        if (value < minValue) return minValue;
-        if (value > maxValue) return maxValue;
-        return value;
-    }
-
-    static SwColor clampColor(const SwColor& c) {
-        return SwColor{clampInt(c.r, 0, 255), clampInt(c.g, 0, 255), clampInt(c.b, 0, 255)};
-    }
-
     void initDefaults() {
         resize(200, 28);
         setCursor(CursorType::Hand);

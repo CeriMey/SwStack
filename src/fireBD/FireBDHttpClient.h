@@ -22,6 +22,30 @@
 
 #pragma once
 
+/**
+ * @file src/fireBD/FireBDHttpClient.h
+ * @ingroup firebd
+ * @brief Declares the public interface exposed by FireBDHttpClient in the FireBD service layer.
+ *
+ * This header belongs to the FireBD service layer. It declares application-facing clients,
+ * service types, and data models used to communicate with the FireBD backend.
+ *
+ * Within that layer, this file focuses on the fire bd HTTP client interface. The declarations
+ * exposed here define the stable surface that adjacent code can rely on while the implementation
+ * remains free to evolve behind the header.
+ *
+ * The main declarations in this header are FireBDHttpClient.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * The contracts in this area mainly describe request and response shapes, client composition, and
+ * higher-level service boundaries.
+ *
+ */
+
+
 /***************************************************************************************************
  * fireBD - Minimal async HTTP/HTTPS client (GET/PUT/PATCH/POST/DELETE).
  *
@@ -56,38 +80,126 @@ public:
         Delete
     };
 
+    /**
+     * @brief Constructs a `FireBDHttpClient` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit FireBDHttpClient(SwObject* parent = nullptr)
         : SwObject(parent) {}
 
+    /**
+     * @brief Destroys the `FireBDHttpClient` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
     ~FireBDHttpClient() override { abort(); }
 
+    /**
+     * @brief Sets the raw Header.
+     * @param key Value passed to the method.
+     * @param value Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setRawHeader(const SwString& key, const SwString& value) {
         m_headerMap[key] = value;
     }
 
+    /**
+     * @brief Returns the current status Code.
+     * @return The current status Code.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     int statusCode() const { return m_lastStatusCode; }
+    /**
+     * @brief Returns the current reason Phrase.
+     * @return The current reason Phrase.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwString& reasonPhrase() const { return m_lastReasonPhrase; }
 
+    /**
+     * @brief Returns the current response Body.
+     * @return The current response Body.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwByteArray& responseBody() const { return m_lastResponseBody; }
+    /**
+     * @brief Performs the `responseBodyAsString` operation.
+     * @param m_lastResponseBody Value passed to the method.
+     * @return The requested response Body As String.
+     */
     SwString responseBodyAsString() const { return SwString(m_lastResponseBody); }
 
+    /**
+     * @brief Returns the current response Headers.
+     * @return The current response Headers.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     const SwString& responseHeaders() const { return m_lastResponseHeaders; }
 
+    /**
+     * @brief Performs the `get` operation.
+     * @param url Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool get(const SwString& url) { return request(Method::Get, url); }
+    /**
+     * @brief Performs the `del` operation.
+     * @param url Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool del(const SwString& url) { return request(Method::Delete, url); }
 
+    /**
+     * @brief Performs the `post` operation.
+     * @param url Value passed to the method.
+     * @param body Value passed to the method.
+     * @param contentType Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool post(const SwString& url, const SwByteArray& body, const SwString& contentType = "application/json") {
         return request(Method::Post, url, body, contentType);
     }
 
+    /**
+     * @brief Performs the `put` operation.
+     * @param url Value passed to the method.
+     * @param body Value passed to the method.
+     * @param contentType Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool put(const SwString& url, const SwByteArray& body, const SwString& contentType = "application/json") {
         return request(Method::Put, url, body, contentType);
     }
 
+    /**
+     * @brief Performs the `patch` operation.
+     * @param url Value passed to the method.
+     * @param body Value passed to the method.
+     * @param contentType Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool patch(const SwString& url, const SwByteArray& body, const SwString& contentType = "application/json") {
         return request(Method::Patch, url, body, contentType);
     }
 
+    /**
+     * @brief Performs the `request` operation.
+     * @param method HTTP method involved in the operation.
+     * @param url Value passed to the method.
+     * @param body Value passed to the method.
+     * @param contentType Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool request(Method method,
                  const SwString& url,
                  const SwByteArray& body = SwByteArray(),
@@ -117,10 +229,10 @@ public:
         m_socket = new SwTcpSocket(this);
         m_socket->useSsl(m_https, m_host);
 
-        connect(m_socket, SIGNAL(connected), this, &FireBDHttpClient::onConnected_);
-        connect(m_socket, SIGNAL(errorOccurred), this, &FireBDHttpClient::onError_);
-        connect(m_socket, SIGNAL(disconnected), this, &FireBDHttpClient::onDisconnected_);
-        connect(m_socket, SIGNAL(readyRead), this, &FireBDHttpClient::onReadyRead_);
+        connect(m_socket, &SwTcpSocket::connected, this, &FireBDHttpClient::onConnected_);
+        connect(m_socket, &SwTcpSocket::errorOccurred, this, &FireBDHttpClient::onError_);
+        connect(m_socket, &SwTcpSocket::disconnected, this, &FireBDHttpClient::onDisconnected_);
+        connect(m_socket, &SwTcpSocket::readyRead, this, &FireBDHttpClient::onReadyRead_);
 
         if (!m_socket->connectToHost(m_host, m_port)) {
             cleanupSocket_();
@@ -130,6 +242,9 @@ public:
         return true;
     }
 
+    /**
+     * @brief Performs the `abort` operation.
+     */
     void abort() { cleanupSocket_(); }
 
 signals:
@@ -137,6 +252,9 @@ signals:
     DECLARE_SIGNAL(errorOccurred, int)
 
 private slots:
+    /**
+     * @brief Performs the `onConnected_` operation.
+     */
     void onConnected_() {
         if (!m_socket) {
             return;
@@ -149,6 +267,9 @@ private slots:
         }
     }
 
+    /**
+     * @brief Performs the `onReadyRead_` operation.
+     */
     void onReadyRead_() {
         if (!m_socket) {
             return;
@@ -165,11 +286,18 @@ private slots:
         processBuffer_();
     }
 
+    /**
+     * @brief Performs the `onError_` operation.
+     * @param err Value passed to the method.
+     */
     void onError_(int err) {
         cleanupSocket_();
         emit errorOccurred(err);
     }
 
+    /**
+     * @brief Performs the `onDisconnected_` operation.
+     */
     void onDisconnected_() {
         if (m_headersReceived && !m_finishedEmitted && !m_chunked && m_contentLength < 0) {
             m_responseBody.append(m_buffer.constData(), m_buffer.size());

@@ -1,4 +1,28 @@
 #pragma once
+
+/**
+ * @file src/core/io/SwProcess.h
+ * @ingroup core_io
+ * @brief Declares the public interface exposed by SwProcess in the CoreSw IO layer.
+ *
+ * This header belongs to the CoreSw IO layer. It defines files, sockets, servers, descriptors,
+ * processes, and network helpers that sit directly at operating-system boundaries.
+ *
+ * Within that layer, this file focuses on the process interface. The declarations exposed here
+ * define the stable surface that adjacent code can rely on while the implementation remains free
+ * to evolve behind the header.
+ *
+ * The main declarations in this header are ProcessFlags and SwProcess.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * IO-facing declarations here usually manage handles, readiness state, buffering, and error
+ * propagation while presenting a portable framework API.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -24,9 +48,9 @@
 #include "SwIODevice.h"
 #include "SwIODescriptor.h"
 #include "SwDebug.h"
-#include <vector>
 #include <string>
 #include <iostream>
+#include "SwList.h"
 static constexpr const char* kSwLogCategory_SwProcess = "sw.core.io.swprocess";
 
 
@@ -91,13 +115,14 @@ inline ProcessFlags& operator|=(ProcessFlags& a, ProcessFlags b) noexcept {
  * SwProcess* process = new SwProcess();
  * process->start("myExecutable", {"arg1", "arg2"});
  * process->write("Input data");
- * QString output = process->readAllStandardOutput();
+ * SwString output = process->readAllStandardOutput();
  * delete process;
  * @endcode
  *
  * @see SwIODevice
  */
 class SwProcess : public SwIODevice {
+    SW_OBJECT(SwProcess, SwIODevice)
 public:
 
     /**
@@ -131,7 +156,7 @@ public:
         stderrDescriptor = nullptr;
         stdinDescriptor = nullptr;
         monitorTimer = new SwTimer(500, this);
-        connect(monitorTimer, SIGNAL(timeout), this, &SwProcess::checkProcessStatus);
+        connect(monitorTimer, &SwTimer::timeout, this, [this]() { checkProcessStatus(); });
     }
 
     /**
@@ -672,16 +697,16 @@ private:
         hThread = pi.hThread;
         return true;
 #else
-        std::vector<std::string> storage;
-        storage.push_back(program.toStdString());
+        SwList<std::string> storage;
+        storage.append(program.toStdString());
         for (const auto& arg : arguments) {
-            storage.push_back(arg.toStdString());
+            storage.append(arg.toStdString());
         }
-        std::vector<char*> argv;
+        SwList<char*> argv;
         for (auto& s : storage) {
-            argv.push_back(const_cast<char*>(s.c_str()));
+            argv.append(const_cast<char*>(s.c_str()));
         }
-        argv.push_back(nullptr);
+        argv.append(nullptr);
 
         pid_t pid = fork();
         if (pid == 0) {

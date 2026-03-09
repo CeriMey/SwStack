@@ -1,4 +1,28 @@
-#pragma once
+﻿#pragma once
+
+/**
+ * @file src/core/gui/SwToolButton.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwToolButton in the CoreSw GUI layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the tool button interface. The declarations exposed
+ * here define the stable surface that adjacent code can rely on while the implementation remains
+ * free to evolve behind the header.
+ *
+ * The main declarations in this header are SwToolButton.
+ *
+ * The declarations in this header are intended to make the subsystem boundary explicit: callers
+ * interact with stable types and functions, while implementation details remain confined to
+ * source files and private helpers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -27,17 +51,36 @@ class SwToolButton : public SwWidget {
     SW_OBJECT(SwToolButton, SwWidget)
 
 public:
+    /**
+     * @brief Constructs a `SwToolButton` instance.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     explicit SwToolButton(SwWidget* parent = nullptr)
         : SwWidget(parent) {
         initDefaults();
     }
 
+    /**
+     * @brief Constructs a `SwToolButton` instance.
+     * @param text Value passed to the method.
+     * @param parent Optional parent object that owns this instance.
+     *
+     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
+     */
     SwToolButton(const SwString& text, SwWidget* parent = nullptr)
         : SwWidget(parent) {
         initDefaults();
         setText(text);
     }
 
+    /**
+     * @brief Sets the checkable.
+     * @param on Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setCheckable(bool on) {
         if (m_checkable == on) {
             return;
@@ -49,8 +92,20 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns whether the object reports checkable.
+     * @return `true` when the object reports checkable; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isCheckable() const { return m_checkable; }
 
+    /**
+     * @brief Sets the checked.
+     * @param checked Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     void setChecked(bool checked) {
         if (!m_checkable) {
             checked = false;
@@ -63,6 +118,12 @@ public:
         update();
     }
 
+    /**
+     * @brief Returns whether the object reports checked.
+     * @return `true` when the object reports checked; otherwise `false`.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     bool isChecked() const { return m_checked; }
 
     DECLARE_SIGNAL(clicked, bool);
@@ -72,33 +133,39 @@ protected:
     CUSTOM_PROPERTY(SwString, Text, "ToolButton") { update(); }
     CUSTOM_PROPERTY(bool, Pressed, false) { update(); }
 
+    /**
+     * @brief Handles the paint Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void paintEvent(PaintEvent* event) override {
         SwPainter* painter = event ? event->painter() : nullptr;
         if (!painter) {
             return;
         }
 
-        const SwRect bounds = getRect();
+        const SwRect bounds = rect();
         const int radius = clampInt(std::min(bounds.width, bounds.height) / 4, 6, 12);
 
-        SwColor bg{255, 255, 255};
-        SwColor border{220, 224, 232};
-        SwColor textColor{30, 30, 30};
+        SwColor bg{249, 249, 249};
+        SwColor border{213, 213, 213};
+        SwColor textColor{32, 32, 32};
 
         if (!getEnable()) {
-            bg = SwColor{245, 245, 245};
-            border = SwColor{230, 230, 230};
-            textColor = SwColor{150, 150, 150};
+            bg = SwColor{249, 249, 249};
+            border = SwColor{229, 229, 229};
+            textColor = SwColor{160, 160, 160};
         } else if (m_checkable && m_checked) {
             bg = m_accent;
             border = m_accent;
             textColor = SwColor{255, 255, 255};
         } else if (getPressed()) {
-            bg = SwColor{236, 236, 236};
-            border = SwColor{200, 200, 200};
+            bg = SwColor{204, 204, 204};
+            border = SwColor{180, 180, 180};
         } else if (getHover()) {
-            bg = SwColor{250, 251, 253};
-            border = SwColor{200, 200, 200};
+            bg = SwColor{229, 229, 229};
+            border = SwColor{198, 198, 198};
         }
 
         painter->fillRoundedRect(bounds, radius, bg, border, 1);
@@ -113,6 +180,12 @@ protected:
                           getFont());
     }
 
+    /**
+     * @brief Handles the mouse Press Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mousePressEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -125,6 +198,12 @@ protected:
         event->accept();
     }
 
+    /**
+     * @brief Handles the mouse Release Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
     void mouseReleaseEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -146,16 +225,6 @@ protected:
     }
 
 private:
-    static int clampInt(int value, int minValue, int maxValue) {
-        if (value < minValue) return minValue;
-        if (value > maxValue) return maxValue;
-        return value;
-    }
-
-    static SwColor clampColor(const SwColor& c) {
-        return SwColor{clampInt(c.r, 0, 255), clampInt(c.g, 0, 255), clampInt(c.b, 0, 255)};
-    }
-
     void initDefaults() {
         resize(96, 34);
         setCursor(CursorType::Hand);

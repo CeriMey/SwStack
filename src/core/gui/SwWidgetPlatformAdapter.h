@@ -1,4 +1,29 @@
 #pragma once
+
+/**
+ * @file src/core/gui/SwWidgetPlatformAdapter.h
+ * @ingroup core_gui
+ * @brief Declares the public interface exposed by SwWidgetPlatformAdapter in the CoreSw GUI
+ * layer.
+ *
+ * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
+ * styling helpers, and application integration for the native UI stack.
+ *
+ * Within that layer, this file focuses on the widget platform adapter interface. The declarations
+ * exposed here define the stable surface that adjacent code can rely on while the implementation
+ * remains free to evolve behind the header.
+ *
+ * The main declarations in this header are SwWidgetPlatformHandle and SwWidgetPlatformAdapter.
+ *
+ * Widget-oriented declarations here usually capture persistent UI state, input handling, layout
+ * participation, and paint-time behavior while keeping platform-specific rendering details behind
+ * lower layers.
+ *
+ * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
+ * focus, and parent-child ownership rules.
+ *
+ */
+
 /***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
@@ -48,11 +73,23 @@ struct SwWidgetPlatformHandle {
     void* nativeHandle{nullptr};
     void* nativeDisplay{nullptr};
 
+    /**
+     * @brief Returns the current bool.
+     * @return The current bool.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     explicit operator bool() const { return nativeHandle != nullptr; }
 };
 
 class SwWidgetPlatformAdapter {
 public:
+    /**
+     * @brief Performs the `fromNativeHandle` operation.
+     * @param handle Value passed to the method.
+     * @param display Value passed to the method.
+     * @return The requested from Native Handle.
+     */
     static SwWidgetPlatformHandle fromNativeHandle(void* handle, void* display = nullptr) {
         SwWidgetPlatformHandle h;
         h.nativeHandle = handle;
@@ -61,41 +98,201 @@ public:
     }
 
     template <typename T>
+    /**
+     * @brief Performs the `nativeHandleAs` operation.
+     * @param handle Value passed to the method.
+     * @return The requested native Handle As.
+     */
     static T nativeHandleAs(const SwWidgetPlatformHandle& handle) {
         return reinterpret_cast<T>(handle.nativeHandle);
     }
 
+    /**
+     * @brief Sets the cursor.
+     * @param cursor Value passed to the method.
+     * @return The requested cursor.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
     static void setCursor(CursorType cursor);
+    /**
+     * @brief Performs the `invalidateRect` operation.
+     * @param handle Value passed to the method.
+     * @param rect Rectangle used by the operation.
+     * @return The requested invalidate Rect.
+     */
     static void invalidateRect(const SwWidgetPlatformHandle& handle, const SwRect& rect);
+    /**
+     * @brief Performs the `clientRect` operation.
+     * @param handle Value passed to the method.
+     * @return The requested client Rect.
+     */
     static SwRect clientRect(const SwWidgetPlatformHandle& handle);
+    /**
+     * @brief Returns the client-area origin in screen coordinates.
+     * @param handle Value passed to the method.
+     * @return The requested client origin on screen.
+     */
+    static SwPoint clientOriginOnScreen(const SwWidgetPlatformHandle& handle);
+    /**
+     * @brief Returns the native window frame rectangle in screen coordinates.
+     * @param handle Value passed to the method.
+     * @return The requested window frame rect on screen.
+     */
+    static SwRect windowFrameRect(const SwWidgetPlatformHandle& handle);
 
+    /**
+     * @brief Performs the `characterIndexAtPosition` operation.
+     * @param handle Value passed to the method.
+     * @param text Value passed to the method.
+     * @param font Font value used by the operation.
+     * @param relativeX Value passed to the method.
+     * @param defaultWidth Value passed to the method.
+     * @return The requested character Index At Position.
+     */
     static size_t characterIndexAtPosition(const SwWidgetPlatformHandle& handle,
                                            const SwString& text,
                                            SwFont font,
                                            int relativeX,
                                            int defaultWidth);
+    /**
+     * @brief Performs the `textWidthUntil` operation.
+     * @param handle Value passed to the method.
+     * @param text Value passed to the method.
+     * @param font Font value used by the operation.
+     * @param length Value passed to the method.
+     * @param defaultWidth Value passed to the method.
+     * @return The requested text Width Until.
+     */
     static int textWidthUntil(const SwWidgetPlatformHandle& handle,
                               const SwString& text,
                               SwFont font,
                               size_t length,
                               int defaultWidth);
 
+    /**
+     * @brief Returns whether the object reports backspace Key.
+     * @param keyCode Value passed to the method.
+     * @return The requested backspace Key.
+     *
+     * @details This query does not modify the object state.
+     */
     static bool isBackspaceKey(int keyCode);
+    /**
+     * @brief Returns whether the object reports delete Key.
+     * @param keyCode Value passed to the method.
+     * @return The requested delete Key.
+     *
+     * @details This query does not modify the object state.
+     */
     static bool isDeleteKey(int keyCode);
+    /**
+     * @brief Returns whether the object reports left Arrow Key.
+     * @param keyCode Value passed to the method.
+     * @return The requested left Arrow Key.
+     *
+     * @details This query does not modify the object state.
+     */
     static bool isLeftArrowKey(int keyCode);
+    /**
+     * @brief Returns whether the object reports right Arrow Key.
+     * @param keyCode Value passed to the method.
+     * @return The requested right Arrow Key.
+     *
+     * @details This query does not modify the object state.
+     */
     static bool isRightArrowKey(int keyCode);
+    /**
+     * @brief Returns whether the object reports up Arrow Key.
+     * @param keyCode Value passed to the method.
+     * @return The requested up Arrow Key.
+     *
+     * @details This query does not modify the object state.
+     */
     static bool isUpArrowKey(int keyCode);
+    /**
+     * @brief Returns whether the object reports down Arrow Key.
+     * @param keyCode Value passed to the method.
+     * @return The requested down Arrow Key.
+     *
+     * @details This query does not modify the object state.
+     */
     static bool isDownArrowKey(int keyCode);
+    /**
+     * @brief Returns whether the object reports home Key.
+     * @param keyCode Value passed to the method.
+     * @return The requested home Key.
+     *
+     * @details This query does not modify the object state.
+     */
     static bool isHomeKey(int keyCode);
+    /**
+     * @brief Returns whether the object reports end Key.
+     * @param keyCode Value passed to the method.
+     * @return The requested end Key.
+     *
+     * @details This query does not modify the object state.
+     */
     static bool isEndKey(int keyCode);
+    /**
+     * @brief Returns whether the object reports return Key.
+     * @param keyCode Value passed to the method.
+     * @return The requested return Key.
+     *
+     * @details This query does not modify the object state.
+     */
     static bool isReturnKey(int keyCode);
+    /**
+     * @brief Returns whether the object reports escape Key.
+     * @param keyCode Value passed to the method.
+     * @return The requested escape Key.
+     *
+     * @details This query does not modify the object state.
+     */
     static bool isEscapeKey(int keyCode);
+    /**
+     * @brief Returns whether the object reports caps Lock Key.
+     * @param keyCode Value passed to the method.
+     * @return The requested caps Lock Key.
+     *
+     * @details This query does not modify the object state.
+     */
     static bool isCapsLockKey(int keyCode);
+    /**
+     * @brief Performs the `matchesShortcutKey` operation.
+     * @param keyCode Value passed to the method.
+     * @param letter Value passed to the method.
+     * @return The requested matches Shortcut Key.
+     */
     static bool matchesShortcutKey(int keyCode, char letter);
+    /**
+     * @brief Performs the `translateCharacter` operation.
+     * @param keyCode Value passed to the method.
+     * @param shiftPressed Value passed to the method.
+     * @param capsLock Value passed to the method.
+     * @param outChar Output value filled by the method.
+     * @return The requested translate Character.
+     */
     static bool translateCharacter(int keyCode, bool shiftPressed, bool capsLock, char& outChar);
+    /**
+     * @brief Returns whether the object reports shift Modifier Active.
+     * @return The current shift Modifier Active.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
     static bool isShiftModifierActive();
 #if defined(__linux__)
+    /**
+     * @brief Performs the `requestSyntheticExpose` operation.
+     * @param window Value passed to the method.
+     * @return The requested request Synthetic Expose.
+     */
     static bool requestSyntheticExpose(::Window window);
+    /**
+     * @brief Performs the `finishSyntheticExpose` operation.
+     * @param window Value passed to the method.
+     * @return The requested finish Synthetic Expose.
+     */
     static void finishSyntheticExpose(::Window window);
 #endif
 
@@ -163,6 +360,35 @@ inline SwRect SwWidgetPlatformAdapter::clientRect(const SwWidgetPlatformHandle& 
     const int w = std::max(0, static_cast<int>(clientRect.right - clientRect.left));
     const int h = std::max(0, static_cast<int>(clientRect.bottom - clientRect.top));
     return SwRect{0, 0, w, h};
+}
+
+inline SwPoint SwWidgetPlatformAdapter::clientOriginOnScreen(const SwWidgetPlatformHandle& handle) {
+    HWND hwnd = nativeHandleAs<HWND>(handle);
+    if (!hwnd) {
+        return SwPoint{0, 0};
+    }
+    POINT pt{};
+    if (!::ClientToScreen(hwnd, &pt)) {
+        return SwPoint{0, 0};
+    }
+    return SwPoint{static_cast<int>(pt.x), static_cast<int>(pt.y)};
+}
+
+inline SwRect SwWidgetPlatformAdapter::windowFrameRect(const SwWidgetPlatformHandle& handle) {
+    HWND hwnd = nativeHandleAs<HWND>(handle);
+    if (!hwnd) {
+        return SwRect{0, 0, 0, 0};
+    }
+    RECT windowRect{};
+    if (!::GetWindowRect(hwnd, &windowRect)) {
+        return SwRect{0, 0, 0, 0};
+    }
+    return SwRect{
+        static_cast<int>(windowRect.left),
+        static_cast<int>(windowRect.top),
+        std::max(0, static_cast<int>(windowRect.right - windowRect.left)),
+        std::max(0, static_cast<int>(windowRect.bottom - windowRect.top))
+    };
 }
 
 
@@ -363,6 +589,11 @@ struct Key {
     bool italic{false};
     bool underline{false};
 
+    /**
+     * @brief Performs the `operator<` operation.
+     * @param other Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
     bool operator<(const Key& other) const {
         return std::tie(family, pixelSize, bold, italic, underline) <
                std::tie(other.family, other.pixelSize, other.bold, other.italic, other.underline);
@@ -531,6 +762,29 @@ inline SwRect SwWidgetPlatformAdapter::clientRect(const SwWidgetPlatformHandle& 
     }
 
     return SwRect{0, 0, std::max(0, attrs.width), std::max(0, attrs.height)};
+}
+
+inline SwPoint SwWidgetPlatformAdapter::clientOriginOnScreen(const SwWidgetPlatformHandle& handle) {
+    Display* display = reinterpret_cast<Display*>(handle.nativeDisplay);
+    ::Window window = reinterpret_cast<::Window>(handle.nativeHandle);
+    if (!display || window == 0) {
+        return SwPoint{0, 0};
+    }
+
+    ::Window root = DefaultRootWindow(display);
+    ::Window child = 0;
+    int rootX = 0;
+    int rootY = 0;
+    if (!XTranslateCoordinates(display, window, root, 0, 0, &rootX, &rootY, &child)) {
+        return SwPoint{0, 0};
+    }
+    return SwPoint{rootX, rootY};
+}
+
+inline SwRect SwWidgetPlatformAdapter::windowFrameRect(const SwWidgetPlatformHandle& handle) {
+    const SwPoint origin = clientOriginOnScreen(handle);
+    const SwRect client = clientRect(handle);
+    return SwRect{origin.x, origin.y, client.width, client.height};
 }
 
 inline size_t SwWidgetPlatformAdapter::characterIndexAtPosition(const SwWidgetPlatformHandle& handle,
@@ -710,6 +964,8 @@ inline bool SwWidgetPlatformAdapter::isShiftModifierActive() {
 inline void SwWidgetPlatformAdapter::setCursor(CursorType) {}
 inline void SwWidgetPlatformAdapter::invalidateRect(const SwWidgetPlatformHandle&, const SwRect&) {}
 inline SwRect SwWidgetPlatformAdapter::clientRect(const SwWidgetPlatformHandle&) { return SwRect{0, 0, 0, 0}; }
+inline SwPoint SwWidgetPlatformAdapter::clientOriginOnScreen(const SwWidgetPlatformHandle&) { return SwPoint{0, 0}; }
+inline SwRect SwWidgetPlatformAdapter::windowFrameRect(const SwWidgetPlatformHandle&) { return SwRect{0, 0, 0, 0}; }
 inline size_t SwWidgetPlatformAdapter::characterIndexAtPosition(const SwWidgetPlatformHandle&,
                                                                 const SwString&,
                                                                 SwFont,

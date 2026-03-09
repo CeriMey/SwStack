@@ -1,0 +1,14 @@
+# Proxy Runtime Plan
+workerProcesses=auto
+httpPort=80
+httpsPort=443
+http2=true
+gzip=true
+proxyBuffering=true
+clientMaxBodyMb=100
+
+[UPSTREAMS]
+- id=app_main target=http://127.0.0.1:8081 active=true connectMs=3000 readMs=30000
+
+[ROUTES]
+- host=app.local.test prefix=/ -> upstream=app_main tls=false ws=true forceHttps=false stripPrefix=false rateLimitRpm=0 policy=public
