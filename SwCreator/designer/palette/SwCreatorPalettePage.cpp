@@ -1,12 +1,14 @@
 ﻿#include "SwCreatorPalettePage.h"
 
 #include "SwCreatorPaletteItem.h"
+#include "theme/SwCreatorTheme.h"
 
 #include <algorithm>
 
 SwCreatorPalettePage::SwCreatorPalettePage(SwWidget* parent)
     : SwWidget(parent) {
-    setStyleSheet("SwCreatorPalettePage { background-color: rgb(255, 255, 255); border-width: 0px; border-radius: 0px; }");
+    const auto& th = SwCreatorTheme::current();
+    setStyleSheet("SwCreatorPalettePage { background-color: " + SwCreatorTheme::rgb(th.surface2) + "; border-width: 0px; border-radius: 0px; }");
 }
 
 void SwCreatorPalettePage::refreshLayout() {

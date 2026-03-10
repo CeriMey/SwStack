@@ -909,7 +909,7 @@ protected:
 
         if (SwWidget* childWidget = getChildUnderCursor(event->x(), event->y())) {
             MouseEvent childEvent = mapMouseEventToChild_(*event, this, childWidget);
-            static_cast<SwWidgetInterface*>(childWidget)->mousePressEvent(&childEvent);
+            SwCoreApplication::sendEvent(childWidget, &childEvent);
             if (childEvent.isAccepted()) {
                 event->accept();
                 return;
@@ -1903,12 +1903,30 @@ private:
 
             const bool selected = m_selectionModel && vr.index.isValid() && m_selectionModel->isSelected(vr.index);
             const bool hovered = !selected && m_hoverIndex.isValid() && m_hoverIndex == vr.index;
-            if (selected) {
-                SwRect highlight{rowRect.x + 2, rowRect.y + 2, std::max(0, rowRect.width - 4), std::max(0, rowRect.height - 4)};
-                painter->fillRoundedRect(highlight, 6, selFill, selBorder, 1);
-            } else if (hovered) {
-                SwRect hi{rowRect.x + 2, rowRect.y + 2, std::max(0, rowRect.width - 4), std::max(0, rowRect.height - 4)};
-                painter->fillRoundedRect(hi, 6, hoverFill, hoverFill, 0);
+
+            // Skip selection/hover highlight for rows that have index widgets —
+            // the widget backgrounds would clash with the highlight (visible
+            // through rounded corners, padding gaps, etc.).
+            bool rowHasIndexWidget = false;
+            {
+                const SwModelIndex parentIdx = m_model->parent(vr.index);
+                for (int c = 0; c < cols; ++c) {
+                    SwModelIndex ci = (c == 0) ? vr.index : m_model->index(vr.index.row(), c, parentIdx);
+                    if (ci.isValid() && indexWidget(ci)) {
+                        rowHasIndexWidget = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!rowHasIndexWidget) {
+                if (selected) {
+                    SwRect highlight{rowRect.x + 2, rowRect.y + 2, std::max(0, rowRect.width - 4), std::max(0, rowRect.height - 4)};
+                    painter->fillRoundedRect(highlight, 6, selFill, selBorder, 1);
+                } else if (hovered) {
+                    SwRect hi{rowRect.x + 2, rowRect.y + 2, std::max(0, rowRect.width - 4), std::max(0, rowRect.height - 4)};
+                    painter->fillRoundedRect(hi, 6, hoverFill, hoverFill, 0);
+                }
             }
 
             const int indentX = vr.depth * m_indent;

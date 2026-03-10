@@ -1,6 +1,7 @@
 ﻿#include "SwCreatorWidgetPalette.h"
 
 #include "SwCreatorPalettePage.h"
+#include "theme/SwCreatorTheme.h"
 
 #include "SwLineEdit.h"
 #include "SwScrollArea.h"
@@ -30,7 +31,8 @@ SwCreatorPaletteEntry makeLayout(const char* category, const char* layoutName) {
 
 SwCreatorWidgetPalette::SwCreatorWidgetPalette(SwWidget* parent)
     : SwWidget(parent) {
-    setStyleSheet("SwCreatorWidgetPalette { background-color: rgb(255, 255, 255); border-width: 0px; border-radius: 0px; }");
+    const auto& th = SwCreatorTheme::current();
+    setStyleSheet("SwCreatorWidgetPalette { background-color: " + SwCreatorTheme::rgb(th.surface2) + "; border-width: 0px; border-radius: 0px; }");
     buildUi_();
     buildEntries_();
     buildPages_();
@@ -43,27 +45,19 @@ void SwCreatorWidgetPalette::resizeEvent(ResizeEvent* event) {
 }
 
 void SwCreatorWidgetPalette::buildUi_() {
+    const auto& th = SwCreatorTheme::current();
+
     m_search = new SwLineEdit(SwString("Search..."), this);
-    m_search->setStyleSheet(R"(
-            SwLineEdit {
-                background-color: rgb(244, 246, 248);
-                border-color: rgb(224, 228, 232);
-                border-width: 1px;
-                border-radius: 8px;
-                padding: 4px 10px;
-                color: rgb(15, 23, 42);
-            }
-        )");
+    m_search->setStyleSheet(
+        "SwLineEdit { background-color: " + SwCreatorTheme::rgb(th.surface3)
+        + "; border-color: " + SwCreatorTheme::rgb(th.border)
+        + "; border-width: 1px; border-radius: 8px; padding: 4px 10px;"
+        " color: " + SwCreatorTheme::rgb(th.textPrimary) + "; }");
 
     m_toolBoxScroll = new SwScrollArea(this);
     m_toolBoxScroll->setWidgetResizable(true);
-    m_toolBoxScroll->setStyleSheet(R"(
-            SwScrollArea {
-                background-color: rgb(255, 255, 255);
-                border-width: 0px;
-                border-radius: 0px;
-            }
-        )");
+    m_toolBoxScroll->setStyleSheet(
+        "SwScrollArea { background-color: " + SwCreatorTheme::rgb(th.surface2) + "; border-width: 0px; border-radius: 0px; }");
 
     m_toolBox = new SwToolBox(nullptr);
     m_toolBox->setContentBasedLayout(true);
@@ -71,29 +65,21 @@ void SwCreatorWidgetPalette::buildUi_() {
     m_toolBox->setContentsMargin(0);
     m_toolBox->setSpacing(0);
     m_toolBox->setHeaderHeight(26);
-    m_toolBox->setStyleSheet(R"(
-            SwToolBox {
-                background-color: rgb(255, 255, 255);
-                border-width: 0px;
-                border-radius: 0px;
-            }
-        )");
-    m_toolBox->setHeaderStyleSheet(R"(
-            SwToolButton {
-                background-color: rgb(241, 244, 247);
-                background-color-hover: rgb(236, 240, 244);
-                background-color-pressed: rgb(229, 233, 238);
-                background-color-checked: rgb(236, 240, 244);
-                border-color: rgb(226, 230, 234);
-                border-width: 1px;
-                border-radius: 0px;
-                color: rgb(15, 23, 42);
-                color-disabled: rgb(148, 163, 184);
-                indicator-color: rgb(71, 85, 105);
-                indicator-color-disabled: rgb(148, 163, 184);
-                padding: 3px 10px;
-            }
-        )");
+    m_toolBox->setStyleSheet(
+        "SwToolBox { background-color: " + SwCreatorTheme::rgb(th.surface2) + "; border-width: 0px; border-radius: 0px; }");
+    m_toolBox->setHeaderStyleSheet(
+        "SwToolButton {"
+        " background-color: " + SwCreatorTheme::rgb(th.surface3)
+        + "; background-color-hover: " + SwCreatorTheme::rgb(th.hoverBg)
+        + "; background-color-pressed: " + SwCreatorTheme::rgb(th.pressedBg)
+        + "; background-color-checked: " + SwCreatorTheme::rgb(th.hoverBg)
+        + "; border-color: " + SwCreatorTheme::rgb(th.border)
+        + "; border-width: 0px; border-radius: 0px;"
+        " color: " + SwCreatorTheme::rgb(th.textPrimary)
+        + "; color-disabled: " + SwCreatorTheme::rgb(th.textMuted)
+        + "; indicator-color: " + SwCreatorTheme::rgb(th.textSecondary)
+        + "; indicator-color-disabled: " + SwCreatorTheme::rgb(th.textMuted)
+        + "; padding: 3px 10px; }");
 
     m_toolBoxScroll->setWidget(m_toolBox);
 

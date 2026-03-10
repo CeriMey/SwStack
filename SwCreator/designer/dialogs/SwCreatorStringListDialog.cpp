@@ -5,6 +5,7 @@
 #include "SwListWidget.h"
 #include "SwPushButton.h"
 #include "SwToolButton.h"
+#include "theme/SwCreatorTheme.h"
 
 #include <algorithm>
 
@@ -32,15 +33,14 @@ SwString uniqueDefaultItemName(const SwVector<SwString>& items) {
 }
 
 SwString previewButtonCss() {
-    return R"(
-        SwToolButton {
-            background-color: rgb(248, 250, 252);
-            border-color: rgb(226, 232, 240);
-            border-width: 1px;
-            border-radius: 10px;
-            padding: 0px;
-        }
-    )";
+    const auto& th = SwCreatorTheme::current();
+    return "SwToolButton {"
+           " background-color: " + SwCreatorTheme::rgb(th.surface3) + ";"
+           " border-color: " + SwCreatorTheme::rgb(th.border) + ";"
+           " border-width: 1px;"
+           " border-radius: 10px;"
+           " padding: 0px;"
+           " }";
 }
 } // namespace
 
@@ -70,6 +70,8 @@ void SwCreatorStringListDialog::buildUi_() {
         return;
     }
 
+    const auto& th = SwCreatorTheme::current();
+
     if (auto* content = contentWidget()) {
         auto* layout = new SwVerticalLayout(content);
         layout->setMargin(0);
@@ -85,16 +87,16 @@ void SwCreatorStringListDialog::buildUi_() {
 
         m_edit = new SwLineEdit(row);
         m_edit->setPlaceholder("Item text");
-        m_edit->setStyleSheet(R"(
-            SwLineEdit {
-                background-color: rgb(248, 250, 252);
-                border-color: rgb(226, 232, 240);
-                border-width: 1px;
-                border-radius: 10px;
-                padding: 4px 8px;
-                color: rgb(15, 23, 42);
-            }
-        )");
+        m_edit->setStyleSheet(
+            "SwLineEdit {"
+            " background-color: " + SwCreatorTheme::rgb(th.surface3) + ";"
+            " border-color: " + SwCreatorTheme::rgb(th.border) + ";"
+            " border-width: 1px;"
+            " border-radius: 10px;"
+            " padding: 4px 8px;"
+            " color: " + SwCreatorTheme::rgb(th.textPrimary) + ";"
+            " }"
+        );
         SwObject::connect(m_edit, &SwLineEdit::FocusChanged, this, [this](bool focus) {
             if (focus) {
                 return;
@@ -165,15 +167,15 @@ void SwCreatorStringListDialog::buildUi_() {
         layout->addWidget(row, 0, 38);
 
         m_list = new SwListWidget(content);
-        m_list->setStyleSheet(R"(
-            SwListView {
-                background-color: rgb(255, 255, 255);
-                border-color: rgb(226, 232, 240);
-                border-width: 1px;
-                border-radius: 12px;
-                padding: 6px;
-            }
-        )");
+        m_list->setStyleSheet(
+            "SwListView {"
+            " background-color: " + SwCreatorTheme::rgb(th.surface1) + ";"
+            " border-color: " + SwCreatorTheme::rgb(th.border) + ";"
+            " border-width: 1px;"
+            " border-radius: 12px;"
+            " padding: 6px;"
+            " }"
+        );
         layout->addWidget(m_list, 1, 0);
 
         if (m_list && m_list->selectionModel()) {

@@ -115,7 +115,8 @@ public:
           selectionStart(0), selectionEnd(0), isSelecting(false) {
         resize(300, 30);
         setCursor(CursorType::IBeam);
-        setPlaceholder(placeholderText);
+        const SwString effectivePlaceholder = placeholderText.isEmpty() ? SwString("Enter text...") : placeholderText;
+        setPlaceholder(effectivePlaceholder);
         connect(this, &SwLineEdit::TextChanged, [this](const SwString& text) {
             setDisplayText(text);
         });
@@ -177,6 +178,7 @@ public:
 
         resize(300, 30);
         setCursor(CursorType::IBeam);
+        setPlaceholder("Enter text...");
         connect(this, &SwLineEdit::TextChanged, [this](const SwString& text) {
             setDisplayText(text);
         });
@@ -284,7 +286,7 @@ public:
             firstVisibleCharacter = 0;
         }
 
-        size_t clampedVisible = (std::min)(firstVisibleCharacter, textToDraw.length());
+        size_t clampedVisible = clampUtf8Boundary_(textToDraw, (std::min)(firstVisibleCharacter, textToDraw.length()));
         int viewStartPx = SwWidgetPlatformAdapter::textWidthUntil(handle,
                                                                   textToDraw,
                                                                   font,
@@ -348,14 +350,19 @@ public:
         }
 
         const int keyCode = event->key();
+        const bool altGrTextInput = event->isCtrlPressed() &&
+                                    event->isAltPressed() &&
+                                    event->text() != L'\0';
+        const bool shortcutCtrl = event->isCtrlPressed() && !altGrTextInput;
 
         auto deleteBackward = [&]() {
             if (selectionStart != selectionEnd) {
                 deleteSelection();
                 emit TextChanged(m_Text);
             } else if (cursorPos > 0) {
-                m_Text.erase(cursorPos - 1, 1);
-                cursorPos--;
+                const size_t prev = previousUtf8Boundary_(m_Text, cursorPos);
+                m_Text.erase(prev, cursorPos - prev);
+                cursorPos = prev;
                 emit TextChanged(m_Text);
             }
             if (firstVisibleCharacter > m_Text.length()) {
@@ -368,7 +375,8 @@ public:
                 deleteSelection();
                 emit TextChanged(m_Text);
             } else if (cursorPos < m_Text.length()) {
-                m_Text.erase(cursorPos, 1);
+                const size_t next = nextUtf8Boundary_(m_Text, cursorPos);
+                m_Text.erase(cursorPos, next - cursorPos);
                 emit TextChanged(m_Text);
             }
             if (firstVisibleCharacter > m_Text.length()) {
@@ -376,7 +384,7 @@ public:
             }
         };
 
-        if (event->isCtrlPressed()) {
+        if (shortcutCtrl) {
             if (SwWidgetPlatformAdapter::matchesShortcutKey(keyCode, 'C')) {
                 copySelectionToClipboard();
             } else if (SwWidgetPlatformAdapter::matchesShortcutKey(keyCode, 'V')) {
@@ -398,7 +406,7 @@ public:
             deleteForward();
         } else if (SwWidgetPlatformAdapter::isLeftArrowKey(keyCode)) {
             if (cursorPos > 0) {
-                cursorPos--;
+                cursorPos = previousUtf8Boundary_(m_Text, cursorPos);
                 if (event->isShiftPressed()) {
                     selectionEnd = cursorPos;
                 } else {
@@ -408,7 +416,7 @@ public:
             }
         } else if (SwWidgetPlatformAdapter::isRightArrowKey(keyCode)) {
             if (cursorPos < m_Text.length()) {
-                cursorPos++;
+                cursorPos = nextUtf8Boundary_(m_Text, cursorPos);
                 if (event->isShiftPressed()) {
                     selectionEnd = cursorPos;
                 } else {
@@ -453,24 +461,9 @@ public:
                 }
             }
             if (wc != L'\0') {
-                // Encode as UTF-8 (1 byte for ASCII, 2 bytes for Latin-1 like Ãª/Ã /Ã©, 3 for BMP)
-                char utf8[4] = {};
-                int utf8len = 0;
-                if (wc < 0x80) {
-                    utf8[0] = static_cast<char>(wc);
-                    utf8len = 1;
-                } else if (wc < 0x800) {
-                    utf8[0] = static_cast<char>(0xC0 | (wc >> 6));
-                    utf8[1] = static_cast<char>(0x80 | (wc & 0x3F));
-                    utf8len = 2;
-                } else {
-                    utf8[0] = static_cast<char>(0xE0 | (wc >> 12));
-                    utf8[1] = static_cast<char>(0x80 | ((wc >> 6) & 0x3F));
-                    utf8[2] = static_cast<char>(0x80 | (wc & 0x3F));
-                    utf8len = 3;
-                }
-                m_Text.insert(static_cast<size_t>(cursorPos), std::string(utf8, static_cast<size_t>(utf8len)));
-                cursorPos += utf8len;
+                const SwString inserted = utf8FromWideChar_(wc);
+                m_Text.insert(static_cast<size_t>(cursorPos), inserted);
+                cursorPos += inserted.length();
                 selectionStart = selectionEnd = cursorPos;
                 emit TextChanged(m_Text);
                 if (firstVisibleCharacter > m_Text.length()) {
@@ -580,6 +573,51 @@ private:
     size_t firstVisibleCharacter{0};
     SwColor m_focusAccent{59, 130, 246};
 
+    static bool isUtf8ContinuationByte_(unsigned char byte) {
+        return (byte & 0xC0U) == 0x80U;
+    }
+
+    static size_t clampUtf8Boundary_(const SwString& text, size_t offset) {
+        const std::string utf8 = text.toStdString();
+        if (offset >= utf8.size()) {
+            return utf8.size();
+        }
+        while (offset > 0 && isUtf8ContinuationByte_(static_cast<unsigned char>(utf8[offset]))) {
+            --offset;
+        }
+        return offset;
+    }
+
+    static size_t nextUtf8Boundary_(const SwString& text, size_t offset) {
+        const std::string utf8 = text.toStdString();
+        if (offset >= utf8.size()) {
+            return utf8.size();
+        }
+        size_t next = clampUtf8Boundary_(text, offset) + 1;
+        while (next < utf8.size() && isUtf8ContinuationByte_(static_cast<unsigned char>(utf8[next]))) {
+            ++next;
+        }
+        return next;
+    }
+
+    static size_t previousUtf8Boundary_(const SwString& text, size_t offset) {
+        const std::string utf8 = text.toStdString();
+        size_t current = std::min(offset, utf8.size());
+        if (current == 0) {
+            return 0;
+        }
+        --current;
+        while (current > 0 && isUtf8ContinuationByte_(static_cast<unsigned char>(utf8[current]))) {
+            --current;
+        }
+        return current;
+    }
+
+    static SwString utf8FromWideChar_(wchar_t wc) {
+        const std::wstring wide(1, wc);
+        return SwString::fromWString(wide);
+    }
+
     SwPlatformIntegration* currentPlatformIntegration() const {
         SwGuiApplication* app = SwGuiApplication::instance(false);
         return app ? app->platformIntegration() : nullptr;
@@ -603,7 +641,7 @@ private:
         auto handle = nativeWindowHandle();
         SwFont font = getFont();
         const SwString& display = m_DisplayText;
-        size_t clampedVisible = (std::min)(firstVisibleCharacter, display.length());
+        size_t clampedVisible = clampUtf8Boundary_(display, (std::min)(firstVisibleCharacter, display.length()));
         int viewStartPx = SwWidgetPlatformAdapter::textWidthUntil(handle,
                                                                   display,
                                                                   font,
@@ -791,6 +829,7 @@ private:
             firstVisibleCharacter = 0;
             return;
         }
+        firstVisibleCharacter = clampUtf8Boundary_(textToDraw, firstVisibleCharacter);
         auto handle = nativeWindowHandle();
         SwFont font = getFont();
         areaWidth = std::max(1, areaWidth);
@@ -798,7 +837,7 @@ private:
             return SwWidgetPlatformAdapter::textWidthUntil(handle, textToDraw, font, index, areaWidth);
         };
 
-        size_t clampedCursor = (std::min)(cursorPos, length);
+        size_t clampedCursor = clampUtf8Boundary_(textToDraw, (std::min)(cursorPos, length));
         int caretPx = widthUntil(clampedCursor);
         int startPx = widthUntil(firstVisibleCharacter);
 
@@ -808,7 +847,7 @@ private:
         }
 
         while (caretPx - startPx > areaWidth && firstVisibleCharacter < length) {
-            ++firstVisibleCharacter;
+            firstVisibleCharacter = nextUtf8Boundary_(textToDraw, firstVisibleCharacter);
             startPx = widthUntil(firstVisibleCharacter);
         }
 
@@ -820,7 +859,7 @@ private:
 
         int maxStartPx = totalWidth - areaWidth;
         while (startPx > maxStartPx && firstVisibleCharacter > 0) {
-            --firstVisibleCharacter;
+            firstVisibleCharacter = previousUtf8Boundary_(textToDraw, firstVisibleCharacter);
             startPx = widthUntil(firstVisibleCharacter);
         }
 

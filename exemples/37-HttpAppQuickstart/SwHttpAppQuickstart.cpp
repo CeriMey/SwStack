@@ -13,6 +13,20 @@
 #include "platform/SwPlatformSelector.h"
 
 #if defined(__has_include)
+#if __has_include("SwHttpAppQuickstartConfig.h")
+#include "SwHttpAppQuickstartConfig.h"
+#endif
+#endif
+
+#ifndef SW_HTTP_APP_QUICKSTART_DEFAULT_WWW_DIR
+#define SW_HTTP_APP_QUICKSTART_DEFAULT_WWW_DIR "exemples/37-HttpAppQuickstart/runtime/http_app_quickstart_www"
+#endif
+
+#ifndef SW_HTTP_APP_QUICKSTART_DEFAULT_UPLOADS_DIR
+#define SW_HTTP_APP_QUICKSTART_DEFAULT_UPLOADS_DIR "exemples/37-HttpAppQuickstart/runtime/http_app_quickstart_uploads"
+#endif
+
+#if defined(__has_include)
 #if __has_include("src/core/runtime/SwThreadPool.h")
 #include "src/core/runtime/SwThreadPool.h"
 #else
@@ -24,6 +38,14 @@
 #else
 #include "SwThreadPool.h"
 #endif
+
+static SwString defaultWwwRoot_() {
+    return SwString(SW_HTTP_APP_QUICKSTART_DEFAULT_WWW_DIR);
+}
+
+static SwString defaultUploadsRoot_() {
+    return SwString(SW_HTTP_APP_QUICKSTART_DEFAULT_UPLOADS_DIR);
+}
 
 static bool parseIntArg_(const SwString& value, int& outValue) {
     bool ok = false;
@@ -1703,11 +1725,11 @@ static SwString buildProxyRuntimePlan_(const ProxyControlConfig& config) {
 
 static void printUsage_() {
     swDebug() << "[HttpAppQuickstart] Usage:";
-    swDebug() << "  HttpAppQuickstart --port 8080 --www ./http_app_quickstart_www --uploads ./http_app_quickstart_uploads --workers 4";
+    swDebug() << "  HttpAppQuickstart --port 8080 --workers 4";
     swDebug() << "  Options:";
     swDebug() << "    --port <n>       HTTP listening port (default: 8080)";
-    swDebug() << "    --www <path>     Static public directory (default: ./http_app_quickstart_www)";
-    swDebug() << "    --uploads <path> Upload storage directory (default: ./http_app_quickstart_uploads)";
+    swDebug() << "    --www <path>     Static public directory (default: " << defaultWwwRoot_() << ")";
+    swDebug() << "    --uploads <path> Upload storage directory (default: " << defaultUploadsRoot_() << ")";
     swDebug() << "    --workers <n>    SwThreadPool worker count (default: CPU count from global pool)";
     swDebug() << "    --no-threadpool  Keep inline request dispatch";
     swDebug() << "    --help / -h      Show this help";
@@ -1734,8 +1756,8 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    const SwString wwwArg = app.getArgument("www", "http_app_quickstart_www");
-    const SwString uploadsArg = app.getArgument("uploads", "http_app_quickstart_uploads");
+    const SwString wwwArg = app.getArgument("www", defaultWwwRoot_());
+    const SwString uploadsArg = app.getArgument("uploads", defaultUploadsRoot_());
     const bool useThreadPool = !app.hasArgument("no-threadpool");
 
     int workersArg = -1;

@@ -57,6 +57,7 @@
 #include "platform/SwPlatformIntegration.h"
 #include "core/gui/SwWidgetPlatformAdapter.h"
 #include "core/runtime/SwCoreApplication.h"
+#include "platform/x11/SwX11Painter.h"
 
 #include <algorithm>
 #include <chrono>
@@ -178,200 +179,6 @@ private:
     std::vector<std::uint8_t> m_pixels;
 };
 
-class SwX11PlatformPainter : public SwPlatformPainter {
-public:
-    /**
-     * @brief Constructs a `SwX11PlatformPainter` instance.
-     * @param display Value passed to the method.
-     * @param screen Value passed to the method.
-     *
-     * @details The instance is initialized and prepared for immediate use.
-     */
-    SwX11PlatformPainter(Display* display, int screen);
-
-    /**
-     * @brief Performs the `begin` operation.
-     * @param surface Value passed to the method.
-     */
-    void begin(void* surface) override;
-    /**
-     * @brief Performs the `end` operation.
-     */
-    void end() override;
-    /**
-     * @brief Performs the `flush` operation.
-     */
-    void flush() override;
-    /**
-     * @brief Performs the `drawImage` operation.
-     * @param image Value passed to the method.
-     * @param srcRect Value passed to the method.
-     * @param dstPoint Value passed to the method.
-     */
-    void drawImage(const SwPlatformImage& image,
-                   const SwPlatformRect& srcRect,
-                   const SwPlatformPoint& dstPoint) override;
-    /**
-     * @brief Performs the `fillRect` operation.
-     * @param rect Rectangle used by the operation.
-     * @param argb Value passed to the method.
-     */
-    void fillRect(const SwPlatformRect& rect, std::uint32_t argb) override;
-
-    ::Window targetWindow() const { return m_targetWindow; }
-
-private:
-    bool ensureDrawable();
-    bool buildXImage(const SwPlatformImage& image, XImage& outImage) const;
-
-    Display* m_display{nullptr};
-    int m_screen{0};
-    int m_depth{24};
-    ::Window m_targetWindow{0};
-    bool m_active{false};
-    GC m_gc{0};
-};
-
-inline SwX11PlatformPainter::SwX11PlatformPainter(Display* display, int screen)
-    : m_display(display), m_screen(screen) {
-    if (m_display) {
-        m_depth = DefaultDepth(m_display, screen);
-    }
-}
-
-inline void SwX11PlatformPainter::begin(void* surface) {
-    if (!surface) {
-        throw std::runtime_error("X11 painter requires a valid surface.");
-    }
-
-    ::Window requestedTarget = reinterpret_cast<::Window>(reinterpret_cast<std::uintptr_t>(surface));
-    if (m_active && requestedTarget == m_targetWindow) {
-        return;
-    }
-
-    end();
-    m_targetWindow = requestedTarget;
-    if (!ensureDrawable()) {
-        throw std::runtime_error("Unable to create X11 graphics context.");
-    }
-    m_active = true;
-}
-
-inline void SwX11PlatformPainter::end() {
-    if (m_gc) {
-        XFreeGC(m_display, m_gc);
-        m_gc = 0;
-    }
-    m_active = false;
-    m_targetWindow = 0;
-}
-
-inline void SwX11PlatformPainter::flush() {
-    if (m_display) {
-        XFlush(m_display);
-    }
-}
-
-inline void SwX11PlatformPainter::drawImage(const SwPlatformImage& image,
-                                            const SwPlatformRect& srcRect,
-                                            const SwPlatformPoint& dstPoint) {
-    if (!ensureDrawable()) {
-        return;
-    }
-
-    XImage xImage;
-    if (!buildXImage(image, xImage)) {
-        return;
-    }
-
-    const int boundedSrcX = std::max(0, std::min(srcRect.x, image.size().width));
-    const int boundedSrcY = std::max(0, std::min(srcRect.y, image.size().height));
-    const int copyWidth = std::max(0, std::min(srcRect.width, image.size().width - boundedSrcX));
-    const int copyHeight = std::max(0, std::min(srcRect.height, image.size().height - boundedSrcY));
-    if (copyWidth == 0 || copyHeight == 0) {
-        return;
-    }
-
-    XPutImage(m_display,
-              m_targetWindow,
-              m_gc,
-              &xImage,
-              boundedSrcX,
-              boundedSrcY,
-              dstPoint.x,
-              dstPoint.y,
-              static_cast<unsigned int>(copyWidth),
-              static_cast<unsigned int>(copyHeight));
-}
-
-inline void SwX11PlatformPainter::fillRect(const SwPlatformRect& rect, std::uint32_t argb) {
-    if (!ensureDrawable()) {
-        return;
-    }
-
-    const unsigned long pixel =
-        ((argb >> 16) & 0xFF) << 16 |
-        ((argb >> 8) & 0xFF) << 8 |
-        (argb & 0xFF);
-
-    XSetForeground(m_display, m_gc, pixel);
-    XFillRectangle(m_display,
-                   m_targetWindow,
-                   m_gc,
-                   rect.x,
-                   rect.y,
-                   static_cast<unsigned int>(rect.width),
-                   static_cast<unsigned int>(rect.height));
-}
-
-inline bool SwX11PlatformPainter::ensureDrawable() {
-    if (!m_display || !m_targetWindow) {
-        return false;
-    }
-    if (!m_gc) {
-        m_gc = XCreateGC(m_display, m_targetWindow, 0, nullptr);
-    }
-    return m_gc != 0;
-}
-
-inline bool SwX11PlatformPainter::buildXImage(const SwPlatformImage& image, XImage& outImage) const {
-    if (!m_display) {
-        return false;
-    }
-
-    const SwPlatformSize size = image.size();
-    if (size.width == 0 || size.height == 0) {
-        return false;
-    }
-
-    std::memset(&outImage, 0, sizeof(outImage));
-    outImage.width = size.width;
-    outImage.height = size.height;
-    outImage.format = ZPixmap;
-    outImage.data = reinterpret_cast<char*>(const_cast<std::uint8_t*>(image.pixels()));
-    outImage.byte_order = LSBFirst;
-    outImage.bitmap_unit = 32;
-    outImage.bitmap_bit_order = LSBFirst;
-    outImage.bitmap_pad = 32;
-    outImage.depth = m_depth >= 24 ? 24 : m_depth;
-    outImage.bits_per_pixel = image.format() == SwPixelFormat::RGB24 || image.format() == SwPixelFormat::BGR24
-        ? 24
-        : 32;
-    outImage.bytes_per_line = image.pitch();
-    unsigned long redMask = 0x00FF0000;
-    unsigned long greenMask = 0x0000FF00;
-    unsigned long blueMask = 0x000000FF;
-    if (image.format() == SwPixelFormat::BGR24 || image.format() == SwPixelFormat::ABGR32) {
-        redMask = 0x000000FF;
-        greenMask = 0x0000FF00;
-        blueMask = 0x00FF0000;
-    }
-    outImage.red_mask = redMask;
-    outImage.green_mask = greenMask;
-    outImage.blue_mask = blueMask;
-    return XInitImage(&outImage) != 0;
-}
-
 class SwX11PlatformWindow : public SwPlatformWindow {
 public:
     /**
@@ -439,6 +246,13 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     void* nativeHandle() const override;
+    /**
+     * @brief Returns the native X11 display associated with this window.
+     * @return The current native display.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
+    void* nativeDisplay() const override;
 
     ::Window handle() const { return m_window; }
     /**
@@ -518,7 +332,8 @@ public:
     std::unique_ptr<SwPlatformWindow> createWindow(const std::string& title,
                                                    int width,
                                                    int height,
-                                                   const SwWindowCallbacks& callbacks) override;
+                                                   const SwWindowCallbacks& callbacks,
+                                                   const SwPlatformWindowOptions& options = {}) override;
 
     /**
      * @brief Returns the current painter.
@@ -530,7 +345,7 @@ public:
         if (!m_display) {
             throw std::runtime_error("X11 backend must be initialized before creating a painter.");
         }
-        return std::unique_ptr<SwPlatformPainter>(new SwX11PlatformPainter(m_display, m_screen));
+        return std::unique_ptr<SwPlatformPainter>(new SwX11Painter());
     }
 
     /**
@@ -649,7 +464,8 @@ private:
     void dispatchEvent(const XEvent& event);
     void handleMouseEvent(const XEvent& event, bool pressed);
     void handleMotionEvent(const XEvent& event);
-    void handleKeyEvent(const XEvent& event);
+    void handleLeaveEvent(const XEvent& event);
+    void handleKeyEvent(const XEvent& event, bool pressed);
     void handleConfigureEvent(const XConfigureEvent& event);
     void handleClientMessage(const XClientMessageEvent& event);
     void handleSelectionRequest(const XSelectionRequestEvent& event);
@@ -729,8 +545,8 @@ inline SwX11PlatformWindow::SwX11PlatformWindow(SwX11PlatformIntegration* integr
     // Windows 11 default surface: rgb(249, 249, 249)
     attributes.background_pixel = (249u << 16) | (249u << 8) | 249u;
     attributes.border_pixel = BlackPixel(m_display, screen);
-    attributes.event_mask = ExposureMask | KeyPressMask | ButtonPressMask | ButtonReleaseMask |
-                            PointerMotionMask | StructureNotifyMask;
+    attributes.event_mask = ExposureMask | KeyPressMask | KeyReleaseMask | ButtonPressMask | ButtonReleaseMask |
+                            PointerMotionMask | LeaveWindowMask | StructureNotifyMask;
 
     m_window = XCreateWindow(m_display,
                              RootWindow(m_display, screen),
@@ -751,8 +567,8 @@ inline SwX11PlatformWindow::SwX11PlatformWindow(SwX11PlatformIntegration* integr
 
     XSelectInput(m_display,
                  m_window,
-                 ExposureMask | KeyPressMask | ButtonPressMask | ButtonReleaseMask |
-                     PointerMotionMask | StructureNotifyMask);
+                 ExposureMask | KeyPressMask | KeyReleaseMask | ButtonPressMask | ButtonReleaseMask |
+                     PointerMotionMask | LeaveWindowMask | StructureNotifyMask);
 
     Atom protocols[1] = { integration->deleteWindowAtom() };
     XSetWMProtocols(m_display, m_window, protocols, 1);
@@ -803,7 +619,9 @@ inline void SwX11PlatformWindow::setTitle(const std::string& title) {
 
 inline void SwX11PlatformWindow::resize(int width, int height) {
     if (m_display && m_window) {
-        XResizeWindow(m_display, m_window, static_cast<unsigned int>(width), static_cast<unsigned int>(height));
+        XResizeWindow(m_display, m_window,
+                      static_cast<unsigned int>(std::max(1, width)),
+                      static_cast<unsigned int>(std::max(1, height)));
     }
 }
 
@@ -829,6 +647,10 @@ inline void SwX11PlatformWindow::requestUpdate() {
 
 inline void* SwX11PlatformWindow::nativeHandle() const {
     return reinterpret_cast<void*>(static_cast<std::uintptr_t>(m_window));
+}
+
+inline void* SwX11PlatformWindow::nativeDisplay() const {
+    return m_display;
 }
 
 inline void SwX11PlatformIntegration::initialize(SwGuiApplication* app) {
@@ -896,10 +718,13 @@ inline std::unique_ptr<SwPlatformWindow> SwX11PlatformIntegration::createWindow(
     const std::string& title,
     int width,
     int height,
-    const SwWindowCallbacks& callbacks) {
+    const SwWindowCallbacks& callbacks,
+    const SwPlatformWindowOptions& options) {
     if (!m_display) {
         throw std::runtime_error("X11 backend is not initialized.");
     }
+
+    (void)options;
 
     std::unique_ptr<SwX11PlatformWindow> window(
         new SwX11PlatformWindow(this, m_display, m_screen, title, width, height, callbacks));
@@ -936,7 +761,18 @@ inline void SwX11PlatformIntegration::dispatchEvent(const XEvent& event) {
         SwWidgetPlatformAdapter::finishSyntheticExpose(event.xexpose.window);
         if (auto* window = findWindow(event.xexpose.window)) {
             if (window->callbacks().paintRequestHandler) {
-                window->callbacks().paintRequestHandler();
+                SwPlatformPaintEvent paintEvent;
+                paintEvent.dirtyRect = SwPlatformRect{
+                    event.xexpose.x,
+                    event.xexpose.y,
+                    event.xexpose.width,
+                    event.xexpose.height
+                };
+                paintEvent.surfaceSize = window->m_size;
+                paintEvent.nativePaintDevice = window->nativeHandle();
+                paintEvent.nativeWindowHandle = window->nativeHandle();
+                paintEvent.nativeDisplay = window->nativeDisplay();
+                window->callbacks().paintRequestHandler(paintEvent);
             }
         }
         break;
@@ -952,8 +788,14 @@ inline void SwX11PlatformIntegration::dispatchEvent(const XEvent& event) {
     case MotionNotify:
         handleMotionEvent(event);
         break;
+    case LeaveNotify:
+        handleLeaveEvent(event);
+        break;
     case KeyPress:
-        handleKeyEvent(event);
+        handleKeyEvent(event, true);
+        break;
+    case KeyRelease:
+        handleKeyEvent(event, false);
         break;
     case ClientMessage:
         handleClientMessage(event.xclient);
@@ -1020,13 +862,37 @@ inline void SwX11PlatformIntegration::handleMotionEvent(const XEvent& event) {
     window->callbacks().mouseMoveHandler(toMouseMoveEvent(event.xmotion));
 }
 
-inline void SwX11PlatformIntegration::handleKeyEvent(const XEvent& event) {
+inline void SwX11PlatformIntegration::handleLeaveEvent(const XEvent& event) {
+    if (event.xcrossing.mode != NotifyNormal) {
+        return;
+    }
+    if (event.xcrossing.detail == NotifyInferior) {
+        return;
+    }
+    auto* window = findWindow(event.xcrossing.window);
+    if (!window || !window->callbacks().mouseLeaveHandler) {
+        return;
+    }
+    window->callbacks().mouseLeaveHandler();
+}
+
+inline void SwX11PlatformIntegration::handleKeyEvent(const XEvent& event, bool pressed) {
     auto* window = findWindow(event.xkey.window);
-    if (!window || !window->callbacks().keyPressHandler) {
+    if (!window) {
         return;
     }
 
-    window->callbacks().keyPressHandler(toKeyEvent(event.xkey));
+    SwKeyEvent keyEvent = toKeyEvent(event.xkey);
+    if (pressed) {
+        if (window->callbacks().keyPressHandler) {
+            window->callbacks().keyPressHandler(keyEvent);
+        }
+        return;
+    }
+
+    if (window->callbacks().keyReleaseHandler) {
+        window->callbacks().keyReleaseHandler(keyEvent);
+    }
 }
 
 inline void SwX11PlatformIntegration::handleConfigureEvent(const XConfigureEvent& event) {
@@ -1040,7 +906,13 @@ inline void SwX11PlatformIntegration::handleConfigureEvent(const XConfigureEvent
         window->callbacks().resizeHandler(SwPlatformSize{event.width, event.height});
     }
     if (window->callbacks().paintRequestHandler) {
-        window->callbacks().paintRequestHandler();
+        SwPlatformPaintEvent paintEvent;
+        paintEvent.dirtyRect = SwPlatformRect{0, 0, event.width, event.height};
+        paintEvent.surfaceSize = SwPlatformSize{event.width, event.height};
+        paintEvent.nativePaintDevice = window->nativeHandle();
+        paintEvent.nativeWindowHandle = window->nativeHandle();
+        paintEvent.nativeDisplay = window->nativeDisplay();
+        window->callbacks().paintRequestHandler(paintEvent);
     }
 }
 
@@ -1371,7 +1243,8 @@ public:
     std::unique_ptr<SwPlatformWindow> createWindow(const std::string&,
                                                    int,
                                                    int,
-                                                   const SwWindowCallbacks&) override {
+                                                   const SwWindowCallbacks&,
+                                                   const SwPlatformWindowOptions& = {}) override {
         throw std::runtime_error("X11 backend is not available on this platform.");
     }
 

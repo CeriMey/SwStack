@@ -91,7 +91,7 @@ protected:
         int cursor = 0;
         int scanStart = 0;
 
-        setCurrentBlockState(-1);
+        setCurrentBlockState(NormalState);
 
         if (previousBlockState() == BlockCommentState) {
             const int commentEnd = findBlockCommentEnd_(text, 0);
@@ -238,6 +238,7 @@ protected:
 
 private:
     enum BlockState {
+        NormalState = 0,
         BlockCommentState = 1
     };
 

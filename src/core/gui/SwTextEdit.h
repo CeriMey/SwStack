@@ -270,16 +270,48 @@ private:
         return nullptr;
     }
 
-    const EmbeddedTable* tableForLine(int visualLineIndex) const {
-        // Convert visual line index to logical line index
-        // by counting how many '\n' appear before the start of this visual line
-        if (visualLineIndex < 0 || visualLineIndex >= static_cast<int>(m_lineStarts.size()))
-            return nullptr;
-        size_t charPos = m_lineStarts[visualLineIndex];
-        int logicalLine = 0;
-        for (size_t j = 0; j < charPos && j < m_text.size(); ++j) {
-            if (m_text[j] == '\n') logicalLine++;
+    size_t documentLength_() const {
+        return m_pieceTable.totalLength();
+    }
+
+    bool documentIsEmpty_() const {
+        return m_pieceTable.isEmpty();
+    }
+
+    SwString documentText_() const {
+        return m_pieceTable.toPlainText();
+    }
+
+    int logicalLineCount_() const {
+        return m_pieceTable.lineCount();
+    }
+
+    size_t logicalLineStart_(int lineIndex) const {
+        if (lineIndex < 0) {
+            return 0;
         }
+        return m_pieceTable.lineStart(lineIndex);
+    }
+
+    size_t logicalLineLength_(int lineIndex) const {
+        if (lineIndex < 0 || lineIndex >= logicalLineCount_()) {
+            return 0;
+        }
+        return m_pieceTable.lineLength(lineIndex);
+    }
+
+    SwString logicalLineText_(int lineIndex) const {
+        if (lineIndex < 0 || lineIndex >= logicalLineCount_()) {
+            return SwString();
+        }
+        return m_pieceTable.lineContent(lineIndex);
+    }
+
+    const EmbeddedTable* tableForLine(int visualLineIndex) const {
+        if (visualLineIndex < 0 || visualLineIndex >= logicalLineCount_())
+            return nullptr;
+        const size_t charPos = logicalLineStart_(visualLineIndex);
+        const int logicalLine = m_pieceTable.lineForOffset(charPos);
         return tableForLogicalLine(logicalLine);
     }
 
@@ -1240,10 +1272,10 @@ inline void SwTextEdit::normalizeRuns() {
 
 inline void SwTextEdit::rebuildRunsFromPlainText() {
     m_runs.clear();
-    if (m_text.isEmpty()) {
+    if (documentIsEmpty_()) {
         return;
     }
-    m_runs.push_back(Run{m_text, TextFormat{}});
+    m_runs.push_back(Run{documentText_(), TextFormat{}});
 }
 
 inline bool SwTextEdit::runsMatchPlainText() const {
@@ -1251,7 +1283,7 @@ inline bool SwTextEdit::runsMatchPlainText() const {
     for (const Run& run : m_runs) {
         total += run.text.size();
     }
-    if (total != m_text.size()) {
+    if (total != documentLength_()) {
         return false;
     }
 
@@ -1260,7 +1292,7 @@ inline bool SwTextEdit::runsMatchPlainText() const {
         if (run.text.isEmpty()) {
             continue;
         }
-        if (m_text.substr(pos, run.text.size()) != run.text) {
+        if (m_pieceTable.substr(pos, run.text.size()) != run.text) {
             return false;
         }
         pos += run.text.size();
@@ -1270,7 +1302,7 @@ inline bool SwTextEdit::runsMatchPlainText() const {
 
 inline void SwTextEdit::ensureRunsInSync() const {
     auto* self = const_cast<SwTextEdit*>(this);
-    if (m_text.isEmpty()) {
+    if (documentIsEmpty_()) {
         self->m_runs.clear();
         return;
     }
@@ -1281,13 +1313,13 @@ inline void SwTextEdit::ensureRunsInSync() const {
 }
 
 inline SwTextEdit::TextFormat SwTextEdit::formatForInsertionAt(size_t pos) const {
-    if (m_text.isEmpty() || m_runs.empty()) {
+    if (documentIsEmpty_() || m_runs.empty()) {
         return TextFormat{};
     }
     if (pos == 0) {
         return formatAtChar(0);
     }
-    return formatAtChar(std::min(pos - 1, m_text.size() - 1));
+    return formatAtChar(std::min(pos - 1, documentLength_() - 1));
 }
 
 inline SwTextEdit::TextFormat SwTextEdit::formatAtChar(size_t pos) const {
@@ -1353,9 +1385,9 @@ inline int SwTextEdit::lineHeightForLine(int lineIndex) const {
         return tableHeight(*tbl) + 8; // +8 for margin
     }
     // Scan runs on this line to find the largest fontSize
-    if (lineIndex >= 0 && lineIndex < static_cast<int>(m_lineStarts.size())) {
-        const size_t lineStart = m_lineStarts[lineIndex];
-        const size_t lineLen = (lineIndex < static_cast<int>(m_lines.size())) ? m_lines[lineIndex].size() : 0;
+    if (lineIndex >= 0 && lineIndex < logicalLineCount_()) {
+        const size_t lineStart = logicalLineStart_(lineIndex);
+        const size_t lineLen = logicalLineLength_(lineIndex);
         size_t runPos = 0;
         for (size_t r = 0; r < m_runs.size(); ++r) {
             size_t runEnd = runPos + m_runs[r].text.size();
@@ -1375,7 +1407,7 @@ inline int SwTextEdit::lineHeightForLine(int lineIndex) const {
 inline int SwTextEdit::yOffsetForLine(int lineIndex, int firstVisible) const {
     int y = 0;
     const int start = std::max(0, firstVisible);
-    const int end = std::min(lineIndex, static_cast<int>(m_lines.size()));
+    const int end = std::min(lineIndex, logicalLineCount_());
     for (int i = start; i < end; ++i) {
         y += lineHeightForLine(i);
     }
@@ -1385,21 +1417,21 @@ inline int SwTextEdit::yOffsetForLine(int lineIndex, int firstVisible) const {
 inline int SwTextEdit::lineIndexAtY(int relativeY, int firstVisible) const {
     int y = 0;
     const int start = std::max(0, firstVisible);
-    for (int i = start; i < static_cast<int>(m_lines.size()); ++i) {
+    for (int i = start; i < logicalLineCount_(); ++i) {
         const int lh = lineHeightForLine(i);
         if (relativeY < y + lh) {
             return i;
         }
         y += lh;
     }
-    return std::max(0, static_cast<int>(m_lines.size()) - 1);
+    return std::max(0, logicalLineCount_() - 1);
 }
 
 inline int SwTextEdit::visibleLineCount(int firstVisible, int availableHeight) const {
     int y = 0;
     int count = 0;
     const int start = std::max(0, firstVisible);
-    for (int i = start; i < static_cast<int>(m_lines.size()); ++i) {
+    for (int i = start; i < logicalLineCount_(); ++i) {
         y += lineHeightForLine(i);
         ++count;
         if (y >= availableHeight) {
@@ -1700,14 +1732,8 @@ inline SwString SwTextEdit::toHtml() const {
 
     // --- Split text into logical lines (by '\n') ---
     std::vector<std::pair<size_t, size_t>> logLines; // (start, length)
-    {
-        size_t pos = 0;
-        for (size_t i = 0; i <= m_text.size(); ++i) {
-            if (i == m_text.size() || m_text[i] == '\n') {
-                logLines.push_back(std::make_pair(pos, i - pos));
-                pos = i + 1;
-            }
-        }
+    for (int i = 0; i < logicalLineCount_(); ++i) {
+        logLines.push_back(std::make_pair(logicalLineStart_(i), logicalLineLength_(i)));
     }
 
     // --- Build cumulative run start offsets ---
@@ -1968,7 +1994,7 @@ inline void SwTextEdit::paintEvent(PaintEvent* event) {
     {
         int totalH = 0;
         int fitCount = 0;
-        for (int li = static_cast<int>(m_lines.size()) - 1; li >= 0; --li) {
+        for (int li = logicalLineCount_() - 1; li >= 0; --li) {
             totalH += lineHeightForLine(li);
             if (totalH > inner.height) break;
             fitCount++;
@@ -1991,14 +2017,14 @@ inline void SwTextEdit::paintEvent(PaintEvent* event) {
 
     const int first = std::max(0, m_firstVisibleLine);
     int yPos = inner.y;
-    for (int i = first; i < static_cast<int>(m_lines.size()); ++i) {
+    for (int i = first; i < logicalLineCount_(); ++i) {
         const int lh = lineHeightForLine(i);
         if (yPos >= inner.y + inner.height) {
             break;
         }
 
-        const size_t lineStart = (i < static_cast<int>(m_lineStarts.size())) ? m_lineStarts[i] : 0;
-        const size_t lineLen = m_lines[i].size();
+        const size_t lineStart = logicalLineStart_(i);
+        const size_t lineLen = logicalLineLength_(i);
         const LineFormat lf = lineFormatAt(i);
 
         // --- Horizontal rule ---
@@ -2135,7 +2161,7 @@ inline void SwTextEdit::paintEvent(PaintEvent* event) {
         yPos += lh;
     }
 
-    if (m_text.isEmpty() && !m_placeholder.isEmpty() && !getFocus()) {
+    if (documentIsEmpty_() && !m_placeholder.isEmpty() && !getFocus()) {
         SwRect phRect = inner;
         phRect.height = baseLh;
         SwColor ph{160, 160, 160};
@@ -2150,14 +2176,14 @@ inline void SwTextEdit::paintEvent(PaintEvent* event) {
         const CursorInfo ci = cursorInfo();
         const int cursorLine = ci.line;
         const int cursorCol = ci.col;
-        if (cursorLine >= first && cursorLine < static_cast<int>(m_lines.size())) {
+        if (cursorLine >= first && cursorLine < logicalLineCount_()) {
             const int cursorLh = lineHeightForLine(cursorLine);
             const int cursorY = inner.y + yOffsetForLine(cursorLine, first);
             if (cursorY < inner.y + inner.height) {
-                const SwString& lineText = m_lines[cursorLine];
+                const SwString lineText = logicalLineText_(cursorLine);
                 const size_t clampedCol = std::min(static_cast<size_t>(cursorCol), lineText.size());
 
-                const size_t lineStart = (cursorLine < static_cast<int>(m_lineStarts.size())) ? m_lineStarts[cursorLine] : 0;
+                const size_t lineStart = logicalLineStart_(cursorLine);
 
                 const LineFormat lf = lineFormatAt(cursorLine);
                 const int indent = lf.indentLevel * listIndentPx();
@@ -2199,14 +2225,14 @@ inline void SwTextEdit::wheelEvent(WheelEvent* event) {
     // Compute visible lines using actual per-line heights (accounts for tables)
     int totalH = 0;
     int fitCount = 0;
-    for (int li = static_cast<int>(m_lines.size()) - 1; li >= 0; --li) {
+    for (int li = logicalLineCount_() - 1; li >= 0; --li) {
         totalH += lineHeightForLine(li);
         if (totalH > inner.height) break;
         fitCount++;
     }
     int visibleLines = std::max(1, fitCount);
     clampFirstVisibleLine(visibleLines);
-    const int maxFirst = std::max(0, static_cast<int>(m_lines.size()) - visibleLines);
+    const int maxFirst = std::max(0, logicalLineCount_() - visibleLines);
 
     int steps = event->delta() / 120;
     if (steps == 0) {
@@ -2240,11 +2266,11 @@ inline void SwTextEdit::updateCursorFromPosition(int px, int py) {
     const LineFormat lf = lineFormatAt(lineIdx);
     const int indent = lf.indentLevel * listIndentPx();
     const int relativeX = px - inner.x - indent;
-    const size_t lineStart = (lineIdx < static_cast<int>(m_lineStarts.size())) ? m_lineStarts[lineIdx] : 0;
-    const size_t lineLen = (lineIdx >= 0 && lineIdx < static_cast<int>(m_lines.size())) ? m_lines[lineIdx].size() : 0;
+    const size_t lineStart = logicalLineStart_(lineIdx);
+    const size_t lineLen = logicalLineLength_(lineIdx);
     const size_t col = richCharacterIndexAtPosition(lineStart, lineLen, relativeX, std::max(1, inner.width));
 
-    m_cursorPos = std::min(lineStart + std::min(col, lineLen), m_text.size());
+    m_cursorPos = std::min(lineStart + std::min(col, lineLen), documentLength_());
 }
 
 inline void SwTextEdit::insertTextAt(size_t pos, const SwString& text) {
@@ -2254,10 +2280,10 @@ inline void SwTextEdit::insertTextAt(size_t pos, const SwString& text) {
         return;
     }
 
-    const size_t clamped = std::min(pos, m_text.size());
+    const size_t clamped = std::min(pos, documentLength_());
     const TextFormat fmt = formatForInsertionAt(clamped);
 
-    m_text.insert(clamped, text);
+    m_pieceTable.insert(clamped, text);
 
     size_t currentPos = clamped;
     for (size_t i = 0; i < text.size(); ++i) {
@@ -2271,17 +2297,17 @@ inline void SwTextEdit::insertTextAt(size_t pos, const SwString& text) {
 inline void SwTextEdit::eraseTextAt(size_t pos, size_t len) {
     ensureRunsInSync();
 
-    if (len == 0 || m_text.isEmpty()) {
+    if (len == 0 || documentIsEmpty_()) {
         return;
     }
 
-    const size_t clampedPos = std::min(pos, m_text.size());
-    if (clampedPos >= m_text.size()) {
+    const size_t clampedPos = std::min(pos, documentLength_());
+    if (clampedPos >= documentLength_()) {
         return;
     }
 
-    const size_t clampedLen = std::min(len, m_text.size() - clampedPos);
-    m_text.erase(clampedPos, clampedLen);
+    const size_t clampedLen = std::min(len, documentLength_() - clampedPos);
+    m_pieceTable.remove(clampedPos, clampedLen);
     for (size_t i = 0; i < clampedLen; ++i) {
         eraseFromRuns(clampedPos);
     }
@@ -2301,7 +2327,7 @@ inline SwTextDocument* SwTextEdit::document() const {
     if (!html.isEmpty()) {
         doc->setHtml(html);
     } else {
-        doc->setPlainText(m_text);
+        doc->setPlainText(toPlainText());
     }
     doc->setDefaultFont(getFont());
     return doc;

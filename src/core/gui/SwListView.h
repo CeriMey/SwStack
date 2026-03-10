@@ -815,7 +815,7 @@ protected:
         // Let child widgets (scrollbar / index widgets) handle the event first.
         if (SwWidget* childWidget = getChildUnderCursor(event->x(), event->y())) {
             MouseEvent childEvent = mapMouseEventToChild_(*event, this, childWidget);
-            static_cast<SwWidgetInterface*>(childWidget)->mousePressEvent(&childEvent);
+            SwCoreApplication::sendEvent(childWidget, &childEvent);
             if (childEvent.isAccepted()) {
                 event->accept();
                 return;

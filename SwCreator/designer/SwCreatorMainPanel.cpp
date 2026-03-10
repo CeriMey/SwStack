@@ -7,6 +7,7 @@
 #include "serialization/SwCreatorSwuiSerializer.h"
 #include "designer/inspector/SwCreatorPropertyInspector.h"
 #include "designer/palette/SwCreatorWidgetPalette.h"
+#include "theme/SwCreatorTheme.h"
 
 #include "SwDragDrop.h"
 #include "SwFrame.h"
@@ -29,16 +30,16 @@ constexpr int kPanelInnerInset = 0;
 
 SwCreatorMainPanel::SwCreatorMainPanel(SwWidget* parent)
     : SwWidget(parent) {
-    setStyleSheet("SwCreatorMainPanel { background-color: rgba(0,0,0,0); border-width: 0px; }");
+    const auto& th = SwCreatorTheme::current();
+    setStyleSheet("SwCreatorMainPanel { background-color: " + SwCreatorTheme::rgb(th.surface1) + "; border-width: 0px; }");
 
     m_splitter = new SwSplitter(SwSplitter::Orientation::Horizontal, this);
     m_splitter->setHandleWidth(4);
 
     m_palettePanel = new SwFrame(this);
     m_palettePanel->setFrameShape(SwFrame::Shape::NoFrame);
-    m_palettePanel->setStyleSheet(R"(
-            SwFrame { background-color: rgb(255, 255, 255); border-width: 0px; border-radius: 0px; }
-        )");
+    m_palettePanel->setStyleSheet(
+        "SwFrame { background-color: " + SwCreatorTheme::rgb(th.surface2) + "; border-width: 0px; border-radius: 0px; }");
 
     m_palette = new SwCreatorWidgetPalette(m_palettePanel);
 
@@ -46,9 +47,8 @@ SwCreatorMainPanel::SwCreatorMainPanel(SwWidget* parent)
 
     m_inspectorPanel = new SwFrame(this);
     m_inspectorPanel->setFrameShape(SwFrame::Shape::NoFrame);
-    m_inspectorPanel->setStyleSheet(R"(
-            SwFrame { background-color: rgb(255, 255, 255); border-width: 0px; border-radius: 0px; }
-        )");
+    m_inspectorPanel->setStyleSheet(
+        "SwFrame { background-color: " + SwCreatorTheme::rgb(th.surface2) + "; border-width: 0px; border-radius: 0px; }");
 
     m_inspectorSplitter = new SwSplitter(SwSplitter::Orientation::Vertical, m_inspectorPanel);
     m_inspectorSplitter->setHandleWidth(4);
@@ -59,21 +59,15 @@ SwCreatorMainPanel::SwCreatorMainPanel(SwWidget* parent)
     m_hierarchyTree->setColumnStretch(0, 2);
     m_hierarchyTree->setColumnStretch(1, 1);
     if (m_hierarchyTree->header()) {
-        m_hierarchyTree->header()->setStyleSheet(R"(
-            SwHeaderView {
-                background-color: rgb(247, 248, 248);
-                border-color: rgb(247, 248, 248);
-                border-width: 0px;
-                border-top-left-radius: 0px;
-                border-top-right-radius: 0px;
-                border-bottom-left-radius: 0px;
-                border-bottom-right-radius: 0px;
-                padding: 0px 6px;
-                color: rgb(17, 27, 33);
-                divider-color: rgb(238, 240, 241);
-                indicator-color: rgb(102, 119, 129);
-            }
-        )");
+        m_hierarchyTree->header()->setStyleSheet(
+            "SwHeaderView {"
+            " background-color: " + SwCreatorTheme::rgb(th.surface2)
+            + "; border-color: " + SwCreatorTheme::rgb(th.surface2)
+            + "; border-width: 0px; border-radius: 0px;"
+            " padding: 0px 6px;"
+            " color: " + SwCreatorTheme::rgb(th.textPrimary)
+            + "; divider-color: " + SwCreatorTheme::rgb(th.borderLight)
+            + "; indicator-color: " + SwCreatorTheme::rgb(th.textSecondary) + "; }");
     }
 
     m_propertyInspector = new SwCreatorPropertyInspector(m_inspectorSplitter);

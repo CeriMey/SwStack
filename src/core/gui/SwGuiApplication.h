@@ -60,6 +60,7 @@
  */
 
 #include "SwCoreApplication.h"
+#include "SwWidgetPlatformAdapter.h"
 #include "platform/SwPlatformFactory.h"
 #include "platform/SwPlatformIntegration.h"
 
@@ -135,6 +136,20 @@ public:
 
             int sleepDuration = processEvent();
 
+            // Batch-drain: process all pending events before re-entering the
+            // platform pump and measurement overhead.  This avoids paying the
+            // full iteration cost (platform pump + timing + sleep check) for
+            // every single queued event when multiple keystrokes/mouse events
+            // arrive in a burst.
+            while (sleepDuration == 0 && running) {
+                sleepDuration = processEvent();
+            }
+
+            // Flush accumulated damage regions into a single InvalidateRect per
+            // HWND before pumping messages, so the upcoming WM_PAINT covers
+            // everything that was dirtied by the events we just processed.
+            SwWidgetPlatformAdapter::flushDamage();
+
             // Process freshly posted paint/input messages that may have been queued by processEvent().
             if (m_platformIntegration) {
                 m_platformIntegration->processPlatformEvents();
@@ -169,6 +184,14 @@ public:
 #if defined(_WIN32)
                 // Wait on core waitables (IPC signals, wake events, ...) *and* Win32 messages.
                 waitForWorkGui(sleepDuration);
+#elif SW_PLATFORM_ANDROID
+                // Phase 1 Android backend: the native app glue looper is not yet
+                // merged into SwCoreApplication waitables, so never sleep forever.
+                // Waking up regularly keeps APP_CMD_* delivery, resize and paint
+                // requests flowing without changing desktop behavior.
+                const int boundedSleepDuration =
+                    (sleepDuration < 0) ? 16000 : std::min(sleepDuration, 16000);
+                waitForWork(boundedSleepDuration);
 #else
                 waitForWork(sleepDuration);
 #endif

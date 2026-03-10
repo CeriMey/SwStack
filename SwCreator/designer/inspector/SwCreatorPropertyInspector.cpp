@@ -12,6 +12,7 @@
 
 #include "designer/dialogs/SwCreatorStringListDialog.h"
 #include "designer/dialogs/SwCreatorTextEditDialog.h"
+#include "theme/SwCreatorTheme.h"
 
 #include <algorithm>
 #include <vector>
@@ -102,7 +103,8 @@ void applyItemsToTarget(SwWidget* target, const SwVector<SwString>& items) {
 
 SwCreatorPropertyInspector::SwCreatorPropertyInspector(SwWidget* parent)
     : SwWidget(parent) {
-    setStyleSheet("SwCreatorPropertyInspector { background-color: rgb(255, 255, 255); border-width: 0px; }");
+    const auto& th = SwCreatorTheme::current();
+    setStyleSheet("SwCreatorPropertyInspector { background-color: " + SwCreatorTheme::rgb(th.surface1) + "; border-width: 0px; }");
     buildUi_();
 }
 
@@ -129,28 +131,30 @@ void SwCreatorPropertyInspector::resizeEvent(ResizeEvent* event) {
 }
 
 void SwCreatorPropertyInspector::buildUi_() {
+    const auto& th = SwCreatorTheme::current();
+
     m_header = new SwFrame(this);
     m_header->setFrameShape(SwFrame::Shape::StyledPanel);
-    m_header->setStyleSheet(R"(
-        SwFrame { background-color: rgb(255, 255, 255); border-width: 0px; }
-    )");
+    m_header->setStyleSheet(
+        "SwFrame { background-color: " + SwCreatorTheme::rgb(th.surface1) + "; border-width: 0px; }"
+    );
 
     m_title = new SwLabel(SwString("Properties"), m_header);
-    m_title->setStyleSheet(R"(
-        SwLabel { background-color: rgba(0,0,0,0); border-width: 0px; color: rgb(15, 23, 42); font-size: 13px; }
-    )");
+    m_title->setStyleSheet(
+        "SwLabel { background-color: rgba(0,0,0,0); border-width: 0px; color: " + SwCreatorTheme::rgb(th.textPrimary) + "; font-size: 13px; }"
+    );
 
     m_add = new SwToolButton("+", m_header);
     m_add->resize(34, 34);
-    m_add->setStyleSheet(R"(
-        SwToolButton { background-color: rgb(248, 250, 252); border-color: rgb(226, 232, 240); border-width: 1px; border-radius: 10px; padding: 0px; }
-    )");
+    m_add->setStyleSheet(
+        "SwToolButton { background-color: " + SwCreatorTheme::rgb(th.surface3) + "; border-color: " + SwCreatorTheme::rgb(th.border) + "; border-width: 1px; border-radius: 10px; padding: 0px; }"
+    );
 
     m_remove = new SwToolButton("-", m_header);
     m_remove->resize(34, 34);
-    m_remove->setStyleSheet(R"(
-        SwToolButton { background-color: rgb(248, 250, 252); border-color: rgb(226, 232, 240); border-width: 1px; border-radius: 10px; padding: 0px; }
-    )");
+    m_remove->setStyleSheet(
+        "SwToolButton { background-color: " + SwCreatorTheme::rgb(th.surface3) + "; border-color: " + SwCreatorTheme::rgb(th.border) + "; border-width: 1px; border-radius: 10px; padding: 0px; }"
+    );
 
     m_tree = new SwTreeWidget(2, this);
     m_tree->setHeaderLabels(SwList<SwString>{SwString("Property"), SwString("Value")});
@@ -158,21 +162,21 @@ void SwCreatorPropertyInspector::buildUi_() {
     m_tree->setColumnStretch(0, 1);
     m_tree->setColumnStretch(1, 2);
     if (m_tree->header()) {
-        m_tree->header()->setStyleSheet(R"(
-            SwHeaderView {
-                background-color: rgb(255, 255, 255);
-                border-color: rgb(226, 232, 240);
-                border-width: 0px;
-                border-top-left-radius: 12px;
-                border-top-right-radius: 12px;
-                border-bottom-left-radius: 0px;
-                border-bottom-right-radius: 0px;
-                padding: 0px 10px;
-                color: rgb(15, 23, 42);
-                divider-color: rgb(226, 232, 240);
-                indicator-color: rgb(100, 116, 139);
-            }
-        )");
+        m_tree->header()->setStyleSheet(
+            "SwHeaderView {"
+            " background-color: " + SwCreatorTheme::rgb(th.surface1) + ";"
+            " border-color: " + SwCreatorTheme::rgb(th.border) + ";"
+            " border-width: 0px;"
+            " border-top-left-radius: 12px;"
+            " border-top-right-radius: 12px;"
+            " border-bottom-left-radius: 0px;"
+            " border-bottom-right-radius: 0px;"
+            " padding: 0px 10px;"
+            " color: " + SwCreatorTheme::rgb(th.textPrimary) + ";"
+            " divider-color: " + SwCreatorTheme::rgb(th.border) + ";"
+            " indicator-color: " + SwCreatorTheme::rgb(th.textSecondary) + ";"
+            " }"
+        );
     }
 
     m_addMenu = new SwMenu(this);
@@ -293,7 +297,7 @@ void SwCreatorPropertyInspector::rebuild_() {
 
     // Real properties from SwObject registry.
     for (const SwString& prop : m_target->propertyNames()) {
-        if (prop == "Focus" || prop == "Hover") {
+        if (prop == "Focus" || prop == "Hover" || prop == "DisplayText") {
             continue;
         }
         if (prop.startsWith("__SwCreator_")) {
@@ -575,6 +579,8 @@ void SwCreatorPropertyInspector::setEditorsForRow_(const SwModelIndex& nameIndex
         return;
     }
 
+    const auto& th = SwCreatorTheme::current();
+
     const auto commitString = [this, propName](const SwString& v) {
         if (!m_target) {
             return;
@@ -599,6 +605,7 @@ void SwCreatorPropertyInspector::setEditorsForRow_(const SwModelIndex& nameIndex
 
         m_target->setProperty(propName, SwAny(v));
         documentModified();
+        canvasNeedsUpdate();
         if (propName == "ObjectName" || propName == "Text" || propName == "ToolTips") {
             hierarchyNeedsRebuild();
         }
@@ -607,16 +614,16 @@ void SwCreatorPropertyInspector::setEditorsForRow_(const SwModelIndex& nameIndex
     if (isDynamic) {
         auto* nameEdit = new SwLineEdit(m_tree);
         nameEdit->setText(propName);
-        nameEdit->setStyleSheet(R"(
-            SwLineEdit {
-                background-color: rgb(248, 250, 252);
-                border-color: rgb(226, 232, 240);
-                border-width: 1px;
-                border-radius: 10px;
-                padding: 4px 8px;
-                color: rgb(15, 23, 42);
-            }
-        )");
+        nameEdit->setStyleSheet(
+            "SwLineEdit {"
+            " background-color: " + SwCreatorTheme::rgb(th.surface3) + ";"
+            " border-color: " + SwCreatorTheme::rgb(th.border) + ";"
+            " border-width: 1px;"
+            " border-radius: 10px;"
+            " padding: 4px 8px;"
+            " color: " + SwCreatorTheme::rgb(th.textPrimary) + ";"
+            " }"
+        );
         SwObject::connect(nameEdit, &SwLineEdit::FocusChanged, this, [this, propName, nameEdit](bool focus) {
             if (focus || !m_target) {
                 return;
@@ -657,9 +664,7 @@ void SwCreatorPropertyInspector::setEditorsForRow_(const SwModelIndex& nameIndex
             }
             m_target->setProperty(propName, SwAny(v));
             documentModified();
-            if (propName == "Visible" || propName == "Enable") {
-                canvasNeedsUpdate();
-            }
+            canvasNeedsUpdate();
         });
         m_tree->setIndexWidget(valueIndex, cb);
         return;
@@ -672,28 +677,28 @@ void SwCreatorPropertyInspector::setEditorsForRow_(const SwModelIndex& nameIndex
         auto* preview = new SwLineEdit(cell);
         preview->setReadOnly(true);
         preview->setText(styleSheetPreviewText(value.toString()));
-        preview->setStyleSheet(R"(
-            SwLineEdit {
-                background-color: rgb(248, 250, 252);
-                border-color: rgb(226, 232, 240);
-                border-width: 1px;
-                border-radius: 10px;
-                padding: 4px 8px;
-                color: rgb(15, 23, 42);
-            }
-        )");
+        preview->setStyleSheet(
+            "SwLineEdit {"
+            " background-color: " + SwCreatorTheme::rgb(th.surface3) + ";"
+            " border-color: " + SwCreatorTheme::rgb(th.border) + ";"
+            " border-width: 1px;"
+            " border-radius: 10px;"
+            " padding: 4px 8px;"
+            " color: " + SwCreatorTheme::rgb(th.textPrimary) + ";"
+            " }"
+        );
 
         auto* open = new SwToolButton("...", cell);
         open->resize(34, 26);
-        open->setStyleSheet(R"(
-            SwToolButton {
-                background-color: rgb(248, 250, 252);
-                border-color: rgb(226, 232, 240);
-                border-width: 1px;
-                border-radius: 10px;
-                padding: 0px;
-            }
-        )");
+        open->setStyleSheet(
+            "SwToolButton {"
+            " background-color: " + SwCreatorTheme::rgb(th.surface3) + ";"
+            " border-color: " + SwCreatorTheme::rgb(th.border) + ";"
+            " border-width: 1px;"
+            " border-radius: 10px;"
+            " padding: 0px;"
+            " }"
+        );
 
         const auto updateLayout = [cell, preview, open]() {
             if (!cell || !preview || !open) {
@@ -734,28 +739,28 @@ void SwCreatorPropertyInspector::setEditorsForRow_(const SwModelIndex& nameIndex
         auto* preview = new SwLineEdit(cell);
         preview->setReadOnly(true);
         preview->setText(value.toString());
-        preview->setStyleSheet(R"(
-            SwLineEdit {
-                background-color: rgb(248, 250, 252);
-                border-color: rgb(226, 232, 240);
-                border-width: 1px;
-                border-radius: 10px;
-                padding: 4px 8px;
-                color: rgb(15, 23, 42);
-            }
-        )");
+        preview->setStyleSheet(
+            "SwLineEdit {"
+            " background-color: " + SwCreatorTheme::rgb(th.surface3) + ";"
+            " border-color: " + SwCreatorTheme::rgb(th.border) + ";"
+            " border-width: 1px;"
+            " border-radius: 10px;"
+            " padding: 4px 8px;"
+            " color: " + SwCreatorTheme::rgb(th.textPrimary) + ";"
+            " }"
+        );
 
         auto* open = new SwToolButton("...", cell);
         open->resize(34, 26);
-        open->setStyleSheet(R"(
-            SwToolButton {
-                background-color: rgb(248, 250, 252);
-                border-color: rgb(226, 232, 240);
-                border-width: 1px;
-                border-radius: 10px;
-                padding: 0px;
-            }
-        )");
+        open->setStyleSheet(
+            "SwToolButton {"
+            " background-color: " + SwCreatorTheme::rgb(th.surface3) + ";"
+            " border-color: " + SwCreatorTheme::rgb(th.border) + ";"
+            " border-width: 1px;"
+            " border-radius: 10px;"
+            " padding: 0px;"
+            " }"
+        );
 
         const auto updateLayout = [cell, preview, open]() {
             if (!cell || !preview || !open) {
@@ -791,16 +796,16 @@ void SwCreatorPropertyInspector::setEditorsForRow_(const SwModelIndex& nameIndex
 
     auto* edit = new SwLineEdit(m_tree);
     edit->setText(value.toString());
-    edit->setStyleSheet(R"(
-        SwLineEdit {
-            background-color: rgb(248, 250, 252);
-            border-color: rgb(226, 232, 240);
-            border-width: 1px;
-            border-radius: 10px;
-            padding: 4px 8px;
-            color: rgb(15, 23, 42);
-        }
-    )");
+    edit->setStyleSheet(
+        "SwLineEdit {"
+        " background-color: " + SwCreatorTheme::rgb(th.surface3) + ";"
+        " border-color: " + SwCreatorTheme::rgb(th.border) + ";"
+        " border-width: 1px;"
+        " border-radius: 10px;"
+        " padding: 4px 8px;"
+        " color: " + SwCreatorTheme::rgb(th.textPrimary) + ";"
+        " }"
+    );
     SwObject::connect(edit, &SwLineEdit::FocusChanged, this, [commitString, edit](bool focus) {
         if (focus) {
             return;

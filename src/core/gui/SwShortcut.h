@@ -177,15 +177,7 @@ private:
         if (!root) {
             return nullptr;
         }
-        for (SwWidget* w : root->findChildren<SwWidget>()) {
-            if (!w) {
-                continue;
-            }
-            if (w->getFocus() && w->isVisibleInHierarchy()) {
-                return w;
-            }
-        }
-        return root->getFocus() ? root : nullptr;
+        return root->focusedWidgetInHierarchy();
     }
 
     SwKeySequence m_key;

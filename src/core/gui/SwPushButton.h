@@ -39,7 +39,6 @@
 #include <iostream>
 
 
-
 class SwPushButton : public SwWidget {
 
     SW_OBJECT(SwPushButton, SwWidget)

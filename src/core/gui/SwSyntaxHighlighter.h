@@ -41,13 +41,38 @@ public:
             SwObject::disconnect(m_document, this);
         }
         m_document = doc;
+        clearDeferredRehighlight_();
         if (m_document) {
             if (!parent()) {
                 setParent(m_document);
             }
+            SwObject::connect(m_document, &SwTextDocument::contentsChange, this, [this](int pos, int /*removed*/, int /*added*/) {
+                if (!m_rehighlighting) {
+                    int startBlock = -1;
+                    if (m_document->lastEditBlockHint() >= 0) {
+                        startBlock = m_document->lastEditBlockHint();
+                        m_document->clearEditBlockHint();
+                    } else {
+                        startBlock = blockIndexForPosition_(pos);
+                    }
+                    if (!m_hasPendingRehighlight) {
+                        m_pendingRehighlightStartBlock = startBlock;
+                        m_hasPendingRehighlight = true;
+                    } else {
+                        m_pendingRehighlightStartBlock = std::min(m_pendingRehighlightStartBlock, startBlock);
+                    }
+                }
+            });
             SwObject::connect(m_document, &SwTextDocument::contentsChanged, this, [this]() {
                 if (!m_rehighlighting) {
-                    rehighlight();
+                    const int startBlock = m_hasPendingRehighlight ? m_pendingRehighlightStartBlock : 0;
+                    m_hasPendingRehighlight = false;
+                    m_pendingRehighlightStartBlock = 0;
+                    if (m_autoRehighlightSuspended) {
+                        queueDeferredRehighlight_(startBlock);
+                    } else {
+                        rehighlightFrom(startBlock);
+                    }
                 }
             });
         }
@@ -60,12 +85,8 @@ public:
         if (!m_document || m_rehighlighting) {
             return;
         }
-        m_rehighlighting = true;
-        for (int i = 0; i < m_document->blockCount(); ++i) {
-            rehighlightBlock(i);
-        }
-        m_rehighlighting = false;
-        formattingChanged();
+        clearDeferredRehighlight_();
+        rehighlightRangeInternal_(0, m_document->blockCount() - 1, false);
     }
 
     void rehighlightBlock(int blockIndex) {
@@ -100,6 +121,92 @@ public:
             return SwList<SwTextLayoutFormatRange>();
         }
         return m_document->blockAt(blockIndex).additionalFormats();
+    }
+
+    void setAutoRehighlightSuspended(bool suspended) {
+        m_autoRehighlightSuspended = suspended;
+    }
+
+    bool autoRehighlightSuspended() const {
+        return m_autoRehighlightSuspended;
+    }
+
+    bool hasDeferredRehighlight() const {
+        return m_hasDeferredRehighlight;
+    }
+
+    int deferredRehighlightStartBlock() const {
+        return m_hasDeferredRehighlight ? m_deferredRehighlightStartBlock : -1;
+    }
+
+    bool processDeferredRehighlight(int maxBlocks) {
+        if (!m_document || !m_hasDeferredRehighlight || maxBlocks <= 0) {
+            return false;
+        }
+        const int count = m_document->blockCount();
+        if (count <= 0) {
+            clearDeferredRehighlight_();
+            return false;
+        }
+        const int startBlock = std::max(0, m_deferredRehighlightStartBlock);
+        const int endBlock = std::min(count - 1, startBlock + maxBlocks - 1);
+        rehighlightRangeInternal_(startBlock, endBlock, false);
+        if (endBlock >= count - 1) {
+            clearDeferredRehighlight_();
+            return false;
+        }
+        m_deferredRehighlightStartBlock = endBlock + 1;
+        return true;
+    }
+
+    bool processDeferredRehighlightUpTo(int targetBlock) {
+        if (!m_document || !m_hasDeferredRehighlight) {
+            return false;
+        }
+        const int count = m_document->blockCount();
+        if (count <= 0) {
+            clearDeferredRehighlight_();
+            return false;
+        }
+        const int startBlock = std::max(0, m_deferredRehighlightStartBlock);
+        const int endBlock = std::min(count - 1, std::max(startBlock, targetBlock));
+        rehighlightRangeInternal_(startBlock, endBlock, false);
+        if (endBlock >= count - 1) {
+            clearDeferredRehighlight_();
+            return false;
+        }
+        m_deferredRehighlightStartBlock = endBlock + 1;
+        return true;
+    }
+
+    void rehighlightWindow(int firstBlock, int lastBlock, int lookBehind = 256) {
+        if (!m_document || m_rehighlighting) {
+            return;
+        }
+        const int count = m_document->blockCount();
+        if (count <= 0) {
+            return;
+        }
+        const int clampedFirst = std::max(0, std::min(firstBlock, count - 1));
+        const int clampedLast = std::max(clampedFirst, std::min(lastBlock, count - 1));
+
+        int safeStart = clampedFirst;
+        int steps = 0;
+        while (safeStart > 0 &&
+               m_document->blockAt(safeStart - 1).userState() < 0 &&
+               steps < std::max(0, lookBehind)) {
+            --safeStart;
+            ++steps;
+        }
+        rehighlightRangeInternal_(safeStart, clampedLast, false);
+    }
+
+    void rehighlightFrom(int startBlock) {
+        if (!m_document || m_rehighlighting) {
+            return;
+        }
+        clearDeferredRehighlight_();
+        rehighlightRangeInternal_(startBlock, m_document->blockCount() - 1, true);
     }
 
     DECLARE_SIGNAL_VOID(formattingChanged)
@@ -151,6 +258,75 @@ protected:
     }
 
 private:
+    int blockIndexForPosition_(int absPos) const {
+        if (!m_document) {
+            return 0;
+        }
+        int pos = 0;
+        for (int i = 0; i < m_document->blockCount(); ++i) {
+            const int next = pos + m_document->blockAt(i).length() + 1;
+            if (absPos < next) {
+                return i;
+            }
+            pos = next;
+        }
+        return std::max(0, m_document->blockCount() - 1);
+    }
+
+    void clearDeferredRehighlight_() {
+        m_hasPendingRehighlight = false;
+        m_pendingRehighlightStartBlock = 0;
+        m_hasDeferredRehighlight = false;
+        m_deferredRehighlightStartBlock = 0;
+    }
+
+    void queueDeferredRehighlight_(int startBlock) {
+        const int clampedStart = std::max(0, startBlock);
+        if (!m_hasDeferredRehighlight) {
+            m_deferredRehighlightStartBlock = clampedStart;
+            m_hasDeferredRehighlight = true;
+            return;
+        }
+        m_deferredRehighlightStartBlock = std::min(m_deferredRehighlightStartBlock, clampedStart);
+    }
+
+    void rehighlightRangeInternal_(int startBlock, int endBlock, bool allowEarlyStop) {
+        if (!m_document || m_rehighlighting) {
+            return;
+        }
+        const int count = m_document->blockCount();
+        if (count <= 0) {
+            m_hasPendingRehighlight = false;
+            m_pendingRehighlightStartBlock = 0;
+            formattingChanged();
+            return;
+        }
+
+        const int clampedStart = std::max(0, startBlock);
+        const int clampedEnd = std::min(endBlock, count - 1);
+        if (clampedStart > clampedEnd) {
+            m_hasPendingRehighlight = false;
+            m_pendingRehighlightStartBlock = 0;
+            return;
+        }
+
+        m_rehighlighting = true;
+        for (int i = clampedStart; i <= clampedEnd; ++i) {
+            const int prevState = m_document->blockAt(i).userState();
+            rehighlightBlock(i);
+            if (allowEarlyStop &&
+                i > clampedStart &&
+                prevState >= 0 &&
+                m_document->blockAt(i).userState() == prevState) {
+                break;
+            }
+        }
+        m_rehighlighting = false;
+        m_hasPendingRehighlight = false;
+        m_pendingRehighlightStartBlock = 0;
+        formattingChanged();
+    }
+
     SwTextDocument* m_document{nullptr};
     int m_currentBlockIndex{-1};
     SwList<SwTextLayoutFormatRange> m_pendingFormats;
@@ -159,4 +335,9 @@ private:
     bool m_hasPendingUserState{false};
     bool m_hasPendingUserData{false};
     bool m_rehighlighting{false};
+    int m_pendingRehighlightStartBlock{0};
+    bool m_hasPendingRehighlight{false};
+    bool m_autoRehighlightSuspended{false};
+    int m_deferredRehighlightStartBlock{0};
+    bool m_hasDeferredRehighlight{false};
 };

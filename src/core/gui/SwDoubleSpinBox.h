@@ -282,7 +282,8 @@ protected:
         const int half = innerH / 2;
         const int midY = innerY + half;
         if (innerH > 8) {
-            painter->drawLine(dividerX + 1, midY, std::max(dividerX + 1, rightEdge - 1), midY, divider, 1);
+            const int midRight = std::max(dividerX + 1, rightEdge - std::max(1, borderWidth));
+            painter->drawLine(dividerX + 1, midY, midRight, midY, divider, 1);
         }
 
         paintChildren(event);
@@ -322,6 +323,13 @@ protected:
     }
 
 private:
+    struct ArrowFillRadii {
+        int tl{0};
+        int tr{0};
+        int br{0};
+        int bl{0};
+    };
+
     class ArrowButton final : public SwWidget {
         SW_OBJECT(ArrowButton, SwWidget)
 
@@ -415,16 +423,15 @@ private:
             }
 
             if (paintBg) {
-                SwRect hi = r;
-                hi.x += 1;
-                hi.width = std::max(0, hi.width - 3);
-                if (m_dir == Direction::Up) {
-                    hi.y += 2;
-                    hi.height = std::max(0, hi.height - 2);
-                } else {
-                    hi.height = std::max(0, hi.height - 2);
+                SwRect hi = m_owner ? m_owner->arrowHighlightRect_(r, m_dir) : r;
+                ArrowFillRadii radii = m_owner ? m_owner->arrowHighlightRadii_(m_dir) : ArrowFillRadii{};
+                if (hi.width > 0 && hi.height > 0) {
+                    if (radii.tl == 0 && radii.tr == 0 && radii.br == 0 && radii.bl == 0) {
+                        painter->fillRect(hi, bg, bg, 0);
+                    } else {
+                        painter->fillRoundedRect(hi, radii.tl, radii.tr, radii.br, radii.bl, bg, bg, 0);
+                    }
                 }
-                painter->fillRect(hi, bg, bg, 0);
             }
 
             const int cx = r.x + r.width / 2;
@@ -453,6 +460,9 @@ private:
             if (!getEnable() || !isPointInside(event->x(), event->y())) {
                 SwWidget::mousePressEvent(event);
                 return;
+            }
+            if (m_owner && m_owner->m_edit) {
+                m_owner->m_edit->setFocus(true);
             }
             setPressed(true);
             event->accept();
@@ -488,6 +498,62 @@ private:
 
     int arrowColumnWidth() const {
         return clampInt(m_arrowWidth, 18, 34);
+    }
+
+    void resolveFrameMetrics_(int& borderWidth,
+                              int& radiusTopRight,
+                              int& radiusBottomRight) {
+        SwColor border{220, 224, 232};
+        int radius = 12;
+        borderWidth = 1;
+        resolveBorder(getToolSheet(), border, borderWidth, radius);
+        borderWidth = std::max(0, borderWidth);
+
+        int tl = std::max(0, radius);
+        int tr = tl;
+        int br = tl;
+        int bl = tl;
+        resolveBorderCornerRadii(getToolSheet(), tl, tr, br, bl);
+        radiusTopRight = std::max(0, tr);
+        radiusBottomRight = std::max(0, br);
+    }
+
+    SwRect arrowHighlightRect_(const SwRect& buttonRect,
+                               ArrowButton::Direction dir) {
+        int borderWidth = 1;
+        int radiusTopRight = 0;
+        int radiusBottomRight = 0;
+        resolveFrameMetrics_(borderWidth, radiusTopRight, radiusBottomRight);
+
+        const int leftInset = 1;
+        const int rightInset = std::max(0, borderWidth);
+        const int outerInset = std::max(0, borderWidth);
+        const int centerInset = 1;
+
+        const int topInset = (dir == ArrowButton::Direction::Up) ? outerInset : centerInset;
+        const int bottomInset = (dir == ArrowButton::Direction::Up) ? centerInset : outerInset;
+
+        SwRect hi = buttonRect;
+        hi.x += leftInset;
+        hi.y += topInset;
+        hi.width = std::max(0, hi.width - leftInset - rightInset);
+        hi.height = std::max(0, hi.height - topInset - bottomInset);
+        return hi;
+    }
+
+    ArrowFillRadii arrowHighlightRadii_(ArrowButton::Direction dir) {
+        int borderWidth = 1;
+        int radiusTopRight = 0;
+        int radiusBottomRight = 0;
+        resolveFrameMetrics_(borderWidth, radiusTopRight, radiusBottomRight);
+
+        ArrowFillRadii radii;
+        if (dir == ArrowButton::Direction::Up) {
+            radii.tr = std::max(0, radiusTopRight - borderWidth);
+        } else {
+            radii.br = std::max(0, radiusBottomRight - borderWidth);
+        }
+        return radii;
     }
 
     void buildChildren() {

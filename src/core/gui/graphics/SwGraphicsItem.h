@@ -74,6 +74,7 @@
 #include "graphics/SwGraphicsTypes.h"
 #include "graphics/SwGraphicsSceneEvent.h"
 #include "SwString.h"
+#include "SwWidget.h"
 #include "Sw.h"
 
 #include <algorithm>
@@ -85,7 +86,6 @@ class SwPainter;
 class SwPainterPath;
 class SwGraphicsScene;
 class SwGraphicsItemGroup;
-class KeyEvent;
 struct SwGraphicsRenderContext;
 
 // ---------------------------------------------------------------------------
@@ -1464,6 +1464,22 @@ protected:
      * @details Override this hook when the default framework behavior needs to be extended or replaced.
      */
     virtual void keyPressEvent(KeyEvent* event) { event->ignore(); }
+    virtual void keyPressEvent(SwGraphicsSceneKeyEvent* event) {
+        if (!event) {
+            return;
+        }
+        KeyEvent keyEvent(event->key(),
+                          event->isCtrlPressed(),
+                          event->isShiftPressed(),
+                          event->isAltPressed(),
+                          event->text(),
+                          event->isTextProvided());
+        if (event->isAccepted()) {
+            keyEvent.accept();
+        }
+        keyPressEvent(&keyEvent);
+        event->setAccepted(keyEvent.isAccepted());
+    }
     /**
      * @brief Handles the key Release Event forwarded by the framework.
      * @return The requested key Release Event.
@@ -1471,6 +1487,23 @@ protected:
      * @details Override this hook when the default framework behavior needs to be extended or replaced.
      */
     virtual void keyReleaseEvent(KeyEvent* event) { event->ignore(); }
+    virtual void keyReleaseEvent(SwGraphicsSceneKeyEvent* event) {
+        if (!event) {
+            return;
+        }
+        KeyEvent keyEvent(event->key(),
+                          event->isCtrlPressed(),
+                          event->isShiftPressed(),
+                          event->isAltPressed(),
+                          event->text(),
+                          event->isTextProvided(),
+                          EventType::KeyReleaseEvent);
+        if (event->isAccepted()) {
+            keyEvent.accept();
+        }
+        keyReleaseEvent(&keyEvent);
+        event->setAccepted(keyEvent.isAccepted());
+    }
 
     /**
      * @brief Handles the focus In Event forwarded by the framework.
@@ -1547,6 +1580,10 @@ protected:
             mouseReleaseEvent(static_cast<SwGraphicsSceneMouseEvent*>(event)); break;
         case SwGraphicsSceneEventType::GraphicsSceneMouseDoubleClick:
             mouseDoubleClickEvent(static_cast<SwGraphicsSceneMouseEvent*>(event)); break;
+        case SwGraphicsSceneEventType::GraphicsSceneKeyPress:
+            keyPressEvent(static_cast<SwGraphicsSceneKeyEvent*>(event)); break;
+        case SwGraphicsSceneEventType::GraphicsSceneKeyRelease:
+            keyReleaseEvent(static_cast<SwGraphicsSceneKeyEvent*>(event)); break;
         case SwGraphicsSceneEventType::GraphicsSceneWheel:
             wheelEvent(static_cast<SwGraphicsSceneWheelEvent*>(event)); break;
         case SwGraphicsSceneEventType::GraphicsSceneHoverEnter:

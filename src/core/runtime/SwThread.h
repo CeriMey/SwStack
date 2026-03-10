@@ -110,8 +110,12 @@ public:
         }
         bool started = m_threadHandle->start();
         if (started) {
-            m_threadHandle->postTask([this]() {
-                run();
+            auto* self = this;
+            m_threadHandle->postTask([self]() {
+                if (!SwObject::isLive(self)) {
+                    return;
+                }
+                self->run();
             });
         }
         return started;

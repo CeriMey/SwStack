@@ -59,13 +59,15 @@
 #include <vector>
 #include <cmath>
 
-#include "core/gui/SwPainter.h"
 #include "core/gui/graphics/SwImage.h"
 #include "core/types/SwString.h"
 #include "core/gui/SwWidgetPlatformAdapter.h"
+#include "platform/SwPlatformIntegration.h"
 
-class SwX11Painter : public SwPainter {
+class SwX11Painter : public SwPlatformPainter {
 public:
+    SwX11Painter() = default;
+
     /**
      * @brief Constructs a `SwX11Painter` instance.
      * @param display Value passed to the method.
@@ -80,12 +82,23 @@ public:
         ensureDrawable();
     }
 
-    /**
-     * @brief Destroys the `SwX11Painter` instance.
-     *
-     * @details Use this hook to release any resources that remain associated with the instance.
-     */
-    ~SwX11Painter() override {
+    void begin(const SwPlatformPaintEvent& event) override {
+        end();
+
+        const void* nativeWindow = event.nativeWindowHandle ? event.nativeWindowHandle : event.nativePaintDevice;
+
+        m_display = static_cast<Display*>(event.nativeDisplay);
+        m_window = reinterpret_cast<::Window>(reinterpret_cast<std::uintptr_t>(nativeWindow));
+        m_width = std::max(1, event.surfaceSize.width);
+        m_height = std::max(1, event.surfaceSize.height);
+        m_finalizeRequested = false;
+        m_presented = false;
+        m_clipStack.clear();
+        ensureDrawable();
+    }
+
+    void end() override {
+        m_finalizeRequested = true;
         presentIfNeeded_();
         if (m_display && m_gc) {
             XFreeGC(m_display, m_gc);
@@ -96,6 +109,34 @@ public:
         if (m_display && m_backBuffer) {
             XFreePixmap(m_display, m_backBuffer);
         }
+
+        m_gc = 0;
+        m_presentGC = 0;
+        m_backBuffer = 0;
+        m_bufferWidth = 0;
+        m_bufferHeight = 0;
+        m_width = 0;
+        m_height = 0;
+        m_finalizeRequested = false;
+        m_presented = false;
+        m_clipStack.clear();
+        m_display = nullptr;
+        m_window = 0;
+    }
+
+    void flush() override {
+        if (m_display) {
+            XFlush(m_display);
+        }
+    }
+
+    /**
+     * @brief Destroys the `SwX11Painter` instance.
+     *
+     * @details Use this hook to release any resources that remain associated with the instance.
+     */
+    ~SwX11Painter() override {
+        end();
     }
 
     /**
@@ -169,7 +210,7 @@ public:
             return;
         }
 
-        const int segments = std::max(12, actualRadius * 3);
+        const int segments = std::min(64, std::max(12, actualRadius * 3));
         auto buildOutline = [&](std::vector<XPoint>& points) {
             points.clear();
             points.reserve(segments * 4 + 1);
@@ -231,6 +272,72 @@ public:
      * @param borderColor Value passed to the method.
      * @param borderWidth Value passed to the method.
      */
+    void fillRoundedRect(const SwRect& rect,
+                         int radiusTL, int radiusTR, int radiusBR, int radiusBL,
+                         const SwColor& fillColor,
+                         const SwColor& borderColor,
+                         int borderWidth) override {
+        if (!ensureDrawable()) {
+            return;
+        }
+        if (radiusTL == radiusTR && radiusTR == radiusBR && radiusBR == radiusBL) {
+            fillRoundedRect(rect, radiusTL, fillColor, borderColor, borderWidth);
+            return;
+        }
+        if (radiusTL <= 0 && radiusTR <= 0 && radiusBR <= 0 && radiusBL <= 0) {
+            fillRect(rect, fillColor, borderColor, borderWidth);
+            return;
+        }
+
+        const int maxRad = std::min(rect.width, rect.height) / 2;
+        auto clamp = [maxRad](int r) { return std::max(0, std::min(r, maxRad)); };
+        const int rTL = clamp(radiusTL);
+        const int rTR = clamp(radiusTR);
+        const int rBR = clamp(radiusBR);
+        const int rBL = clamp(radiusBL);
+
+        const int segments = std::min(64, std::max(12, maxRad * 3));
+        const int left = rect.x;
+        const int right = rect.x + rect.width;
+        const int top = rect.y;
+        const int bottom = rect.y + rect.height;
+
+        std::vector<XPoint> outline;
+        outline.reserve(static_cast<size_t>(segments) * 4 + 1);
+
+        auto addArc = [&](double start, double end, int cx, int cy, int rad) {
+            if (rad <= 0) {
+                outline.push_back(XPoint{static_cast<short>(cx + static_cast<int>(rad * std::cos(start))),
+                                         static_cast<short>(cy + static_cast<int>(rad * std::sin(start)))});
+                return;
+            }
+            for (int i = 0; i <= segments; ++i) {
+                double t = start + (end - start) * (static_cast<double>(i) / segments);
+                outline.push_back(XPoint{static_cast<short>(std::lround(cx + rad * std::cos(t))),
+                                         static_cast<short>(std::lround(cy + rad * std::sin(t)))});
+            }
+        };
+
+        addArc(M_PI, M_PI * 1.5, left + rTL, top + rTL, rTL);
+        addArc(M_PI * 1.5, M_PI * 2.0, right - rTR, top + rTR, rTR);
+        addArc(0.0, M_PI_2, right - rBR, bottom - rBR, rBR);
+        addArc(M_PI_2, M_PI, left + rBL, bottom - rBL, rBL);
+
+        setForeground(fillColor);
+        XFillPolygon(m_display, targetDrawable(), m_gc,
+                     outline.data(), static_cast<int>(outline.size()),
+                     Complex, CoordModeOrigin);
+
+        if (borderWidth > 0) {
+            setForeground(borderColor);
+            XSetLineAttributes(m_display, m_gc, borderWidth, LineSolid, CapRound, JoinRound);
+            outline.push_back(outline.front());
+            XDrawLines(m_display, targetDrawable(), m_gc,
+                       outline.data(), static_cast<int>(outline.size()),
+                       CoordModeOrigin);
+        }
+    }
+
     void drawRect(const SwRect& rect,
                   const SwColor& borderColor,
                   int borderWidth) override {
@@ -257,6 +364,32 @@ public:
      * @param color Value passed to the method.
      * @param width Width value.
      */
+    void drawDashedRect(const SwRect& rect,
+                        const SwColor& color,
+                        int borderWidth,
+                        int dashLen,
+                        int gapLen) override {
+        if (!ensureDrawable() || rect.width <= 0 || rect.height <= 0) {
+            return;
+        }
+        const int bw = borderWidth > 0 ? borderWidth : 1;
+        const char dashPattern[2] = {
+            static_cast<char>(dashLen > 0 ? dashLen : 4),
+            static_cast<char>(gapLen > 0 ? gapLen : 4)
+        };
+        setForeground(color);
+        XSetDashes(m_display, m_gc, 0, dashPattern, 2);
+        XSetLineAttributes(m_display, m_gc, bw, LineOnOffDash, CapButt, JoinMiter);
+        XDrawRectangle(m_display,
+                       targetDrawable(),
+                       m_gc,
+                       rect.x,
+                       rect.y,
+                       static_cast<unsigned int>(rect.width),
+                       static_cast<unsigned int>(rect.height));
+        XSetLineAttributes(m_display, m_gc, 1, LineSolid, CapButt, JoinMiter);
+    }
+
     void drawLine(int x1,
                   int y1,
                   int x2,

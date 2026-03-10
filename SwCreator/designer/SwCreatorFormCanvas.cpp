@@ -5,6 +5,8 @@
 
 #include "SwMenu.h"
 
+#include "theme/SwCreatorTheme.h"
+
 #include "SwGroupBox.h"
 #include "SwLineEdit.h"
 #include "SwListWidget.h"
@@ -33,6 +35,18 @@ int clampInt(int value, int minValue, int maxValue) {
     if (value < minValue) return minValue;
     if (value > maxValue) return maxValue;
     return value;
+}
+
+SwColor blendColor_(const SwColor& from, const SwColor& to, float amount) {
+    const float t = (std::max)(0.0f, (std::min)(1.0f, amount));
+    auto blendChannel = [t](int a, int b) -> int {
+        return static_cast<int>(std::lround(a + (b - a) * t));
+    };
+    return SwColor{
+        blendChannel(from.r, to.r),
+        blendChannel(from.g, to.g),
+        blendChannel(from.b, to.b)
+    };
 }
 
 SwRect intersectRects_(const SwRect& a, const SwRect& b) {
@@ -173,9 +187,6 @@ protected:
             SwWidget* w = m_owner->designWidgetFromHit_(hit);
             m_owner->setSelectedWidget(w);
             m_owner->selectionChanged(w);
-            if (w) {
-                w->setFocus(true);
-            }
             m_owner->showContextMenu_(event->x(), event->y());
             event->accept();
             return;
@@ -245,9 +256,6 @@ protected:
         SwWidget* w = m_owner->designWidgetFromHit_(hit);
         m_owner->setSelectedWidget(w);
         m_owner->selectionChanged(w);
-        if (w) {
-            w->setFocus(true);
-        }
         setCursor(cursorForSelectionAt_(event->x(), event->y()));
 
         m_pressed = true;
@@ -1034,8 +1042,18 @@ protected:
             if (!inside) {
                 m_owner->hideRegistryPopup_();
                 if (m_root) {
-                    MouseEvent forwarded(EventType::MousePressEvent, event->x(), event->y());
-                    static_cast<SwWidgetInterface*>(m_root)->mousePressEvent(&forwarded);
+                    const SwPoint rootPos = m_root->mapFrom(this, event->pos());
+                    MouseEvent forwarded(EventType::MousePressEvent,
+                                         rootPos.x,
+                                         rootPos.y,
+                                         event->button(),
+                                         event->isCtrlPressed(),
+                                         event->isShiftPressed(),
+                                         event->isAltPressed());
+                    forwarded.setGlobalPos(event->globalPos());
+                    if (m_root->dispatchMouseEventFromRoot(forwarded)) {
+                        event->accept();
+                    }
                 }
                 event->accept();
                 return;
@@ -1616,7 +1634,6 @@ SwWidget* SwCreatorFormCanvas::createWidgetAt(const SwString& className, int glo
     widgetAdded(w);
     setSelectedWidget(w);
     selectionChanged(w);
-    w->setFocus(true);
     return w;
 }
 
@@ -1633,7 +1650,6 @@ SwWidget* SwCreatorFormCanvas::createLayoutContainerAt(const SwString& layoutCla
     widgetAdded(w);
     setSelectedWidget(w);
     selectionChanged(w);
-    w->setFocus(true);
     return w;
 }
 
@@ -1896,12 +1912,17 @@ void SwCreatorFormCanvas::paintEvent(PaintEvent* event) {
     }
 
     if (m_selected && m_selected != this) {
+        const SwCreatorTheme& theme = SwCreatorTheme::current();
+        const SwColor accentBlue = SwCreatorTheme::current().accentSecondary;
+        const SwColor selColor = blendColor_(theme.borderStrong, accentBlue, 0.30f);
+        const SwColor handleFill = blendColor_(theme.surface1, accentBlue, 0.12f);
+        const SwColor handleBorder = blendColor_(theme.borderStrong, accentBlue, 0.68f);
         SwRect r = widgetRectInCanvas_(this, m_selected);
-        r.x -= 2;
-        r.y -= 2;
-        r.width += 4;
-        r.height += 4;
-        painter->drawRect(r, SwColor{99, 102, 241}, 2);
+        r.x -= 1;
+        r.y -= 1;
+        r.width += 2;
+        r.height += 2;
+        painter->drawRect(r, selColor, 1);
 
         SwWidget* parentWidget = dynamic_cast<SwWidget*>(m_selected->parent());
         SwAbstractLayout* activeLayout = parentWidget ? parentWidget->layout() : nullptr;
@@ -1910,12 +1931,12 @@ void SwCreatorFormCanvas::paintEvent(PaintEvent* event) {
                                            dynamic_cast<SwGridLayout*>(activeLayout) ||
                                            dynamic_cast<SwFormLayout*>(activeLayout));
         if (!managedByKnownLayout) {
-            const int handleSize = 8;
+            const int handleSize = 4;
             const int half = handleSize / 2;
             const int left = r.x;
             const int top = r.y;
-            const int right = r.x + r.width;
-            const int bottom = r.y + r.height;
+            const int right = r.x + r.width - 1;
+            const int bottom = r.y + r.height - 1;
             const int midX = (left + right) / 2;
             const int midY = (top + bottom) / 2;
 
@@ -1923,18 +1944,16 @@ void SwCreatorFormCanvas::paintEvent(PaintEvent* event) {
                 return SwRect{cx - half, cy - half, handleSize, handleSize};
             };
 
-            const SwColor handleBorder{99, 102, 241};
-            const SwColor handleFill{255, 255, 255};
-            painter->fillRoundedRect(handleRect(left, top), 3, handleFill, handleBorder, 1);
-            painter->fillRoundedRect(handleRect(midX, top), 3, handleFill, handleBorder, 1);
-            painter->fillRoundedRect(handleRect(right, top), 3, handleFill, handleBorder, 1);
+            painter->fillRect(handleRect(left, top), handleFill, handleBorder, 1);
+            painter->fillRect(handleRect(midX, top), handleFill, handleBorder, 1);
+            painter->fillRect(handleRect(right, top), handleFill, handleBorder, 1);
 
-            painter->fillRoundedRect(handleRect(left, midY), 3, handleFill, handleBorder, 1);
-            painter->fillRoundedRect(handleRect(right, midY), 3, handleFill, handleBorder, 1);
+            painter->fillRect(handleRect(left, midY), handleFill, handleBorder, 1);
+            painter->fillRect(handleRect(right, midY), handleFill, handleBorder, 1);
 
-            painter->fillRoundedRect(handleRect(left, bottom), 3, handleFill, handleBorder, 1);
-            painter->fillRoundedRect(handleRect(midX, bottom), 3, handleFill, handleBorder, 1);
-            painter->fillRoundedRect(handleRect(right, bottom), 3, handleFill, handleBorder, 1);
+            painter->fillRect(handleRect(left, bottom), handleFill, handleBorder, 1);
+            painter->fillRect(handleRect(midX, bottom), handleFill, handleBorder, 1);
+            painter->fillRect(handleRect(right, bottom), handleFill, handleBorder, 1);
         }
     }
 
@@ -2227,7 +2246,7 @@ SwWidget* SwCreatorFormCanvas::createWidgetAt_(const SwString& className, int gl
         return nullptr;
     }
 
-    w->setFocusPolicy(FocusPolicyEnum::Accept);
+    w->setFocusPolicy(FocusPolicyEnum::NoFocus);
 
     const std::string objectName = nextObjectNameForClass_(className);
     w->setObjectName(SwString(objectName));
@@ -2291,7 +2310,7 @@ SwWidget* SwCreatorFormCanvas::createLayoutContainerAt_(const SwString& layoutCl
     }
 
     auto* frame = new SwFrame(parentForNewWidget);
-    frame->setFocusPolicy(FocusPolicyEnum::Accept);
+    frame->setFocusPolicy(FocusPolicyEnum::NoFocus);
     frame->setFrameShape(SwFrame::Shape::Box);
     frame->setStyleSheet(R"(
         SwFrame {

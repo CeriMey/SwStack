@@ -689,6 +689,9 @@ protected:
         }
 
         m_scene->mousePressEvent_(scenePos, event->globalPos(), event->button(), modifiers);
+        if (event->button() == SwMouseButton::Right) {
+            m_scene->contextMenuEvent_(scenePos, event->globalPos(), modifiers);
+        }
         event->accept();
     }
 
@@ -811,6 +814,11 @@ protected:
     void keyPressEvent(KeyEvent* event) override {
         if (!m_scene || !m_interactive) { SwWidget::keyPressEvent(event); return; }
         m_scene->keyPressEvent_(event);
+    }
+
+    void keyReleaseEvent(KeyEvent* event) override {
+        if (!m_scene || !m_interactive) { SwWidget::keyReleaseEvent(event); return; }
+        m_scene->keyReleaseEvent_(event);
     }
 
     // ===================================================================

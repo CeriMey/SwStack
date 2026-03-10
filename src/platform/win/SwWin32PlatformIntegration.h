@@ -57,6 +57,7 @@
 #if defined(_WIN32)
 
 #include "core/runtime/SwCoreApplication.h"
+#include "platform/win/SwWin32Painter.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -67,11 +68,62 @@
 #include <gdiplus.h>
 #include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
 #include <vector>
 #include <stdexcept>
+
+class SwWin32PlatformImage : public SwPlatformImage {
+public:
+    SwWin32PlatformImage(const SwPlatformSize& size, SwPixelFormat format)
+        : m_size(size), m_format(format) {
+        const int bytesPerPixel = (format == SwPixelFormat::RGB24 || format == SwPixelFormat::BGR24) ? 3 : 4;
+        m_pitch = size.width * bytesPerPixel;
+        m_pixels.resize(static_cast<std::size_t>(m_pitch) * size.height);
+    }
+
+    SwPlatformSize size() const override { return m_size; }
+    SwPixelFormat format() const override { return m_format; }
+    int pitch() const override { return m_pitch; }
+    std::uint8_t* pixels() override { return m_pixels.empty() ? nullptr : m_pixels.data(); }
+    const std::uint8_t* pixels() const override { return m_pixels.empty() ? nullptr : m_pixels.data(); }
+
+    void clear(std::uint32_t argb) override {
+        if (m_pixels.empty()) {
+            return;
+        }
+
+        const std::uint8_t a = static_cast<std::uint8_t>((argb >> 24) & 0xFF);
+        const std::uint8_t r = static_cast<std::uint8_t>((argb >> 16) & 0xFF);
+        const std::uint8_t g = static_cast<std::uint8_t>((argb >> 8) & 0xFF);
+        const std::uint8_t b = static_cast<std::uint8_t>(argb & 0xFF);
+
+        for (int y = 0; y < m_size.height; ++y) {
+            std::uint8_t* row = m_pixels.data() + y * m_pitch;
+            for (int x = 0; x < m_size.width; ++x) {
+                const int bpp = (m_format == SwPixelFormat::RGB24 || m_format == SwPixelFormat::BGR24) ? 3 : 4;
+                std::uint8_t* pixel = row + x * bpp;
+                if (m_format == SwPixelFormat::RGB24) {
+                    pixel[0] = r; pixel[1] = g; pixel[2] = b;
+                } else if (m_format == SwPixelFormat::BGR24) {
+                    pixel[0] = b; pixel[1] = g; pixel[2] = r;
+                } else if (m_format == SwPixelFormat::ABGR32) {
+                    pixel[0] = a; pixel[1] = b; pixel[2] = g; pixel[3] = r;
+                } else {
+                    pixel[0] = b; pixel[1] = g; pixel[2] = r; pixel[3] = a;
+                }
+            }
+        }
+    }
+
+private:
+    SwPlatformSize m_size{};
+    SwPixelFormat m_format{SwPixelFormat::Unknown};
+    int m_pitch{0};
+    std::vector<std::uint8_t> m_pixels;
+};
 
 class SwVirtualGraphicsEngine {
 public:
@@ -210,7 +262,7 @@ struct SwWin32WindowCallbacks {
      * @param HDC Value passed to the method.
      * @return The requested function<void.
      */
-    std::function<void(HDC, const RECT&)> paintHandler;
+    std::function<void(HWND, HDC, const RECT&)> paintHandler;
     /**
      * @brief Returns the current function<void.
      * @return The current function<void.
@@ -263,6 +315,11 @@ struct SwWin32WindowCallbacks {
     std::function<void(int, int, bool, bool, bool)> mouseMoveHandler;
     /**
      * @brief Performs the `function<void` operation.
+     * @return The requested function<void.
+     */
+    std::function<void()> mouseLeaveHandler;
+    /**
+     * @brief Performs the `function<void` operation.
      * @param int Value passed to the method.
      * @param int Value passed to the method.
      * @param int Value passed to the method.
@@ -285,12 +342,25 @@ struct SwWin32WindowCallbacks {
     std::function<void(int, bool, bool, bool, wchar_t, bool)> keyPressHandler;
     /**
      * @brief Performs the `function<void` operation.
+     * @param int Value passed to the method.
+     * @param bool Value passed to the method.
+     * @param bool Value passed to the method.
+     * @param bool Value passed to the method.
+     * @param wchar_t Value passed to the method.
+     * @param bool Value passed to the method.
+     * @return The requested function<void.
+     */
+    std::function<void(int, bool, bool, bool, wchar_t, bool)> keyReleaseHandler;
+    /**
+     * @brief Performs the `function<void` operation.
      * @param width Width value.
      * @param height Height value.
      * @return The requested function<void.
      */
     std::function<void(int width, int height)> resizeHandler;
 };
+
+class SwWin32PlatformWindow;
 
 class SwWin32PlatformIntegration : public SwPlatformIntegration {
 public:
@@ -335,9 +405,8 @@ public:
     std::unique_ptr<SwPlatformWindow> createWindow(const std::string&,
                                                    int,
                                                    int,
-                                                   const SwWindowCallbacks&) override {
-        return nullptr;
-    }
+                                                   const SwWindowCallbacks&,
+                                                   const SwPlatformWindowOptions& = {}) override;
 
     /**
      * @brief Returns the current painter.
@@ -345,16 +414,19 @@ public:
      *
      * @details The returned value reflects the state currently stored by the instance.
      */
-    std::unique_ptr<SwPlatformPainter> createPainter() override { return nullptr; }
+    std::unique_ptr<SwPlatformPainter> createPainter() override {
+        return std::unique_ptr<SwPlatformPainter>(new SwWin32Painter());
+    }
 
     /**
      * @brief Creates the requested image.
      * @param SwPixelFormat Value passed to the method.
      * @return The resulting image.
      */
-    std::unique_ptr<SwPlatformImage> createImage(const SwPlatformSize&,
-                                                 SwPixelFormat) override {
-        return nullptr;
+    std::unique_ptr<SwPlatformImage> createImage(const SwPlatformSize& size,
+                                                 SwPixelFormat format) override {
+        SwPixelFormat resolved = (format == SwPixelFormat::Unknown) ? SwPixelFormat::ARGB32 : format;
+        return std::unique_ptr<SwPlatformImage>(new SwWin32PlatformImage(size, resolved));
     }
 
     /**
@@ -391,7 +463,27 @@ public:
      */
     std::vector<std::string> availableScreens() const override {
         std::vector<std::string> result;
-        result.push_back("Primary Display");
+        EnumDisplayMonitors(nullptr, nullptr,
+            [](HMONITOR hMonitor, HDC, LPRECT, LPARAM lParam) -> BOOL {
+                auto* screens = reinterpret_cast<std::vector<std::string>*>(lParam);
+                MONITORINFOEXA info{};
+                info.cbSize = sizeof(info);
+                if (GetMonitorInfoA(hMonitor, &info)) {
+                    std::ostringstream stream;
+                    stream << info.szDevice
+                           << " (" << (info.rcMonitor.right - info.rcMonitor.left)
+                           << "x" << (info.rcMonitor.bottom - info.rcMonitor.top) << ")";
+                    if (info.dwFlags & MONITORINFOF_PRIMARY) {
+                        stream << " [Primary]";
+                    }
+                    screens->push_back(stream.str());
+                }
+                return TRUE;
+            },
+            reinterpret_cast<LPARAM>(&result));
+        if (result.empty()) {
+            result.push_back("Primary Display");
+        }
         return result;
     }
 
@@ -466,7 +558,21 @@ public:
         if (registry.empty()) {
             registerWindowClass();
         }
-        registry[hwnd] = callbacks;
+        registry[hwnd] = std::make_shared<SwWin32WindowCallbacks>(callbacks);
+    }
+
+    /**
+     * @brief Updates the callbacks associated with an already registered native window.
+     * @param hwnd Value passed to the method.
+     * @param callbacks Value passed to the method.
+     */
+    static void updateWindowCallbacks(HWND hwnd, const SwWin32WindowCallbacks& callbacks) {
+        std::lock_guard<std::mutex> lock(windowMutex());
+        auto& registry = windowRegistry();
+        auto it = registry.find(hwnd);
+        if (it != registry.end()) {
+            it->second = std::make_shared<SwWin32WindowCallbacks>(callbacks);
+        }
     }
 
     /**
@@ -474,13 +580,13 @@ public:
      * @param hwnd Value passed to the method.
      * @return The requested deregister Window.
      */
-    static void deregisterWindow(HWND hwnd) {
+    static void deregisterWindow(HWND hwnd, bool invokeDeleteHandler = true) {
         auto& registry = windowRegistry();
         std::lock_guard<std::mutex> lock(windowMutex());
         auto it = registry.find(hwnd);
         if (it != registry.end()) {
-            if (it->second.deleteHandler) {
-                runDeleteHandler(it->second.deleteHandler);
+            if (invokeDeleteHandler && it->second->deleteHandler) {
+                runDeleteHandler(it->second->deleteHandler);
             }
             registry.erase(it);
         }
@@ -498,24 +604,25 @@ public:
      * @return The requested window Proc.
      */
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-        SwWin32WindowCallbacks callbacks;
+        std::shared_ptr<SwWin32WindowCallbacks> callbacksPtr;
         {
             std::lock_guard<std::mutex> lock(windowMutex());
             auto& registry = windowRegistry();
             auto it = registry.find(hwnd);
             if (it != registry.end()) {
-                callbacks = it->second;
+                callbacksPtr = it->second;
             } else {
                 return DefWindowProcW(hwnd, uMsg, wParam, lParam);
             }
         }
+        const SwWin32WindowCallbacks& callbacks = *callbacksPtr;
 
         switch (uMsg) {
         case WM_PAINT: {
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hwnd, &ps);
             if (callbacks.paintHandler) {
-                runPaintHandler(callbacks.paintHandler, hdc, ps.rcPaint);
+                runPaintHandler(callbacks.paintHandler, hwnd, hdc, ps.rcPaint);
             }
             EndPaint(hwnd, &ps);
             return 0;
@@ -538,8 +645,8 @@ public:
             if (GetCapture() != hwnd) {
                 SetCapture(hwnd);
             }
-            int x = LOWORD(lParam);
-            int y = HIWORD(lParam);
+            int x = GET_X_LPARAM(lParam);
+            int y = GET_Y_LPARAM(lParam);
             if (callbacks.mousePressHandler) {
                 SwMouseButton button = SwMouseButton::NoButton;
                 if (uMsg == WM_LBUTTONDOWN) button = SwMouseButton::Left;
@@ -556,8 +663,8 @@ public:
         case WM_LBUTTONDBLCLK:
         case WM_RBUTTONDBLCLK:
         case WM_MBUTTONDBLCLK: {
-            int x = LOWORD(lParam);
-            int y = HIWORD(lParam);
+            int x = GET_X_LPARAM(lParam);
+            int y = GET_Y_LPARAM(lParam);
             if (callbacks.mouseDoubleClickHandler) {
                 SwMouseButton button = SwMouseButton::NoButton;
                 if (uMsg == WM_LBUTTONDBLCLK) button = SwMouseButton::Left;
@@ -580,8 +687,8 @@ public:
         case WM_LBUTTONUP:
         case WM_RBUTTONUP:
         case WM_MBUTTONUP: {
-            int x = LOWORD(lParam);
-            int y = HIWORD(lParam);
+            int x = GET_X_LPARAM(lParam);
+            int y = GET_Y_LPARAM(lParam);
             if (callbacks.mouseReleaseHandler) {
                 SwMouseButton button = SwMouseButton::NoButton;
                 if (uMsg == WM_LBUTTONUP) button = SwMouseButton::Left;
@@ -601,8 +708,13 @@ public:
             return 0;
         }
         case WM_MOUSEMOVE: {
-            int x = LOWORD(lParam);
-            int y = HIWORD(lParam);
+            TRACKMOUSEEVENT tracking{};
+            tracking.cbSize = sizeof(TRACKMOUSEEVENT);
+            tracking.dwFlags = TME_LEAVE;
+            tracking.hwndTrack = hwnd;
+            TrackMouseEvent(&tracking);
+            int x = GET_X_LPARAM(lParam);
+            int y = GET_Y_LPARAM(lParam);
             if (callbacks.mouseMoveHandler) {
                 const UINT keyState = static_cast<UINT>(wParam);
                 const bool ctrlPressed = (keyState & MK_CONTROL) != 0;
@@ -612,11 +724,17 @@ public:
             }
             return 0;
         }
+        case WM_MOUSELEAVE: {
+            if (callbacks.mouseLeaveHandler) {
+                runMouseLeaveHandler(callbacks.mouseLeaveHandler);
+            }
+            return 0;
+        }
         case WM_MOUSEWHEEL: {
             if (callbacks.mouseWheelHandler) {
                 POINT pt;
-                pt.x = static_cast<short>(LOWORD(lParam));
-                pt.y = static_cast<short>(HIWORD(lParam));
+                pt.x = GET_X_LPARAM(lParam);
+                pt.y = GET_Y_LPARAM(lParam);
                 ScreenToClient(hwnd, &pt);
 
                 const int delta = static_cast<short>(HIWORD(wParam));
@@ -638,8 +756,8 @@ public:
         case WM_MOUSEHWHEEL: {
             if (callbacks.mouseWheelHandler) {
                 POINT pt;
-                pt.x = static_cast<short>(LOWORD(lParam));
-                pt.y = static_cast<short>(HIWORD(lParam));
+                pt.x = GET_X_LPARAM(lParam);
+                pt.y = GET_Y_LPARAM(lParam);
                 ScreenToClient(hwnd, &pt);
 
                 // The widget stack currently exposes a single wheel delta plus modifiers.
@@ -665,8 +783,8 @@ public:
         case WM_POINTERWHEEL: {
             if (callbacks.mouseWheelHandler) {
                 POINT pt;
-                pt.x = static_cast<short>(LOWORD(lParam));
-                pt.y = static_cast<short>(HIWORD(lParam));
+                pt.x = GET_X_LPARAM(lParam);
+                pt.y = GET_Y_LPARAM(lParam);
                 ScreenToClient(hwnd, &pt);
 
                 const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
@@ -687,8 +805,8 @@ public:
         case WM_POINTERHWHEEL: {
             if (callbacks.mouseWheelHandler) {
                 POINT pt;
-                pt.x = static_cast<short>(LOWORD(lParam));
-                pt.y = static_cast<short>(HIWORD(lParam));
+                pt.x = GET_X_LPARAM(lParam);
+                pt.y = GET_Y_LPARAM(lParam);
                 ScreenToClient(hwnd, &pt);
 
                 // Precision touchpads can emit horizontal wheel input through the
@@ -726,29 +844,61 @@ public:
             }
             return DefWindowProcW(hwnd, uMsg, wParam, lParam);
         }
-        case WM_KEYDOWN: {
+        case WM_KEYDOWN:
+        case WM_SYSKEYDOWN: {
             int keyCode = static_cast<int>(wParam);
             bool ctrlPressed = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             bool shiftPressed = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
             bool altPressed = (GetKeyState(VK_MENU) & 0x8000) != 0;
 
-            // Peek at the WM_CHAR that TranslateMessage already posted for this keystroke.
-            // wParam of WM_CHAR is already a Unicode codepoint (UTF-16 BMP).
-            // textProvided=true always so widgets never fall back to translateCharacter()
-            // (which would insert wrong chars for dead keys that yield no WM_CHAR).
-            wchar_t textChar = L'\0';
-            {
-                MSG charMsg = {};
-                if (PeekMessageW(&charMsg, hwnd, WM_CHAR, WM_CHAR, PM_REMOVE)) {
-                    const wchar_t ch = static_cast<wchar_t>(charMsg.wParam);
-                    if (ch >= 0x20) { // skip control chars (BS=8, CR=13, etc.)
-                        textChar = ch;
-                    }
-                }
-            }
-
             if (callbacks.keyPressHandler) {
-                runKeyPressHandler(callbacks.keyPressHandler, keyCode, ctrlPressed, shiftPressed, altPressed, textChar, /*textProvided=*/true);
+                runKeyPressHandler(callbacks.keyPressHandler,
+                                   keyCode,
+                                   ctrlPressed,
+                                   shiftPressed,
+                                   altPressed,
+                                   L'\0',
+                                   /*textProvided=*/true);
+            }
+            return 0;
+        }
+        case WM_CHAR:
+        case WM_SYSCHAR: {
+            const wchar_t ch = static_cast<wchar_t>(wParam);
+            if (ch < 0x20) {
+                return 0;
+            }
+            if (callbacks.keyPressHandler) {
+                const bool ctrlPressed = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+                const bool shiftPressed = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+                const bool altPressed = (GetKeyState(VK_MENU) & 0x8000) != 0;
+                runKeyPressHandler(callbacks.keyPressHandler,
+                                   0,
+                                   ctrlPressed,
+                                   shiftPressed,
+                                   altPressed,
+                                   ch,
+                                   /*textProvided=*/true);
+            }
+            return 0;
+        }
+        case WM_DEADCHAR:
+        case WM_SYSDEADCHAR:
+            return 0;
+        case WM_KEYUP:
+        case WM_SYSKEYUP: {
+            const int keyCode = static_cast<int>(wParam);
+            const bool ctrlPressed = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            const bool shiftPressed = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            const bool altPressed = (GetKeyState(VK_MENU) & 0x8000) != 0;
+            if (callbacks.keyReleaseHandler) {
+                runKeyReleaseHandler(callbacks.keyReleaseHandler,
+                                     keyCode,
+                                     ctrlPressed,
+                                     shiftPressed,
+                                     altPressed,
+                                     L'\0',
+                                     /*textProvided=*/false);
             }
             return 0;
         }
@@ -757,7 +907,6 @@ public:
             if (callbacks.deleteHandler) {
                 runDeleteHandler(callbacks.deleteHandler);
             }
-            PostQuitMessage(0);
             return 0;
         }
         default:
@@ -772,12 +921,17 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     static void registerWindowClass() {
+        if (windowClassRegistered_()) {
+            return;
+        }
         WNDCLASSW wc = {};
         wc.lpfnWndProc = SwWin32PlatformIntegration::WindowProc;
         wc.hInstance = GetModuleHandle(nullptr);
-        wc.lpszClassName = L"SwMainWindowClass";
+        wc.lpszClassName = L"SwPlatformWindowClass";
         wc.style = CS_DBLCLKS;
-        RegisterClassW(&wc);
+        if (RegisterClassW(&wc) || GetLastError() == ERROR_CLASS_ALREADY_EXISTS) {
+            windowClassRegistered_() = true;
+        }
     }
 
     /**
@@ -787,19 +941,39 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     static void unregisterWindowClass() {
-        UnregisterClassW(L"SwMainWindowClass", GetModuleHandle(nullptr));
+        if (!windowClassRegistered_()) {
+            return;
+        }
+        UnregisterClassW(L"SwPlatformWindowClass", GetModuleHandle(nullptr));
+        windowClassRegistered_() = false;
     }
 
 private:
-    static void runPaintHandler(const std::function<void(HDC, const RECT&)>& handler,
+    static bool& windowClassRegistered_() {
+        static bool registered = false;
+        return registered;
+    }
+
+    static void runPaintHandler(const std::function<void(HWND, HDC, const RECT&)>& handler,
+                                HWND hwnd,
                                 HDC hdc,
                                 const RECT& rect) {
-        handler(hdc, rect);
+        handler(hwnd, hdc, rect);
     }
 
     static void runResizeHandler(const std::function<void(int, int)>& handler, int width, int height) {
             handler(width, height);
     }
+
+    // ── Input dispatch helpers ─────────────────────────────────────────
+    // Input events are posted to the core event queue so they execute
+    // inside a fiber context (user code may call dialog.exec(), yield,
+    // waitForConnected(), etc.).  The batch-drain loop in
+    // SwGuiApplication::exec() ensures these are dequeued immediately
+    // after processPlatformEvents() returns, keeping latency minimal.
+    //
+    // Mouse-move and mouse-leave are high-frequency and never need fiber
+    // context, so they are dispatched synchronously for throughput.
 
     static void runMousePressHandler(const std::function<void(int, int, SwMouseButton, bool, bool, bool)>& handler,
                                      int x,
@@ -848,6 +1022,12 @@ private:
         });
     }
 
+    static void runMouseLeaveHandler(const std::function<void()>& handler) {
+        SwCoreApplication::instance()->postEvent([handler]() {
+            handler();
+        });
+    }
+
     static void runMouseWheelHandler(const std::function<void(int, int, int, bool, bool, bool)>& handler,
                                      int x,
                                      int y,
@@ -881,6 +1061,18 @@ private:
         });
     }
 
+    static void runKeyReleaseHandler(const std::function<void(int, bool, bool, bool, wchar_t, bool)>& handler,
+                                     int keyCode,
+                                     bool ctrlPressed,
+                                     bool shiftPressed,
+                                     bool altPressed,
+                                     wchar_t textChar,
+                                     bool textProvided) {
+        SwCoreApplication::instance()->postEvent([handler, keyCode, ctrlPressed, shiftPressed, altPressed, textChar, textProvided]() {
+            handler(keyCode, ctrlPressed, shiftPressed, altPressed, textChar, textProvided);
+        });
+    }
+
     static void runDeleteHandler(const std::function<void()>& handler) {
         SwCoreApplication::instance()->postEvent([handler]() {
             handler();
@@ -891,8 +1083,8 @@ private:
         auto& registry = windowRegistry();
         std::lock_guard<std::mutex> lock(windowMutex());
         for (auto& pair : registry) {
-            if (pair.second.deleteHandler) {
-                pair.second.deleteHandler();
+            if (pair.second->deleteHandler) {
+                pair.second->deleteHandler();
             }
         }
         registry.clear();
@@ -1150,8 +1342,8 @@ private:
     SwGuiApplication* m_application{nullptr};
     DWORD m_mainThreadId{0};
 
-    static std::map<HWND, SwWin32WindowCallbacks>& windowRegistry() {
-        static std::map<HWND, SwWin32WindowCallbacks> registry;
+    static std::map<HWND, std::shared_ptr<SwWin32WindowCallbacks>>& windowRegistry() {
+        static std::map<HWND, std::shared_ptr<SwWin32WindowCallbacks>> registry;
         return registry;
     }
 
@@ -1175,6 +1367,330 @@ private:
         return mutex;
     }
 };
+
+class SwWin32PlatformWindow final : public SwPlatformWindow {
+public:
+    SwWin32PlatformWindow(const std::string& title,
+                          int width,
+                          int height,
+                          const SwWindowCallbacks& callbacks,
+                          const SwPlatformWindowOptions& options)
+        : m_callbacks(adaptCallbacks_(callbacks))
+        , m_options(options) {
+        SwWin32PlatformIntegration::registerWindowClass();
+
+        const DWORD style = buildStyle_(options);
+        const DWORD exStyle = buildExStyle_(options);
+        RECT windowRect = {0, 0, std::max(1, width), std::max(1, height)};
+        AdjustWindowRectEx(&windowRect, style, FALSE, exStyle);
+
+        const std::wstring wideTitle = toWideTitle_(title);
+        m_hwnd = CreateWindowExW(exStyle,
+                                 L"SwPlatformWindowClass",
+                                 wideTitle.c_str(),
+                                 style,
+                                 CW_USEDEFAULT,
+                                 CW_USEDEFAULT,
+                                 std::max(1, static_cast<int>(windowRect.right - windowRect.left)),
+                                 std::max(1, static_cast<int>(windowRect.bottom - windowRect.top)),
+                                 static_cast<HWND>(options.ownerHandle),
+                                 nullptr,
+                                 GetModuleHandle(nullptr),
+                                 nullptr);
+        if (!m_hwnd) {
+            throw std::runtime_error("Failed to create Win32 platform window.");
+        }
+
+        SwWin32PlatformIntegration::registerWindow(m_hwnd, m_callbacks);
+    }
+
+    ~SwWin32PlatformWindow() override {
+        destroyWindow_();
+    }
+
+    void show() override {
+        if (m_hwnd) {
+            ShowWindow(m_hwnd, SW_SHOW);
+            UpdateWindow(m_hwnd);
+        }
+    }
+
+    void hide() override {
+        if (m_hwnd) {
+            ShowWindow(m_hwnd, SW_HIDE);
+        }
+    }
+
+    void setTitle(const std::string& title) override {
+        if (m_hwnd) {
+            const std::wstring wideTitle = toWideTitle_(title);
+            SetWindowTextW(m_hwnd, wideTitle.c_str());
+        }
+    }
+
+    void resize(int width, int height) override {
+        if (!m_hwnd) {
+            return;
+        }
+
+        RECT windowRect = {0, 0, std::max(1, width), std::max(1, height)};
+        const DWORD style = static_cast<DWORD>(GetWindowLongPtrW(m_hwnd, GWL_STYLE));
+        const DWORD exStyle = static_cast<DWORD>(GetWindowLongPtrW(m_hwnd, GWL_EXSTYLE));
+        AdjustWindowRectEx(&windowRect, style, FALSE, exStyle);
+        SetWindowPos(m_hwnd,
+                     nullptr,
+                     0,
+                     0,
+                     std::max(1, static_cast<int>(windowRect.right - windowRect.left)),
+                     std::max(1, static_cast<int>(windowRect.bottom - windowRect.top)),
+                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+
+    void move(int x, int y) override {
+        if (m_hwnd) {
+            SetWindowPos(m_hwnd, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+
+    void requestUpdate() override {
+        if (m_hwnd) {
+            InvalidateRect(m_hwnd, nullptr, FALSE);
+        }
+    }
+
+    void* nativeHandle() const override {
+        return m_hwnd;
+    }
+
+    void* nativeDisplay() const override {
+        return nullptr;
+    }
+
+private:
+    static DWORD buildStyle_(const SwPlatformWindowOptions& options) {
+        DWORD style = WS_OVERLAPPEDWINDOW;
+        if (options.role != SwPlatformWindowRole::MainWindow) {
+            style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
+        }
+        if (!options.resizable) {
+            style &= ~WS_THICKFRAME;
+        }
+        if (!options.minimizable) {
+            style &= ~WS_MINIMIZEBOX;
+        }
+        if (!options.maximizable) {
+            style &= ~WS_MAXIMIZEBOX;
+        }
+        return style;
+    }
+
+    static DWORD buildExStyle_(const SwPlatformWindowOptions& options) {
+        DWORD exStyle = 0;
+        if (!options.showInTaskbar || options.role == SwPlatformWindowRole::ToolWindow) {
+            exStyle |= WS_EX_TOOLWINDOW;
+        } else {
+            exStyle |= WS_EX_APPWINDOW;
+        }
+        return exStyle;
+    }
+
+    static std::wstring toWideTitle_(const std::string& title) {
+        std::wstring wide = SwString::fromUtf8(title.c_str()).toStdWString();
+        wide.erase(std::remove(wide.begin(), wide.end(), L'\0'), wide.end());
+        return wide;
+    }
+
+    static SwWin32WindowCallbacks adaptCallbacks_(const SwWindowCallbacks& callbacks) {
+        SwWin32WindowCallbacks nativeCallbacks;
+        if (callbacks.paintRequestHandler) {
+            nativeCallbacks.paintHandler = [handler = callbacks.paintRequestHandler](HWND hwnd,
+                                                                                    HDC hdc,
+                                                                                    const RECT& rect) {
+                SwPlatformPaintEvent paintEvent;
+                RECT clientRect{};
+                if (hwnd) {
+                    GetClientRect(hwnd, &clientRect);
+                }
+                paintEvent.dirtyRect = SwPlatformRect{
+                    rect.left,
+                    rect.top,
+                    std::max(0, static_cast<int>(rect.right - rect.left)),
+                    std::max(0, static_cast<int>(rect.bottom - rect.top))
+                };
+                paintEvent.surfaceSize = SwPlatformSize{
+                    std::max(0, static_cast<int>(clientRect.right - clientRect.left)),
+                    std::max(0, static_cast<int>(clientRect.bottom - clientRect.top))
+                };
+                paintEvent.nativePaintDevice = hdc;
+                paintEvent.nativeWindowHandle = hwnd;
+                handler(paintEvent);
+            };
+        }
+        nativeCallbacks.deleteHandler = callbacks.deleteHandler;
+        nativeCallbacks.mousePressHandler = [handler = callbacks.mousePressHandler](int x,
+                                                                                    int y,
+                                                                                    SwMouseButton button,
+                                                                                    bool ctrlPressed,
+                                                                                    bool shiftPressed,
+                                                                                    bool altPressed) {
+            if (!handler) {
+                return;
+            }
+            SwMouseEvent event;
+            event.position = SwPlatformPoint{x, y};
+            event.button = button;
+            event.ctrl = ctrlPressed;
+            event.shift = shiftPressed;
+            event.alt = altPressed;
+            event.clickCount = 1;
+            handler(event);
+        };
+        nativeCallbacks.mouseReleaseHandler = [handler = callbacks.mouseReleaseHandler](int x,
+                                                                                        int y,
+                                                                                        SwMouseButton button,
+                                                                                        bool ctrlPressed,
+                                                                                        bool shiftPressed,
+                                                                                        bool altPressed) {
+            if (!handler) {
+                return;
+            }
+            SwMouseEvent event;
+            event.position = SwPlatformPoint{x, y};
+            event.button = button;
+            event.ctrl = ctrlPressed;
+            event.shift = shiftPressed;
+            event.alt = altPressed;
+            event.clickCount = 1;
+            handler(event);
+        };
+        nativeCallbacks.mouseDoubleClickHandler = [handler = callbacks.mouseDoubleClickHandler](int x,
+                                                                                                int y,
+                                                                                                SwMouseButton button,
+                                                                                                bool ctrlPressed,
+                                                                                                bool shiftPressed,
+                                                                                                bool altPressed) {
+            if (!handler) {
+                return;
+            }
+            SwMouseEvent event;
+            event.position = SwPlatformPoint{x, y};
+            event.button = button;
+            event.ctrl = ctrlPressed;
+            event.shift = shiftPressed;
+            event.alt = altPressed;
+            event.clickCount = 2;
+            handler(event);
+        };
+        nativeCallbacks.mouseMoveHandler = [handler = callbacks.mouseMoveHandler](int x,
+                                                                                  int y,
+                                                                                  bool ctrlPressed,
+                                                                                  bool shiftPressed,
+                                                                                  bool altPressed) {
+            if (!handler) {
+                return;
+            }
+            SwMouseEvent event;
+            event.position = SwPlatformPoint{x, y};
+            event.ctrl = ctrlPressed;
+            event.shift = shiftPressed;
+            event.alt = altPressed;
+            handler(event);
+        };
+        nativeCallbacks.mouseLeaveHandler = callbacks.mouseLeaveHandler;
+        nativeCallbacks.mouseWheelHandler = [handler = callbacks.mouseWheelHandler](int x,
+                                                                                    int y,
+                                                                                    int delta,
+                                                                                    bool ctrlPressed,
+                                                                                    bool shiftPressed,
+                                                                                    bool altPressed) {
+            if (!handler) {
+                return;
+            }
+            SwMouseEvent event;
+            event.position = SwPlatformPoint{x, y};
+            event.ctrl = ctrlPressed;
+            event.shift = shiftPressed;
+            event.alt = altPressed;
+            event.wheelDelta = delta;
+            handler(event);
+        };
+        nativeCallbacks.keyPressHandler = [handler = callbacks.keyPressHandler](int keyCode,
+                                                                                bool ctrlPressed,
+                                                                                bool shiftPressed,
+                                                                                bool altPressed,
+                                                                                wchar_t textChar,
+                                                                                bool textProvided) {
+            if (!handler) {
+                return;
+            }
+            SwKeyEvent event;
+            event.keyCode = keyCode;
+            event.ctrl = ctrlPressed;
+            event.shift = shiftPressed;
+            event.alt = altPressed;
+            event.system = false;
+            event.text = textChar;
+            event.textProvided = textProvided;
+            handler(event);
+        };
+        nativeCallbacks.keyReleaseHandler = [handler = callbacks.keyReleaseHandler](int keyCode,
+                                                                                    bool ctrlPressed,
+                                                                                    bool shiftPressed,
+                                                                                    bool altPressed,
+                                                                                    wchar_t textChar,
+                                                                                    bool textProvided) {
+            if (!handler) {
+                return;
+            }
+            SwKeyEvent event;
+            event.keyCode = keyCode;
+            event.ctrl = ctrlPressed;
+            event.shift = shiftPressed;
+            event.alt = altPressed;
+            event.system = false;
+            event.text = textChar;
+            event.textProvided = textProvided;
+            handler(event);
+        };
+        nativeCallbacks.resizeHandler = [handler = callbacks.resizeHandler](int width, int height) {
+            if (!handler) {
+                return;
+            }
+            handler(SwPlatformSize{width, height});
+        };
+        return nativeCallbacks;
+    }
+
+    void destroyWindow_() {
+        if (!m_hwnd) {
+            return;
+        }
+
+        SwWin32WindowCallbacks callbacksWithoutDelete = m_callbacks;
+        callbacksWithoutDelete.deleteHandler = nullptr;
+        SwWin32PlatformIntegration::updateWindowCallbacks(m_hwnd, callbacksWithoutDelete);
+
+        if (IsWindow(m_hwnd)) {
+            DestroyWindow(m_hwnd);
+        }
+        SwWin32PlatformIntegration::deregisterWindow(m_hwnd, false);
+        m_hwnd = nullptr;
+    }
+
+    HWND m_hwnd{nullptr};
+    SwWin32WindowCallbacks m_callbacks;
+    SwPlatformWindowOptions m_options{};
+};
+
+inline std::unique_ptr<SwPlatformWindow> SwWin32PlatformIntegration::createWindow(
+    const std::string& title,
+    int width,
+    int height,
+    const SwWindowCallbacks& callbacks,
+    const SwPlatformWindowOptions& options) {
+    return std::unique_ptr<SwPlatformWindow>(
+        new SwWin32PlatformWindow(title, width, height, callbacks, options));
+}
 
 inline std::unique_ptr<SwPlatformIntegration> SwCreateWin32PlatformIntegration() {
     return std::unique_ptr<SwPlatformIntegration>(new SwWin32PlatformIntegration());

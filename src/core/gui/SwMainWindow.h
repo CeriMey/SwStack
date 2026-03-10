@@ -63,20 +63,12 @@
 #include <cstdint>
 #include <functional>
 #include <iostream>
-#if defined(__linux__)
-#include <codecvt>
-#endif
 #include <memory>
 #include <stdexcept>
 #include <string>
 
 #if defined(_WIN32)
-#include "platform/win/SwWin32PlatformIntegration.h"
-#include "platform/win/SwWin32Painter.h"
 #include "platform/win/SwWindows.h"
-#elif defined(__linux__)
-#include "platform/x11/SwX11Painter.h"
-#include "platform/x11/SwX11PlatformIntegration.h"
 #endif
 
 class SwMainWindow : public SwWidget {
@@ -93,92 +85,48 @@ public:
         : SwWidget(nullptr),
           lastMoveTime(std::chrono::steady_clock::now()),
           m_windowTitle(title) {
-#if defined(_WIN32)
-        // Define the window class name
-        const wchar_t CLASS_NAME[] = L"SwMainWindowClass";
-
-        // Initialize WNDCLASSW structure
-        WNDCLASSW wc = {};
-        wc.lpfnWndProc = SwWin32PlatformIntegration::WindowProc;  // Use Win32 platform WindowProc
-        wc.hInstance = GetModuleHandle(nullptr);
-        wc.lpszClassName = CLASS_NAME;
-        wc.style = CS_DBLCLKS;
-        wc.hbrBackground = CreateSolidBrush(RGB(249, 249, 249));
-
-        // Attempt to register the window class
-        if (!RegisterClassW(&wc)) {
-            if (GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
-                std::wcerr << L"Failed to register window class. Error: " << GetLastError() << std::endl;
-                return;
-            }
+        SwGuiApplication* app = SwGuiApplication::instance(false);
+        if (!app || !app->platformIntegration()) {
+            throw std::runtime_error("SwGuiApplication instance must exist before creating SwMainWindow.");
         }
 
-        // Create the window
-        const std::wstring nativeTitle = toNativeWindowsTitle_(m_windowTitle);
-        hwnd = CreateWindowExW(0,
-                               CLASS_NAME,
-                               nativeTitle.c_str(),
-                               WS_OVERLAPPEDWINDOW,
-                               CW_USEDEFAULT,
-                               CW_USEDEFAULT,
-                               width,
-                               height,
-                               nullptr,
-                               nullptr,
-                               GetModuleHandle(nullptr),
-                               this);
-
-        if (hwnd == nullptr) {
-            std::wcerr << L"Failed to create window. Error: " << GetLastError() << std::endl;
-            return;
-        }
-        setNativeWindowHandle(SwWidgetPlatformAdapter::fromNativeHandle(hwnd));
-
-        // Define the callbacks for this window
-        SwWin32WindowCallbacks callbacks;
-        callbacks.paintHandler = std::bind(&SwMainWindow::onPaint, this, std::placeholders::_1, std::placeholders::_2);
+        SwWindowCallbacks callbacks;
+        callbacks.paintRequestHandler = [this](const SwPlatformPaintEvent& event) { handlePaintRequest(event); };
         callbacks.deleteHandler = [this]() { handleDeleteRequest(true); };
-        callbacks.mousePressHandler = [this](int x,
-                                            int y,
-                                            SwMouseButton button,
-                                            bool ctrlPressed,
-                                            bool shiftPressed,
-                                            bool altPressed) {
-            onMousePress(x, y, button, ctrlPressed, shiftPressed, altPressed);
+        callbacks.resizeHandler = [this](const SwPlatformSize& size) { onResize(size.width, size.height); };
+        callbacks.mousePressHandler = [this](const SwMouseEvent& event) {
+            handleMouseEvent(EventType::MousePressEvent, event);
         };
-        callbacks.mouseReleaseHandler = [this](int x,
-                                              int y,
-                                              SwMouseButton button,
-                                              bool ctrlPressed,
-                                              bool shiftPressed,
-                                              bool altPressed) {
-            onMouseRelease(x, y, button, ctrlPressed, shiftPressed, altPressed);
+        callbacks.mouseDoubleClickHandler = [this](const SwMouseEvent& event) {
+            handleMouseEvent(EventType::MouseDoubleClickEvent, event);
         };
-        callbacks.mouseDoubleClickHandler = [this](int x,
-                                                  int y,
-                                                  SwMouseButton button,
-                                                  bool ctrlPressed,
-                                                  bool shiftPressed,
-                                                  bool altPressed) {
-            onMouseDoubleClick(x, y, button, ctrlPressed, shiftPressed, altPressed);
+        callbacks.mouseReleaseHandler = [this](const SwMouseEvent& event) {
+            handleMouseEvent(EventType::MouseReleaseEvent, event);
         };
-        callbacks.mouseMoveHandler = [this](int x, int y, bool ctrlPressed, bool shiftPressed, bool altPressed) {
-            onMouseMove(x, y, ctrlPressed, shiftPressed, altPressed);
-        };
-        callbacks.mouseWheelHandler = std::bind(&SwMainWindow::onMouseWheel, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, std::placeholders::_4, std::placeholders::_5, std::placeholders::_6);
-        callbacks.keyPressHandler = std::bind(&SwMainWindow::onKeyPress, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, std::placeholders::_4, std::placeholders::_5, std::placeholders::_6);
-        callbacks.resizeHandler = std::bind(&SwMainWindow::onResize, this, std::placeholders::_1, std::placeholders::_2);
+        callbacks.mouseMoveHandler = [this](const SwMouseEvent& event) { handleMouseMove(event); };
+        callbacks.mouseLeaveHandler = [this]() { handleMouseLeave(); };
+        callbacks.mouseWheelHandler = [this](const SwMouseEvent& event) { handleWheelEvent(event); };
+        callbacks.keyPressHandler = [this](const SwKeyEvent& event) { handleKeyEvent(event); };
+        callbacks.keyReleaseHandler = [this](const SwKeyEvent& event) { handleKeyReleaseEvent(event); };
 
-        // Register this window with SwGuiApplication
-        SwWin32PlatformIntegration::registerWindow(hwnd, callbacks);
-#elif defined(__linux__)
-        initializeX11Window(title, width, height);
-#else
-        (void)title;
-        (void)width;
-        (void)height;
-#endif
-        SwWidget::resize(width, height);
+        SwPlatformWindowOptions options;
+        options.role = SwPlatformWindowRole::MainWindow;
+        options.showInTaskbar = true;
+
+        m_platformWindow = app->platformIntegration()->createWindow(toUtf8(m_windowTitle),
+                                                                    width,
+                                                                    height,
+                                                                    callbacks,
+                                                                    options);
+        if (m_platformWindow) {
+            setNativeWindowHandle(SwWidgetPlatformAdapter::fromNativeHandle(m_platformWindow->nativeHandle(),
+                                                                            m_platformWindow->nativeDisplay()));
+        }
+
+        SwRect clientRect = SwWidgetPlatformAdapter::clientRect(nativeWindowHandle());
+        const int initialWidth = clientRect.width > 0 ? clientRect.width : width;
+        const int initialHeight = clientRect.height > 0 ? clientRect.height : height;
+        SwWidget::resize(initialWidth, initialHeight);
         setWindowTitle(m_windowTitle);
     }
 
@@ -220,17 +168,8 @@ public:
      */
     ~SwMainWindow() override {
         handleDeleteRequest(false);
-#if defined(_WIN32)
-        if (hwnd) {
-            SwWin32PlatformIntegration::deregisterWindow(hwnd);
-            DestroyWindow(hwnd);
-            hwnd = nullptr;
-            setNativeWindowHandle(SwWidgetPlatformHandle{});
-        }
-#elif defined(__linux__)
         m_platformWindow.reset();
         setNativeWindowHandle(SwWidgetPlatformHandle{});
-#endif
     }
 
     /**
@@ -239,16 +178,9 @@ public:
      * Displays the window.
      */
     void show() override {
-        #if defined(_WIN32)
-        if (hwnd) {
-            ShowWindow(hwnd, SW_SHOW);
-            UpdateWindow(hwnd);
-        }
-        #elif defined(__linux__)
         if (m_platformWindow) {
             m_platformWindow->show();
         }
-        #endif
         SwWidget::show();
     }
 
@@ -258,15 +190,9 @@ public:
      * Hides the window from the screen.
      */
     void hide() override {
-        #if defined(_WIN32)
-        if (hwnd) {
-            ShowWindow(hwnd, SW_HIDE);
-        }
-        #elif defined(__linux__)
         if (m_platformWindow) {
             m_platformWindow->hide();
         }
-        #endif
         SwWidget::hide();
     }
 
@@ -277,7 +203,7 @@ public:
      */
     void showMinimized() {
         #if defined(_WIN32)
-        if (hwnd) {
+        if (HWND hwnd = nativeHwnd_()) {
             ShowWindow(hwnd, SW_MINIMIZE);
         }
         #endif
@@ -290,7 +216,7 @@ public:
      */
     void showMaximized() {
         #if defined(_WIN32)
-        if (hwnd) {
+        if (HWND hwnd = nativeHwnd_()) {
             ShowWindow(hwnd, SW_MAXIMIZE);
         }
         #endif
@@ -303,7 +229,7 @@ public:
      */
     void showNormal() {
         #if defined(_WIN32)
-        if (hwnd) {
+        if (HWND hwnd = nativeHwnd_()) {
             ShowWindow(hwnd, SW_RESTORE);
         }
         #endif
@@ -483,6 +409,7 @@ public:
      */
     void setWindowFlags(WindowFlags flags) {
 #if defined(_WIN32)
+        HWND hwnd = nativeHwnd_();
         if (!hwnd) return;
 
         // RÃ©cupÃ©ration des styles actuels
@@ -554,6 +481,7 @@ public:
     WindowFlags getWindowFlags() const {
 #if defined(_WIN32)
         WindowFlags flags = WindowFlag::NoFlag;
+        HWND hwnd = nativeHwnd_();
         if (!hwnd) {
             return flags;
         }
@@ -620,12 +548,7 @@ public:
     void dispatchMouseRelease(int x, int y) { onMouseRelease(x, y, SwMouseButton::Left); }
 
 private:
-#if defined(_WIN32)
-    HWND hwnd{nullptr};
-#elif defined(__linux__)
     std::unique_ptr<SwPlatformWindow> m_platformWindow;
-    SwX11PlatformIntegration* m_x11Integration{nullptr};
-#endif
     std::wstring m_windowTitle;
     struct {
         int x{0};
@@ -662,6 +585,12 @@ private:
             "eymeric.oneill@gmail.com</span>"
         );
     }
+
+#if defined(_WIN32)
+    HWND nativeHwnd_() const {
+        return SwWidgetPlatformAdapter::nativeHandleAs<HWND>(nativeWindowHandle());
+    }
+#endif
 
     void ensureAboutDialog() {
         if (m_aboutDialog) {
@@ -794,81 +723,56 @@ private:
 
         m_toolBar = new SwToolBar(this);
         if (m_chromeLayout) {
-            const size_t index = m_menuBar ? 1 : 0;
+            const int index = m_menuBar ? 1 : 0;
             m_chromeLayout->insertWidget(index, m_toolBar, 0, m_toolBar->height());
         }
     }
 
     // Event Handlers
 
-    /**
-     * @brief Handles paint events.
-     * @param hdc Handle to device context.
-     * @param rect Rectangle to paint.
-     */
-#if defined(_WIN32)
-    void onPaint(HDC hdc, const RECT& rect) {
-        if (!hwnd) {
+    void handlePaintRequest(const SwPlatformPaintEvent& paintEvent) {
+        SwGuiApplication* app = SwGuiApplication::instance(false);
+        if (!app || !app->platformIntegration() || !m_platformWindow) {
             return;
         }
 
-        RECT clientRect{};
-        GetClientRect(hwnd, &clientRect);
-        int clientWidth = clientRect.right - clientRect.left;
-        int clientHeight = clientRect.bottom - clientRect.top;
-        if (clientWidth <= 0 || clientHeight <= 0) {
+        SwRect clientRect = SwWidgetPlatformAdapter::clientRect(nativeWindowHandle());
+        if (clientRect.width <= 0) {
+            clientRect.width = paintEvent.surfaceSize.width > 0 ? paintEvent.surfaceSize.width : width();
+        }
+        if (clientRect.height <= 0) {
+            clientRect.height = paintEvent.surfaceSize.height > 0 ? paintEvent.surfaceSize.height : height();
+        }
+        clientRect.width = std::max(1, clientRect.width);
+        clientRect.height = std::max(1, clientRect.height);
+
+        if (width() != clientRect.width || height() != clientRect.height) {
+            SwWidget::resize(clientRect.width, clientRect.height);
+        }
+
+        SwPlatformPaintEvent resolvedEvent = SwResolvePlatformPaintEvent(
+            paintEvent,
+            SwPlatformSize{clientRect.width, clientRect.height},
+            paintEvent.nativePaintDevice ? paintEvent.nativePaintDevice : m_platformWindow->nativeHandle(),
+            m_platformWindow->nativeHandle(),
+            m_platformWindow->nativeDisplay());
+
+        SwScopedPlatformPainter painter(app->platformIntegration(), resolvedEvent);
+        if (!painter) {
             return;
         }
 
-        HDC memDC = CreateCompatibleDC(hdc);
-        if (!memDC) {
-            return;
-        }
-        HBITMAP memBitmap = CreateCompatibleBitmap(hdc, clientWidth, clientHeight);
-        if (!memBitmap) {
-            DeleteDC(memDC);
-            return;
-        }
-
-        HBITMAP oldBitmap = static_cast<HBITMAP>(SelectObject(memDC, memBitmap));
-
-        SwWin32Painter painter(memDC);
-        SwRect paintRect;
-        paintRect.x = 0;
-        paintRect.y = 0;
-        paintRect.width = clientWidth;
-        paintRect.height = clientHeight;
-        PaintEvent paintEvent(&painter, paintRect);
-        this->paintEvent(&paintEvent);
-        SwDragDrop::instance().paintOverlay(&painter);
-
-        int copyWidth = rect.right - rect.left;
-        int copyHeight = rect.bottom - rect.top;
-        BitBlt(hdc, rect.left, rect.top, copyWidth, copyHeight, memDC, rect.left, rect.top, SRCCOPY);
-
-        SelectObject(memDC, oldBitmap);
-        DeleteObject(memBitmap);
-        DeleteDC(memDC);
+        PaintEvent widgetPaintEvent(painter.asPainter(), SwRect{0, 0, clientRect.width, clientRect.height});
+        SwCoreApplication::sendEvent(this, &widgetPaintEvent);
+        SwDragDrop::instance().paintOverlay(painter.asPainter());
+        painter->finalize();
+        painter->flush();
     }
-#endif
 
     void applyWindowTitle() {
-#if defined(_WIN32)
-        if (hwnd) {
-            const std::wstring nativeTitle = toNativeWindowsTitle_(m_windowTitle);
-            SetWindowTextW(hwnd, nativeTitle.c_str());
-        }
-#elif defined(__linux__)
         if (m_platformWindow) {
-            try {
-                std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> conv;
-                m_platformWindow->setTitle(conv.to_bytes(m_windowTitle));
-            } catch (...) {
-                std::string fallback(m_windowTitle.begin(), m_windowTitle.end());
-                m_platformWindow->setTitle(fallback);
-            }
+            m_platformWindow->setTitle(toUtf8(m_windowTitle));
         }
-#endif
     }
 
     void handleDeleteRequest(bool requestAppExit) {
@@ -917,7 +821,8 @@ private:
                       bool altPressed = false) {
         SwToolTip::handleMousePress();
         MouseEvent mouseEvent(EventType::MousePressEvent, x, y, button, ctrlPressed, shiftPressed, altPressed);
-        SwWidget::mousePressEvent(&mouseEvent);
+        mouseEvent.setGlobalPos(mapToGlobal(mouseEvent.pos()));
+        dispatchMouseEventFromRoot_(mouseEvent);
     }
 
     /**
@@ -932,7 +837,8 @@ private:
                         bool shiftPressed = false,
                         bool altPressed = false) {
         MouseEvent mouseEvent(EventType::MouseReleaseEvent, x, y, button, ctrlPressed, shiftPressed, altPressed);
-        SwWidget::mouseReleaseEvent(&mouseEvent);
+        mouseEvent.setGlobalPos(mapToGlobal(mouseEvent.pos()));
+        dispatchMouseEventFromRoot_(mouseEvent);
     }
 
     /**
@@ -947,7 +853,8 @@ private:
                             bool shiftPressed = false,
                             bool altPressed = false) {
         MouseEvent mouseEvent(EventType::MouseDoubleClickEvent, x, y, button, ctrlPressed, shiftPressed, altPressed);
-        SwWidget::mouseDoubleClickEvent(&mouseEvent);
+        mouseEvent.setGlobalPos(mapToGlobal(mouseEvent.pos()));
+        dispatchMouseEventFromRoot_(mouseEvent);
     }
 
     /**
@@ -985,24 +892,21 @@ private:
 
         // Optionally, call the base class mouseMoveEvent if necessary
         SwWidgetPlatformAdapter::setCursor(CursorType::Arrow);
-        SwWidget::mouseMoveEvent(&mouseEvent);
+        mouseEvent.setGlobalPos(mapToGlobal(mouseEvent.pos()));
+        dispatchMouseEventFromRoot_(mouseEvent);
         SwToolTip::handleMouseMove(this, x, y);
+    }
+
+    void onMouseLeave() {
+        lastMoveTime = std::chrono::steady_clock::time_point{};
+        clearHoverRecursive_();
+        SwToolTip::hideText();
     }
 
     void onMouseWheel(int x, int y, int delta, bool ctrlPressed, bool shiftPressed, bool altPressed) {
         WheelEvent wheelEvent(x, y, delta, ctrlPressed, shiftPressed, altPressed);
-
-        SwWidget* target = getChildUnderCursor(x, y);
-        SwWidget* current = target ? target : this;
-        while (current) {
-            WheelEvent localEvent = mapWheelEventToChild_(wheelEvent, this, current);
-            current->wheelEvent(&localEvent);
-            if (localEvent.isAccepted()) {
-                wheelEvent.accept();
-                return;
-            }
-            current = dynamic_cast<SwWidget*>(current->parent());
-        }
+        wheelEvent.setGlobalPos(mapToGlobal(wheelEvent.pos()));
+        dispatchWheelEventFromRoot_(wheelEvent);
     }
 
     /**
@@ -1015,10 +919,20 @@ private:
     void onKeyPress(int keyCode, bool ctrlPressed, bool shiftPressed, bool altPressed, wchar_t textChar = L'\0', bool textProvided = false) {
         SwToolTip::handleKeyPress();
         KeyEvent keyEvent(keyCode, ctrlPressed, shiftPressed, altPressed, textChar, textProvided);
-        if (SwShortcut::dispatch(this, &keyEvent)) {
-            return;
+        if (!dispatchKeyPressEventFromRoot_(keyEvent)) {
+            SwShortcut::dispatch(this, &keyEvent);
         }
-        SwWidget::keyPressEvent(&keyEvent);
+    }
+
+    void onKeyRelease(int keyCode, bool ctrlPressed, bool shiftPressed, bool altPressed) {
+        KeyEvent keyEvent(keyCode,
+                          ctrlPressed,
+                          shiftPressed,
+                          altPressed,
+                          L'\0',
+                          false,
+                          EventType::KeyReleaseEvent);
+        dispatchKeyReleaseEventFromRoot_(keyEvent);
     }
 
 #if defined(_WIN32)
@@ -1033,24 +947,6 @@ private:
         }
         return SwString::fromUtf8(title).toStdWString();
     }
-
-    static std::wstring toNativeWindowsTitle_(const std::wstring& title) {
-        if (title.empty()) {
-            return std::wstring();
-        }
-        if (title.find(L'\0') == std::wstring::npos) {
-            return title;
-        }
-        // Defensive: strip embedded NULs to avoid Win32 truncating at first character.
-        std::wstring sanitized;
-        sanitized.reserve(title.size());
-        for (wchar_t ch : title) {
-            if (ch != L'\0') {
-                sanitized.push_back(ch);
-            }
-        }
-        return sanitized;
-    }
 #endif
 
 #if !defined(_WIN32)
@@ -1059,97 +955,12 @@ private:
     }
 #endif
 
-#if defined(__linux__)
     static std::string toUtf8(const std::wstring& value) {
         if (value.empty()) {
             return {};
         }
         SwString converted = SwString::fromWCharArray(value.c_str());
         return converted.toStdString();
-    }
-
-    void initializeX11Window(const std::wstring& title, int width, int height) {
-        SwGuiApplication* app = SwGuiApplication::instance(false);
-        if (!app) {
-            throw std::runtime_error("SwGuiApplication instance must exist before creating SwMainWindow.");
-        }
-
-        m_x11Integration = dynamic_cast<SwX11PlatformIntegration*>(app->platformIntegration());
-        if (!m_x11Integration) {
-            throw std::runtime_error("X11 platform integration is not available.");
-        }
-
-        SwWindowCallbacks callbacks;
-        callbacks.paintRequestHandler = [this]() { handlePaintRequest(); };
-        callbacks.deleteHandler = [this]() { handleDeleteRequest(true); };
-        callbacks.resizeHandler = [this](const SwPlatformSize& size) { onResize(size.width, size.height); };
-        callbacks.mousePressHandler = [this](const SwMouseEvent& event) {
-            handleMouseEvent(EventType::MousePressEvent, event);
-        };
-        callbacks.mouseDoubleClickHandler = [this](const SwMouseEvent& event) {
-            handleMouseEvent(EventType::MouseDoubleClickEvent, event);
-        };
-        callbacks.mouseReleaseHandler = [this](const SwMouseEvent& event) {
-            handleMouseEvent(EventType::MouseReleaseEvent, event);
-        };
-        callbacks.mouseMoveHandler = [this](const SwMouseEvent& event) { handleMouseMove(event); };
-        callbacks.mouseWheelHandler = [this](const SwMouseEvent& event) { handleWheelEvent(event); };
-        callbacks.keyPressHandler = [this](const SwKeyEvent& event) { handleKeyEvent(event); };
-
-        std::string utf8Title = toUtf8(title);
-        m_platformWindow = m_x11Integration->createWindow(utf8Title.empty() ? "Main Window" : utf8Title,
-                                                          width,
-                                                          height,
-                                                          callbacks);
-
-        if (auto* x11Window = dynamic_cast<SwX11PlatformWindow*>(m_platformWindow.get())) {
-            setNativeWindowHandle(SwWidgetPlatformAdapter::fromNativeHandle(
-                reinterpret_cast<void*>(static_cast<std::uintptr_t>(x11Window->handle())),
-                m_x11Integration->display()));
-        }
-
-        if (m_platformWindow) {
-            m_platformWindow->show();
-        }
-    }
-
-    void handlePaintRequest() {
-        if (!m_x11Integration || !m_platformWindow) {
-            return;
-        }
-        auto* x11Window = dynamic_cast<SwX11PlatformWindow*>(m_platformWindow.get());
-        if (!x11Window) {
-            return;
-        }
-
-        SwRect clientRect = SwWidgetPlatformAdapter::clientRect(nativeWindowHandle());
-        if (clientRect.width <= 0) {
-            clientRect.width = width();
-        }
-        if (clientRect.height <= 0) {
-            clientRect.height = height();
-        }
-
-        if (clientRect.width <= 0) {
-            clientRect.width = 1;
-        }
-        if (clientRect.height <= 0) {
-            clientRect.height = 1;
-        }
-
-        if (width() != clientRect.width || height() != clientRect.height) {
-            SwWidget::resize(clientRect.width, clientRect.height);
-        }
-
-        SwRect rect = this->rect();
-        rect.width = clientRect.width;
-        rect.height = clientRect.height;
-
-        SwX11Painter painter(m_x11Integration->display(), x11Window->handle(), rect.width, rect.height);
-        PaintEvent paintEvent(&painter, rect);
-        this->paintEvent(&paintEvent);
-        SwDragDrop::instance().paintOverlay(&painter);
-        painter.finalize();
     }
 
     void handleMouseEvent(EventType type, const SwMouseEvent& event) {
@@ -1172,6 +983,10 @@ private:
         onMouseMove(event.position.x, event.position.y, event.ctrl, event.shift, event.alt);
     }
 
+    void handleMouseLeave() {
+        onMouseLeave();
+    }
+
     void handleWheelEvent(const SwMouseEvent& event) {
         onMouseWheel(event.position.x, event.position.y, event.wheelDelta, event.ctrl, event.shift, event.alt);
     }
@@ -1179,6 +994,9 @@ private:
     void handleKeyEvent(const SwKeyEvent& event) {
         onKeyPress(event.keyCode, event.ctrl, event.shift, event.alt, event.text, event.textProvided);
     }
-#endif
+
+    void handleKeyReleaseEvent(const SwKeyEvent& event) {
+        onKeyRelease(event.keyCode, event.ctrl, event.shift, event.alt);
+    }
 };
 

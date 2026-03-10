@@ -162,6 +162,14 @@ public:
      */
     virtual void keyPressEvent(KeyEvent* event) = 0;
     /**
+     * @brief Handles the key Release Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     * @return The requested key Release Event.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
+    virtual void keyReleaseEvent(KeyEvent* event) { SW_UNUSED(event); }
+    /**
      * @brief Handles the wheel Event forwarded by the framework.
      * @param event Event object forwarded by the framework.
      * @return The requested wheel Event.
@@ -225,4 +233,3 @@ public:
 //    virtual void setX(int x) = 0;
 //    virtual void setY(int y) = 0;
 };
-

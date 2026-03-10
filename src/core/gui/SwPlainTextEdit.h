@@ -1,4 +1,4 @@
-﻿/***************************************************************************************************
+/***************************************************************************************************
  * This file is part of a project developed by Eymeric O'Neill.
  *
  * Copyright (C) 2025 Ariya Consulting
@@ -25,24 +25,7 @@
 /**
  * @file src/core/gui/SwPlainTextEdit.h
  * @ingroup core_gui
- * @brief Declares the public interface exposed by SwPlainTextEdit in the CoreSw GUI layer.
- *
- * This header belongs to the CoreSw GUI layer. It defines widgets, dialogs, models, delegates,
- * styling helpers, and application integration for the native UI stack.
- *
- * Within that layer, this file focuses on the plain text edit interface. The declarations exposed
- * here define the stable surface that adjacent code can rely on while the implementation remains
- * free to evolve behind the header.
- *
- * The main declarations in this header are SwPlainTextEdit.
- *
- * The declarations in this header are intended to make the subsystem boundary explicit: callers
- * interact with stable types and functions, while implementation details remain confined to
- * source files and private helpers.
- *
- * GUI-facing declarations here are expected to cooperate with event delivery, layout, painting,
- * focus, and parent-child ownership rules.
- *
+ * @brief Multi-line plain text editor backed by a Piece Table.
  */
 
 
@@ -54,20 +37,22 @@
  * - Keyboard editing + cursor, suitable for snapshot-based visual validation.
  * - Styling via StyleSheet basics: background-color / border-color / border-width / border-radius /
  *   color / padding.
+ *
+ * Text storage uses SwPieceTable for O(log P) insert/delete regardless of document size.
+ * Line index is maintained incrementally inside the piece table.
  **************************************************************************************************/
 
 #include "SwFrame.h"
 #include "SwGuiApplication.h"
 #include "SwTimer.h"
 #include "SwWidgetPlatformAdapter.h"
-#include "SwVector.h"
+#include "SwPieceTable.h"
 
 #include <algorithm>
 #include <cctype>
 #include <functional>
 #include <sstream>
 #include <string>
-#include <vector>
 
 class SwPlainTextEdit : public SwFrame {
     SW_OBJECT(SwPlainTextEdit, SwFrame)
@@ -79,24 +64,19 @@ protected:
         size_t selectionStart{0};
         size_t selectionEnd{0};
         int firstVisibleLine{0};
-        /**
-         * @brief Returns the current function<void.
-         * @return The current function<void.
-         *
-         * @details The returned value reflects the state currently stored by the instance.
-         */
         std::function<void()> applyExtra;
     };
 
-    /**
-     * @brief Returns the current capture Edit State.
-     * @return The current capture Edit State.
-     *
-     * @details The returned value reflects the state currently stored by the instance.
-     */
+    enum class UndoMergeKind {
+        None,
+        InsertText,
+        Backspace,
+        DeleteForward
+    };
+
     virtual EditState captureEditState() const {
         EditState st;
-        st.text = m_text;
+        st.text = m_pieceTable.toPlainText();
         st.cursorPos = m_cursorPos;
         st.selectionStart = m_selectionStart;
         st.selectionEnd = m_selectionEnd;
@@ -105,114 +85,71 @@ protected:
     }
 
 public:
-    /**
-     * @brief Constructs a `SwPlainTextEdit` instance.
-     * @param parent Optional parent object that owns this instance.
-     *
-     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
-     */
     explicit SwPlainTextEdit(SwWidget* parent = nullptr)
         : SwFrame(parent) {
         initDefaults();
-        rebuildLines();
         ensureBlinkTimer();
     }
 
-    /**
-     * @brief Sets the word Wrap Enabled.
-     * @param on Value passed to the method.
-     *
-     * @details Call this method to replace the currently stored value with the caller-provided one.
-     */
     void setWordWrapEnabled(bool on) {
         if (m_wordWrapEnabled == on) {
             return;
         }
         m_wordWrapEnabled = on;
-        rebuildLines();
+        rebuildVisualLines_();
         ensureCursorVisible();
         update();
     }
 
-    /**
-     * @brief Returns the current word Wrap Enabled.
-     * @return `true` on success; otherwise `false`.
-     *
-     * @details The returned value reflects the state currently stored by the instance.
-     */
     bool wordWrapEnabled() const { return m_wordWrapEnabled; }
 
-    /**
-     * @brief Sets the plain Text.
-     * @param text Value passed to the method.
-     *
-     * @details Call this method to replace the currently stored value with the caller-provided one.
-     */
     virtual void setPlainText(const SwString& text) {
-        if (m_text == text) {
+        if (m_pieceTable.equals(text)) {
             return;
         }
-        m_text = text;
-        if (m_cursorPos > m_text.size()) {
-            m_cursorPos = m_text.size();
+        m_pieceTable.setText(text);
+        if (m_cursorPos > m_pieceTable.totalLength()) {
+            m_cursorPos = m_pieceTable.totalLength();
         }
         m_selectionStart = m_selectionEnd = m_cursorPos;
         clearUndoRedo_();
-        rebuildLines();
+        rebuildVisualLines_();
         ensureCursorVisible();
         textChanged();
         update();
     }
 
-    /**
-     * @brief Returns the current to Plain Text.
-     * @return The current to Plain Text.
-     *
-     * @details The returned value reflects the state currently stored by the instance.
-     */
-    SwString toPlainText() const { return m_text; }
+    SwString toPlainText() const { return m_pieceTable.toPlainText(); }
 
-    /**
-     * @brief Performs the `appendPlainText` operation.
-     * @param text Value passed to the method.
-     */
     virtual void appendPlainText(const SwString& text) {
-        if (!m_text.isEmpty() && !m_text.endsWith("\n")) {
-            m_text.append("\n");
+        SwString current = m_pieceTable.toPlainText();
+        if (!current.isEmpty() && !current.endsWith("\n")) {
+            m_pieceTable.insert(m_pieceTable.totalLength(), SwString("\n"));
         }
-        m_text.append(text);
-        m_cursorPos = m_text.size();
+        m_pieceTable.insert(m_pieceTable.totalLength(), text);
+        m_cursorPos = m_pieceTable.totalLength();
         m_selectionStart = m_selectionEnd = m_cursorPos;
         clearUndoRedo_();
-        rebuildLines();
+        rebuildVisualLines_();
         ensureCursorVisible();
         textChanged();
         update();
     }
 
-    /**
-     * @brief Clears the current object state.
-     */
     virtual void clear() {
-        if (m_text.isEmpty()) {
+        if (m_pieceTable.isEmpty()) {
             return;
         }
-        m_text.clear();
+        m_pieceTable.setText(SwString());
         m_cursorPos = 0;
         m_selectionStart = m_selectionEnd = 0;
         m_firstVisibleLine = 0;
         clearUndoRedo_();
-        rebuildLines();
+        rebuildVisualLines_();
         textChanged();
         update();
     }
 
-    /**
-     * @brief Sets the placeholder Text.
-     * @param text Value passed to the method.
-     *
-     * @details Call this method to replace the currently stored value with the caller-provided one.
-     */
     void setPlaceholderText(const SwString& text) {
         if (m_placeholder == text) {
             return;
@@ -221,78 +158,34 @@ public:
         update();
     }
 
-    /**
-     * @brief Returns the current placeholder Text.
-     * @return The current placeholder Text.
-     *
-     * @details The returned value reflects the state currently stored by the instance.
-     */
     SwString placeholderText() const { return m_placeholder; }
 
-    /**
-     * @brief Sets the read Only.
-     * @param on Value passed to the method.
-     *
-     * @details Call this method to replace the currently stored value with the caller-provided one.
-     */
     void setReadOnly(bool on) { m_readOnly = on; }
-    /**
-     * @brief Returns whether the object reports read Only.
-     * @return `true` when the object reports read Only; otherwise `false`.
-     *
-     * @details The returned value reflects the state currently stored by the instance.
-     */
     bool isReadOnly() const { return m_readOnly; }
 
-    /**
-     * @brief Performs the `cursorPosition` operation.
-     * @param m_cursorPos Value passed to the method.
-     * @return The requested cursor Position.
-     */
     int cursorPosition() const { return static_cast<int>(m_cursorPos); }
 
-    /**
-     * @brief Returns whether the object reports selected Text.
-     * @return `true` when the object reports selected Text; otherwise `false`.
-     *
-     * @details The returned value reflects the state currently stored by the instance.
-     */
     bool hasSelectedText() const { return m_selectionStart != m_selectionEnd; }
 
-    /**
-     * @brief Returns the current selected Text.
-     * @return The current selected Text.
-     *
-     * @details The returned value reflects the state currently stored by the instance.
-     */
     SwString selectedText() const {
         if (!hasSelectedText()) {
             return {};
         }
         const size_t start = selectionMin_();
         const size_t end = selectionMax_();
-        if (start >= m_text.size() || end <= start) {
+        if (start >= m_pieceTable.totalLength() || end <= start) {
             return {};
         }
-        return m_text.substr(start, end - start);
+        return m_pieceTable.substr(start, end - start);
     }
 
-    /**
-     * @brief Performs the `selectAll` operation.
-     */
     void selectAll() {
         m_selectionStart = 0;
-        m_selectionEnd = m_text.size();
+        m_selectionEnd = m_pieceTable.totalLength();
         m_cursorPos = m_selectionEnd;
         update();
     }
 
-    /**
-     * @brief Sets the undo Redo Enabled.
-     * @param on Value passed to the method.
-     *
-     * @details Call this method to replace the currently stored value with the caller-provided one.
-     */
     void setUndoRedoEnabled(bool on) {
         m_undoRedoEnabled = on;
         if (!m_undoRedoEnabled) {
@@ -301,31 +194,10 @@ public:
         }
     }
 
-    /**
-     * @brief Returns whether the object reports undo Redo Enabled.
-     * @return `true` when the object reports undo Redo Enabled; otherwise `false`.
-     *
-     * @details The returned value reflects the state currently stored by the instance.
-     */
     bool isUndoRedoEnabled() const { return m_undoRedoEnabled; }
-    /**
-     * @brief Returns whether the object reports undo.
-     * @return `true` when the object reports undo; otherwise `false`.
-     *
-     * @details This query does not modify the object state.
-     */
-    bool canUndo() const { return m_undoRedoEnabled && !m_undoStack.empty(); }
-    /**
-     * @brief Returns whether the object reports redo.
-     * @return `true` when the object reports redo; otherwise `false`.
-     *
-     * @details This query does not modify the object state.
-     */
-    bool canRedo() const { return m_undoRedoEnabled && !m_redoStack.empty(); }
+    bool canUndo() const { return m_undoRedoEnabled && !m_undoStack.isEmpty(); }
+    bool canRedo() const { return m_undoRedoEnabled && !m_redoStack.isEmpty(); }
 
-    /**
-     * @brief Performs the `undo` operation.
-     */
     void undo() {
         if (m_readOnly || !canUndo()) {
             return;
@@ -337,9 +209,6 @@ public:
         restoreEditState_(previous);
     }
 
-    /**
-     * @brief Performs the `redo` operation.
-     */
     void redo() {
         if (m_readOnly || !canRedo()) {
             return;
@@ -351,9 +220,6 @@ public:
         restoreEditState_(next);
     }
 
-    /**
-     * @brief Performs the `copy` operation.
-     */
     void copy() {
         if (!hasSelectedText()) {
             return;
@@ -363,9 +229,6 @@ public:
         }
     }
 
-    /**
-     * @brief Performs the `cut` operation.
-     */
     void cut() {
         if (m_readOnly) {
             return;
@@ -376,9 +239,6 @@ public:
         update();
     }
 
-    /**
-     * @brief Performs the `paste` operation.
-     */
     void paste() {
         if (m_readOnly) {
             return;
@@ -388,7 +248,6 @@ public:
             if (clip.isEmpty()) {
                 return;
             }
-            // Normalize to '\n' line breaks to keep internal storage consistent.
             clip.replace("\r\n", "\n");
             clip.replace("\r", "\n");
             replaceSelectionWithText_(clip);
@@ -400,28 +259,16 @@ public:
     DECLARE_SIGNAL_VOID(textChanged);
 
 protected:
-    /**
-     * @brief Handles the resize Event forwarded by the framework.
-     * @param event Event object forwarded by the framework.
-     *
-     * @details Override this hook when the default framework behavior needs to be extended or replaced.
-     */
     void resizeEvent(ResizeEvent* event) override {
         SwFrame::resizeEvent(event);
         if (!m_wordWrapEnabled) {
             return;
         }
-        rebuildLines();
+        rebuildVisualLines_();
         ensureCursorVisible();
         update();
     }
 
-    /**
-     * @brief Handles the paint Event forwarded by the framework.
-     * @param event Event object forwarded by the framework.
-     *
-     * @details Override this hook when the default framework behavior needs to be extended or replaced.
-     */
     void paintEvent(PaintEvent* event) override {
         if (!isVisibleInHierarchy()) {
             return;
@@ -480,17 +327,21 @@ protected:
         const SwColor selFill{219, 234, 254};
         const int fallbackWidth = std::max(1, inner.width);
 
+        const int totalLines = effectiveLineCount_();
         const int first = std::max(0, m_firstVisibleLine);
-        const int last = std::min(first + visibleLines + 1, m_lines.size());
+        const int last = std::min(first + visibleLines + 1, totalLines);
+
+        // Cache visible line content to avoid repeated piece table traversals
         for (int i = first; i < last; ++i) {
             const int row = i - first;
             SwRect lineRect{inner.x, inner.y + row * lh, inner.width, lh};
 
-            if (hasSel && i < m_lineStarts.size()) {
-                const size_t lineStart = m_lineStarts[i];
-                const size_t lineLen = m_lines[i].size();
-                const size_t lineEnd = lineStart + lineLen;
+            const SwString lineText = effectiveLineContent_(i);
+            const size_t lineStart = effectiveLineStart_(i);
+            const size_t lineLen = lineText.size();
 
+            if (hasSel) {
+                const size_t lineEnd = lineStart + lineLen;
                 const size_t segStart = (std::max)(selMin, lineStart);
                 const size_t segEnd = (std::min)(selMax, lineEnd);
                 if (segStart < segEnd) {
@@ -498,12 +349,12 @@ protected:
                     const size_t endCol = segEnd - lineStart;
 
                     const int x1 = inner.x + SwWidgetPlatformAdapter::textWidthUntil(nativeWindowHandle(),
-                                                                                     m_lines[i],
+                                                                                     lineText,
                                                                                      getFont(),
                                                                                      startCol,
                                                                                      fallbackWidth);
                     const int x2 = inner.x + SwWidgetPlatformAdapter::textWidthUntil(nativeWindowHandle(),
-                                                                                     m_lines[i],
+                                                                                     lineText,
                                                                                      getFont(),
                                                                                      endCol,
                                                                                      fallbackWidth);
@@ -516,13 +367,13 @@ protected:
             }
 
             painter->drawText(lineRect,
-                              m_lines[i],
+                              lineText,
                               DrawTextFormats(DrawTextFormat::Left | DrawTextFormat::VCenter | DrawTextFormat::SingleLine),
                               textColor,
                               getFont());
         }
 
-        if (m_text.isEmpty() && !m_placeholder.isEmpty() && !getFocus()) {
+        if (m_pieceTable.isEmpty() && !m_placeholder.isEmpty() && !getFocus()) {
             SwRect phRect = inner;
             phRect.height = lh;
             SwColor ph{160, 160, 160};
@@ -538,7 +389,7 @@ protected:
             const int cursorLine = ci.line;
             const int cursorCol = ci.col;
             if (cursorLine >= first && cursorLine < last) {
-                const SwString& lineText = m_lines[cursorLine];
+                const SwString lineText = effectiveLineContent_(cursorLine);
                 const size_t clampedCol = std::min(static_cast<size_t>(cursorCol), lineText.size());
 
                 const int caretDx = SwWidgetPlatformAdapter::textWidthUntil(nativeWindowHandle(),
@@ -559,12 +410,6 @@ protected:
         painter->finalize();
     }
 
-    /**
-     * @brief Handles the mouse Press Event forwarded by the framework.
-     * @param event Event object forwarded by the framework.
-     *
-     * @details Override this hook when the default framework behavior needs to be extended or replaced.
-     */
     void mousePressEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -597,12 +442,6 @@ protected:
         update();
     }
 
-    /**
-     * @brief Handles the mouse Move Event forwarded by the framework.
-     * @param event Event object forwarded by the framework.
-     *
-     * @details Override this hook when the default framework behavior needs to be extended or replaced.
-     */
     void mouseMoveEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -620,12 +459,6 @@ protected:
         SwFrame::mouseMoveEvent(event);
     }
 
-    /**
-     * @brief Handles the mouse Release Event forwarded by the framework.
-     * @param event Event object forwarded by the framework.
-     *
-     * @details Override this hook when the default framework behavior needs to be extended or replaced.
-     */
     void mouseReleaseEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -638,12 +471,6 @@ protected:
         SwFrame::mouseReleaseEvent(event);
     }
 
-    /**
-     * @brief Handles the mouse Double Click Event forwarded by the framework.
-     * @param event Event object forwarded by the framework.
-     *
-     * @details Override this hook when the default framework behavior needs to be extended or replaced.
-     */
     void mouseDoubleClickEvent(MouseEvent* event) override {
         if (!event) {
             return;
@@ -663,12 +490,6 @@ protected:
         update();
     }
 
-    /**
-     * @brief Handles the wheel Event forwarded by the framework.
-     * @param event Event object forwarded by the framework.
-     *
-     * @details Override this hook when the default framework behavior needs to be extended or replaced.
-     */
     void wheelEvent(WheelEvent* event) override {
         if (!event) {
             return;
@@ -678,9 +499,6 @@ protected:
             return;
         }
         if (event->isShiftPressed()) {
-            // Plain text edit only implements vertical wheel scrolling. Let
-            // horizontal wheel gestures bubble so parent scroll areas or
-            // horizontal scroll bars can consume them.
             SwFrame::wheelEvent(event);
             return;
         }
@@ -702,7 +520,7 @@ protected:
 
         const int visibleLines = std::max(1, inner.height / lh);
         clampFirstVisibleLine(visibleLines);
-        const int maxFirst = std::max(0, m_lines.size() - visibleLines);
+        const int maxFirst = std::max(0, effectiveLineCount_() - visibleLines);
 
         int steps = event->delta() / 120;
         if (steps == 0) {
@@ -718,12 +536,6 @@ protected:
         update();
     }
 
-    /**
-     * @brief Handles the key Press Event forwarded by the framework.
-     * @param event Event object forwarded by the framework.
-     *
-     * @details Override this hook when the default framework behavior needs to be extended or replaced.
-     */
     void keyPressEvent(KeyEvent* event) override {
         if (!event) {
             return;
@@ -736,8 +548,12 @@ protected:
 
         const int key = event->key();
         const bool shift = event->isShiftPressed();
+        const bool altGrTextInput = event->isCtrlPressed() &&
+                                    event->isAltPressed() &&
+                                    event->text() != L'\0';
+        const bool shortcutCtrl = event->isCtrlPressed() && !altGrTextInput;
 
-        if (event->isCtrlPressed()) {
+        if (shortcutCtrl) {
             if (SwWidgetPlatformAdapter::matchesShortcutKey(key, 'C')) {
                 copy();
                 event->accept();
@@ -886,17 +702,7 @@ protected:
                 }
             }
             if (wc != L'\0' && wc != L'\r' && wc != L'\n') {
-                // Encode as UTF-8 before inserting (1 byte ASCII, 2 bytes Latin-1 like ÃƒÂª/ÃƒÂ /ÃƒÂ©)
-                if (wc < 0x80) {
-                    insertChar(static_cast<char>(wc));
-                } else if (wc < 0x800) {
-                    insertChar(static_cast<char>(0xC0 | (wc >> 6)));
-                    insertChar(static_cast<char>(0x80 | (wc & 0x3F)));
-                } else {
-                    insertChar(static_cast<char>(0xE0 | (wc >> 12)));
-                    insertChar(static_cast<char>(0x80 | ((wc >> 6) & 0x3F)));
-                    insertChar(static_cast<char>(0x80 | (wc & 0x3F)));
-                }
+                insertText(utf8FromWideChar_(wc));
                 event->accept();
             }
         }
@@ -924,24 +730,50 @@ protected:
         size_t lineStart{0};
     };
 
-    /**
-     * @brief Performs the `parsePaddingShorthand` operation.
-     * @param value Value passed to the method.
-     * @param current Value passed to the method.
-     * @return The requested parse Padding Shorthand.
-     */
+    static bool isUtf8ContinuationByte_(unsigned char byte) {
+        return (byte & 0xC0U) == 0x80U;
+    }
+
+    static size_t clampUtf8BoundaryInText_(const SwString& text, size_t offset) {
+        const std::string utf8 = text.toStdString();
+        if (offset >= utf8.size()) {
+            return utf8.size();
+        }
+        while (offset > 0 && isUtf8ContinuationByte_(static_cast<unsigned char>(utf8[offset]))) {
+            --offset;
+        }
+        return offset;
+    }
+
+    static size_t nextUtf8BoundaryInText_(const SwString& text, size_t offset) {
+        const std::string utf8 = text.toStdString();
+        if (offset >= utf8.size()) {
+            return utf8.size();
+        }
+        size_t next = clampUtf8BoundaryInText_(text, offset) + 1;
+        while (next < utf8.size() && isUtf8ContinuationByte_(static_cast<unsigned char>(utf8[next]))) {
+            ++next;
+        }
+        return next;
+    }
+
+    static SwString utf8FromWideChar_(wchar_t wc) {
+        const std::wstring wide(1, wc);
+        return SwString::fromWString(wide);
+    }
+
     static Padding parsePaddingShorthand(const SwString& value, Padding current) {
         if (value.isEmpty()) {
             return current;
         }
-        std::vector<std::string> tokens;
+        SwVector<SwString> tokens;
         std::istringstream ss(value.toStdString());
         std::string token;
         while (ss >> token) {
-            tokens.push_back(token);
+            tokens.push_back(SwString(token));
         }
-        auto toPx = [&](const std::string& str, int fallback) -> int {
-            return parsePixelValue(SwString(str), fallback);
+        auto toPx = [&](const SwString& str, int fallback) -> int {
+            return parsePixelValue(str, fallback);
         };
         if (tokens.size() == 1) {
             const int v = toPx(tokens[0], current.top);
@@ -967,11 +799,6 @@ protected:
         return current;
     }
 
-    /**
-     * @brief Performs the `resolvePadding` operation.
-     * @param sheet Value passed to the method.
-     * @return The requested resolve Padding.
-     */
     Padding resolvePadding(StyleSheet* sheet) const {
         Padding padding{};
         if (!sheet) {
@@ -1040,20 +867,11 @@ protected:
         return padding;
     }
 
-    /**
-     * @brief Returns the current line Height Px.
-     * @return The current line Height Px.
-     *
-     * @details The returned value reflects the state currently stored by the instance.
-     */
     int lineHeightPx() const {
         const int pt = getFont().getPointSize();
         return clampInt(pt + 10, 18, 34);
     }
 
-    /**
-     * @brief Performs the `ensureBlinkTimer` operation.
-     */
     void ensureBlinkTimer() {
         if (m_blinkTimer) {
             return;
@@ -1069,7 +887,7 @@ protected:
 
         SwObject::connect(this, &SwPlainTextEdit::FocusChanged, [this](bool focus) {
             m_caretVisible = true;
-            if (focus) {
+            if (focus && isVisibleInHierarchy()) {
                 if (m_blinkTimer) {
                     m_blinkTimer->start();
                 }
@@ -1080,39 +898,115 @@ protected:
             }
             update();
         });
+
+        SwObject::connect(this, &SwPlainTextEdit::VisibleChanged, [this](bool visible) {
+            if (!visible && m_blinkTimer) {
+                m_blinkTimer->stop();
+            } else if (visible && getFocus() && m_blinkTimer) {
+                m_blinkTimer->start();
+            }
+        });
     }
 
-    /**
-     * @brief Performs the `rebuildLines` operation.
-     */
-    void rebuildLines() {
-        m_lines.clear();
-        m_lineStarts.clear();
+    // ─── Line access abstraction ────────────────────────────────────────
+    // When word wrap is off, delegates directly to piece table (logical lines).
+    // When word wrap is on, uses the visual line cache.
 
-        const size_t n = m_text.size();
-        size_t lineStart = 0;
+    int effectiveLineCount_() const {
+        if (m_wordWrapEnabled && !m_visualLines.isEmpty()) {
+            return m_visualLines.size();
+        }
+        return m_pieceTable.lineCount();
+    }
 
-        const bool wrap = m_wordWrapEnabled;
-        const int wrapWidthPx = wrap ? resolveInnerWrapWidthPx_() : 0;
+    SwString effectiveLineContent_(int lineIdx) const {
+        if (m_wordWrapEnabled && !m_visualLines.isEmpty()) {
+            if (lineIdx < 0 || lineIdx >= m_visualLines.size()) {
+                return SwString();
+            }
+            const VisualLine& vl = m_visualLines[lineIdx];
+            return m_pieceTable.substr(vl.offset, vl.length);
+        }
+        return m_pieceTable.lineContent(lineIdx);
+    }
 
-        auto pushLine = [&](size_t start, size_t len) {
-            m_lines.push_back(m_text.substr(start, len));
-            m_lineStarts.push_back(start);
-        };
+    size_t effectiveLineStart_(int lineIdx) const {
+        if (m_wordWrapEnabled && !m_visualLines.isEmpty()) {
+            if (lineIdx < 0 || lineIdx >= m_visualLines.size()) {
+                return 0;
+            }
+            return m_visualLines[lineIdx].offset;
+        }
+        return m_pieceTable.lineStart(lineIdx);
+    }
 
-        auto pushWrapped = [&](size_t start, size_t len) {
-            if (len == 0) {
-                pushLine(start, 0);
-                return;
+    size_t effectiveLineLength_(int lineIdx) const {
+        if (m_wordWrapEnabled && !m_visualLines.isEmpty()) {
+            if (lineIdx < 0 || lineIdx >= m_visualLines.size()) {
+                return 0;
+            }
+            return m_visualLines[lineIdx].length;
+        }
+        return m_pieceTable.lineLength(lineIdx);
+    }
+
+    int effectiveLineForOffset_(size_t pos) const {
+        if (m_wordWrapEnabled && !m_visualLines.isEmpty()) {
+            const size_t clamped = std::min(pos, m_pieceTable.totalLength());
+            // Binary search on visual lines
+            int lo = 0;
+            int hi = m_visualLines.size() - 1;
+            int result = 0;
+            while (lo <= hi) {
+                const int mid = lo + (hi - lo) / 2;
+                if (m_visualLines[mid].offset <= clamped) {
+                    result = mid;
+                    lo = mid + 1;
+                } else {
+                    hi = mid - 1;
+                }
+            }
+            return result;
+        }
+        return m_pieceTable.lineForOffset(pos);
+    }
+
+    // ─── Visual line cache (only used when word wrap is on) ─────────────
+    struct VisualLine {
+        size_t offset;
+        size_t length;
+    };
+
+    void rebuildVisualLines_() {
+        m_visualLines.clear();
+        if (!m_wordWrapEnabled) {
+            return; // Use piece table directly
+        }
+
+        const int wrapWidthPx = resolveInnerWrapWidthPx_();
+        if (wrapWidthPx <= 1) {
+            return;
+        }
+
+        // Iterate logical lines and wrap each one
+        const int logicalCount = m_pieceTable.lineCount();
+        for (int logLine = 0; logLine < logicalCount; ++logLine) {
+            const size_t lineStart = m_pieceTable.lineStart(logLine);
+            const size_t lineLen = m_pieceTable.lineLength(logLine);
+
+            if (lineLen == 0) {
+                m_visualLines.push_back(VisualLine{lineStart, 0});
+                continue;
             }
 
+            const SwString paragraph = m_pieceTable.substr(lineStart, lineLen);
             const int fallbackWidth = std::max(1, wrapWidthPx);
-            const SwString paragraph = m_text.substr(start, len);
             size_t localStart = 0;
 
-            while (localStart < len) {
-                const size_t remaining = len - localStart;
-                const SwString remainingText = paragraph.substr(localStart, remaining);
+            while (localStart < lineLen) {
+                const size_t clampedLocalStart = clampUtf8BoundaryInText_(paragraph, localStart);
+                const size_t remaining = lineLen - clampedLocalStart;
+                const SwString remainingText = paragraph.substr(clampedLocalStart, remaining);
 
                 auto textWidth = [&](size_t count) -> int {
                     return SwWidgetPlatformAdapter::textWidthUntil(nativeWindowHandle(),
@@ -1122,69 +1016,51 @@ protected:
                                                                    fallbackWidth);
                 };
 
-                size_t best = 1;
-                size_t lo = 1;
-                size_t hi = remaining;
-                while (lo <= hi) {
-                    const size_t mid = lo + ((hi - lo) / 2);
-                    if (textWidth(mid) <= wrapWidthPx) {
-                        best = mid;
-                        lo = mid + 1;
+                size_t best = nextUtf8BoundaryInText_(remainingText, 0);
+                for (size_t probe = best; probe <= remaining;) {
+                    if (textWidth(probe) <= wrapWidthPx) {
+                        best = probe;
                     } else {
-                        if (mid == 0) {
-                            break;
-                        }
-                        hi = mid - 1;
+                        break;
                     }
+                    if (probe == remaining) {
+                        break;
+                    }
+                    const size_t nextProbe = nextUtf8BoundaryInText_(remainingText, probe);
+                    if (nextProbe <= probe) {
+                        break;
+                    }
+                    probe = nextProbe;
                 }
 
                 size_t take = std::max<size_t>(1, best);
 
-                // Prefer breaking at whitespace when possible (keeps words together).
                 if (take < remaining) {
                     size_t breakPos = static_cast<size_t>(-1);
-                    size_t i = take;
-                    while (i > 0) {
-                        --i;
-                        const char ch = remainingText[i];
+                    size_t idx = take;
+                    while (idx > 0) {
+                        --idx;
+                        const char ch = remainingText[idx];
                         if (ch == ' ' || ch == '\t') {
-                            breakPos = i;
+                            breakPos = idx;
                             break;
                         }
                     }
                     if (breakPos != static_cast<size_t>(-1) && breakPos > 0) {
-                        take = breakPos + 1; // include the whitespace (keeps 1:1 mapping with m_text)
+                        take = breakPos + 1;
                     }
                 }
 
-                pushLine(start + localStart, take);
-                localStart += take;
-            }
-        };
-
-        for (size_t i = 0; i <= n; ++i) {
-            if (i == n || m_text[i] == '\n') {
-                const size_t segLen = i - lineStart;
-                if (!wrap || wrapWidthPx <= 1) {
-                    pushLine(lineStart, segLen);
-                } else {
-                    pushWrapped(lineStart, segLen);
-                }
-                lineStart = i + 1;
+                m_visualLines.push_back(VisualLine{lineStart + clampedLocalStart, take});
+                localStart = clampedLocalStart + take;
             }
         }
 
-        if (m_lines.size() == 0) {
-            pushLine(0, 0);
+        if (m_visualLines.isEmpty()) {
+            m_visualLines.push_back(VisualLine{0, 0});
         }
     }
 
-    /**
-     * @brief Returns the current resolve Inner Wrap Width Px.
-     * @return The current resolve Inner Wrap Width Px.
-     *
-     * @details The returned value reflects the state currently stored by the instance.
-     */
     int resolveInnerWrapWidthPx_() {
         const SwRect bounds = rect();
         if (bounds.width <= 0) {
@@ -1203,47 +1079,25 @@ protected:
         return std::max(1, innerW);
     }
 
-    /**
-     * @brief Returns the current cursor Info.
-     * @return The current cursor Info.
-     *
-     * @details The returned value reflects the state currently stored by the instance.
-     */
+    // ─── Cursor ─────────────────────────────────────────────────────────
+
     CursorInfo cursorInfo() const {
         CursorInfo ci;
-        const size_t cursor = std::min(m_cursorPos, m_text.size());
-
-        int line = 0;
-        size_t lineStart = 0;
-        for (int i = 0; i < m_lineStarts.size(); ++i) {
-            const size_t s = m_lineStarts[i];
-            if (s <= cursor) {
-                line = i;
-                lineStart = s;
-            } else {
-                break;
-            }
-        }
-
-        ci.line = std::max(0, std::min(line, m_lines.size() - 1));
-        ci.lineStart = lineStart;
-        ci.col = static_cast<int>(cursor - lineStart);
+        const size_t cursor = clampCursorBoundary_(std::min(m_cursorPos, m_pieceTable.totalLength()));
+        const int line = effectiveLineForOffset_(cursor);
+        const size_t ls = effectiveLineStart_(line);
+        ci.line = std::max(0, std::min(line, effectiveLineCount_() - 1));
+        ci.lineStart = ls;
+        ci.col = static_cast<int>(cursor - ls);
         return ci;
     }
 
-    /**
-     * @brief Performs the `clampFirstVisibleLine` operation.
-     * @param visibleLines Value passed to the method.
-     */
     void clampFirstVisibleLine(int visibleLines) {
         visibleLines = std::max(1, visibleLines);
-        const int maxFirst = std::max(0, m_lines.size() - visibleLines);
+        const int maxFirst = std::max(0, effectiveLineCount_() - visibleLines);
         m_firstVisibleLine = clampInt(m_firstVisibleLine, 0, maxFirst);
     }
 
-    /**
-     * @brief Performs the `ensureCursorVisible` operation.
-     */
     void ensureCursorVisible() {
         const int lh = lineHeightPx();
         if (lh <= 0) {
@@ -1271,12 +1125,6 @@ protected:
         clampFirstVisibleLine(visibleLines);
     }
 
-    /**
-     * @brief Updates the cursor From Position managed by the object.
-     * @param px Value passed to the method.
-     * @param py Value passed to the method.
-     * @return The requested cursor From Position.
-     */
     virtual void updateCursorFromPosition(int px, int py) {
         const SwRect bounds = rect();
         const Padding pad = resolvePadding(getToolSheet());
@@ -1292,67 +1140,54 @@ protected:
         int row = (lh > 0) ? (relativeY / lh) : 0;
         row = std::max(0, row);
 
-        const int lineIdx = clampInt(m_firstVisibleLine + row, 0, m_lines.size() - 1);
+        const int lineIdx = clampInt(m_firstVisibleLine + row, 0, effectiveLineCount_() - 1);
 
+        const SwString lineText = effectiveLineContent_(lineIdx);
         const int relativeX = px - inner.x;
         const size_t col = SwWidgetPlatformAdapter::characterIndexAtPosition(nativeWindowHandle(),
-                                                                             m_lines[lineIdx],
+                                                                             lineText,
                                                                              getFont(),
                                                                              relativeX,
                                                                              std::max(1, inner.width));
 
-        const size_t lineStart = (lineIdx < m_lineStarts.size()) ? m_lineStarts[lineIdx] : 0;
-        const size_t clampedCol = std::min(col, m_lines[lineIdx].size());
-        m_cursorPos = std::min(lineStart + clampedCol, m_text.size());
+        const size_t ls = effectiveLineStart_(lineIdx);
+        const size_t clampedCol = clampUtf8BoundaryInText_(lineText, std::min(col, lineText.size()));
+        m_cursorPos = std::min(ls + clampedCol, m_pieceTable.totalLength());
     }
 
-    /**
-     * @brief Performs the `insertTextAt` operation.
-     * @param pos Position used by the operation.
-     * @param text Value passed to the method.
-     * @return The requested insert Text At.
-     */
+    // ─── Text mutation ──────────────────────────────────────────────────
+
     virtual void insertTextAt(size_t pos, const SwString& text) {
-        const size_t clamped = std::min(pos, m_text.size());
-        m_text.insert(clamped, text);
+        const size_t clamped = clampCursorBoundary_(std::min(pos, m_pieceTable.totalLength()));
+        m_pieceTable.insert(clamped, text);
     }
 
-    /**
-     * @brief Performs the `eraseTextAt` operation.
-     * @param pos Position used by the operation.
-     * @param len Value passed to the method.
-     * @return The requested erase Text At.
-     */
     virtual void eraseTextAt(size_t pos, size_t len) {
-        if (len == 0 || m_text.isEmpty()) {
+        if (len == 0 || m_pieceTable.isEmpty()) {
             return;
         }
-        const size_t clampedPos = std::min(pos, m_text.size());
-        if (clampedPos >= m_text.size()) {
+        const size_t clampedPos = std::min(pos, m_pieceTable.totalLength());
+        if (clampedPos >= m_pieceTable.totalLength()) {
             return;
         }
-        const size_t clampedLen = std::min(len, m_text.size() - clampedPos);
-        m_text.erase(clampedPos, clampedLen);
+        const size_t clampedLen = std::min(len, m_pieceTable.totalLength() - clampedPos);
+        m_pieceTable.remove(clampedPos, clampedLen);
     }
 
-    /**
-     * @brief Performs the `insertChar` operation.
-     * @param ch Value passed to the method.
-     * @return The requested insert Char.
-     */
     virtual void insertChar(char ch) {
         if (m_readOnly) {
             return;
         }
-        replaceSelectionWithText_(SwString(1, ch));
+        replaceSelectionWithText_(SwString(1, ch), UndoMergeKind::InsertText);
     }
 
-    /**
-     * @brief Returns the current backspace.
-     * @return The current backspace.
-     *
-     * @details The returned value reflects the state currently stored by the instance.
-     */
+    virtual void insertText(const SwString& text) {
+        if (m_readOnly || text.isEmpty()) {
+            return;
+        }
+        replaceSelectionWithText_(text, UndoMergeKind::InsertText);
+    }
+
     virtual void backspace() {
         if (m_readOnly) {
             return;
@@ -1361,24 +1196,25 @@ protected:
             replaceSelectionWithText_(SwString());
             return;
         }
-        if (m_cursorPos == 0 || m_text.size() == 0) {
+        if (m_cursorPos == 0 || m_pieceTable.isEmpty()) {
             return;
         }
-        const size_t pos = std::min(m_cursorPos, m_text.size());
-        recordUndoState_();
-        eraseTextAt(pos - 1, 1);
-        m_cursorPos = pos - 1;
+        const size_t pos = clampCursorBoundary_(std::min(m_cursorPos, m_pieceTable.totalLength()));
+        const size_t prev = previousCursorBoundary_(pos);
+        if (prev == pos) {
+            return;
+        }
+        recordUndoState_(UndoMergeKind::Backspace);
+        eraseTextAt(prev, pos - prev);
+        m_cursorPos = prev;
         m_selectionStart = m_selectionEnd = m_cursorPos;
-        rebuildLines();
+        if (m_wordWrapEnabled) {
+            rebuildVisualLines_();
+        }
+        rememberUndoMergeState_(UndoMergeKind::Backspace);
         textChanged();
     }
 
-    /**
-     * @brief Returns the current delete Forward.
-     * @return The current delete Forward.
-     *
-     * @details The returned value reflects the state currently stored by the instance.
-     */
     virtual void deleteForward() {
         if (m_readOnly) {
             return;
@@ -1387,86 +1223,74 @@ protected:
             replaceSelectionWithText_(SwString());
             return;
         }
-        const size_t pos = std::min(m_cursorPos, m_text.size());
-        if (pos >= m_text.size()) {
+        const size_t pos = clampCursorBoundary_(std::min(m_cursorPos, m_pieceTable.totalLength()));
+        if (pos >= m_pieceTable.totalLength()) {
             return;
         }
-        recordUndoState_();
-        eraseTextAt(pos, 1);
-        m_cursorPos = std::min(m_cursorPos, m_text.size());
+        const size_t next = nextCursorBoundary_(pos);
+        if (next == pos) {
+            return;
+        }
+        recordUndoState_(UndoMergeKind::DeleteForward);
+        eraseTextAt(pos, next - pos);
+        m_cursorPos = std::min(m_cursorPos, m_pieceTable.totalLength());
         m_selectionStart = m_selectionEnd = m_cursorPos;
-        rebuildLines();
+        if (m_wordWrapEnabled) {
+            rebuildVisualLines_();
+        }
+        rememberUndoMergeState_(UndoMergeKind::DeleteForward);
         textChanged();
     }
 
-    /**
-     * @brief Performs the `moveCursorLeft` operation.
-     */
     void moveCursorLeft() {
         if (m_cursorPos > 0) {
-            --m_cursorPos;
+            m_cursorPos = previousCursorBoundary_(m_cursorPos);
         }
     }
 
-    /**
-     * @brief Performs the `moveCursorRight` operation.
-     */
     void moveCursorRight() {
-        if (m_cursorPos < m_text.size()) {
-            ++m_cursorPos;
+        if (m_cursorPos < m_pieceTable.totalLength()) {
+            m_cursorPos = nextCursorBoundary_(m_cursorPos);
         }
     }
 
-    /**
-     * @brief Performs the `moveCursorHome` operation.
-     */
     void moveCursorHome() {
         const CursorInfo ci = cursorInfo();
         m_cursorPos = ci.lineStart;
     }
 
-    /**
-     * @brief Performs the `moveCursorEnd` operation.
-     */
     void moveCursorEnd() {
         const CursorInfo ci = cursorInfo();
-        const size_t lineLen = (ci.line >= 0 && ci.line < m_lines.size()) ? m_lines[ci.line].size() : 0;
-        m_cursorPos = std::min(ci.lineStart + lineLen, m_text.size());
+        const size_t lineLen = effectiveLineLength_(ci.line);
+        m_cursorPos = std::min(ci.lineStart + lineLen, m_pieceTable.totalLength());
     }
 
-    /**
-     * @brief Performs the `moveCursorUp` operation.
-     */
     void moveCursorUp() {
         const CursorInfo ci = cursorInfo();
         if (ci.line <= 0) {
             return;
         }
         const int targetLine = ci.line - 1;
-        const size_t start = m_lineStarts[targetLine];
-        const size_t len = m_lines[targetLine].size();
-        const size_t col = std::min(static_cast<size_t>(ci.col), len);
-        m_cursorPos = std::min(start + col, m_text.size());
+        const size_t start = effectiveLineStart_(targetLine);
+        const SwString lineText = effectiveLineContent_(targetLine);
+        const size_t len = lineText.size();
+        const size_t col = clampUtf8BoundaryInText_(lineText, std::min(static_cast<size_t>(ci.col), len));
+        m_cursorPos = std::min(start + col, m_pieceTable.totalLength());
     }
 
-    /**
-     * @brief Performs the `moveCursorDown` operation.
-     */
     void moveCursorDown() {
         const CursorInfo ci = cursorInfo();
-        if (ci.line >= m_lines.size() - 1) {
+        if (ci.line >= effectiveLineCount_() - 1) {
             return;
         }
         const int targetLine = ci.line + 1;
-        const size_t start = m_lineStarts[targetLine];
-        const size_t len = m_lines[targetLine].size();
-        const size_t col = std::min(static_cast<size_t>(ci.col), len);
-        m_cursorPos = std::min(start + col, m_text.size());
+        const size_t start = effectiveLineStart_(targetLine);
+        const SwString lineText = effectiveLineContent_(targetLine);
+        const size_t len = lineText.size();
+        const size_t col = clampUtf8BoundaryInText_(lineText, std::min(static_cast<size_t>(ci.col), len));
+        m_cursorPos = std::min(start + col, m_pieceTable.totalLength());
     }
 
-    /**
-     * @brief Performs the `initDefaults` operation.
-     */
     void initDefaults() {
         resize(420, 160);
         setCursor(CursorType::IBeam);
@@ -1489,9 +1313,46 @@ protected:
     size_t selectionMin_() const { return (std::min)(m_selectionStart, m_selectionEnd); }
     size_t selectionMax_() const { return (std::max)(m_selectionStart, m_selectionEnd); }
 
+    size_t clampCursorBoundary_(size_t pos) const {
+        const size_t total = m_pieceTable.totalLength();
+        if (pos >= total) {
+            return total;
+        }
+        while (pos > 0 && isUtf8ContinuationByte_(static_cast<unsigned char>(m_pieceTable.charAt(pos)))) {
+            --pos;
+        }
+        return pos;
+    }
+
+    size_t previousCursorBoundary_(size_t pos) const {
+        size_t current = std::min(pos, m_pieceTable.totalLength());
+        if (current == 0) {
+            return 0;
+        }
+        --current;
+        while (current > 0 && isUtf8ContinuationByte_(static_cast<unsigned char>(m_pieceTable.charAt(current)))) {
+            --current;
+        }
+        return current;
+    }
+
+    size_t nextCursorBoundary_(size_t pos) const {
+        const size_t total = m_pieceTable.totalLength();
+        size_t current = clampCursorBoundary_(std::min(pos, total));
+        if (current >= total) {
+            return total;
+        }
+        ++current;
+        while (current < total && isUtf8ContinuationByte_(static_cast<unsigned char>(m_pieceTable.charAt(current)))) {
+            ++current;
+        }
+        return current;
+    }
+
     void clearUndoRedo_() {
         m_undoStack.clear();
         m_redoStack.clear();
+        resetUndoMergeState_();
     }
 
     void pushUndoState_(EditState state) {
@@ -1504,36 +1365,72 @@ protected:
         }
     }
 
-    void recordUndoState_() {
+    bool shouldMergeUndoState_(UndoMergeKind kind) const {
+        if (kind == UndoMergeKind::None || m_undoStack.isEmpty()) {
+            return false;
+        }
+        if (m_lastUndoMergeKind != kind || hasSelectedText()) {
+            return false;
+        }
+        switch (kind) {
+            case UndoMergeKind::InsertText:
+                return m_cursorPos == m_lastUndoMergeCursorPos;
+            case UndoMergeKind::Backspace:
+                return m_cursorPos == m_lastUndoMergeCursorPos;
+            case UndoMergeKind::DeleteForward:
+                return m_cursorPos == m_lastUndoMergeCursorPos;
+            case UndoMergeKind::None:
+            default:
+                return false;
+        }
+    }
+
+    void rememberUndoMergeState_(UndoMergeKind kind) {
+        m_lastUndoMergeKind = kind;
+        m_lastUndoMergeCursorPos = m_cursorPos;
+    }
+
+    void resetUndoMergeState_() {
+        m_lastUndoMergeKind = UndoMergeKind::None;
+        m_lastUndoMergeCursorPos = static_cast<size_t>(-1);
+    }
+
+    void recordUndoState_(UndoMergeKind kind = UndoMergeKind::None) {
         if (!m_undoRedoEnabled) {
+            return;
+        }
+        if (shouldMergeUndoState_(kind)) {
+            m_redoStack.clear();
             return;
         }
         pushUndoState_(captureEditState());
         m_redoStack.clear();
+        m_lastUndoMergeKind = kind;
     }
 
     void restoreEditState_(const EditState& state) {
-        const bool textWasDifferent = (m_text != state.text);
+        const bool textWasDifferent = !m_pieceTable.equals(state.text);
 
-        m_text = state.text;
-        m_cursorPos = std::min(state.cursorPos, m_text.size());
-        m_selectionStart = std::min(state.selectionStart, m_text.size());
-        m_selectionEnd = std::min(state.selectionEnd, m_text.size());
+        m_pieceTable.setText(state.text);
+        m_cursorPos = clampCursorBoundary_(std::min(state.cursorPos, m_pieceTable.totalLength()));
+        m_selectionStart = clampCursorBoundary_(std::min(state.selectionStart, m_pieceTable.totalLength()));
+        m_selectionEnd = clampCursorBoundary_(std::min(state.selectionEnd, m_pieceTable.totalLength()));
         m_firstVisibleLine = state.firstVisibleLine;
 
         if (state.applyExtra) {
             state.applyExtra();
         }
 
-        rebuildLines();
+        rebuildVisualLines_();
         ensureCursorVisible();
         if (textWasDifferent) {
             textChanged();
         }
+        resetUndoMergeState_();
         update();
     }
 
-    void replaceSelectionWithText_(const SwString& text) {
+    void replaceSelectionWithText_(const SwString& text, UndoMergeKind mergeKind = UndoMergeKind::None) {
         size_t start = m_cursorPos;
         size_t end = m_cursorPos;
         if (hasSelectedText()) {
@@ -1541,12 +1438,16 @@ protected:
             end = selectionMax_();
         }
 
-        start = std::min(start, m_text.size());
-        end = std::min(end, m_text.size());
+        start = clampCursorBoundary_(std::min(start, m_pieceTable.totalLength()));
+        end = clampCursorBoundary_(std::min(end, m_pieceTable.totalLength()));
         if (end <= start && text.isEmpty()) {
             return;
         }
-        recordUndoState_();
+        if (end > start) {
+            mergeKind = UndoMergeKind::None;
+        }
+        recordUndoState_(mergeKind);
+
         if (end > start) {
             eraseTextAt(start, end - start);
         }
@@ -1554,20 +1455,23 @@ protected:
             insertTextAt(start, text);
         }
 
-        m_cursorPos = std::min(start + text.size(), m_text.size());
+        m_cursorPos = std::min(start + text.size(), m_pieceTable.totalLength());
         m_selectionStart = m_selectionEnd = m_cursorPos;
 
-        rebuildLines();
+        if (m_wordWrapEnabled) {
+            rebuildVisualLines_();
+        }
+        rememberUndoMergeState_(mergeKind);
         textChanged();
     }
 
     void selectWordAtCursor_() {
-        if (m_text.isEmpty()) {
+        if (m_pieceTable.isEmpty()) {
             return;
         }
 
-        size_t pos = std::min(m_cursorPos, m_text.size());
-        if (pos == m_text.size()) {
+        size_t pos = std::min(m_cursorPos, m_pieceTable.totalLength());
+        if (pos == m_pieceTable.totalLength()) {
             pos = (pos > 0) ? (pos - 1) : 0;
         }
 
@@ -1575,17 +1479,17 @@ protected:
             return std::isalnum(c) != 0 || c == static_cast<unsigned char>('_');
         };
 
-        if (!isWordChar(static_cast<unsigned char>(m_text[pos]))) {
+        if (!isWordChar(static_cast<unsigned char>(m_pieceTable.charAt(pos)))) {
             selectAll();
             return;
         }
 
         size_t start = pos;
-        while (start > 0 && isWordChar(static_cast<unsigned char>(m_text[start - 1]))) {
+        while (start > 0 && isWordChar(static_cast<unsigned char>(m_pieceTable.charAt(start - 1)))) {
             --start;
         }
         size_t end = pos;
-        while (end < m_text.size() && isWordChar(static_cast<unsigned char>(m_text[end]))) {
+        while (end < m_pieceTable.totalLength() && isWordChar(static_cast<unsigned char>(m_pieceTable.charAt(end)))) {
             ++end;
         }
 
@@ -1594,10 +1498,10 @@ protected:
         m_cursorPos = end;
     }
 
-    SwString m_text;
+    // ─── Data members ───────────────────────────────────────────────────
+    mutable SwPieceTable m_pieceTable;
     SwString m_placeholder;
-    SwVector<SwString> m_lines;
-    SwVector<size_t> m_lineStarts;
+    SwVector<VisualLine> m_visualLines;   // only used when word wrap is on
     size_t m_cursorPos{0};
     size_t m_selectionStart{0};
     size_t m_selectionEnd{0};
@@ -1606,8 +1510,10 @@ protected:
     bool m_readOnly{false};
     bool m_undoRedoEnabled{true};
     size_t m_undoLimit{200};
-    std::vector<EditState> m_undoStack;
-    std::vector<EditState> m_redoStack;
+    SwVector<EditState> m_undoStack;
+    SwVector<EditState> m_redoStack;
+    UndoMergeKind m_lastUndoMergeKind{UndoMergeKind::None};
+    size_t m_lastUndoMergeCursorPos{static_cast<size_t>(-1)};
 
     bool m_caretVisible{true};
     SwTimer* m_blinkTimer{nullptr};
@@ -1621,4 +1527,3 @@ protected:
         return app ? app->platformIntegration() : nullptr;
     }
 };
-

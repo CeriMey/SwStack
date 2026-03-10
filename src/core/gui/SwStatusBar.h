@@ -153,20 +153,11 @@ protected:
         }
 
         const SwRect bounds = rect();
-        StyleSheet* sheet = getToolSheet();
 
-        SwColor bg{248, 250, 252};
-        float bgAlpha = 1.0f;
-        bool paintBackground = true;
+        // Qt-like: no distinct background, just a 1px separator line at the top
+        const SwColor separatorColor{218, 218, 218};
+        painter->drawLine(bounds.x, bounds.y, bounds.x + bounds.width, bounds.y, separatorColor, 1);
 
-        SwColor border{226, 232, 240};
-        int borderWidth = 1;
-        int radius = 14;
-
-        resolveBackground(sheet, bg, bgAlpha, paintBackground);
-        resolveBorder(sheet, border, borderWidth, radius);
-
-        painter->fillRoundedRect(bounds, radius, bg, border, borderWidth);
         paintChildren(event);
         painter->finalize();
     }
@@ -177,11 +168,12 @@ private:
         setCursor(CursorType::Arrow);
         setFocusPolicy(FocusPolicyEnum::NoFocus);
         setFrameShape(Shape::NoFrame);
+        // Qt-like: transparent background, only a 1px top separator line
         setStyleSheet(R"(
             SwStatusBar {
-                background-color: rgb(243, 243, 243);
+                background-color: rgba(0, 0, 0, 0);
                 border-color: rgb(218, 218, 218);
-                border-width: 1px;
+                border-width: 0px;
                 border-radius: 0px;
             }
         )");
@@ -256,4 +248,3 @@ private:
     int m_margin{4};
     int m_spacing{6};
 };
-

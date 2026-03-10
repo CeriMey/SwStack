@@ -60,11 +60,14 @@
 
 #include <memory>
 
+#include "platform/SwPlatformTarget.h"
 #include "platform/SwPlatformIntegration.h"
 
-#if defined(_WIN32)
+#if SW_PLATFORM_WIN32
 #include "platform/win/SwWin32PlatformIntegration.h"
-#elif defined(__linux__)
+#elif SW_PLATFORM_ANDROID
+#include "platform/android/SwAndroidPlatformIntegration.h"
+#elif SW_PLATFORM_X11
 #include "platform/x11/SwX11PlatformIntegration.h"
 #endif
 
@@ -75,9 +78,11 @@
  * hooks required by SwGuiApplication and related GUI infrastructure.
  */
 inline std::unique_ptr<SwPlatformIntegration> SwCreateDefaultPlatformIntegration() {
-#if defined(_WIN32)
+#if SW_PLATFORM_WIN32
     return SwCreateWin32PlatformIntegration();
-#elif defined(__linux__)
+#elif SW_PLATFORM_ANDROID
+    return SwCreateAndroidPlatformIntegration();
+#elif SW_PLATFORM_X11
     return SwCreateX11PlatformIntegration();
 #else
     return nullptr;

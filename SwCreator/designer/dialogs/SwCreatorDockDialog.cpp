@@ -36,8 +36,16 @@ public:
         }
 
         if (m_root) {
-            MouseEvent forwarded(EventType::MousePressEvent, event->x(), event->y(), event->button());
-            static_cast<SwWidgetInterface*>(m_root)->mousePressEvent(&forwarded);
+            const SwPoint rootPos = m_root->mapFrom(this, event->pos());
+            MouseEvent forwarded(EventType::MousePressEvent,
+                                 rootPos.x,
+                                 rootPos.y,
+                                 event->button(),
+                                 event->isCtrlPressed(),
+                                 event->isShiftPressed(),
+                                 event->isAltPressed());
+            forwarded.setGlobalPos(event->globalPos());
+            m_root->dispatchMouseEventFromRoot(forwarded);
         }
 
         event->accept();

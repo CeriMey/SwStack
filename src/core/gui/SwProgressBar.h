@@ -56,6 +56,7 @@
  **************************************************************************************************/
 
 #include "SwWidget.h"
+#include "SwTimer.h"
 
 class SwProgressBar : public SwWidget {
     SW_OBJECT(SwProgressBar, SwWidget)
@@ -75,6 +76,14 @@ public:
     explicit SwProgressBar(SwWidget* parent = nullptr)
         : SwWidget(parent) {
         initDefaults();
+        m_shimmerTimer = new SwTimer(40, this);
+        connect(m_shimmerTimer, &SwTimer::timeout, this, [this]() {
+            m_shimmerPhase += 3;
+            if (m_shimmerPhase > 600) {
+                m_shimmerPhase = -120;
+            }
+            update();
+        });
     }
 
     /**
@@ -262,10 +271,10 @@ protected:
         }
 
         const SwRect bounds = rect();
-        const int radius = clampInt(bounds.height / 3, 6, 10);
+        const int radius = clampInt(bounds.height / 3, 4, 10);
 
         SwColor frame{172, 172, 172};
-        SwColor background{236, 236, 236};
+        SwColor background{230, 230, 230};
         SwColor textColor{30, 30, 30};
         SwColor fillColor = m_accent;
 
@@ -276,9 +285,10 @@ protected:
             fillColor = SwColor{180, 200, 230};
         }
 
+        // Outer trough with subtle inner shadow effect
         painter->fillRoundedRect(bounds, radius, background, frame, 1);
 
-        const int padding = 3;
+        const int padding = 2;
         SwRect inner{bounds.x + padding,
                      bounds.y + padding,
                      clampInt(bounds.width - padding * 2, 0, 1000000),
@@ -297,13 +307,46 @@ protected:
         }
 
         if (fillPixels > 0) {
+            const int innerRadius = clampInt(radius - 1, 2, 8);
+            SwRect fill;
             if (m_orientation == Orientation::Horizontal) {
-                SwRect fill{inner.x, inner.y, fillPixels, inner.height};
-                painter->fillRoundedRect(fill, clampInt(radius - 2, 2, 10), fillColor, fillColor, 0);
+                fill = SwRect{inner.x, inner.y, fillPixels, inner.height};
             } else {
-                SwRect fill{inner.x, inner.y + (inner.height - fillPixels), inner.width, fillPixels};
-                painter->fillRoundedRect(fill, clampInt(radius - 2, 2, 10), fillColor, fillColor, 0);
+                fill = SwRect{inner.x, inner.y + (inner.height - fillPixels), inner.width, fillPixels};
             }
+
+            // Base fill with a slightly darker border for definition
+            SwColor fillBorder = blendColor(fillColor, SwColor{0, 0, 0}, 20);
+            painter->fillRoundedRect(fill, innerRadius, fillColor, fillBorder, 1);
+
+            // Clip all gloss overlays to the fill rect
+            painter->pushClipRect(fill);
+
+            // Top gloss: lighter band on upper 45%
+            const int glossH = clampInt(fill.height * 45 / 100, 2, fill.height);
+            SwColor glossColor = blendColor(fillColor, SwColor{255, 255, 255}, 35);
+            SwRect glossBand{fill.x, fill.y, fill.width, glossH};
+            painter->fillRect(glossBand, glossColor, glossColor, 0);
+
+            // Specular highlight: narrow bright line at the very top
+            if (fill.height >= 8) {
+                SwColor specular = blendColor(fillColor, SwColor{255, 255, 255}, 55);
+                SwRect specBand{fill.x, fill.y, fill.width, clampInt(fill.height / 5, 1, 3)};
+                painter->fillRect(specBand, specular, specular, 0);
+            }
+
+            // Bottom shadow for depth
+            const int shadowH = clampInt(fill.height / 4, 1, 4);
+            SwColor shadowColor = blendColor(fillColor, SwColor{0, 0, 0}, 15);
+            SwRect shadowBand{fill.x, fill.y + fill.height - shadowH, fill.width, shadowH};
+            painter->fillRect(shadowBand, shadowColor, shadowColor, 0);
+
+            // Animated shimmer sweep
+            if (getEnable() && fill.width > 10) {
+                paintShimmer(painter, fill);
+            }
+
+            painter->popClipRect();
         }
 
         if (m_textVisible) {
@@ -316,6 +359,45 @@ protected:
     }
 
 private:
+    static SwColor blendColor(const SwColor& base, const SwColor& overlay, int pct) {
+        const int bp = clampInt(100 - pct, 0, 100);
+        const int op = clampInt(pct, 0, 100);
+        return SwColor{
+            clampInt((base.r * bp + overlay.r * op) / 100, 0, 255),
+            clampInt((base.g * bp + overlay.g * op) / 100, 0, 255),
+            clampInt((base.b * bp + overlay.b * op) / 100, 0, 255)
+        };
+    }
+
+    void paintShimmer(SwPainter* painter, const SwRect& fill) {
+        // Shimmer is a soft bright band that sweeps across the fill area.
+        // m_shimmerPhase goes from -120 to 600 (percentage * 3 of fill width).
+        const int sweepWidth = clampInt(fill.width / 3, 20, 80);
+        const int centerX = fill.x + (m_shimmerPhase * fill.width) / 480;
+
+        // Draw several thin vertical strips with decreasing brightness
+        // to create a soft gaussian-like shimmer band.
+        const int halfW = sweepWidth / 2;
+        for (int i = -halfW; i < halfW; ++i) {
+            const int x = centerX + i;
+            if (x < fill.x || x >= fill.x + fill.width) {
+                continue;
+            }
+            // Intensity: strongest at center, fading to edges (triangle falloff)
+            const int dist = (i < 0) ? -i : i;
+            const int intensity = clampInt(18 - (dist * 18 / halfW), 0, 18);
+            if (intensity <= 0) {
+                continue;
+            }
+            SwColor shimColor = blendColor(SwColor{255, 255, 255}, SwColor{255, 255, 255}, 100);
+            // Blend shimmer with the base fill at the computed intensity
+            // Since we can't do alpha, draw a blended color line
+            SwColor base = m_accent;
+            SwColor lineColor = blendColor(base, shimColor, intensity * 3);
+            painter->drawLine(x, fill.y, x, fill.y + fill.height, lineColor, 1);
+        }
+    }
+
     static long long clampLL(long long value, long long minValue, long long maxValue) {
         if (value < minValue) return minValue;
         if (value > maxValue) return maxValue;
@@ -340,10 +422,12 @@ private:
 
     int m_minimum{0};
     int m_maximum{100};
-    int m_value{0};
+    int m_value{25};
     bool m_textVisible{true};
     SwString m_format{"%p%"};
     Orientation m_orientation{Orientation::Horizontal};
     SwColor m_accent{0, 120, 215};
+    SwTimer* m_shimmerTimer{nullptr};
+    int m_shimmerPhase{-120};
 };
 

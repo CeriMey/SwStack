@@ -1,6 +1,7 @@
 #include "SwCreatorWorkspace.h"
 
 #include "SwCreatorFormCanvas.h"
+#include "theme/SwCreatorTheme.h"
 #include "SwScrollArea.h"
 
 #include <algorithm>
@@ -11,15 +12,18 @@ constexpr int kWorkspacePadding = 8;
 
 SwCreatorWorkspace::SwCreatorWorkspace(SwWidget* parent)
     : SwWidget(parent) {
-    setStyleSheet("SwCreatorWorkspace { background-color: rgb(243, 245, 247); border-width: 0px; }");
+    const auto& th = SwCreatorTheme::current();
+    const SwString surfaceBg = SwCreatorTheme::rgb(th.surface1);
+
+    setStyleSheet("SwCreatorWorkspace { background-color: " + surfaceBg + "; border-width: 0px; }");
 
     m_scrollArea = new SwScrollArea(this);
     m_scrollArea->setFrameShape(SwFrame::Shape::NoFrame);
     m_scrollArea->setLineWidth(0);
-    m_scrollArea->setStyleSheet("SwScrollArea { background-color: rgb(243, 245, 247); border-width: 0px; }");
+    m_scrollArea->setStyleSheet("SwScrollArea { background-color: " + surfaceBg + "; border-width: 0px; }");
 
     m_canvasHost = new SwWidget();
-    m_canvasHost->setStyleSheet("SwWidget { background-color: rgb(243, 245, 247); border-width: 0px; }");
+    m_canvasHost->setStyleSheet("SwWidget { background-color: " + surfaceBg + "; border-width: 0px; }");
     m_scrollArea->setWidget(m_canvasHost);
 
     m_canvas = new SwCreatorFormCanvas(m_canvasHost);

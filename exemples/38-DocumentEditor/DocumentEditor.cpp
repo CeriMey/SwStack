@@ -15,6 +15,7 @@
 
 #include "SwCodeEditor.h"
 #include "SwCompleter.h"
+#include "SwCppCompletionIndex.h"
 #include "SwCppDiagnosticsProvider.h"
 #include "SwCppSyntaxHighlighter.h"
 #include "SwDir.h"
@@ -26,16 +27,19 @@
 #include "SwMainWindow.h"
 #include "SwMessageBox.h"
 #include "SwPushButton.h"
+#include "SwStandardItemModel.h"
+#include "editorTheme/SwCodeEditorVisualTheme.h"
 #include "core/runtime/SwCrashHandler.h"
 #include "core/types/SwDebug.h"
+#include "core/types/SwMap.h"
 #include "SwString.h"
-#include "SwStyledItemDelegate.h"
 #include "SwTabWidget.h"
 #include "SwTextCursor.h"
 #include "SwTextDocument.h"
 #include "SwTextDocumentWriter.h"
 #include "SwTextEdit.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cctype>
 
@@ -351,56 +355,57 @@ int main() {
 }
 )";
 
-class CodeCompletionDelegate : public SwStyledItemDelegate {
-    SW_OBJECT(CodeCompletionDelegate, SwStyledItemDelegate)
-
-public:
-    explicit CodeCompletionDelegate(SwObject* parent = nullptr)
-        : SwStyledItemDelegate(parent) {}
-
-    void paint(SwPainter* painter,
-               const SwStyleOptionViewItem& option,
-               const SwModelIndex& index) const override {
-        if (!painter || !index.isValid() || !index.model()) {
-            return;
-        }
-
-        const SwColor rowFill = option.selected
-            ? SwColor{48, 52, 58}
-            : (option.hovered ? SwColor{34, 37, 42} : SwColor{28, 30, 34});
-        painter->fillRect(option.rect, rowFill, rowFill, 0);
-
-        if (option.selected) {
-            painter->fillRect(SwRect{option.rect.x, option.rect.y, 1, option.rect.height},
-                              SwColor{124, 130, 140},
-                              SwColor{124, 130, 140},
-                              0);
-        }
-
-        SwRect textRect = option.rect;
-        textRect.x += 8;
-        textRect.width = std::max(0, textRect.width - 16);
-
-        const SwColor textColor = option.selected ? SwColor{244, 246, 248} : SwColor{206, 211, 218};
-        painter->drawText(textRect,
-                          index.model()->data(index, SwItemDataRole::DisplayRole).toString(),
-                          DrawTextFormats(DrawTextFormat::Left | DrawTextFormat::VCenter | DrawTextFormat::SingleLine),
-                          textColor,
-                          option.font);
-    }
-
-    SwSize sizeHint(const SwStyleOptionViewItem& option,
-                    const SwModelIndex& index) const override {
-        SwSize hint = SwStyledItemDelegate::sizeHint(option, index);
-        hint.height = std::max(22, hint.height);
-        return hint;
-    }
-};
-
 struct ParsedClassRange {
     SwString name;
     size_t openBrace{static_cast<size_t>(-1)};
     size_t closeBrace{static_cast<size_t>(-1)};
+};
+
+enum class CompletionMemberKind {
+    Method,
+    Field
+};
+
+enum class CompletionMemberAccess {
+    Public,
+    Protected,
+    Private
+};
+
+struct CompletionMemberInfo {
+    SwString name;
+    CompletionMemberKind kind{CompletionMemberKind::Field};
+    CompletionMemberAccess access{CompletionMemberAccess::Public};
+};
+
+struct CompletionTypeInfo {
+    SwString qualifiedName;
+    SwString leafName;
+    SwList<CompletionMemberInfo> members;
+};
+
+struct CompletionTypeTable {
+    SwList<SwString> typeNames;
+    SwMap<SwString, CompletionTypeInfo> typeInfos;
+};
+
+struct CompletionVariableInfo {
+    SwString typeName;
+    bool isPointer{false};
+};
+
+struct MemberAccessContext {
+    bool valid{false};
+    bool usesArrow{false};
+    size_t operatorPos{static_cast<size_t>(-1)};
+    SwString baseName;
+    SwString memberPrefix;
+};
+
+struct CompletionItem {
+    SwString displayText;
+    SwString insertText;
+    SwString toolTip;
 };
 
 static bool isCompletionIdentifierStart(char ch) {
@@ -620,6 +625,22 @@ static void appendUniqueCompletionWord_(SwList<SwString>& words, const SwString&
     words.append(word);
 }
 
+static bool containsString_(const SwList<SwString>& values, const SwString& value) {
+    for (int i = 0; i < values.size(); ++i) {
+        if (values[i] == value) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void appendUniqueString_(SwList<SwString>& values, const SwString& value) {
+    if (value.isEmpty() || containsString_(values, value)) {
+        return;
+    }
+    values.append(value);
+}
+
 static SwString extractIdentifierBefore_(const SwString& text, size_t pos) {
     size_t end = std::min(pos, text.size());
     while (end > 0 && std::isspace(static_cast<unsigned char>(text[end - 1])) != 0) {
@@ -679,6 +700,593 @@ static SwList<SwString> splitTopLevelComma_(const SwString& text) {
         parts.append(text.substr(segmentStart));
     }
     return parts;
+}
+
+static SwString joinQualifiedName_(const SwList<SwString>& scope, const SwString& leaf) {
+    if (scope.isEmpty()) {
+        return leaf;
+    }
+
+    SwString qualified = scope[0];
+    for (int i = 1; i < scope.size(); ++i) {
+        qualified += "::";
+        qualified += scope[i];
+    }
+
+    if (!leaf.isEmpty()) {
+        qualified += "::";
+        qualified += leaf;
+    }
+    return qualified;
+}
+
+static SwString leafNameOfQualified_(const SwString& qualifiedName) {
+    const size_t separator = qualifiedName.lastIndexOf(SwString("::"));
+    if (separator == static_cast<size_t>(-1)) {
+        return qualifiedName;
+    }
+    return qualifiedName.substr(separator + 2);
+}
+
+static size_t findMatchingParen_(const SwString& text, size_t openParen) {
+    if (openParen >= text.size() || text[openParen] != '(') {
+        return static_cast<size_t>(-1);
+    }
+
+    int depth = 1;
+    for (size_t i = openParen + 1; i < text.size(); ++i) {
+        if (text[i] == '(') {
+            ++depth;
+        } else if (text[i] == ')') {
+            --depth;
+            if (depth == 0) {
+                return i;
+            }
+        }
+    }
+    return static_cast<size_t>(-1);
+}
+
+static size_t skipSpacesBackward_(const SwString& text, size_t pos) {
+    if (text.isEmpty()) {
+        return static_cast<size_t>(-1);
+    }
+
+    size_t cursor = std::min(pos, text.size());
+    while (cursor > 0 && std::isspace(static_cast<unsigned char>(text[cursor - 1])) != 0) {
+        --cursor;
+    }
+    return (cursor == 0) ? static_cast<size_t>(-1) : (cursor - 1);
+}
+
+static bool isCompletionTypeDeclarationHead_(const SwString& text, size_t pos) {
+    return startsWithKeywordAt_(text, pos, "class") ||
+           startsWithKeywordAt_(text, pos, "struct") ||
+           startsWithKeywordAt_(text, pos, "enum");
+}
+
+static bool isCompletionTypeDeclarationHeaderText_(const SwString& header) {
+    return header.startsWith("class ") ||
+           header.startsWith("struct ") ||
+           header.startsWith("enum ") ||
+           header.startsWith("enum class ");
+}
+
+static SwString extractDeclaredNameFromDeclarator_(const SwString& declarator) {
+    SwString part = collapseWhitespace_(declarator).trimmed();
+    while (!part.isEmpty() && (part[0] == '*' || part[0] == '&')) {
+        part.remove(0, 1);
+        part = part.trimmed();
+    }
+
+    const size_t equalPos = part.firstIndexOf('=');
+    if (equalPos != static_cast<size_t>(-1)) {
+        part = part.substr(0, equalPos).trimmed();
+    }
+
+    const size_t bracePos = part.firstIndexOf('{');
+    if (bracePos != static_cast<size_t>(-1)) {
+        part = part.substr(0, bracePos).trimmed();
+    }
+
+    const size_t bracketPos = part.firstIndexOf('[');
+    if (bracketPos != static_cast<size_t>(-1)) {
+        return extractIdentifierBefore_(part, bracketPos);
+    }
+
+    const size_t parenPos = part.firstIndexOf('(');
+    if (parenPos != static_cast<size_t>(-1)) {
+        return extractIdentifierBefore_(part, parenPos);
+    }
+
+    return extractIdentifierBefore_(part, part.size());
+}
+
+static bool isPointerDeclarator_(const SwString& declarator, const SwString& declaredName) {
+    if (declaredName.isEmpty()) {
+        return false;
+    }
+
+    const SwString compact = collapseWhitespace_(declarator).trimmed();
+    const size_t namePos = compact.lastIndexOf(declaredName);
+    if (namePos == static_cast<size_t>(-1)) {
+        return compact.firstIndexOf('*') != static_cast<size_t>(-1);
+    }
+
+    return compact.substr(0, namePos).firstIndexOf('*') != static_cast<size_t>(-1);
+}
+
+static SwString readQualifiedIdentifier_(const SwString& text, size_t& pos) {
+    pos = skipSpaces_(text, pos);
+    if (pos >= text.size() || !isCompletionIdentifierStart(text[pos])) {
+        return SwString();
+    }
+
+    const size_t start = pos;
+    ++pos;
+    while (pos < text.size() && isCompletionIdentifierPart(text[pos])) {
+        ++pos;
+    }
+
+    while (pos + 1 < text.size() && text[pos] == ':' && text[pos + 1] == ':') {
+        const size_t separatorPos = pos;
+        pos += 2;
+        if (pos >= text.size() || !isCompletionIdentifierStart(text[pos])) {
+            pos = separatorPos;
+            break;
+        }
+        ++pos;
+        while (pos < text.size() && isCompletionIdentifierPart(text[pos])) {
+            ++pos;
+        }
+    }
+
+    return text.substr(start, pos - start);
+}
+
+static size_t skipTemplateArguments_(const SwString& text, size_t pos) {
+    if (pos >= text.size() || text[pos] != '<') {
+        return pos;
+    }
+
+    int depth = 0;
+    for (size_t i = pos; i < text.size(); ++i) {
+        if (text[i] == '<') {
+            ++depth;
+        } else if (text[i] == '>' && depth > 0) {
+            --depth;
+            if (depth == 0) {
+                return i + 1;
+            }
+        }
+    }
+
+    return pos;
+}
+
+static bool isCompletionLeadingDeclarationQualifier_(const SwString& token) {
+    return token == SwString("const") ||
+           token == SwString("constexpr") ||
+           token == SwString("static") ||
+           token == SwString("inline") ||
+           token == SwString("volatile") ||
+           token == SwString("mutable") ||
+           token == SwString("typename") ||
+           token == SwString("extern") ||
+           token == SwString("friend");
+}
+
+static bool isCompletionPostTypeQualifier_(const SwString& token) {
+    return token == SwString("const") ||
+           token == SwString("volatile") ||
+           token == SwString("constexpr");
+}
+
+static void registerCompletionType_(CompletionTypeTable& table, const SwString& qualifiedTypeName) {
+    if (qualifiedTypeName.isEmpty() || table.typeInfos.contains(qualifiedTypeName)) {
+        return;
+    }
+
+    CompletionTypeInfo info;
+    info.qualifiedName = qualifiedTypeName;
+    info.leafName = leafNameOfQualified_(qualifiedTypeName);
+    table.typeInfos.insert(qualifiedTypeName, info);
+    appendUniqueString_(table.typeNames, qualifiedTypeName);
+}
+
+static void appendCompletionMember_(CompletionTypeTable& table,
+                                    const SwString& qualifiedTypeName,
+                                    const CompletionMemberInfo& member) {
+    if (qualifiedTypeName.isEmpty() || member.name.isEmpty()) {
+        return;
+    }
+
+    registerCompletionType_(table, qualifiedTypeName);
+    CompletionTypeInfo info = table.typeInfos.value(qualifiedTypeName);
+    for (int i = 0; i < info.members.size(); ++i) {
+        if (info.members[i].name == member.name && info.members[i].kind == member.kind) {
+            return;
+        }
+    }
+    info.members.append(member);
+    table.typeInfos.insert(qualifiedTypeName, info);
+}
+
+static SwString resolveKnownCompletionTypeName_(const CompletionTypeTable& table, const SwString& candidate) {
+    if (candidate.isEmpty()) {
+        return SwString();
+    }
+    if (table.typeInfos.contains(candidate)) {
+        return candidate;
+    }
+
+    SwString resolved;
+    for (int i = 0; i < table.typeNames.size(); ++i) {
+        const SwString& typeName = table.typeNames[i];
+        if (typeName == candidate || typeName.endsWith(SwString("::") + candidate)) {
+            if (!resolved.isEmpty() && resolved != typeName) {
+                return SwString();
+            }
+            resolved = typeName;
+        }
+    }
+    return resolved;
+}
+
+static SwString resolveCompletionTypeNameAt_(const SwString& statement,
+                                             const CompletionTypeTable& table,
+                                             size_t& typeEnd) {
+    size_t pos = skipSpaces_(statement, 0);
+    while (pos < statement.size()) {
+        size_t tokenPos = pos;
+        const SwString token = readIdentifier_(statement, tokenPos);
+        if (token.isEmpty() || !isCompletionLeadingDeclarationQualifier_(token)) {
+            break;
+        }
+        pos = skipSpaces_(statement, tokenPos);
+    }
+
+    size_t candidatePos = pos;
+    const SwString candidate = readQualifiedIdentifier_(statement, candidatePos);
+    if (candidate.isEmpty()) {
+        typeEnd = static_cast<size_t>(-1);
+        return SwString();
+    }
+
+    size_t afterType = skipSpaces_(statement, candidatePos);
+    const size_t afterTemplate = skipTemplateArguments_(statement, afterType);
+    if (afterTemplate != afterType) {
+        afterType = skipSpaces_(statement, afterTemplate);
+    }
+
+    while (afterType < statement.size()) {
+        size_t tokenPos = afterType;
+        const SwString token = readIdentifier_(statement, tokenPos);
+        if (token.isEmpty() || !isCompletionPostTypeQualifier_(token)) {
+            break;
+        }
+        afterType = skipSpaces_(statement, tokenPos);
+    }
+
+    typeEnd = afterType;
+    return resolveKnownCompletionTypeName_(table, candidate);
+}
+
+static void registerDeclaredVariablesFromStatement_(const SwString& statement,
+                                                    const CompletionTypeTable& table,
+                                                    SwMap<SwString, CompletionVariableInfo>& variables) {
+    const SwString compact = collapseWhitespace_(statement);
+    if (compact.isEmpty()) {
+        return;
+    }
+
+    size_t firstTokenPos = 0;
+    const SwString firstToken = readIdentifier_(compact, firstTokenPos);
+    if (isIgnoredDeclarationHead_(firstToken)) {
+        return;
+    }
+
+    size_t typeEnd = static_cast<size_t>(-1);
+    const SwString resolvedTypeName = resolveCompletionTypeNameAt_(compact, table, typeEnd);
+    if (resolvedTypeName.isEmpty() || typeEnd == static_cast<size_t>(-1) || typeEnd >= compact.size()) {
+        return;
+    }
+
+    const SwString declaratorsText = compact.substr(typeEnd);
+    const SwList<SwString> declarators = splitTopLevelComma_(declaratorsText);
+    for (int i = 0; i < declarators.size(); ++i) {
+        const SwString variableName = extractDeclaredNameFromDeclarator_(declarators[i]);
+        if (variableName.isEmpty()) {
+            continue;
+        }
+
+        CompletionVariableInfo info;
+        info.typeName = resolvedTypeName;
+        info.isPointer = isPointerDeclarator_(declarators[i], variableName);
+        variables.insert(variableName, info);
+    }
+}
+
+static void registerFunctionParametersFromHeader_(const SwString& header,
+                                                  const CompletionTypeTable& table,
+                                                  SwMap<SwString, CompletionVariableInfo>& variables) {
+    const SwString compact = collapseWhitespace_(header);
+    const size_t openParen = compact.firstIndexOf('(');
+    if (openParen == static_cast<size_t>(-1)) {
+        return;
+    }
+
+    const size_t closeParen = findMatchingParen_(compact, openParen);
+    if (closeParen == static_cast<size_t>(-1) || closeParen <= openParen + 1) {
+        return;
+    }
+
+    const SwString paramsText = compact.substr(openParen + 1, closeParen - openParen - 1).trimmed();
+    if (paramsText.isEmpty() || paramsText == SwString("void")) {
+        return;
+    }
+
+    const SwList<SwString> params = splitTopLevelComma_(paramsText);
+    for (int i = 0; i < params.size(); ++i) {
+        registerDeclaredVariablesFromStatement_(params[i], table, variables);
+    }
+}
+
+static void collectCompletionMembersFromBody_(const SwString& sanitizedBody,
+                                              const SwString& qualifiedTypeName,
+                                              bool publicByDefault,
+                                              CompletionTypeTable& table) {
+    const SwString typeLeaf = leafNameOfQualified_(qualifiedTypeName);
+    CompletionMemberAccess currentAccess =
+        publicByDefault ? CompletionMemberAccess::Public : CompletionMemberAccess::Private;
+    size_t statementStart = 0;
+    size_t i = 0;
+
+    while (i < sanitizedBody.size()) {
+        const char ch = sanitizedBody[i];
+
+        if (startsWithKeywordAt_(sanitizedBody, i, "public") ||
+            startsWithKeywordAt_(sanitizedBody, i, "private") ||
+            startsWithKeywordAt_(sanitizedBody, i, "protected")) {
+            size_t pos = i;
+            const SwString access = readIdentifier_(sanitizedBody, pos);
+            pos = skipSpaces_(sanitizedBody, pos);
+            if (!access.isEmpty() && pos < sanitizedBody.size() && sanitizedBody[pos] == ':') {
+                if (access == SwString("public")) {
+                    currentAccess = CompletionMemberAccess::Public;
+                } else if (access == SwString("protected")) {
+                    currentAccess = CompletionMemberAccess::Protected;
+                } else {
+                    currentAccess = CompletionMemberAccess::Private;
+                }
+                i = pos + 1;
+                statementStart = i;
+                continue;
+            }
+        }
+
+        if (isCompletionTypeDeclarationHead_(sanitizedBody, i) || startsWithKeywordAt_(sanitizedBody, i, "namespace")) {
+            size_t pos = i;
+            while (pos < sanitizedBody.size() && sanitizedBody[pos] != '{' && sanitizedBody[pos] != ';') {
+                ++pos;
+            }
+            if (pos < sanitizedBody.size() && sanitizedBody[pos] == '{') {
+                const size_t closeBrace = findMatchingBrace_(sanitizedBody, pos);
+                if (closeBrace == static_cast<size_t>(-1)) {
+                    break;
+                }
+                i = closeBrace + 1;
+                while (i < sanitizedBody.size() && std::isspace(static_cast<unsigned char>(sanitizedBody[i])) != 0) {
+                    ++i;
+                }
+                if (i < sanitizedBody.size() && sanitizedBody[i] == ';') {
+                    ++i;
+                }
+                statementStart = i;
+                continue;
+            }
+
+            i = (pos < sanitizedBody.size()) ? (pos + 1) : sanitizedBody.size();
+            statementStart = i;
+            continue;
+        }
+
+        if (ch == '{') {
+            const SwString header = collapseWhitespace_(sanitizedBody.substr(statementStart, i - statementStart));
+            if (!header.isEmpty() && !isCompletionTypeDeclarationHeaderText_(header) && !header.startsWith("namespace ")) {
+                const size_t parenPos = header.firstIndexOf('(');
+                if (parenPos != static_cast<size_t>(-1)) {
+                    const SwString memberName = extractIdentifierBefore_(header, parenPos);
+                    if (!memberName.isEmpty() &&
+                        memberName != typeLeaf &&
+                        memberName != (SwString("~") + typeLeaf) &&
+                        memberName != SwString("operator")) {
+                        CompletionMemberInfo member;
+                        member.name = memberName;
+                        member.kind = CompletionMemberKind::Method;
+                        member.access = currentAccess;
+                        appendCompletionMember_(table, qualifiedTypeName, member);
+                    }
+                }
+            }
+
+            const size_t closeBrace = findMatchingBrace_(sanitizedBody, i);
+            if (closeBrace == static_cast<size_t>(-1)) {
+                break;
+            }
+
+            i = closeBrace + 1;
+            while (i < sanitizedBody.size() && std::isspace(static_cast<unsigned char>(sanitizedBody[i])) != 0) {
+                ++i;
+            }
+            if (i < sanitizedBody.size() && sanitizedBody[i] == ';') {
+                ++i;
+            }
+            statementStart = i;
+            continue;
+        }
+
+        if (ch == ';') {
+            const SwString statement = collapseWhitespace_(sanitizedBody.substr(statementStart, i - statementStart));
+            if (!statement.isEmpty()) {
+                const size_t parenPos = statement.firstIndexOf('(');
+                if (parenPos != static_cast<size_t>(-1)) {
+                    const SwString memberName = extractIdentifierBefore_(statement, parenPos);
+                    if (!memberName.isEmpty() &&
+                        memberName != typeLeaf &&
+                        memberName != (SwString("~") + typeLeaf) &&
+                        memberName != SwString("operator")) {
+                        CompletionMemberInfo member;
+                        member.name = memberName;
+                        member.kind = CompletionMemberKind::Method;
+                        member.access = currentAccess;
+                        appendCompletionMember_(table, qualifiedTypeName, member);
+                    }
+                } else {
+                    const SwList<SwString> declarators = splitTopLevelComma_(statement);
+                    for (int partIndex = 0; partIndex < declarators.size(); ++partIndex) {
+                        const SwString memberName = extractDeclaredNameFromDeclarator_(declarators[partIndex]);
+                        if (memberName.isEmpty() ||
+                            memberName == typeLeaf ||
+                            memberName == (SwString("~") + typeLeaf)) {
+                            continue;
+                        }
+
+                        CompletionMemberInfo member;
+                        member.name = memberName;
+                        member.kind = CompletionMemberKind::Field;
+                        member.access = currentAccess;
+                        appendCompletionMember_(table, qualifiedTypeName, member);
+                    }
+                }
+            }
+
+            statementStart = i + 1;
+        }
+
+        ++i;
+    }
+}
+
+static void collectCompletionDeclaredTypes_(const SwString& sanitized,
+                                            size_t begin,
+                                            size_t end,
+                                            const SwList<SwString>& scope,
+                                            CompletionTypeTable& table) {
+    size_t i = begin;
+
+    while (i < end) {
+        if (startsWithKeywordAt_(sanitized, i, "namespace")) {
+            size_t pos = i + SwString("namespace").size();
+            const SwString namespaceName = readIdentifier_(sanitized, pos);
+            const bool hasName = !namespaceName.isEmpty();
+
+            while (pos < end && sanitized[pos] != '{' && sanitized[pos] != ';') {
+                ++pos;
+            }
+            if (pos < end && sanitized[pos] == '{') {
+                const size_t closeBrace = findMatchingBrace_(sanitized, pos);
+                if (closeBrace != static_cast<size_t>(-1) && closeBrace < end) {
+                    SwList<SwString> nestedScope = scope;
+                    if (hasName) {
+                        nestedScope.append(namespaceName);
+                    }
+                    collectCompletionDeclaredTypes_(sanitized, pos + 1, closeBrace, nestedScope, table);
+                    i = closeBrace + 1;
+                    continue;
+                }
+            }
+
+            i = (pos < end) ? (pos + 1) : end;
+            continue;
+        }
+
+        if (isCompletionTypeDeclarationHead_(sanitized, i)) {
+            size_t pos = i;
+            SwString kindToken;
+            if (startsWithKeywordAt_(sanitized, i, "enum")) {
+                kindToken = SwString("enum");
+                pos += SwString("enum").size();
+                pos = skipSpaces_(sanitized, pos);
+                if (startsWithKeywordAt_(sanitized, pos, "class")) {
+                    pos += SwString("class").size();
+                }
+            } else if (startsWithKeywordAt_(sanitized, i, "class")) {
+                kindToken = SwString("class");
+                pos += SwString("class").size();
+            } else {
+                kindToken = SwString("struct");
+                pos += SwString("struct").size();
+            }
+
+            const SwString typeName = readIdentifier_(sanitized, pos);
+            const bool hasName = !typeName.isEmpty();
+            const SwString qualifiedTypeName = hasName ? joinQualifiedName_(scope, typeName) : SwString();
+            if (!qualifiedTypeName.isEmpty()) {
+                registerCompletionType_(table, qualifiedTypeName);
+            }
+
+            while (pos < end && sanitized[pos] != '{' && sanitized[pos] != ';') {
+                ++pos;
+            }
+            if (pos < end && sanitized[pos] == '{') {
+                const size_t closeBrace = findMatchingBrace_(sanitized, pos);
+                if (closeBrace != static_cast<size_t>(-1) && closeBrace < end) {
+                    if (!qualifiedTypeName.isEmpty() && kindToken != SwString("enum")) {
+                        collectCompletionMembersFromBody_(sanitized.substr(pos + 1, closeBrace - pos - 1),
+                                                          qualifiedTypeName,
+                                                          kindToken == SwString("struct"),
+                                                          table);
+                    }
+
+                    SwList<SwString> nestedScope = scope;
+                    if (hasName) {
+                        nestedScope.append(typeName);
+                    }
+                    collectCompletionDeclaredTypes_(sanitized, pos + 1, closeBrace, nestedScope, table);
+                    i = closeBrace + 1;
+                    continue;
+                }
+            }
+
+            i = (pos < end) ? (pos + 1) : end;
+            continue;
+        }
+
+        if (sanitized[i] == '{') {
+            const size_t closeBrace = findMatchingBrace_(sanitized, i);
+            if (closeBrace == static_cast<size_t>(-1) || closeBrace >= end) {
+                break;
+            }
+            collectCompletionDeclaredTypes_(sanitized, i + 1, closeBrace, scope, table);
+            i = closeBrace + 1;
+            continue;
+        }
+
+        ++i;
+    }
+}
+
+static void collectCompletionTypesFromText_(const SwString& text, CompletionTypeTable& table) {
+    const SwString sanitized = sanitizeCodeForParsing_(text);
+    const SwList<SwString> rootScope;
+    collectCompletionDeclaredTypes_(sanitized, 0, sanitized.size(), rootScope, table);
+}
+
+static void mergeCompletionTypeTables_(CompletionTypeTable& destination, const CompletionTypeTable& source) {
+    for (int i = 0; i < source.typeNames.size(); ++i) {
+        const SwString& typeName = source.typeNames[i];
+        if (!destination.typeInfos.contains(typeName)) {
+            destination.typeInfos.insert(typeName, source.typeInfos.value(typeName));
+            appendUniqueString_(destination.typeNames, typeName);
+            continue;
+        }
+
+        const CompletionTypeInfo sourceInfo = source.typeInfos.value(typeName);
+        for (int memberIndex = 0; memberIndex < sourceInfo.members.size(); ++memberIndex) {
+            appendCompletionMember_(destination, typeName, sourceInfo.members[memberIndex]);
+        }
+    }
 }
 
 static void collectFunctionNameFromStatement_(const SwString& statement, SwList<SwString>& words) {
@@ -823,18 +1431,22 @@ static void collectScopeSymbols_(const SwString& original,
         }
 
         if (ch == '{') {
-            collectFunctionNameFromStatement_(original.substr(statementStart, i - statementStart), words);
+            const SwString header = original.substr(statementStart, i - statementStart);
+            collectFunctionNameFromStatement_(header, words);
             const size_t closeBrace = findMatchingBrace_(sanitized, i);
             if (closeBrace == static_cast<size_t>(-1)) {
                 break;
             }
+            collectScopeSymbols_(original, sanitized, i + 1, closeBrace, words);
             i = closeBrace + 1;
             statementStart = i;
             continue;
         }
 
         if (ch == ';') {
-            collectFunctionNameFromStatement_(original.substr(statementStart, i - statementStart), words);
+            const SwString statement = original.substr(statementStart, i - statementStart);
+            collectFunctionNameFromStatement_(statement, words);
+            collectDeclaratorNamesFromStatement_(statement, words);
             statementStart = i + 1;
         }
 
@@ -1049,6 +1661,50 @@ static SwString readFileText_(const SwString& filePath) {
     return file.readAll();
 }
 
+static void collectIncludedHeaderCompletionTypes_(const SwString& text, CompletionTypeTable& table) {
+    static SwMap<SwString, CompletionTypeTable> headerCache;
+
+    const SwList<SwString> lines = text.split('\n');
+    for (int i = 0; i < lines.size(); ++i) {
+        const SwString trimmed = lines[i].trimmed();
+        if (!trimmed.startsWith("#include")) {
+            continue;
+        }
+
+        size_t pathStart = trimmed.firstIndexOf('"');
+        char closing = '"';
+        if (pathStart == static_cast<size_t>(-1)) {
+            pathStart = trimmed.firstIndexOf('<');
+            closing = '>';
+        }
+        if (pathStart == static_cast<size_t>(-1)) {
+            continue;
+        }
+
+        size_t pathEnd = pathStart + 1;
+        while (pathEnd < trimmed.size() && trimmed[pathEnd] != closing) {
+            ++pathEnd;
+        }
+        if (pathEnd >= trimmed.size() || pathEnd <= pathStart + 1) {
+            continue;
+        }
+
+        const SwString includePath = trimmed.substr(pathStart + 1, pathEnd - pathStart - 1);
+        const SwString resolved = resolveIncludePath_(includePath);
+        if (resolved.isEmpty()) {
+            continue;
+        }
+
+        if (!headerCache.contains(resolved)) {
+            CompletionTypeTable cachedTable;
+            collectCompletionTypesFromText_(readFileText_(resolved), cachedTable);
+            headerCache.insert(resolved, cachedTable);
+        }
+
+        mergeCompletionTypeTables_(table, headerCache.value(resolved));
+    }
+}
+
 static void appendBuiltInIncludeWords_(const SwString& includePath, SwList<SwString>& words) {
     if (includePath == SwString("array")) {
         appendUniqueCompletionWord_(words, SwString("array"));
@@ -1128,6 +1784,346 @@ static void collectIncludedHeaderSymbols_(const SwString& text, SwList<SwString>
     }
 }
 
+static bool isClassOrStructHeader_(const SwString& header) {
+    return header.startsWith("class ") || header.startsWith("struct ");
+}
+
+static void collectVisibleVariablesUntilCursor_(const SwString& sanitized,
+                                                size_t begin,
+                                                size_t end,
+                                                size_t cursorPos,
+                                                const CompletionTypeTable& table,
+                                                SwMap<SwString, CompletionVariableInfo>& variables);
+
+static void collectVisibleClassMembersUntilCursor_(const SwString& sanitized,
+                                                   size_t begin,
+                                                   size_t end,
+                                                   size_t cursorPos,
+                                                   const CompletionTypeTable& table,
+                                                   SwMap<SwString, CompletionVariableInfo>& variables) {
+    size_t statementStart = begin;
+    size_t i = begin;
+    const size_t limit = std::min(end, cursorPos);
+
+    while (i < limit) {
+        if (startsWithKeywordAt_(sanitized, i, "public") ||
+            startsWithKeywordAt_(sanitized, i, "private") ||
+            startsWithKeywordAt_(sanitized, i, "protected")) {
+            size_t pos = i;
+            const SwString access = readIdentifier_(sanitized, pos);
+            pos = skipSpaces_(sanitized, pos);
+            if (!access.isEmpty() && pos < limit && sanitized[pos] == ':') {
+                i = pos + 1;
+                statementStart = i;
+                continue;
+            }
+        }
+
+        if (isCompletionTypeDeclarationHead_(sanitized, i) || startsWithKeywordAt_(sanitized, i, "namespace")) {
+            size_t pos = i;
+            while (pos < end && sanitized[pos] != '{' && sanitized[pos] != ';') {
+                ++pos;
+            }
+            if (pos < end && sanitized[pos] == '{') {
+                const size_t closeBrace = findMatchingBrace_(sanitized, pos);
+                if (closeBrace == static_cast<size_t>(-1) || closeBrace >= end) {
+                    break;
+                }
+                const SwString header = collapseWhitespace_(sanitized.substr(i, pos - i));
+                if (cursorPos > pos && cursorPos <= closeBrace && isClassOrStructHeader_(header)) {
+                    collectVisibleClassMembersUntilCursor_(sanitized, pos + 1, closeBrace, cursorPos, table, variables);
+                    return;
+                }
+                i = closeBrace + 1;
+                statementStart = i;
+                continue;
+            }
+
+            i = (pos < end) ? (pos + 1) : end;
+            statementStart = i;
+            continue;
+        }
+
+        if (sanitized[i] == '{') {
+            const size_t closeBrace = findMatchingBrace_(sanitized, i);
+            if (closeBrace == static_cast<size_t>(-1) || closeBrace >= end) {
+                break;
+            }
+
+            const SwString header = collapseWhitespace_(sanitized.substr(statementStart, i - statementStart));
+            if (cursorPos > i && cursorPos <= closeBrace) {
+                if (!header.isEmpty() && !isCompletionTypeDeclarationHeaderText_(header) && !header.startsWith("namespace ")) {
+                    registerFunctionParametersFromHeader_(header, table, variables);
+                    collectVisibleVariablesUntilCursor_(sanitized, i + 1, closeBrace, cursorPos, table, variables);
+                }
+                return;
+            }
+
+            i = closeBrace + 1;
+            statementStart = i;
+            continue;
+        }
+
+        if (sanitized[i] == ';') {
+            const SwString statement = sanitized.substr(statementStart, i - statementStart);
+            if (statement.firstIndexOf('(') == static_cast<size_t>(-1)) {
+                registerDeclaredVariablesFromStatement_(statement, table, variables);
+            }
+            statementStart = i + 1;
+        }
+
+        ++i;
+    }
+}
+
+static void collectVisibleVariablesUntilCursor_(const SwString& sanitized,
+                                                size_t begin,
+                                                size_t end,
+                                                size_t cursorPos,
+                                                const CompletionTypeTable& table,
+                                                SwMap<SwString, CompletionVariableInfo>& variables) {
+    size_t statementStart = begin;
+    size_t i = begin;
+    const size_t limit = std::min(end, cursorPos);
+
+    while (i < limit) {
+        if (startsWithKeywordAt_(sanitized, i, "namespace")) {
+            size_t pos = i + SwString("namespace").size();
+            readIdentifier_(sanitized, pos);
+            while (pos < end && sanitized[pos] != '{' && sanitized[pos] != ';') {
+                ++pos;
+            }
+            if (pos < end && sanitized[pos] == '{') {
+                const size_t closeBrace = findMatchingBrace_(sanitized, pos);
+                if (closeBrace == static_cast<size_t>(-1) || closeBrace >= end) {
+                    break;
+                }
+                if (cursorPos > pos && cursorPos <= closeBrace) {
+                    collectVisibleVariablesUntilCursor_(sanitized, pos + 1, closeBrace, cursorPos, table, variables);
+                    return;
+                }
+                i = closeBrace + 1;
+                statementStart = i;
+                continue;
+            }
+
+            i = (pos < end) ? (pos + 1) : end;
+            statementStart = i;
+            continue;
+        }
+
+        if (isCompletionTypeDeclarationHead_(sanitized, i)) {
+            size_t pos = i;
+            while (pos < end && sanitized[pos] != '{' && sanitized[pos] != ';') {
+                ++pos;
+            }
+            if (pos < end && sanitized[pos] == '{') {
+                const size_t closeBrace = findMatchingBrace_(sanitized, pos);
+                if (closeBrace == static_cast<size_t>(-1) || closeBrace >= end) {
+                    break;
+                }
+                const SwString header = collapseWhitespace_(sanitized.substr(i, pos - i));
+                if (cursorPos > pos && cursorPos <= closeBrace && isClassOrStructHeader_(header)) {
+                    collectVisibleClassMembersUntilCursor_(sanitized, pos + 1, closeBrace, cursorPos, table, variables);
+                    return;
+                }
+                i = closeBrace + 1;
+                statementStart = i;
+                continue;
+            }
+
+            i = (pos < end) ? (pos + 1) : end;
+            statementStart = i;
+            continue;
+        }
+
+        if (sanitized[i] == '{') {
+            const size_t closeBrace = findMatchingBrace_(sanitized, i);
+            if (closeBrace == static_cast<size_t>(-1) || closeBrace >= end) {
+                break;
+            }
+
+            const SwString header = collapseWhitespace_(sanitized.substr(statementStart, i - statementStart));
+            if (cursorPos > i && cursorPos <= closeBrace) {
+                if (!header.isEmpty() && !isCompletionTypeDeclarationHeaderText_(header) && !header.startsWith("namespace ")) {
+                    registerFunctionParametersFromHeader_(header, table, variables);
+                    collectVisibleVariablesUntilCursor_(sanitized, i + 1, closeBrace, cursorPos, table, variables);
+                }
+                return;
+            }
+
+            i = closeBrace + 1;
+            statementStart = i;
+            continue;
+        }
+
+        if (sanitized[i] == ';') {
+            registerDeclaredVariablesFromStatement_(sanitized.substr(statementStart, i - statementStart),
+                                                    table,
+                                                    variables);
+            statementStart = i + 1;
+        }
+
+        ++i;
+    }
+}
+
+static SwMap<SwString, CompletionVariableInfo> buildVisibleCompletionVariables_(const SwString& text,
+                                                                                size_t cursorPos,
+                                                                                const CompletionTypeTable& table) {
+    SwMap<SwString, CompletionVariableInfo> variables;
+    const SwString sanitized = sanitizeCodeForParsing_(text);
+    collectVisibleVariablesUntilCursor_(sanitized, 0, sanitized.size(), cursorPos, table, variables);
+
+    ParsedClassRange currentClass;
+    if (findEnclosingClassRange_(text, cursorPos, currentClass)) {
+        CompletionVariableInfo selfInfo;
+        selfInfo.typeName = resolveKnownCompletionTypeName_(table, currentClass.name);
+        if (selfInfo.typeName.isEmpty()) {
+            selfInfo.typeName = currentClass.name;
+        }
+        selfInfo.isPointer = true;
+        variables.insert(SwString("this"), selfInfo);
+    }
+
+    return variables;
+}
+
+static MemberAccessContext findMemberAccessContext_(const SwString& text, size_t cursorPos) {
+    MemberAccessContext context;
+    if (text.isEmpty()) {
+        return context;
+    }
+
+    const size_t cursor = std::min(cursorPos, text.size());
+    size_t prefixStart = cursor;
+    while (prefixStart > 0 && isCompletionIdentifierPart(text[prefixStart - 1])) {
+        --prefixStart;
+    }
+    context.memberPrefix = text.substr(prefixStart, cursor - prefixStart);
+
+    size_t scan = prefixStart;
+    while (scan > 0 && std::isspace(static_cast<unsigned char>(text[scan - 1])) != 0) {
+        --scan;
+    }
+
+    if (scan >= 2 && text[scan - 2] == '-' && text[scan - 1] == '>') {
+        context.usesArrow = true;
+        context.operatorPos = scan - 2;
+    } else if (scan >= 1 && text[scan - 1] == '.') {
+        context.usesArrow = false;
+        context.operatorPos = scan - 1;
+    } else {
+        return context;
+    }
+
+    context.baseName = extractIdentifierBefore_(text, context.operatorPos);
+    if (context.baseName.isEmpty()) {
+        return context;
+    }
+
+    const size_t previousTokenPos = skipSpacesBackward_(text, context.operatorPos - context.baseName.size());
+    if (previousTokenPos != static_cast<size_t>(-1)) {
+        const char previous = text[previousTokenPos];
+        if (previous == '.' || previous == '>' || previous == ':' || previous == ')' || previous == ']') {
+            return context;
+        }
+    }
+
+    context.valid = true;
+    return context;
+}
+
+static SwString completionMemberAccessLabel_(CompletionMemberAccess access) {
+    switch (access) {
+        case CompletionMemberAccess::Public:
+            return SwString("public");
+        case CompletionMemberAccess::Protected:
+            return SwString("protected");
+        case CompletionMemberAccess::Private:
+            return SwString("private");
+    }
+    return SwString("public");
+}
+
+static SwString completionMemberKindLabel_(CompletionMemberKind kind) {
+    return (kind == CompletionMemberKind::Method) ? SwString("method") : SwString("attribute");
+}
+
+static SwString completionMemberDisplayText_(const CompletionMemberInfo& member) {
+    SwString display = member.name;
+    if (member.kind == CompletionMemberKind::Method) {
+        display += "()";
+    }
+    display += "  ";
+    display += completionMemberAccessLabel_(member.access);
+    display += " ";
+    display += completionMemberKindLabel_(member.kind);
+    return display;
+}
+
+static SwString completionMemberToolTip_(const CompletionTypeInfo& typeInfo, const CompletionMemberInfo& member) {
+    SwString toolTip = typeInfo.qualifiedName;
+    toolTip += "::";
+    toolTip += member.name;
+    if (member.kind == CompletionMemberKind::Method) {
+        toolTip += "()";
+    }
+    toolTip += " - ";
+    toolTip += completionMemberAccessLabel_(member.access);
+    toolTip += " ";
+    toolTip += completionMemberKindLabel_(member.kind);
+    return toolTip;
+}
+
+static CompletionTypeTable buildCompletionTypeTable_(const SwString& text) {
+    CompletionTypeTable table;
+    collectCompletionTypesFromText_(text, table);
+    collectIncludedHeaderCompletionTypes_(text, table);
+    return table;
+}
+
+static SwList<CompletionItem> buildMemberCompletionItems_(const SwString& text, size_t cursorPos) {
+    SwList<CompletionItem> items;
+    const CompletionTypeTable typeTable = buildCompletionTypeTable_(text);
+    const MemberAccessContext context = findMemberAccessContext_(text, cursorPos);
+    if (!context.valid) {
+        return items;
+    }
+
+    const SwMap<SwString, CompletionVariableInfo> variables =
+        buildVisibleCompletionVariables_(text, cursorPos, typeTable);
+    if (!variables.contains(context.baseName)) {
+        return items;
+    }
+
+    const CompletionVariableInfo variableInfo = variables.value(context.baseName);
+    const SwString resolvedTypeName = resolveKnownCompletionTypeName_(typeTable, variableInfo.typeName);
+    if (resolvedTypeName.isEmpty() || !typeTable.typeInfos.contains(resolvedTypeName)) {
+        return items;
+    }
+
+    CompletionTypeInfo typeInfo = typeTable.typeInfos.value(resolvedTypeName);
+    std::stable_sort(typeInfo.members.begin(),
+                     typeInfo.members.end(),
+                     [](const CompletionMemberInfo& lhs, const CompletionMemberInfo& rhs) {
+                         if (lhs.kind != rhs.kind) {
+                             return lhs.kind == CompletionMemberKind::Method;
+                         }
+                         return lhs.name < rhs.name;
+                     });
+
+    for (int i = 0; i < typeInfo.members.size(); ++i) {
+        CompletionItem item;
+        item.displayText = completionMemberDisplayText_(typeInfo.members[i]);
+        item.insertText = typeInfo.members[i].name;
+        item.toolTip = completionMemberToolTip_(typeInfo, typeInfo.members[i]);
+        items.append(item);
+    }
+
+    return items;
+}
+
 static SwList<SwString> buildCodeCompletionWords(SwCodeEditor* editor) {
     static const char* kWords[] = {
         "auto", "bool", "break", "case", "catch", "char", "class", "concept",
@@ -1162,43 +2158,134 @@ static SwList<SwString> buildCodeCompletionWords(SwCodeEditor* editor) {
     return words;
 }
 
-static void configureCodeCompleter(SwCodeEditor* editor) {
+static SwList<CompletionItem> buildCodeCompletionItems(SwCodeEditor* editor) {
+    SwList<CompletionItem> items;
     if (!editor) {
-        return;
+        return items;
+    }
+
+    const SwString text = editor->toPlainText();
+    const size_t cursorPos = static_cast<size_t>(std::max(0, editor->textCursor().position()));
+    items = buildMemberCompletionItems_(text, cursorPos);
+    if (!items.isEmpty()) {
+        return items;
+    }
+
+    const SwList<SwString> words = buildCodeCompletionWords(editor);
+    for (int i = 0; i < words.size(); ++i) {
+        CompletionItem item;
+        item.displayText = words[i];
+        item.insertText = words[i];
+        items.append(item);
+    }
+    return items;
+}
+
+static SwCppCompletionIndex* configureCodeCompleter(SwCodeEditor* editor) {
+    if (!editor) {
+        return nullptr;
     }
 
     SwCompleter* completer = new SwCompleter(editor);
+    SwStandardItemModel* model = new SwStandardItemModel(0, 1, completer);
     completer->setCaseSensitivity(Sw::CaseInsensitive);
+    completer->setCompletionRole(SwItemDataRole::EditRole);
     completer->setMaxVisibleItems(6);
-    completer->setStringList(buildCodeCompletionWords(editor));
+    completer->setModel(model);
 
     editor->setCompleter(completer);
     editor->setAutoCompletionEnabled(true);
     editor->setAutoCompletionMinPrefixLength(2);
+    swApplyCodeCompletionTheme(completer, swCodeCompletionThemeDefaultLight());
 
-    SwListView* popup = completer->popup();
-    popup->setStyleSheet(R"(
-        SwListView {
-            background-color: rgb(28, 30, 34);
-            border-color: rgb(50, 54, 60);
-            border-width: 1px;
-            border-radius: 3px;
-            color: rgb(206, 211, 218);
+    SwCppCompletionIndex* index = new SwCppCompletionIndex(editor);
+    index->setTextProvider([editor]() {
+        return editor->toPlainText();
+    });
+    index->setDebounceInterval(80);
+    index->setAsyncEnabled(true);
+    index->rebuildNow();
+
+    editor->setCompletionProvider([index](SwCodeEditor*,
+                                          const SwString& prefix,
+                                          size_t cursorPos,
+                                          bool) {
+        SwList<SwCodeEditor::CompletionEntry> entries;
+        const SwList<SwCppCompletionItem> items = index->completionItems(cursorPos, prefix, 96);
+        for (int i = 0; i < items.size(); ++i) {
+            SwCodeEditor::CompletionEntry entry;
+            entry.displayText = items[i].displayText;
+            entry.insertText = items[i].insertText;
+            entry.toolTip = items[i].toolTip;
+            entries.append(entry);
         }
-    )");
-    popup->setSpacing(0);
-    popup->setViewportPadding(1);
-    popup->setRowHeight(22);
-    popup->setItemDelegate(new CodeCompletionDelegate(popup));
-
-    auto updateWords = [editor, completer]() {
-        completer->setStringList(buildCodeCompletionWords(editor));
-    };
-
-    updateWords();
-    SwObject::connect(editor, &SwPlainTextEdit::textChanged, editor, updateWords);
-    SwObject::connect(editor, &SwCodeEditor::cursorPositionChanged, editor, updateWords);
+        return entries;
+    });
+    SwObject::connect(editor, &SwPlainTextEdit::textChanged, index, [index]() {
+        index->scheduleRebuild();
+    });
+    SwObject::connect(index, &SwCppCompletionIndex::indexUpdated, editor, [editor]() {
+        if (editor->completer() && editor->completer()->popupVisible()) {
+            editor->triggerCompletion();
+        }
+    });
+    return index;
 }
+
+class DocumentEditorCodeEditor : public SwCodeEditor {
+public:
+    explicit DocumentEditorCodeEditor(SwWidget* parent = nullptr)
+        : SwCodeEditor(parent) {}
+
+    void setCompletionIndex(SwCppCompletionIndex* index) {
+        m_completionIndex = index;
+    }
+
+protected:
+    void keyPressEvent(KeyEvent* event) override {
+        const bool ctrlSpace = event && event->isCtrlPressed() && (event->key() == 32 || event->text() == L' ');
+        if (ctrlSpace) {
+            rewritePointerMemberAccessForCompletion_();
+        }
+        SwCodeEditor::keyPressEvent(event);
+    }
+
+private:
+    void rewritePointerMemberAccessForCompletion_() {
+        const size_t cursorPos = static_cast<size_t>(std::max(0, textCursor().position()));
+        size_t operatorPos = static_cast<size_t>(-1);
+        const SwString text = toPlainText();
+        const MemberAccessContext context = findMemberAccessContext_(text, cursorPos);
+        if (!context.valid || context.usesArrow) {
+            return;
+        }
+        operatorPos = context.operatorPos;
+
+        bool shouldRewrite = false;
+        if (m_completionIndex && m_completionIndex->isReady()) {
+            shouldRewrite = m_completionIndex->shouldPreferArrowAccess(cursorPos);
+        } else {
+            const CompletionTypeTable typeTable = buildCompletionTypeTable_(text);
+            const SwMap<SwString, CompletionVariableInfo> variables =
+                buildVisibleCompletionVariables_(text, cursorPos, typeTable);
+            shouldRewrite = variables.contains(context.baseName) && variables.value(context.baseName).isPointer;
+        }
+        if (!shouldRewrite) {
+            return;
+        }
+
+        recordUndoState_();
+        eraseTextAt(operatorPos, 1);
+        insertTextAt(operatorPos, SwString("->"));
+        m_cursorPos = std::min(m_cursorPos + 1, m_pieceTable.totalLength());
+        m_selectionStart = m_selectionEnd = m_cursorPos;
+        textChanged();
+        ensureCursorVisible();
+        update();
+    }
+
+    SwCppCompletionIndex* m_completionIndex{nullptr};
+};
 
 static void ensureCrashDumpsEnabled_() {
 #if defined(_WIN32)
@@ -1325,20 +2412,24 @@ int main() {
     documentPage->setLayout(documentLayout);
 
     SwWidget* codePage = new SwWidget();
-    codePage->setStyleSheet("SwWidget { background-color: rgb(30, 30, 30); border-width: 0px; }");
+    const SwCodeEditorVisualTheme codeTheme =
+        swCodeEditorVisualThemeById(SwCodeEditorVisualThemeId::VsCodeDark);
+    codePage->setStyleSheet(swCodeEditorVisualThemeContainerStyleSheet(codeTheme));
     SwVerticalLayout* codeLayout = new SwVerticalLayout();
     codeLayout->setSpacing(0);
     codeLayout->setMargin(0);
-    SwCodeEditor* codeEditor = new SwCodeEditor(codePage);
-    codeEditor->setTheme(swCodeEditorVsCodeDarkTheme());
+    SwCodeEditor* codeEditor = new DocumentEditorCodeEditor(codePage);
     codeEditor->setPlainText(SwString(sampleCode));
     SwCppSyntaxHighlighter* cppHighlighter = new SwCppSyntaxHighlighter(codeEditor->document());
-    cppHighlighter->setTheme(swCppSyntaxThemeVsCodeDark());
     codeEditor->setSyntaxHighlighter(cppHighlighter);
     SwCppDiagnosticsProvider* cppDiagnostics = new SwCppDiagnosticsProvider(codeEditor->document());
-    cppDiagnostics->setDebounceInterval(75);
+    cppDiagnostics->setDebounceInterval(220);
     codeEditor->setDiagnosticsProvider(cppDiagnostics);
-    configureCodeCompleter(codeEditor);
+    SwCppCompletionIndex* completionIndex = configureCodeCompleter(codeEditor);
+    if (DocumentEditorCodeEditor* typedCodeEditor = dynamic_cast<DocumentEditorCodeEditor*>(codeEditor)) {
+        typedCodeEditor->setCompletionIndex(completionIndex);
+    }
+    swApplyCodeEditorVisualTheme(codeEditor, codeTheme);
     codeLayout->addWidget(codeEditor, 1);
     codePage->setLayout(codeLayout);
 

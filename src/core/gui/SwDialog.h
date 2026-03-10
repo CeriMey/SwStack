@@ -56,6 +56,7 @@
  **************************************************************************************************/
 
 #include "SwFrame.h"
+#include "SwGuiApplication.h"
 #include "SwLabel.h"
 #include "SwPushButton.h"
 #include "SwTimer.h"
@@ -64,18 +65,19 @@
 #include "SwToolTip.h"
 #include "SwShortcut.h"
 
+#include "core/object/SwPointer.h"
 #include "core/runtime/SwCoreApplication.h"
 #include "core/runtime/SwEventLoop.h"
+#include "platform/SwPlatformTarget.h"
 
 #include <algorithm>
+#include <memory>
+#include <utility>
 
-#if defined(_WIN32)
-#include "platform/win/SwWin32Painter.h"
+#if SW_PLATFORM_WIN32
 #include "platform/win/SwWindows.h"
-#elif defined(__linux__)
-#include "SwGuiApplication.h"
+#elif SW_PLATFORM_X11
 #include "platform/x11/SwX11PlatformIntegration.h"
-#include "platform/x11/SwX11Painter.h"
 #endif
 
 class SwDialog : public SwFrame {
@@ -110,13 +112,9 @@ public:
         if (m_titleLabel) {
             m_titleLabel->setText(m_title);
         }
-#if defined(_WIN32)
-        if (m_nativeHwnd) {
-            std::wstring wide = m_title.toStdWString();
-            wide.erase(std::remove(wide.begin(), wide.end(), L'\0'), wide.end());
-            SetWindowTextW(m_nativeHwnd, wide.c_str());
+        if (m_nativePlatformWindow) {
+            m_nativePlatformWindow->setTitle(toUtf8_(m_title));
         }
-#endif
         update();
     }
 
@@ -178,9 +176,12 @@ public:
      */
     void setNativeWindowIcon(HICON hIcon) {
         m_nativeIcon = hIcon;
-        if (m_nativeHwnd && hIcon) {
-            SendMessage(m_nativeHwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(hIcon));
-            SendMessage(m_nativeHwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(hIcon));
+        if (m_nativePlatformWindow && hIcon) {
+            HWND hwnd = static_cast<HWND>(m_nativePlatformWindow->nativeHandle());
+            if (hwnd) {
+                SendMessage(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(hIcon));
+                SendMessage(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(hIcon));
+            }
         }
     }
 #endif
@@ -244,21 +245,13 @@ public:
      * @details The call affects the runtime state associated with the underlying resource or service.
      */
     void open() {
-#if defined(_WIN32)
         if (m_useNativeWindow) {
-            openNativeWindow();
-            if (m_nativeHwnd) {
+            openNativePlatformWindow_();
+            if (m_nativePlatformWindow) {
                 return;
             }
         }
-#elif defined(__linux__)
-        if (m_useNativeWindow) {
-            openNativeWindowX11();
-            if (m_x11PlatformWindow) {
-                return;
-            }
-        }
-#endif
+        capturePreviousFocusForActivation_();
         ensureOverlay();
         if (m_modal && m_overlay) {
             m_overlay->show();
@@ -269,7 +262,7 @@ public:
         centerInRoot();
         update();
         if (m_modal) {
-            setFocus(true);
+            activateDialogFocus_();
         }
         shown();
     }
@@ -295,19 +288,14 @@ public:
     void done(int code) {
         m_result = code;
         hide();
-#if defined(_WIN32)
         if (m_activePresentation == Presentation::NativeWindow) {
-            closeNativeWindow();
+            closeNativePlatformWindow_();
         }
-#elif defined(__linux__)
-        if (m_activePresentation == Presentation::NativeWindow) {
-            closeNativeWindowX11();
-        }
-#endif
         if (m_overlay) {
             m_overlay->hide();
         }
         restorePresentationParent();
+        restorePreviousFocusAfterClose_();
         finished(m_result);
         if (m_result == Accepted) {
             accepted();
@@ -419,11 +407,14 @@ private:
         case WM_MBUTTONDOWN: {
             int x = LOWORD(lParam);
             int y = HIWORD(lParam);
+            const bool ctrlPressed = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            const bool shiftPressed = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            const bool altPressed = (GetKeyState(VK_MENU) & 0x8000) != 0;
             SwMouseButton button = SwMouseButton::NoButton;
             if (uMsg == WM_LBUTTONDOWN) button = SwMouseButton::Left;
             else if (uMsg == WM_RBUTTONDOWN) button = SwMouseButton::Right;
             else if (uMsg == WM_MBUTTONDOWN) button = SwMouseButton::Middle;
-            dialog->nativePostMousePress(x, y, button);
+            dialog->nativePostMousePress(x, y, button, ctrlPressed, shiftPressed, altPressed);
             return 0;
         }
         case WM_LBUTTONDBLCLK:
@@ -431,11 +422,14 @@ private:
         case WM_MBUTTONDBLCLK: {
             int x = LOWORD(lParam);
             int y = HIWORD(lParam);
+            const bool ctrlPressed = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            const bool shiftPressed = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            const bool altPressed = (GetKeyState(VK_MENU) & 0x8000) != 0;
             SwMouseButton button = SwMouseButton::NoButton;
             if (uMsg == WM_LBUTTONDBLCLK) button = SwMouseButton::Left;
             else if (uMsg == WM_RBUTTONDBLCLK) button = SwMouseButton::Right;
             else if (uMsg == WM_MBUTTONDBLCLK) button = SwMouseButton::Middle;
-            dialog->nativePostMouseDoubleClick(x, y, button);
+            dialog->nativePostMouseDoubleClick(x, y, button, ctrlPressed, shiftPressed, altPressed);
             return 0;
         }
         case WM_LBUTTONUP:
@@ -443,17 +437,32 @@ private:
         case WM_MBUTTONUP: {
             int x = LOWORD(lParam);
             int y = HIWORD(lParam);
+            const bool ctrlPressed = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            const bool shiftPressed = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            const bool altPressed = (GetKeyState(VK_MENU) & 0x8000) != 0;
             SwMouseButton button = SwMouseButton::NoButton;
             if (uMsg == WM_LBUTTONUP) button = SwMouseButton::Left;
             else if (uMsg == WM_RBUTTONUP) button = SwMouseButton::Right;
             else if (uMsg == WM_MBUTTONUP) button = SwMouseButton::Middle;
-            dialog->nativePostMouseRelease(x, y, button);
+            dialog->nativePostMouseRelease(x, y, button, ctrlPressed, shiftPressed, altPressed);
             return 0;
         }
         case WM_MOUSEMOVE: {
+            TRACKMOUSEEVENT tracking{};
+            tracking.cbSize = sizeof(TRACKMOUSEEVENT);
+            tracking.dwFlags = TME_LEAVE;
+            tracking.hwndTrack = hwnd;
+            TrackMouseEvent(&tracking);
             int x = LOWORD(lParam);
             int y = HIWORD(lParam);
-            dialog->nativePostMouseMove(x, y);
+            const bool ctrlPressed = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            const bool shiftPressed = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            const bool altPressed = (GetKeyState(VK_MENU) & 0x8000) != 0;
+            dialog->nativePostMouseMove(x, y, ctrlPressed, shiftPressed, altPressed);
+            return 0;
+        }
+        case WM_MOUSELEAVE: {
+            dialog->nativePostMouseLeave();
             return 0;
         }
         case WM_MOUSEWHEEL: {
@@ -496,12 +505,37 @@ private:
             dialog->nativePostMouseWheel(pt.x, pt.y, delta, ctrlPressed, shiftPressed, altPressed);
             return 0;
         }
-        case WM_KEYDOWN: {
+        case WM_KEYDOWN:
+        case WM_SYSKEYDOWN: {
             int keyCode = static_cast<int>(wParam);
             bool ctrlPressed = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             bool shiftPressed = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
             bool altPressed = (GetKeyState(VK_MENU) & 0x8000) != 0;
-            dialog->nativePostKeyPress(keyCode, ctrlPressed, shiftPressed, altPressed);
+            dialog->nativePostKeyPress(keyCode, ctrlPressed, shiftPressed, altPressed, L'\0', true);
+            return 0;
+        }
+        case WM_CHAR:
+        case WM_SYSCHAR: {
+            const wchar_t ch = static_cast<wchar_t>(wParam);
+            if (ch < 0x20) {
+                return 0;
+            }
+            const bool ctrlPressed = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            const bool shiftPressed = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            const bool altPressed = (GetKeyState(VK_MENU) & 0x8000) != 0;
+            dialog->nativePostKeyPress(0, ctrlPressed, shiftPressed, altPressed, ch, true);
+            return 0;
+        }
+        case WM_DEADCHAR:
+        case WM_SYSDEADCHAR:
+            return 0;
+        case WM_KEYUP:
+        case WM_SYSKEYUP: {
+            const int keyCode = static_cast<int>(wParam);
+            const bool ctrlPressed = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            const bool shiftPressed = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            const bool altPressed = (GetKeyState(VK_MENU) & 0x8000) != 0;
+            dialog->nativePostKeyRelease(keyCode, ctrlPressed, shiftPressed, altPressed);
             return 0;
         }
         case WM_CLOSE: {
@@ -518,6 +552,7 @@ private:
     }
 
     void openNativeWindow() {
+        capturePreviousFocusForActivation_();
         SwWidget* root = findRootWidget(this);
         HWND owner = root ? SwWidgetPlatformAdapter::nativeHandleAs<HWND>(root->platformHandle()) : nullptr;
 
@@ -592,7 +627,7 @@ private:
         ShowWindow(m_nativeHwnd, SW_SHOW);
         UpdateWindow(m_nativeHwnd);
 
-        setFocus(true);
+        activateDialogFocus_();
         shown();
     }
 
@@ -632,33 +667,25 @@ private:
         if (clientWidth <= 0 || clientHeight <= 0) {
             return;
         }
-
-        HDC memDC = CreateCompatibleDC(hdc);
-        if (!memDC) {
-            return;
-        }
-        HBITMAP memBitmap = CreateCompatibleBitmap(hdc, clientWidth, clientHeight);
-        if (!memBitmap) {
-            DeleteDC(memDC);
-            return;
-        }
-
-        HBITMAP oldBitmap = static_cast<HBITMAP>(SelectObject(memDC, memBitmap));
-
-        SwWin32Painter painter(memDC);
-        painter.clear(SwColor{241, 245, 249});
-        SwRect paintRect{0, 0, clientWidth, clientHeight};
-        PaintEvent paintEvent(&painter, paintRect);
-        this->paintEvent(&paintEvent);
-        SwDragDrop::instance().paintOverlay(&painter);
-
-        int copyWidth = rect.right - rect.left;
-        int copyHeight = rect.bottom - rect.top;
-        BitBlt(hdc, rect.left, rect.top, copyWidth, copyHeight, memDC, rect.left, rect.top, SRCCOPY);
-
-        SelectObject(memDC, oldBitmap);
-        DeleteObject(memBitmap);
-        DeleteDC(memDC);
+        paintPlatformSurface_(SwGuiApplication::instance(false) ? SwGuiApplication::instance(false)->platformIntegration() : nullptr,
+                              SwMakePlatformPaintEvent(SwPlatformSize{clientWidth, clientHeight},
+                                                       hdc,
+                                                       m_nativeHwnd,
+                                                       nullptr,
+                                                       SwPlatformRect{
+                                                           rect.left,
+                                                           rect.top,
+                                                           std::max(0, static_cast<int>(rect.right - rect.left)),
+                                                           std::max(0, static_cast<int>(rect.bottom - rect.top))
+                                                       }),
+                              SwWidgetPlatformAdapter::fromNativeHandle(m_nativeHwnd),
+                              clientWidth,
+                              clientHeight,
+                              true,
+                              true,
+                              [this](PaintEvent& paintEvent) {
+                                  SwCoreApplication::sendEvent(this, &paintEvent);
+                              });
     }
 
     void nativeOnResize(int width, int height) {
@@ -687,116 +714,161 @@ private:
         SetWindowPos(dialogHwnd, nullptr, x, y, 0, 0, SWP_NOZORDER | SWP_NOSIZE);
     }
 
-    void nativePostMousePress(int x, int y, SwMouseButton button) {
-        if (auto* app = SwCoreApplication::instance(false)) {
-            app->postEvent([this, x, y, button]() { nativeDispatchMousePress(x, y, button); });
+    void postGuardedNativeEvent_(std::function<void(SwDialog*)> fn) {
+        if (!fn) {
             return;
         }
-        nativeDispatchMousePress(x, y, button);
+        if (auto* app = SwCoreApplication::instance(false)) {
+            const SwPointer<SwDialog> self(this);
+            app->postEvent([self, fn = std::move(fn)]() mutable {
+                if (!self) {
+                    return;
+                }
+                SwDialog* liveSelf = self.data();
+                if (!SwObject::isLive(liveSelf)) {
+                    return;
+                }
+                fn(liveSelf);
+            });
+            return;
+        }
+        fn(this);
     }
 
-    void nativePostMouseDoubleClick(int x, int y, SwMouseButton button) {
-        if (auto* app = SwCoreApplication::instance(false)) {
-            app->postEvent([this, x, y, button]() { nativeDispatchMouseDoubleClick(x, y, button); });
-            return;
-        }
-        nativeDispatchMouseDoubleClick(x, y, button);
+    void nativePostMousePress(int x, int y, SwMouseButton button, bool ctrlPressed, bool shiftPressed, bool altPressed) {
+        postGuardedNativeEvent_([x, y, button, ctrlPressed, shiftPressed, altPressed](SwDialog* self) {
+            self->nativeDispatchMousePress(x, y, button, ctrlPressed, shiftPressed, altPressed);
+        });
     }
 
-    void nativePostMouseRelease(int x, int y, SwMouseButton button) {
-        if (auto* app = SwCoreApplication::instance(false)) {
-            app->postEvent([this, x, y, button]() { nativeDispatchMouseRelease(x, y, button); });
-            return;
-        }
-        nativeDispatchMouseRelease(x, y, button);
+    void nativePostMouseDoubleClick(int x, int y, SwMouseButton button, bool ctrlPressed, bool shiftPressed, bool altPressed) {
+        postGuardedNativeEvent_([x, y, button, ctrlPressed, shiftPressed, altPressed](SwDialog* self) {
+            self->nativeDispatchMouseDoubleClick(x, y, button, ctrlPressed, shiftPressed, altPressed);
+        });
     }
 
-    void nativePostMouseMove(int x, int y) {
-        if (auto* app = SwCoreApplication::instance(false)) {
-            app->postEvent([this, x, y]() { nativeDispatchMouseMove(x, y); });
-            return;
-        }
-        nativeDispatchMouseMove(x, y);
+    void nativePostMouseRelease(int x, int y, SwMouseButton button, bool ctrlPressed, bool shiftPressed, bool altPressed) {
+        postGuardedNativeEvent_([x, y, button, ctrlPressed, shiftPressed, altPressed](SwDialog* self) {
+            self->nativeDispatchMouseRelease(x, y, button, ctrlPressed, shiftPressed, altPressed);
+        });
+    }
+
+    void nativePostMouseMove(int x, int y, bool ctrlPressed, bool shiftPressed, bool altPressed) {
+        postGuardedNativeEvent_([x, y, ctrlPressed, shiftPressed, altPressed](SwDialog* self) {
+            self->nativeDispatchMouseMove(x, y, ctrlPressed, shiftPressed, altPressed);
+        });
+    }
+
+    void nativePostMouseLeave() {
+        postGuardedNativeEvent_([](SwDialog* self) {
+            self->dispatchNativeMouseLeave_();
+        });
     }
 
     void nativePostMouseWheel(int x, int y, int delta, bool ctrlPressed, bool shiftPressed, bool altPressed) {
-        if (auto* app = SwCoreApplication::instance(false)) {
-            app->postEvent([this, x, y, delta, ctrlPressed, shiftPressed, altPressed]() {
-                nativeDispatchMouseWheel(x, y, delta, ctrlPressed, shiftPressed, altPressed);
-            });
-            return;
-        }
-        nativeDispatchMouseWheel(x, y, delta, ctrlPressed, shiftPressed, altPressed);
+        postGuardedNativeEvent_([x, y, delta, ctrlPressed, shiftPressed, altPressed](SwDialog* self) {
+            self->nativeDispatchMouseWheel(x, y, delta, ctrlPressed, shiftPressed, altPressed);
+        });
     }
 
-    void nativePostKeyPress(int keyCode, bool ctrlPressed, bool shiftPressed, bool altPressed) {
-        if (auto* app = SwCoreApplication::instance(false)) {
-            app->postEvent([this, keyCode, ctrlPressed, shiftPressed, altPressed]() {
-                nativeDispatchKeyPress(keyCode, ctrlPressed, shiftPressed, altPressed);
-            });
-            return;
-        }
-        nativeDispatchKeyPress(keyCode, ctrlPressed, shiftPressed, altPressed);
+    void nativePostKeyPress(int keyCode,
+                            bool ctrlPressed,
+                            bool shiftPressed,
+                            bool altPressed,
+                            wchar_t textChar = L'\0',
+                            bool textProvided = false) {
+        postGuardedNativeEvent_([keyCode, ctrlPressed, shiftPressed, altPressed, textChar, textProvided](SwDialog* self) {
+            self->nativeDispatchKeyPress(keyCode, ctrlPressed, shiftPressed, altPressed, textChar, textProvided);
+        });
+    }
+
+    void nativePostKeyRelease(int keyCode,
+                              bool ctrlPressed,
+                              bool shiftPressed,
+                              bool altPressed) {
+        postGuardedNativeEvent_([keyCode, ctrlPressed, shiftPressed, altPressed](SwDialog* self) {
+            self->nativeDispatchKeyRelease(keyCode, ctrlPressed, shiftPressed, altPressed);
+        });
     }
 
     void nativePostCloseRequested() {
-        if (auto* app = SwCoreApplication::instance(false)) {
-            app->postEvent([this]() { reject(); });
-            return;
-        }
-        reject();
+        postGuardedNativeEvent_([](SwDialog* self) { self->reject(); });
     }
 
-    void nativeDispatchMousePress(int x, int y, SwMouseButton button) {
+    void nativeDispatchMousePress(int x, int y, SwMouseButton button, bool ctrlPressed, bool shiftPressed, bool altPressed) {
         SwToolTip::handleMousePress();
-        MouseEvent mouseEvent(EventType::MousePressEvent, x, y, button);
-        SwWidget::mousePressEvent(&mouseEvent);
+        MouseEvent mouseEvent(EventType::MousePressEvent, x, y, button, ctrlPressed, shiftPressed, altPressed);
+        mouseEvent.setGlobalPos(mapToGlobal(mouseEvent.pos()));
+        dispatchMouseEventFromRoot_(mouseEvent);
     }
 
-    void nativeDispatchMouseDoubleClick(int x, int y, SwMouseButton button) {
-        MouseEvent mouseEvent(EventType::MouseDoubleClickEvent, x, y, button);
-        SwWidget::mouseDoubleClickEvent(&mouseEvent);
+    void nativeDispatchMouseDoubleClick(int x,
+                                        int y,
+                                        SwMouseButton button,
+                                        bool ctrlPressed,
+                                        bool shiftPressed,
+                                        bool altPressed) {
+        MouseEvent mouseEvent(EventType::MouseDoubleClickEvent, x, y, button, ctrlPressed, shiftPressed, altPressed);
+        mouseEvent.setGlobalPos(mapToGlobal(mouseEvent.pos()));
+        dispatchMouseEventFromRoot_(mouseEvent);
     }
 
-    void nativeDispatchMouseRelease(int x, int y, SwMouseButton button) {
-        MouseEvent mouseEvent(EventType::MouseReleaseEvent, x, y, button);
-        SwWidget::mouseReleaseEvent(&mouseEvent);
+    void nativeDispatchMouseRelease(int x,
+                                    int y,
+                                    SwMouseButton button,
+                                    bool ctrlPressed,
+                                    bool shiftPressed,
+                                    bool altPressed) {
+        MouseEvent mouseEvent(EventType::MouseReleaseEvent, x, y, button, ctrlPressed, shiftPressed, altPressed);
+        mouseEvent.setGlobalPos(mapToGlobal(mouseEvent.pos()));
+        dispatchMouseEventFromRoot_(mouseEvent);
     }
 
-    void nativeDispatchMouseMove(int x, int y) {
-        MouseEvent mouseEvent(EventType::MouseMoveEvent, x, y);
+    void nativeDispatchMouseMove(int x, int y, bool ctrlPressed, bool shiftPressed, bool altPressed) {
+        MouseEvent mouseEvent(EventType::MouseMoveEvent, x, y, SwMouseButton::NoButton, ctrlPressed, shiftPressed, altPressed);
         SwWidgetPlatformAdapter::setCursor(CursorType::Arrow);
-        SwWidget::mouseMoveEvent(&mouseEvent);
+        mouseEvent.setGlobalPos(mapToGlobal(mouseEvent.pos()));
+        dispatchMouseEventFromRoot_(mouseEvent);
         SwToolTip::handleMouseMove(this, x, y);
     }
 
     void nativeDispatchMouseWheel(int x, int y, int delta, bool ctrlPressed, bool shiftPressed, bool altPressed) {
         WheelEvent wheelEvent(x, y, delta, ctrlPressed, shiftPressed, altPressed);
-        SwWidget* target = getChildUnderCursor(x, y);
-        SwWidget* current = target ? target : this;
-        while (current) {
-            WheelEvent localEvent = mapWheelEventToChild_(wheelEvent, this, current);
-            current->wheelEvent(&localEvent);
-            if (localEvent.isAccepted()) {
-                wheelEvent.accept();
-                return;
-            }
-            current = dynamic_cast<SwWidget*>(current->parent());
+        wheelEvent.setGlobalPos(mapToGlobal(wheelEvent.pos()));
+        dispatchWheelEventFromRoot_(wheelEvent);
+    }
+
+    void nativeDispatchKeyPress(int keyCode,
+                                bool ctrlPressed,
+                                bool shiftPressed,
+                                bool altPressed,
+                                wchar_t textChar = L'\0',
+                                bool textProvided = false) {
+        SwToolTip::handleKeyPress();
+        KeyEvent keyEvent(keyCode, ctrlPressed, shiftPressed, altPressed, textChar, textProvided);
+        if (!dispatchKeyPressEventFromRoot_(keyEvent)) {
+            SwShortcut::dispatch(this, &keyEvent);
         }
     }
 
-    void nativeDispatchKeyPress(int keyCode, bool ctrlPressed, bool shiftPressed, bool altPressed) {
-        SwToolTip::handleKeyPress();
-        KeyEvent keyEvent(keyCode, ctrlPressed, shiftPressed, altPressed);
-        if (SwShortcut::dispatch(this, &keyEvent)) {
-            return;
-        }
-        SwWidget::keyPressEvent(&keyEvent);
+    void nativeDispatchKeyRelease(int keyCode,
+                                  bool ctrlPressed,
+                                  bool shiftPressed,
+                                  bool altPressed) {
+        KeyEvent keyEvent(keyCode,
+                          ctrlPressed,
+                          shiftPressed,
+                          altPressed,
+                          L'\0',
+                          false,
+                          EventType::KeyReleaseEvent);
+        dispatchKeyReleaseEventFromRoot_(keyEvent);
     }
 #endif
 
-#if defined(__linux__)
+#if SW_PLATFORM_X11
     void openNativeWindowX11() {
+        capturePreviousFocusForActivation_();
         SwGuiApplication* guiApp = SwGuiApplication::instance(false);
         if (!guiApp) {
             return;
@@ -820,71 +892,54 @@ private:
         const std::string title = m_title.toStdString();
 
         SwWindowCallbacks callbacks;
-        callbacks.paintRequestHandler = [this]() {
+        callbacks.paintRequestHandler = [this](const SwPlatformPaintEvent&) {
             x11HandlePaintRequest();
         };
         callbacks.deleteHandler = [this]() {
-            if (auto* app = SwCoreApplication::instance(false)) {
-                app->postEvent([this]() { reject(); });
-            } else {
-                reject();
-            }
+            postOrRunNativeEvent_([](SwDialog* self) { self->reject(); });
         };
         callbacks.resizeHandler = [this](const SwPlatformSize& size) {
             move(0, 0);
             SwWidget::resize(size.width, size.height);
         };
         callbacks.mousePressHandler = [this](const SwMouseEvent& evt) {
-            x11PostEvent([this, evt]() {
-                SwToolTip::handleMousePress();
-                MouseEvent e(EventType::MousePressEvent, evt.position.x, evt.position.y, evt.button);
-                SwWidget::mousePressEvent(&e);
+            x11PostEvent([evt](SwDialog* self) {
+                self->dispatchNativeMousePress_(evt);
             });
         };
         callbacks.mouseDoubleClickHandler = [this](const SwMouseEvent& evt) {
-            x11PostEvent([this, evt]() {
-                MouseEvent e(EventType::MouseDoubleClickEvent, evt.position.x, evt.position.y, evt.button);
-                SwWidget::mouseDoubleClickEvent(&e);
+            x11PostEvent([evt](SwDialog* self) {
+                self->dispatchNativeMouseDoubleClick_(evt);
             });
         };
         callbacks.mouseReleaseHandler = [this](const SwMouseEvent& evt) {
-            x11PostEvent([this, evt]() {
-                MouseEvent e(EventType::MouseReleaseEvent, evt.position.x, evt.position.y, evt.button);
-                SwWidget::mouseReleaseEvent(&e);
+            x11PostEvent([evt](SwDialog* self) {
+                self->dispatchNativeMouseRelease_(evt);
             });
         };
         callbacks.mouseMoveHandler = [this](const SwMouseEvent& evt) {
-            x11PostEvent([this, evt]() {
-                MouseEvent e(EventType::MouseMoveEvent, evt.position.x, evt.position.y);
-                SwWidgetPlatformAdapter::setCursor(CursorType::Arrow);
-                SwWidget::mouseMoveEvent(&e);
-                SwToolTip::handleMouseMove(this, evt.position.x, evt.position.y);
+            x11PostEvent([evt](SwDialog* self) {
+                self->dispatchNativeMouseMove_(evt);
+            });
+        };
+        callbacks.mouseLeaveHandler = [this]() {
+            x11PostEvent([](SwDialog* self) {
+                self->dispatchNativeMouseLeave_();
             });
         };
         callbacks.mouseWheelHandler = [this](const SwMouseEvent& evt) {
-            x11PostEvent([this, evt]() {
-                WheelEvent wheelEvent(evt.position.x, evt.position.y, evt.wheelDelta, evt.ctrl, evt.shift, evt.alt);
-                SwWidget* target = getChildUnderCursor(evt.position.x, evt.position.y);
-                SwWidget* current = target ? target : this;
-                while (current) {
-                    WheelEvent localEvent = mapWheelEventToChild_(wheelEvent, this, current);
-                    current->wheelEvent(&localEvent);
-                    if (localEvent.isAccepted()) {
-                        wheelEvent.accept();
-                        return;
-                    }
-                    current = dynamic_cast<SwWidget*>(current->parent());
-                }
+            x11PostEvent([evt](SwDialog* self) {
+                self->dispatchNativeMouseWheel_(evt);
             });
         };
         callbacks.keyPressHandler = [this](const SwKeyEvent& evt) {
-            x11PostEvent([this, evt]() {
-                SwToolTip::handleKeyPress();
-                KeyEvent e(evt.keyCode, evt.ctrl, evt.shift, evt.alt);
-                if (SwShortcut::dispatch(this, &e)) {
-                    return;
-                }
-                SwWidget::keyPressEvent(&e);
+            x11PostEvent([evt](SwDialog* self) {
+                self->dispatchNativeKeyPress_(evt);
+            });
+        };
+        callbacks.keyReleaseHandler = [this](const SwKeyEvent& evt) {
+            x11PostEvent([evt](SwDialog* self) {
+                self->dispatchNativeKeyRelease_(evt);
             });
         };
 
@@ -908,7 +963,7 @@ private:
         show();
         update();
         m_x11PlatformWindow->show();
-        setFocus(true);
+        activateDialogFocus_();
         shown();
     }
 
@@ -927,22 +982,354 @@ private:
         }
         const int w = std::max(1, width());
         const int h = std::max(1, height());
-        SwX11Painter painter(m_x11Integration->display(), x11Window->handle(), w, h);
-        painter.clear(SwColor{241, 245, 249});
-        PaintEvent paintEvent(&painter, SwRect{0, 0, w, h});
-        this->paintEvent(&paintEvent);
-        painter.finalize();
+        paintPlatformSurface_(m_x11Integration,
+                              SwMakePlatformPaintEvent(SwPlatformSize{w, h},
+                                                       reinterpret_cast<void*>(static_cast<std::uintptr_t>(x11Window->handle())),
+                                                       reinterpret_cast<void*>(static_cast<std::uintptr_t>(x11Window->handle())),
+                                                       m_x11Integration->display(),
+                                                       SwPlatformRect{0, 0, w, h}),
+                              SwWidgetPlatformAdapter::fromNativeHandle(
+                                  reinterpret_cast<void*>(static_cast<std::uintptr_t>(x11Window->handle())),
+                                  m_x11Integration->display()),
+                              w,
+                              h,
+                              true,
+                              false,
+                              [this](PaintEvent& paintEvent) {
+                                  SwCoreApplication::sendEvent(this, &paintEvent);
+                              });
     }
 
-    template<typename F>
-    void x11PostEvent(F&& fn) {
-        if (auto* app = SwCoreApplication::instance(false)) {
-            app->postEvent(std::forward<F>(fn));
-        } else {
-            fn();
-        }
+    void x11PostEvent(std::function<void(SwDialog*)> fn) {
+        postOrRunNativeEvent_(std::move(fn));
     }
 #endif
+
+    template<typename PaintDispatch>
+    void paintPlatformSurface_(SwPlatformIntegration* integration,
+                               const SwPlatformPaintEvent& baseEvent,
+                               const SwWidgetPlatformHandle& handle,
+                               int surfaceWidth,
+                               int surfaceHeight,
+                               bool clearBackground,
+                               bool paintOverlay,
+                               PaintDispatch&& dispatch) {
+        if (!integration || surfaceWidth <= 0 || surfaceHeight <= 0) {
+            return;
+        }
+
+        SwPlatformPaintEvent resolvedEvent = SwResolvePlatformPaintEvent(baseEvent,
+                                                                         SwPlatformSize{surfaceWidth, surfaceHeight},
+                                                                         baseEvent.nativePaintDevice
+                                                                             ? baseEvent.nativePaintDevice
+                                                                             : handle.nativeHandle,
+                                                                         handle.nativeHandle,
+                                                                         handle.nativeDisplay);
+        SwScopedPlatformPainter painter(integration, resolvedEvent);
+        if (!painter) {
+            return;
+        }
+
+        if (clearBackground) {
+            painter->clear(SwColor{241, 245, 249});
+        }
+
+        PaintEvent paintEvent(painter.asPainter(), SwRect{0, 0, surfaceWidth, surfaceHeight});
+        dispatch(paintEvent);
+
+        if (paintOverlay) {
+            SwDragDrop::instance().paintOverlay(painter.asPainter());
+        }
+
+        painter->finalize();
+        painter->flush();
+    }
+
+    static std::string toUtf8_(const SwString& value) {
+        return value.toStdString();
+    }
+
+    void postOrRunNativeEvent_(std::function<void(SwDialog*)> fn) {
+        if (!fn) {
+            return;
+        }
+        if (auto* app = SwCoreApplication::instance(false)) {
+            const SwPointer<SwDialog> self(this);
+            app->postEvent([self, fn = std::move(fn)]() mutable {
+                if (!self) {
+                    return;
+                }
+                SwDialog* liveSelf = self.data();
+                if (!SwObject::isLive(liveSelf)) {
+                    return;
+                }
+                fn(liveSelf);
+            });
+            return;
+        }
+        fn(this);
+    }
+
+    SwWindowCallbacks nativePlatformCallbacks_() {
+        SwWindowCallbacks callbacks;
+        callbacks.paintRequestHandler = [this](const SwPlatformPaintEvent& event) {
+            handleNativePaintRequest_(event);
+        };
+        callbacks.deleteHandler = [this]() {
+            postOrRunNativeEvent_([](SwDialog* self) { self->reject(); });
+        };
+        callbacks.resizeHandler = [this](const SwPlatformSize& size) {
+            move(0, 0);
+            SwWidget::resize(size.width, size.height);
+        };
+        callbacks.mousePressHandler = [this](const SwMouseEvent& evt) {
+            postOrRunNativeEvent_([evt](SwDialog* self) { self->dispatchNativeMousePress_(evt); });
+        };
+        callbacks.mouseDoubleClickHandler = [this](const SwMouseEvent& evt) {
+            postOrRunNativeEvent_([evt](SwDialog* self) { self->dispatchNativeMouseDoubleClick_(evt); });
+        };
+        callbacks.mouseReleaseHandler = [this](const SwMouseEvent& evt) {
+            postOrRunNativeEvent_([evt](SwDialog* self) { self->dispatchNativeMouseRelease_(evt); });
+        };
+        callbacks.mouseMoveHandler = [this](const SwMouseEvent& evt) {
+            postOrRunNativeEvent_([evt](SwDialog* self) { self->dispatchNativeMouseMove_(evt); });
+        };
+        callbacks.mouseLeaveHandler = [this]() {
+            postOrRunNativeEvent_([](SwDialog* self) { self->dispatchNativeMouseLeave_(); });
+        };
+        callbacks.mouseWheelHandler = [this](const SwMouseEvent& evt) {
+            postOrRunNativeEvent_([evt](SwDialog* self) { self->dispatchNativeMouseWheel_(evt); });
+        };
+        callbacks.keyPressHandler = [this](const SwKeyEvent& evt) {
+            postOrRunNativeEvent_([evt](SwDialog* self) { self->dispatchNativeKeyPress_(evt); });
+        };
+        callbacks.keyReleaseHandler = [this](const SwKeyEvent& evt) {
+            postOrRunNativeEvent_([evt](SwDialog* self) { self->dispatchNativeKeyRelease_(evt); });
+        };
+        return callbacks;
+    }
+
+    void openNativePlatformWindow_() {
+        capturePreviousFocusForActivation_();
+        SwGuiApplication* guiApp = SwGuiApplication::instance(false);
+        if (!guiApp || !guiApp->platformIntegration()) {
+            return;
+        }
+
+        SwWidget* root = findRootWidget(this);
+        SwWidgetPlatformHandle ownerHandle = root ? root->platformHandle() : SwWidgetPlatformHandle{};
+        if (m_activePresentation != Presentation::NativeWindow) {
+            m_originalParent = parent();
+            m_originalRect = frameGeometry();
+        }
+
+        if (parent() != nullptr) {
+            setParent(nullptr);
+        }
+
+        SwPlatformWindowOptions options;
+        options.role = SwPlatformWindowRole::Dialog;
+        options.ownerHandle = ownerHandle.nativeHandle;
+        options.resizable = false;
+        options.minimizable = false;
+        options.maximizable = false;
+        options.showInTaskbar = false;
+
+        const std::string title = toUtf8_(m_title);
+        m_nativePlatformWindow = guiApp->platformIntegration()->createWindow(title.empty() ? "Dialog" : title,
+                                                                             std::max(1, width()),
+                                                                             std::max(1, height()),
+                                                                             nativePlatformCallbacks_(),
+                                                                             options);
+        if (!m_nativePlatformWindow) {
+            return;
+        }
+
+        m_activePresentation = Presentation::NativeWindow;
+#if defined(_WIN32)
+        m_nativeOwnerHwnd = ownerHandle
+            ? SwWidgetPlatformAdapter::nativeHandleAs<HWND>(ownerHandle)
+            : nullptr;
+        m_nativeOwnerWasEnabled = false;
+        if (m_modal && m_nativeOwnerHwnd) {
+            m_nativeOwnerWasEnabled = IsWindowEnabled(m_nativeOwnerHwnd) != FALSE;
+            EnableWindow(m_nativeOwnerHwnd, FALSE);
+        }
+#endif
+
+        setNativeWindowHandleRecursive(SwWidgetPlatformAdapter::fromNativeHandle(
+            m_nativePlatformWindow->nativeHandle(),
+            m_nativePlatformWindow->nativeDisplay()));
+        move(0, 0);
+
+        SwRect clientRect = SwWidgetPlatformAdapter::clientRect(nativeWindowHandle());
+        const int clientW = std::max(1, clientRect.width > 0 ? clientRect.width : width());
+        const int clientH = std::max(1, clientRect.height > 0 ? clientRect.height : height());
+        SwWidget::resize(clientW, clientH);
+
+        centerNativePlatformWindow_(ownerHandle);
+        show();
+        update();
+        m_nativePlatformWindow->show();
+#if defined(_WIN32)
+        if (m_nativeIcon) {
+            HWND hwnd = static_cast<HWND>(m_nativePlatformWindow->nativeHandle());
+            if (hwnd) {
+                SendMessage(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(m_nativeIcon));
+                SendMessage(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(m_nativeIcon));
+            }
+        }
+#endif
+        activateDialogFocus_();
+        shown();
+    }
+
+    void closeNativePlatformWindow_() {
+#if defined(_WIN32)
+        HWND ownerToRestore = nullptr;
+        if (m_modal && m_nativeOwnerHwnd && m_nativeOwnerWasEnabled) {
+            EnableWindow(m_nativeOwnerHwnd, TRUE);
+            ownerToRestore = m_nativeOwnerHwnd;
+        }
+        m_nativeOwnerWasEnabled = false;
+        m_nativeOwnerHwnd = nullptr;
+#endif
+        m_nativePlatformWindow.reset();
+        setNativeWindowHandleRecursive(SwWidgetPlatformHandle{});
+#if defined(_WIN32)
+        if (ownerToRestore) {
+            SetForegroundWindow(ownerToRestore);
+        }
+#endif
+    }
+
+    void centerNativePlatformWindow_(const SwWidgetPlatformHandle& ownerHandle) {
+        if (!m_nativePlatformWindow) {
+            return;
+        }
+
+        const SwRect frameRect = SwWidgetPlatformAdapter::windowFrameRect(nativeWindowHandle());
+        if (frameRect.width <= 0 || frameRect.height <= 0 || !ownerHandle) {
+            return;
+        }
+
+        const SwRect ownerRect = SwWidgetPlatformAdapter::windowFrameRect(ownerHandle);
+        if (ownerRect.width <= 0 || ownerRect.height <= 0) {
+            return;
+        }
+
+        const int x = ownerRect.x + std::max(0, (ownerRect.width - frameRect.width) / 2);
+        const int y = ownerRect.y + std::max(0, (ownerRect.height - frameRect.height) / 2);
+        m_nativePlatformWindow->move(x, y);
+    }
+
+    void handleNativePaintRequest_(const SwPlatformPaintEvent& event) {
+        if (!m_nativePlatformWindow) {
+            return;
+        }
+
+        SwGuiApplication* guiApp = SwGuiApplication::instance(false);
+        if (!guiApp || !guiApp->platformIntegration()) {
+            return;
+        }
+
+        SwRect clientRect = SwWidgetPlatformAdapter::clientRect(nativeWindowHandle());
+        const int w = std::max(1, clientRect.width > 0 ? clientRect.width : width());
+        const int h = std::max(1, clientRect.height > 0 ? clientRect.height : height());
+
+        paintPlatformSurface_(guiApp->platformIntegration(),
+                              event,
+                              SwWidgetPlatformAdapter::fromNativeHandle(m_nativePlatformWindow->nativeHandle(),
+                                                                        m_nativePlatformWindow->nativeDisplay()),
+                              w,
+                              h,
+                              true,
+                              true,
+                              [this](PaintEvent& paintEvent) {
+                                  SwCoreApplication::sendEvent(this, &paintEvent);
+                              });
+    }
+
+    void dispatchNativeMousePress_(const SwMouseEvent& evt) {
+        SwToolTip::handleMousePress();
+        MouseEvent event(EventType::MousePressEvent,
+                         evt.position.x,
+                         evt.position.y,
+                         evt.button,
+                         evt.ctrl,
+                         evt.shift,
+                         evt.alt);
+        event.setGlobalPos(mapToGlobal(event.pos()));
+        dispatchMouseEventFromRoot_(event);
+    }
+
+    void dispatchNativeMouseDoubleClick_(const SwMouseEvent& evt) {
+        MouseEvent event(EventType::MouseDoubleClickEvent,
+                         evt.position.x,
+                         evt.position.y,
+                         evt.button,
+                         evt.ctrl,
+                         evt.shift,
+                         evt.alt);
+        event.setGlobalPos(mapToGlobal(event.pos()));
+        dispatchMouseEventFromRoot_(event);
+    }
+
+    void dispatchNativeMouseRelease_(const SwMouseEvent& evt) {
+        MouseEvent event(EventType::MouseReleaseEvent,
+                         evt.position.x,
+                         evt.position.y,
+                         evt.button,
+                         evt.ctrl,
+                         evt.shift,
+                         evt.alt);
+        event.setGlobalPos(mapToGlobal(event.pos()));
+        dispatchMouseEventFromRoot_(event);
+    }
+
+    void dispatchNativeMouseMove_(const SwMouseEvent& evt) {
+        MouseEvent event(EventType::MouseMoveEvent,
+                         evt.position.x,
+                         evt.position.y,
+                         SwMouseButton::NoButton,
+                         evt.ctrl,
+                         evt.shift,
+                         evt.alt);
+        SwWidgetPlatformAdapter::setCursor(CursorType::Arrow);
+        event.setGlobalPos(mapToGlobal(event.pos()));
+        dispatchMouseEventFromRoot_(event);
+        SwToolTip::handleMouseMove(this, evt.position.x, evt.position.y);
+    }
+
+    void dispatchNativeMouseLeave_() {
+        clearHoverRecursive_();
+        SwToolTip::hideText();
+    }
+
+    void dispatchNativeMouseWheel_(const SwMouseEvent& evt) {
+        WheelEvent event(evt.position.x, evt.position.y, evt.wheelDelta, evt.ctrl, evt.shift, evt.alt);
+        event.setGlobalPos(mapToGlobal(event.pos()));
+        dispatchWheelEventFromRoot_(event);
+    }
+
+    void dispatchNativeKeyPress_(const SwKeyEvent& evt) {
+        SwToolTip::handleKeyPress();
+        KeyEvent event(evt.keyCode, evt.ctrl, evt.shift, evt.alt, evt.text, evt.textProvided);
+        if (!dispatchKeyPressEventFromRoot_(event)) {
+            SwShortcut::dispatch(this, &event);
+        }
+    }
+
+    void dispatchNativeKeyRelease_(const SwKeyEvent& evt) {
+        KeyEvent event(evt.keyCode,
+                       evt.ctrl,
+                       evt.shift,
+                       evt.alt,
+                       L'\0',
+                       false,
+                       EventType::KeyReleaseEvent);
+        dispatchKeyReleaseEventFromRoot_(event);
+    }
 
     class ModalOverlay final : public SwWidget {
         SW_OBJECT(ModalOverlay, SwWidget)
@@ -1132,6 +1519,50 @@ private:
         move(x, y);
     }
 
+    void capturePreviousFocusForActivation_() {
+        m_previousFocus = nullptr;
+        m_focusRestoreRoot = nullptr;
+        if (!m_modal) {
+            return;
+        }
+        SwWidget* focusRoot = m_root ? m_root : findRootWidget(this);
+        if (!focusRoot) {
+            return;
+        }
+        m_focusRestoreRoot = focusRoot;
+        SwWidget* focused = focusRoot->focusedWidgetInHierarchy();
+        if (focused && focused != this) {
+            m_previousFocus = focused;
+        }
+    }
+
+    void activateDialogFocus_() {
+        setFocus(true);
+    }
+
+    void restorePreviousFocusAfterClose_() {
+        SwPointer<SwWidget> previous = m_previousFocus;
+        SwPointer<SwWidget> focusRoot = m_focusRestoreRoot;
+        m_previousFocus = nullptr;
+        m_focusRestoreRoot = nullptr;
+
+        auto canRestore = [](SwWidget* widget) -> bool {
+            return widget &&
+                   widget->isVisibleInHierarchy() &&
+                   widget->getEnable() &&
+                   widget->getFocusPolicy() != FocusPolicyEnum::NoFocus;
+        };
+
+        if (canRestore(previous.data()) && previous.data() != this) {
+            previous.data()->setFocus(true);
+            return;
+        }
+
+        if (canRestore(focusRoot.data()) && focusRoot.data() != this) {
+            focusRoot.data()->setFocus(true);
+        }
+    }
+
     void restorePresentationParent() {
         if (m_originalParent && m_activePresentation == Presentation::Overlay && parent() == m_overlay) {
             setParent(m_originalParent);
@@ -1139,7 +1570,7 @@ private:
             resize(m_originalRect.width, m_originalRect.height);
             setNativeWindowHandleRecursive(nativeWindowHandle());
         }
-#if defined(_WIN32) || defined(__linux__)
+#if SW_PLATFORM_WIN32 || SW_PLATFORM_X11
         if (m_originalParent && m_activePresentation == Presentation::NativeWindow && parent() == nullptr) {
             setParent(m_originalParent);
             move(m_originalRect.x, m_originalRect.y);
@@ -1154,7 +1585,7 @@ private:
 
     SwString m_title;
     bool m_modal{true};
-#if defined(_WIN32) || defined(__linux__)
+#if SW_PLATFORM_WIN32 || SW_PLATFORM_X11
     bool m_useNativeWindow{true};
 #else
     bool m_useNativeWindow{false};
@@ -1164,16 +1595,19 @@ private:
     SwWidget* m_root{nullptr};
     ModalOverlay* m_overlay{nullptr};
     SwWidget* m_overlayRootConnected{nullptr};
+    SwPointer<SwWidget> m_previousFocus;
+    SwPointer<SwWidget> m_focusRestoreRoot;
     SwObject* m_originalParent{nullptr};
     SwRect m_originalRect{};
     Presentation m_activePresentation{Presentation::Embedded};
+    std::unique_ptr<SwPlatformWindow> m_nativePlatformWindow;
 
-#if defined(_WIN32)
+#if SW_PLATFORM_WIN32
     HWND m_nativeHwnd{nullptr};
     HWND m_nativeOwnerHwnd{nullptr};
     bool m_nativeOwnerWasEnabled{false};
     HICON m_nativeIcon{nullptr};
-#elif defined(__linux__)
+#elif SW_PLATFORM_X11
     std::unique_ptr<SwPlatformWindow> m_x11PlatformWindow;
     SwX11PlatformIntegration* m_x11Integration{nullptr};
 #endif

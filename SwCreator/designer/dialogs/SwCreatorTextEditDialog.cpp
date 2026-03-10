@@ -3,6 +3,7 @@
 #include "SwLayout.h"
 #include "SwPlainTextEdit.h"
 #include "SwPushButton.h"
+#include "theme/SwCreatorTheme.h"
 
 #include <algorithm>
 
@@ -39,6 +40,8 @@ void SwCreatorTextEditDialog::buildUi_() {
         return;
     }
 
+    const auto& th = SwCreatorTheme::current();
+
     if (auto* content = contentWidget()) {
         auto* layout = new SwVerticalLayout(content);
         layout->setMargin(0);
@@ -47,17 +50,17 @@ void SwCreatorTextEditDialog::buildUi_() {
 
         m_edit = new SwPlainTextEdit(content);
         m_edit->setPlaceholderText("...");
-        m_edit->setStyleSheet(R"(
-            SwPlainTextEdit {
-                background-color: rgb(248, 250, 252);
-                border-color: rgb(226, 232, 240);
-                border-width: 1px;
-                border-radius: 12px;
-                padding: 10px 12px;
-                color: rgb(15, 23, 42);
-                font-size: 13px;
-            }
-        )");
+        m_edit->setStyleSheet(
+            "SwPlainTextEdit {"
+            " background-color: " + SwCreatorTheme::rgb(th.surface3) + ";"
+            " border-color: " + SwCreatorTheme::rgb(th.border) + ";"
+            " border-width: 1px;"
+            " border-radius: 12px;"
+            " padding: 10px 12px;"
+            " color: " + SwCreatorTheme::rgb(th.textPrimary) + ";"
+            " font-size: 13px;"
+            " }"
+        );
         layout->addWidget(m_edit, 1, 0);
 
         auto* spacer = new SwWidget(content);
@@ -77,25 +80,25 @@ void SwCreatorTextEditDialog::buildUi_() {
 
         m_apply = new SwPushButton("Apply", bar);
         m_apply->resize(120, 36);
-        m_apply->setStyleSheet(R"(
-            SwPushButton {
-                background-color: rgb(59, 130, 246);
-                border-color: rgb(59, 130, 246);
-                color: rgb(255, 255, 255);
-                border-radius: 10px;
-                padding: 8px 14px;
-                border-width: 1px;
-                font-size: 14px;
-            }
-            SwPushButton:hover {
-                background-color: rgb(37, 99, 235);
-                border-color: rgb(37, 99, 235);
-            }
-            SwPushButton:pressed {
-                background-color: rgb(29, 78, 216);
-                border-color: rgb(29, 78, 216);
-            }
-        )");
+        m_apply->setStyleSheet(
+            "SwPushButton {"
+            " background-color: " + SwCreatorTheme::rgb(th.accentSecondary) + ";"
+            " border-color: " + SwCreatorTheme::rgb(th.accentSecondary) + ";"
+            " color: " + SwCreatorTheme::rgb(th.textInverse) + ";"
+            " border-radius: 10px;"
+            " padding: 8px 14px;"
+            " border-width: 1px;"
+            " font-size: 14px;"
+            " }"
+            " SwPushButton:hover {"
+            " background-color: " + SwCreatorTheme::rgb(th.accentSecondaryHover) + ";"
+            " border-color: " + SwCreatorTheme::rgb(th.accentSecondaryHover) + ";"
+            " }"
+            " SwPushButton:pressed {"
+            " background-color: " + SwCreatorTheme::rgb(th.accentSecondaryPressed) + ";"
+            " border-color: " + SwCreatorTheme::rgb(th.accentSecondaryPressed) + ";"
+            " }"
+        );
         SwObject::connect(m_apply, &SwPushButton::clicked, this, [this]() {
             const SwString t = text();
             if (m_onApply) {

@@ -953,7 +953,7 @@ private:
             }
             if (m_pressedChild) {
                 MouseEvent childEvent = mapMouseEventToChild_(*event, this, m_pressedChild);
-                static_cast<SwWidgetInterface*>(m_pressedChild)->mouseMoveEvent(&childEvent);
+                SwCoreApplication::sendEvent(m_pressedChild, &childEvent);
                 if (childEvent.isAccepted()) {
                     event->accept();
                     return;
@@ -989,7 +989,7 @@ private:
             if (hasVisibleScrollBars_()) {
                 if (SwWidget* child = getChildUnderCursor(event->x(), event->y())) {
                     MouseEvent childEvent = mapMouseEventToChild_(*event, this, child);
-                    static_cast<SwWidgetInterface*>(child)->mousePressEvent(&childEvent);
+                    SwCoreApplication::sendEvent(child, &childEvent);
                     if (childEvent.isAccepted()) {
                         event->accept();
                         m_pressedChild = child;
@@ -1058,7 +1058,7 @@ private:
                 SwWidget* child = m_pressedChild;
                 m_pressedChild = nullptr;
                 MouseEvent childEvent = mapMouseEventToChild_(*event, this, child);
-                static_cast<SwWidgetInterface*>(child)->mouseReleaseEvent(&childEvent);
+                SwCoreApplication::sendEvent(child, &childEvent);
                 if (childEvent.isAccepted()) {
                     event->accept();
                     return;
@@ -1067,7 +1067,7 @@ private:
             if (hasVisibleScrollBars_()) {
                 if (SwWidget* child = getChildUnderCursor(event->x(), event->y())) {
                     MouseEvent childEvent = mapMouseEventToChild_(*event, this, child);
-                    static_cast<SwWidgetInterface*>(child)->mouseReleaseEvent(&childEvent);
+                    SwCoreApplication::sendEvent(child, &childEvent);
                     if (childEvent.isAccepted()) {
                         event->accept();
                         return;

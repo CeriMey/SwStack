@@ -42,6 +42,7 @@
 #include "SwWidget.h"
 #include "SwWidgetPlatformAdapter.h"
 
+#include "core/object/SwPointer.h"
 #include "core/runtime/SwTimer.h"
 #include "core/types/SwVector.h"
 
@@ -367,7 +368,7 @@ private:
                                          event->isCtrlPressed(),
                                          event->isShiftPressed(),
                                          event->isAltPressed());
-                    static_cast<SwWidgetInterface*>(m_root)->mousePressEvent(&forwarded);
+                    m_root->dispatchMouseEventFromRoot(forwarded);
                 }
                 event->accept();
                 return;
@@ -383,7 +384,7 @@ private:
                                          event->isCtrlPressed(),
                                          event->isShiftPressed(),
                                          event->isAltPressed());
-                    static_cast<SwWidgetInterface*>(m_root)->mousePressEvent(&forwarded);
+                    m_root->dispatchMouseEventFromRoot(forwarded);
                 }
                 event->accept();
                 return;
@@ -661,9 +662,7 @@ private:
                     return;
                 }
 
-                action->trigger();
-                m_owner->triggered(action);
-                m_owner->hideAll();
+                m_owner->activateLeafAction_(action);
                 event->accept();
                 return;
             }
@@ -712,9 +711,7 @@ private:
                     if (action->hasMenu()) {
                         m_owner->onPopupHoverChanged_(m_hoverIndex, rowRectForIndex_(m_hoverIndex));
                     } else {
-                        action->trigger();
-                        m_owner->triggered(action);
-                        m_owner->hideAll();
+                        m_owner->activateLeafAction_(action);
                     }
                 }
                 event->accept();
@@ -1010,6 +1007,37 @@ private:
         } else {
             closeSubMenu_();
         }
+    }
+
+    /**
+     * @brief Closes the full menu chain before triggering a leaf action.
+     *
+     * @details
+     * This matches Qt behavior and prevents menus from staying visible while the triggered slot
+     * opens a modal dialog or another popup. Lifetime guards cover slots that destroy the action
+     * or the owning menu during activation.
+     */
+    void activateLeafAction_(SwAction* action) {
+        if (!action || action->getSeparator() || !action->getEnabled() || action->hasMenu()) {
+            return;
+        }
+
+        const SwPointer<SwMenu> liveMenu(this);
+        const SwPointer<SwAction> liveAction(action);
+
+        hideAll();
+
+        if (!liveAction) {
+            return;
+        }
+
+        liveAction->trigger();
+
+        if (!liveMenu || !liveAction) {
+            return;
+        }
+
+        liveMenu->triggered(liveAction.data());
     }
 
     /**

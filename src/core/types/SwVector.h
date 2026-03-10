@@ -272,6 +272,10 @@ public:
      */
     void append(const T& value) { m_data.push_back(value); }
 
+    void pop_back() { m_data.pop_back(); }
+
+    void assign(size_type count, const T& value) { m_data.assign(count, value); }
+
     template<typename... Args>
     /**
      * @brief Performs the `emplace_back` operation.
@@ -282,6 +286,9 @@ public:
         m_data.emplace_back(std::forward<Args>(args)...);
         return m_data.back();
     }
+
+    iterator insert(iterator pos, const T& value) { return m_data.insert(pos, value); }
+    iterator insert(iterator pos, T&& value) { return m_data.insert(pos, std::move(value)); }
 
     /**
      * @brief Performs the `erase` operation.

@@ -36,45 +36,16 @@
 #include "SwPainter.h"
 #include "SwGuiApplication.h"
 #include "SwWidgetPlatformAdapter.h"
+#include "core/types/SwMap.h"
 
 class SwStyle;
 
-
-
-// Enum pour les types d'Ã©vÃ©nements
-enum class EventType {
-    Paint,
-    Resize,
-    Move,
-    KeyPressEvent,
-    MousePressEvent,
-    MouseDoubleClickEvent,
-    MouseMoveEvent,
-    MouseReleaseEvent,
-    WheelEvent,
-    Show,
-    Hide
-};
-
-// Classe de base pour un Ã©vÃ©nement
-class Event {
+class Event : public SwEvent {
 public:
-    Event(EventType type) : eventType(type), accepted(false) {}
+    explicit Event(EventType type)
+        : SwEvent(type) {}
 
-    EventType type() const { return eventType; }
-
-    // Marquer l'Ã©vÃ©nement comme acceptÃ©
-    void accept() { accepted = true; }
-
-    // Marquer l'Ã©vÃ©nement comme refusÃ©
-    void ignore() { accepted = false; }
-
-    // VÃ©rifier si l'Ã©vÃ©nement a Ã©tÃ© acceptÃ©
-    bool isAccepted() const { return accepted; }
-
-private:
-    EventType eventType;
-    bool accepted;  // Nouveau membre pour suivre si l'Ã©vÃ©nement est acceptÃ© ou non
+    Event* clone() const override { return new Event(*this); }
 };
 
 
@@ -88,6 +59,20 @@ public:
 
 private:
     int newWidth, newHeight;
+};
+
+class MoveEvent : public Event {
+public:
+    MoveEvent(int xPos, int yPos)
+        : Event(EventType::Move), newX(xPos), newY(yPos) {}
+
+    int x() const { return newX; }
+    int y() const { return newY; }
+    SwPoint pos() const { return SwPoint{newX, newY}; }
+
+private:
+    int newX;
+    int newY;
 };
 
 // Classe pour l'Ã©vÃ©nement de dessin
@@ -234,8 +219,9 @@ private:
 class KeyEvent : public Event {
 public:
     KeyEvent(int keyCode, bool ctrl = false, bool shift = false, bool alt = false,
-             wchar_t textChar = L'\0', bool textProvided = false)
-        : Event(EventType::KeyPressEvent)
+             wchar_t textChar = L'\0', bool textProvided = false,
+             EventType type = EventType::KeyPressEvent)
+        : Event(type)
         , keyPressed(keyCode), ctrlPressed(ctrl), shiftPressed(shift), altPressed(alt)
         , textChar(textChar), textProvidedFlag(textProvided) {}
 
@@ -280,7 +266,12 @@ class SwWidget : public SwWidgetInterface {
      *
      * @param FocusPolicy The focus policy as a `FocusPolicyEnum` value. Default is `FocusPolicyEnum::Accept`.
      */
-    PROPERTY(FocusPolicyEnum, FocusPolicy, FocusPolicyEnum::Accept)
+    CUSTOM_PROPERTY(FocusPolicyEnum, FocusPolicy, FocusPolicyEnum::Accept) {
+        if (value == FocusPolicyEnum::NoFocus && getFocus()) {
+            setFocus(false);
+        }
+        update();
+    }
 
     /**
      * @brief Property for the SwWidget's tooltip text.
@@ -299,6 +290,9 @@ class SwWidget : public SwWidgetInterface {
      * @param Enable The new enabled state (`true` if the SwWidget is enabled, `false` otherwise).
      */
     CUSTOM_PROPERTY(bool, Enable, true) {
+        if (!value && getFocus()) {
+            setFocus(false);
+        }
         update();
     }
 
@@ -309,7 +303,36 @@ class SwWidget : public SwWidgetInterface {
      *
      * @param Focus The new focus state (`true` if the SwWidget is focused, `false` otherwise).
      */
-    CUSTOM_PROPERTY(bool, Focus, false) {
+private:
+    bool m_Focus{false};
+public:
+    void setFocus(const bool& value) {
+        if (value) {
+            requestFocusOwnership_();
+            return;
+        }
+        releaseFocusOwnership_();
+    }
+    bool getFocus() const {
+        return m_Focus;
+    }
+    template<typename T>
+    static bool register_Focus_setter(T* instance) {
+        instance->propertySetterMap["Focus"] = [instance](void* value) {
+            instance->setFocus(*static_cast<bool*>(value));
+        };
+        instance->propertyGetterMap["Focus"] = [instance]() -> void* {
+            return static_cast<void*>(&instance->m_Focus);
+        };
+        instance->propertyArgumentTypeNameMap["Focus"] = typeid(bool).name();
+        instance->propertyOwnerClassMap["Focus"] = SwDemangleClassName(typeid(T).name());
+        return true;
+    }
+    DECLARE_SIGNAL(FocusChanged, const bool&);
+protected:
+    bool __Focus__prop = register_Focus_setter<typename std::remove_reference<decltype(*this)>::type>(this);
+    virtual void on_Focus_changed(const bool& value) {
+        SW_UNUSED(value);
         update();
     }
 
@@ -332,7 +355,16 @@ class SwWidget : public SwWidgetInterface {
      * @param Visible The new visibility state (`true` for visible, `false` for hidden).
      */
     CUSTOM_PROPERTY(bool, Visible, true) {
+        if (!value) {
+            clearFocusInHierarchy_();
+        }
         invalidateRect();
+        if (!m_visibilityEventInFlight) {
+            Event visibilityEvent(value ? EventType::Show : EventType::Hide);
+            m_visibilityEventInFlight = true;
+            SwCoreApplication::sendEvent(this, &visibilityEvent);
+            m_visibilityEventInFlight = false;
+        }
     }
 
     /**
@@ -416,6 +448,8 @@ public:
      * Cleans up the SwWidget by deleting all its child SwWidgets to ensure proper memory management.
      */
     virtual ~SwWidget() {
+        removeFocusOwnerEntriesForWidget_(this);
+        m_Focus = false;
         m_layout = nullptr;
     }
 
@@ -478,10 +512,14 @@ public:
     }
 
     /**
-     * @brief Redraws the SwWidget and propagates the update event to its children.
+     * @brief Marks the widget's area as dirty so the next paint cycle redraws it.
      *
-     * If the SwWidget is visible, it invalidates its rectangle to trigger a redraw and
-     * recursively calls the `update` method on all child SwWidgets.
+     * A single InvalidateRect on the native window is sufficient: the paint
+     * handler already walks the full widget tree and repaints every child that
+     * intersects the dirty region.  Recursing into children here was causing
+     * O(N) InvalidateRect + PostMessage calls for a tree of N widgets, which
+     * flooded the Win32 message queue on every keystroke or property change.
+     *
      */
     virtual void update() override {
         if (!isVisibleInHierarchy()) {
@@ -493,15 +531,6 @@ public:
             if (auto* integration = guiApp->platformIntegration()) {
                 integration->wakeUpGuiThread();
             }
-        }
-
-        // Propagation de l'Ã©vÃ©nement de dessin aux enfants
-        for (SwObject* objChild : children()) {
-            auto* child = dynamic_cast<SwWidget*>(objChild);
-            if (!child) {
-                continue;
-            }
-            child->update();
         }
     }
 
@@ -562,7 +591,7 @@ public:
             SwWidgetPlatformAdapter::invalidateRect(m_nativeWindowHandle, inflate(absoluteRect_(), kInvalidateMargin));
         }
         ResizeEvent event(m_width, m_height);
-        resizeEvent(&event);
+        SwCoreApplication::sendEvent(this, &event);
         emit resized(m_width, m_height);
     }
 
@@ -903,6 +932,26 @@ signals:
      */
     DECLARE_SIGNAL_VOID(visibilityChanged);
 
+    bool dispatchMouseEventFromRoot(const MouseEvent& rootEvent) {
+        return dispatchMouseEventFromRoot_(rootEvent);
+    }
+
+    bool dispatchWheelEventFromRoot(const WheelEvent& rootEvent) {
+        return dispatchWheelEventFromRoot_(rootEvent);
+    }
+
+    bool dispatchKeyPressEventFromRoot(const KeyEvent& rootEvent) {
+        return dispatchKeyPressEventFromRoot_(rootEvent);
+    }
+
+    bool dispatchKeyReleaseEventFromRoot(const KeyEvent& rootEvent) {
+        return dispatchKeyReleaseEventFromRoot_(rootEvent);
+    }
+
+    SwWidget* focusedWidgetInHierarchy() {
+        return findFocusedWidgetInHierarchy_();
+    }
+
 
 protected:
 
@@ -926,6 +975,9 @@ protected:
             setAbsolutePos_(ui->m_absX + localX, ui->m_absY + localY);
         }
         SwObject::newParentEvent(parent);
+        if (m_Focus) {
+            rebindFocusOwnership_();
+        }
     }
 
     // Internal: set absolute window position and propagate delta to all children.
@@ -945,7 +997,10 @@ protected:
         int deltaY = absY - m_absY;
         m_absX = absX;
         m_absY = absY;
-        emit moved(pos().x, pos().y);
+        const SwPoint newPos = pos();
+        MoveEvent event(newPos.x, newPos.y);
+        SwCoreApplication::sendEvent(this, &event);
+        emit moved(newPos.x, newPos.y);
         if (isVisibleInHierarchy()) {
             constexpr int kInvalidateMargin = 8;
             SwWidgetPlatformAdapter::invalidateRect(m_nativeWindowHandle, inflate(oldRect, kInvalidateMargin));
@@ -1179,14 +1234,166 @@ protected:
         childPaintRect.y -= childGeometry.y;
         SwOffsetPainter childPainter(painter, childGeometry.x, childGeometry.y);
         PaintEvent childEvent(&childPainter, childPaintRect);
-        child->paintEvent(&childEvent);
+        SwCoreApplication::sendEvent(child, &childEvent);
+    }
+
+    virtual bool event(SwEvent* event) override {
+        if (!event) {
+            return false;
+        }
+
+        switch (event->type()) {
+        case EventType::Paint:
+            paintEvent(static_cast<PaintEvent*>(event));
+            event->accept();
+            return true;
+        case EventType::Resize:
+            resizeEvent(static_cast<ResizeEvent*>(event));
+            event->accept();
+            return true;
+        case EventType::Move:
+            moveEvent(static_cast<MoveEvent*>(event));
+            event->accept();
+            return true;
+        case EventType::KeyPressEvent:
+            keyPressEvent(static_cast<KeyEvent*>(event));
+            return true;
+        case EventType::KeyReleaseEvent:
+            keyReleaseEvent(static_cast<KeyEvent*>(event));
+            return true;
+        case EventType::MousePressEvent:
+            mousePressEvent(static_cast<MouseEvent*>(event));
+            return true;
+        case EventType::MouseDoubleClickEvent:
+            mouseDoubleClickEvent(static_cast<MouseEvent*>(event));
+            return true;
+        case EventType::MouseMoveEvent:
+            mouseMoveEvent(static_cast<MouseEvent*>(event));
+            return true;
+        case EventType::MouseReleaseEvent:
+            mouseReleaseEvent(static_cast<MouseEvent*>(event));
+            return true;
+        case EventType::WheelEvent:
+            wheelEvent(static_cast<WheelEvent*>(event));
+            return true;
+        case EventType::Show:
+            showEvent(static_cast<Event*>(event));
+            event->accept();
+            return true;
+        case EventType::Hide:
+            releaseMouseGrabForHiddenHierarchy_();
+            clearHoverRecursive_();
+            hideEvent(static_cast<Event*>(event));
+            event->accept();
+            return true;
+        default:
+            return SwWidgetInterface::event(event);
+        }
+    }
+
+    bool dispatchMouseEventFromRoot_(const MouseEvent& rootEvent) {
+        if (!isVisibleInHierarchy()) {
+            return false;
+        }
+
+        if (rootEvent.type() == EventType::MouseMoveEvent) {
+            updateHoverStateFromRoot_(rootEvent.pos());
+        }
+
+        SwWidget* target = nullptr;
+        SwWidget* mouseGrabRoot = mouseGrabScopeRoot_();
+        SwWidget* grabber = mouseGrabberWidget_();
+        if (grabber &&
+            (!SwObject::isLive(grabber) ||
+             !mouseGrabRoot->belongsToHierarchy_(grabber) ||
+             !grabber->isVisibleInHierarchy())) {
+            mouseGrabberWidget_() = nullptr;
+            mouseGrabButtons_() = 0;
+            grabber = nullptr;
+        }
+        if ((rootEvent.type() == EventType::MouseMoveEvent ||
+             rootEvent.type() == EventType::MouseReleaseEvent ||
+             (rootEvent.type() == EventType::MousePressEvent && mouseGrabButtons_() != 0)) &&
+            grabber) {
+            target = grabber;
+        }
+
+        if (!target) {
+            target = getChildUnderCursor(rootEvent.x(), rootEvent.y());
+        }
+        if (!target) {
+            target = this;
+        }
+
+        SwWidget* acceptedBy = nullptr;
+
+        if (rootEvent.type() == EventType::MousePressEvent) {
+            updateFocusForDispatch_(target);
+        }
+
+        const bool handled = deliverMouseEventToChain_(target, rootEvent, &acceptedBy);
+
+        if (rootEvent.type() == EventType::MousePressEvent &&
+            rootEvent.button() != SwMouseButton::NoButton &&
+            acceptedBy) {
+            mouseGrabRoot->m_mouseGrabberWidget = acceptedBy;
+            mouseGrabRoot->m_mouseGrabButtons |= mouseButtonMask_(rootEvent.button());
+        }
+
+        if (rootEvent.type() == EventType::MouseReleaseEvent && rootEvent.button() != SwMouseButton::NoButton) {
+            mouseGrabRoot->m_mouseGrabButtons &= ~mouseButtonMask_(rootEvent.button());
+            if (mouseGrabRoot->m_mouseGrabButtons == 0) {
+                mouseGrabRoot->m_mouseGrabberWidget = nullptr;
+            }
+        }
+
+        return handled;
+    }
+
+    bool dispatchWheelEventFromRoot_(const WheelEvent& rootEvent) {
+        if (!isVisibleInHierarchy()) {
+            return false;
+        }
+
+        SwWidget* target = getChildUnderCursor(rootEvent.x(), rootEvent.y());
+        if (!target) {
+            target = this;
+        }
+
+        return deliverWheelEventToChain_(target, rootEvent);
+    }
+
+    bool dispatchKeyPressEventFromRoot_(const KeyEvent& rootEvent) {
+        if (!isVisibleInHierarchy()) {
+            return false;
+        }
+
+        SwWidget* target = findFocusedWidgetInHierarchy_();
+        if (!target) {
+            target = this;
+        }
+
+        return deliverKeyEventToChain_(target, rootEvent);
+    }
+
+    bool dispatchKeyReleaseEventFromRoot_(const KeyEvent& rootEvent) {
+        if (!isVisibleInHierarchy()) {
+            return false;
+        }
+
+        SwWidget* target = findFocusedWidgetInHierarchy_();
+        if (!target) {
+            target = this;
+        }
+
+        return deliverKeyEventToChain_(target, rootEvent);
     }
 
     /**
      * @brief Handles the key press event for the SwWidget.
      *
-     * Processes the key press event and propagates it to the child SwWidgets.
-     * If the event is marked as accepted by any child, further propagation stops.
+     * Root-level key dispatch is handled by `dispatchKeyPressEventFromRoot_()`. The base widget does
+     * not perform legacy child recursion anymore.
      *
      * @param event Pointer to the `KeyEvent` containing information about the key press.
      */
@@ -1195,23 +1402,21 @@ protected:
             return;
         }
 
-        const auto& directChildren = children();
-        size_t i = 0;
-        while (i < directChildren.size()) {
-            if (event->isAccepted()) {
-                return;
-            }
-
-            SwObject* obj = directChildren[i];
-            SwWidget* child = obj ? dynamic_cast<SwWidget*>(obj) : nullptr;
-            if (child) {
-                child->keyPressEvent(event);
-            }
-
-            if (i < directChildren.size() && directChildren[i] == obj) {
-                ++i;
-            }
+        if (!event->isKernelDispatched()) {
+            return;
         }
+
+    }
+
+    virtual void keyReleaseEvent(KeyEvent* event) override {
+        if (!event) {
+            return;
+        }
+
+        if (!event->isKernelDispatched()) {
+            return;
+        }
+
     }
 
     /**
@@ -1229,12 +1434,23 @@ protected:
         }
     }
 
+    virtual void moveEvent(MoveEvent* event) {
+        SW_UNUSED(event);
+    }
+
+    virtual void showEvent(Event* event) {
+        SW_UNUSED(event);
+    }
+
+    virtual void hideEvent(Event* event) {
+        SW_UNUSED(event);
+    }
+
     /**
      * @brief Handles the mouse press event for the SwWidget.
      *
-     * Determines the deepest child SwWidget under the cursor and propagates the event to it.
-     * If the target SwWidget has a focus policy, it is given focus, and other child SwWidgets lose focus.
-     * If the event is marked as accepted by any child, further propagation stops.
+     * Root-level mouse dispatch is handled by `dispatchMouseEventFromRoot_()`. The base widget does
+     * not perform legacy child recursion anymore.
      *
      * @param event Pointer to the `MouseEvent` containing the mouse press details.
      */
@@ -1242,85 +1458,17 @@ protected:
         if (!isVisibleInHierarchy() || !event) {
             return;
         }
-        // Trouver l'enfant le plus profond sous le pointeur de la souris
-        SwWidget* targetWidget = getChildUnderCursor(event->x(), event->y());
-        SwWidget* targetTopChild = nullptr;
-        if (targetWidget) {
-            targetTopChild = targetWidget;
-            while (targetTopChild && targetTopChild->parent() && targetTopChild->parent() != this) {
-                targetTopChild = dynamic_cast<SwWidget*>(targetTopChild->parent());
-            }
-            if (targetTopChild && targetTopChild->parent() != this) {
-                targetTopChild = nullptr;
-            }
+        if (!event->isKernelDispatched()) {
+            return;
         }
 
-        if (targetWidget) {
-            if (targetWidget->getFocusPolicy() != FocusPolicyEnum::NoFocus) {
-                std::vector<SwWidget*> stack;
-                stack.push_back(this);
-                while (!stack.empty()) {
-                    SwWidget* widget = stack.back();
-                    stack.pop_back();
-                    if (!widget) {
-                        continue;
-                    }
-                    const auto& directChildren = widget->children();
-                    size_t i = 0;
-                    while (i < directChildren.size()) {
-                        SwObject* obj = directChildren[i];
-                        SwWidget* child = obj ? dynamic_cast<SwWidget*>(obj) : nullptr;
-                        if (child && child->isVisibleInHierarchy()) {
-                            if (child != targetWidget) {
-                                child->setFocus(false);
-                            }
-                            stack.push_back(child);
-                        }
-                        if (i < directChildren.size() && directChildren[i] == obj) {
-                            ++i;
-                        }
-                    }
-                }
-                targetWidget->setFocus(true);
-            }
-            MouseEvent childEvent = mapMouseEventToChild_(*event, this, targetWidget);
-            targetWidget->mousePressEvent(&childEvent);
-            if (childEvent.isAccepted()) {
-                event->accept();
-            }
-        }
-
-        const auto& directChildren = children();
-        size_t i = 0;
-        while (i < directChildren.size()) {
-            if (event->isAccepted()) {
-                return;
-            }
-            SwObject* obj = directChildren[i];
-            SwWidget* child = obj ? dynamic_cast<SwWidget*>(obj) : nullptr;
-            if (child && child != targetTopChild && child->isVisibleInHierarchy()) {
-                const SwPoint childLocal = child->mapFromParent(event->pos());
-                if (child->isPointInside(childLocal.x, childLocal.y)) {
-                    MouseEvent childEvent = mapMouseEventToChild_(*event, this, child);
-                    child->mousePressEvent(&childEvent);
-                    if (childEvent.isAccepted()) {
-                        event->accept();
-                    }
-                }
-            }
-            if (i < directChildren.size() && directChildren[i] == obj) {
-                ++i;
-            }
-        }
-
-        event->accept();
     }
 
     /**
      * @brief Handles the mouse release event for the SwWidget.
      *
-     * Propagates the mouse release event to all child SwWidgets.
-     * Note: propagation does not stop on acceptance, so widgets can reliably reset pressed/drag states.
+     * Root-level mouse dispatch is handled by `dispatchMouseEventFromRoot_()`. The base widget does
+     * not perform legacy child recursion anymore.
      *
      * @param event Pointer to the `MouseEvent` containing the mouse release details.
      */
@@ -1328,29 +1476,17 @@ protected:
         if (!isVisibleInHierarchy() || !event) {
             return;
         }
-        const auto& directChildren = children();
-        size_t i = 0;
-        while (i < directChildren.size()) {
-            SwObject* obj = directChildren[i];
-            SwWidget* child = obj ? dynamic_cast<SwWidget*>(obj) : nullptr;
-            if (child && child->isVisibleInHierarchy()) {
-                MouseEvent childEvent = mapMouseEventToChild_(*event, this, child);
-                child->mouseReleaseEvent(&childEvent);
-                if (childEvent.isAccepted()) {
-                    event->accept();
-                }
-            }
-            if (i < directChildren.size() && directChildren[i] == obj) {
-                ++i;
-            }
+        if (!event->isKernelDispatched()) {
+            return;
         }
+
     }
 
     /**
      * @brief Handles the mouse double-click event for the SwWidget.
      *
-     * Propagates the mouse double-click event to all child SwWidgets that contain the cursor position.
-     * If the event is marked as accepted by any child, further propagation stops.
+     * Root-level mouse dispatch is handled by `dispatchMouseEventFromRoot_()`. The base widget does
+     * not perform legacy child recursion anymore.
      *
      * @param event Pointer to the `MouseEvent` containing the double-click details.
      */
@@ -1358,36 +1494,17 @@ protected:
         if (!isVisibleInHierarchy() || !event) {
             return;
         }
-        const auto& directChildren = children();
-        size_t i = 0;
-        while (i < directChildren.size()) {
-            SwObject* obj = directChildren[i];
-            SwWidget* child = obj ? dynamic_cast<SwWidget*>(obj) : nullptr;
-            if (child && child->isVisibleInHierarchy()) {
-                if (event->isAccepted()) {
-                    return;
-                }
-                const SwPoint childLocal = child->mapFromParent(event->pos());
-                if (child->isPointInside(childLocal.x, childLocal.y)) {
-                    MouseEvent childEvent = mapMouseEventToChild_(*event, this, child);
-                    child->mouseDoubleClickEvent(&childEvent);
-                    if (childEvent.isAccepted()) {
-                        event->accept();
-                    }
-                }
-            }
-            if (i < directChildren.size() && directChildren[i] == obj) {
-                ++i;
-            }
+        if (!event->isKernelDispatched()) {
+            return;
         }
+
     }
 
     /**
      * @brief Handles the mouse move event for the SwWidget.
      *
-     * Propagates the mouse move event to all child SwWidgets.
-     * Updates the hover state of the current SwWidget based on the cursor position.
-     * If the event is not accepted and the SwWidget is hovered, it sets the cursor and marks the event as accepted.
+     * Root-level mouse dispatch is handled by `dispatchMouseEventFromRoot_()`. The base widget only
+     * updates its own hover/cursor state for kernel-delivered events.
      *
      * @param event Pointer to the `MouseEvent` containing the mouse move details.
      */
@@ -1396,23 +1513,8 @@ protected:
             return;
         }
 
-        
-        //c'est l'enfant qui decide donc c'est lui qui parlera le derneir
-        const auto& directChildren = children();
-        size_t i = 0;
-        while (i < directChildren.size()) {
-            SwObject* obj = directChildren[i];
-            SwWidget* child = obj ? dynamic_cast<SwWidget*>(obj) : nullptr;
-            if (child && child->isVisibleInHierarchy()) {
-                MouseEvent childEvent = mapMouseEventToChild_(*event, this, child);
-                child->mouseMoveEvent(&childEvent);
-                if (childEvent.isAccepted()) {
-                    event->accept();
-                }
-            }
-            if (i < directChildren.size() && directChildren[i] == obj) {
-                ++i;
-            }
+        if (!event->isKernelDispatched()) {
+            return;
         }
 
         this->setHover(isPointInside(event->x(), event->y()));
@@ -1421,6 +1523,16 @@ protected:
             SwWidgetPlatformAdapter::setCursor(getCursor());
             event->accept();
         }
+    }
+
+    virtual void wheelEvent(WheelEvent* event) override {
+        if (!isVisibleInHierarchy() || !event) {
+            return;
+        }
+        if (!event->isKernelDispatched()) {
+            return;
+        }
+
     }
 
 protected:
@@ -1635,12 +1747,200 @@ protected:
     int m_absX, m_absY;
     SwStyle *m_style;
     SwWidgetPlatformHandle m_nativeWindowHandle;
+    SwWidget* m_mouseGrabberWidget{nullptr};
+    unsigned int m_mouseGrabButtons{0};
 
 private:
+    bool m_visibilityEventInFlight{false};
     StyleSheet m_ComplexSheet;
     SwAbstractLayout* m_layout;
 
 protected:
+    static bool sharesNativeWindow_(const SwWidget* left, const SwWidget* right) {
+        if (!left || !right) {
+            return false;
+        }
+        return left->m_nativeWindowHandle.nativeHandle == right->m_nativeWindowHandle.nativeHandle &&
+               left->m_nativeWindowHandle.nativeDisplay == right->m_nativeWindowHandle.nativeDisplay;
+    }
+
+    SwWidget* mouseGrabScopeRoot_() {
+        SwWidget* root = this;
+        while (auto* parentWidget = dynamic_cast<SwWidget*>(root->parent())) {
+            if (!sharesNativeWindow_(parentWidget, root)) {
+                break;
+            }
+            root = parentWidget;
+        }
+        return root;
+    }
+
+    const SwWidget* mouseGrabScopeRoot_() const {
+        const SwWidget* root = this;
+        while (const auto* parentWidget = dynamic_cast<const SwWidget*>(root->parent())) {
+            if (!sharesNativeWindow_(parentWidget, root)) {
+                break;
+            }
+            root = parentWidget;
+        }
+        return root;
+    }
+
+    SwWidget*& mouseGrabberWidget_() {
+        return mouseGrabScopeRoot_()->m_mouseGrabberWidget;
+    }
+
+    unsigned int& mouseGrabButtons_() {
+        return mouseGrabScopeRoot_()->m_mouseGrabButtons;
+    }
+
+    void releaseMouseGrabForHiddenHierarchy_() {
+        SwWidget* mouseGrabRoot = mouseGrabScopeRoot_();
+        if (!mouseGrabRoot || !mouseGrabRoot->m_mouseGrabberWidget) {
+            return;
+        }
+        if (this == mouseGrabRoot ||
+            mouseGrabRoot->m_mouseGrabberWidget == this ||
+            belongsToHierarchy_(mouseGrabRoot->m_mouseGrabberWidget)) {
+            mouseGrabRoot->m_mouseGrabberWidget = nullptr;
+            mouseGrabRoot->m_mouseGrabButtons = 0;
+        }
+    }
+
+    static unsigned int mouseButtonMask_(SwMouseButton button) {
+        switch (button) {
+        case SwMouseButton::Left:
+            return 0x1u;
+        case SwMouseButton::Right:
+            return 0x2u;
+        case SwMouseButton::Middle:
+            return 0x4u;
+        case SwMouseButton::Other:
+            return 0x8u;
+        case SwMouseButton::NoButton:
+        default:
+            return 0u;
+        }
+    }
+
+    bool belongsToHierarchy_(const SwWidget* widget) const {
+        const SwObject* current = widget;
+        while (current) {
+            if (current == this) {
+                return true;
+            }
+            current = current->parent();
+        }
+        return false;
+    }
+
+    SwWidget* findFocusedWidgetInHierarchy_() {
+        SwWidget* focused = currentFocusOwnerInScope_();
+        if (focused && focused->isVisibleInHierarchy() && belongsToHierarchy_(focused)) {
+            return focused;
+        }
+        if (getFocus() && isVisibleInHierarchy()) {
+            return this;
+        }
+        return nullptr;
+    }
+
+    void updateFocusForDispatch_(SwWidget* targetWidget) {
+        if (!targetWidget || targetWidget->getFocusPolicy() == FocusPolicyEnum::NoFocus) {
+            return;
+        }
+        targetWidget->setFocus(true);
+    }
+
+    void clearHoverRecursive_() {
+        setHover(false);
+        const auto& directChildren = children();
+        size_t i = 0;
+        while (i < directChildren.size()) {
+            SwObject* obj = directChildren[i];
+            SwWidget* child = obj ? dynamic_cast<SwWidget*>(obj) : nullptr;
+            if (child) {
+                child->clearHoverRecursive_();
+            }
+            if (i < directChildren.size() && directChildren[i] == obj) {
+                ++i;
+            }
+        }
+    }
+
+    void updateHoverStateFromRoot_(const SwPoint& pointInThis) {
+        const bool inside = isVisibleInHierarchy() && isPointInside(pointInThis.x, pointInThis.y);
+        setHover(inside);
+
+        const auto& directChildren = children();
+        size_t i = 0;
+        while (i < directChildren.size()) {
+            SwObject* obj = directChildren[i];
+            SwWidget* child = obj ? dynamic_cast<SwWidget*>(obj) : nullptr;
+            if (child) {
+                if (!inside) {
+                    child->clearHoverRecursive_();
+                } else {
+                    child->updateHoverStateFromRoot_(child->mapFromParent(pointInThis));
+                }
+            }
+            if (i < directChildren.size() && directChildren[i] == obj) {
+                ++i;
+            }
+        }
+    }
+
+    bool deliverMouseEventToChain_(SwWidget* target, const MouseEvent& rootEvent, SwWidget** acceptedBy = nullptr) {
+        SwWidget* current = target ? target : this;
+        while (current) {
+            MouseEvent localEvent = mapMouseEventToChild_(rootEvent, this, current);
+            SwCoreApplication::sendEvent(current, &localEvent);
+            if (localEvent.isAccepted()) {
+                if (acceptedBy) {
+                    *acceptedBy = current;
+                }
+                return true;
+            }
+            if (current == this) {
+                break;
+            }
+            current = dynamic_cast<SwWidget*>(current->parent());
+        }
+        return false;
+    }
+
+    bool deliverWheelEventToChain_(SwWidget* target, const WheelEvent& rootEvent) {
+        SwWidget* current = target ? target : this;
+        while (current) {
+            WheelEvent localEvent = mapWheelEventToChild_(rootEvent, this, current);
+            SwCoreApplication::sendEvent(current, &localEvent);
+            if (localEvent.isAccepted()) {
+                return true;
+            }
+            if (current == this) {
+                break;
+            }
+            current = dynamic_cast<SwWidget*>(current->parent());
+        }
+        return false;
+    }
+
+    bool deliverKeyEventToChain_(SwWidget* target, const KeyEvent& rootEvent) {
+        SwWidget* current = target ? target : this;
+        while (current) {
+            KeyEvent localEvent = rootEvent;
+            SwCoreApplication::sendEvent(current, &localEvent);
+            if (localEvent.isAccepted()) {
+                return true;
+            }
+            if (current == this) {
+                break;
+            }
+            current = dynamic_cast<SwWidget*>(current->parent());
+        }
+        return false;
+    }
+
     static MouseEvent mapMouseEventToChild_(const MouseEvent& event,
                                             const SwWidget* source,
                                             const SwWidget* child) {
@@ -1680,12 +1980,175 @@ protected:
         return mapped;
     }
 
+    void setFocusState_(bool value) {
+        if (m_Focus == value) {
+            return;
+        }
+        m_Focus = value;
+        on_Focus_changed(value);
+        emit FocusChanged(value);
+    }
+
+    void requestFocusOwnership_() {
+        if (!isFocusEligible_()) {
+            return;
+        }
+
+        const FocusScopeKey_ scopeKey = focusScopeKey_();
+        SwWidget* previous = validatedFocusOwnerForKey_(scopeKey);
+        if (previous == this) {
+            setFocusState_(true);
+            return;
+        }
+
+        if (previous) {
+            focusOwnerMap_().remove(scopeKey);
+            previous->setFocusState_(false);
+            SwWidget* reboundOwner = validatedFocusOwnerForKey_(scopeKey);
+            if (reboundOwner && reboundOwner != this) {
+                setFocusState_(false);
+                return;
+            }
+        }
+
+        focusOwnerMap_()[scopeKey] = this;
+        setFocusState_(true);
+    }
+
+    void releaseFocusOwnership_() {
+        removeFocusOwnerEntriesForWidget_(this);
+        setFocusState_(false);
+    }
+
+    bool isFocusEligible_() const {
+        return getEnable() && getFocusPolicy() != FocusPolicyEnum::NoFocus;
+    }
+
+    void clearFocusInHierarchy_() {
+        if (getFocus()) {
+            setFocus(false);
+        }
+        const auto& directChildren = children();
+        size_t i = 0;
+        while (i < directChildren.size()) {
+            SwObject* obj = directChildren[i];
+            SwWidget* child = obj ? dynamic_cast<SwWidget*>(obj) : nullptr;
+            if (child) {
+                child->clearFocusInHierarchy_();
+            }
+            if (i < directChildren.size() && directChildren[i] == obj) {
+                ++i;
+            }
+        }
+    }
+
+    struct FocusScopeKey_ {
+        const void* nativeHandle{nullptr};
+        const void* nativeDisplay{nullptr};
+        const SwWidget* logicalRoot{nullptr};
+
+        bool operator==(const FocusScopeKey_& other) const {
+            return nativeHandle == other.nativeHandle &&
+                   nativeDisplay == other.nativeDisplay &&
+                   logicalRoot == other.logicalRoot;
+        }
+
+        bool operator!=(const FocusScopeKey_& other) const {
+            return !(*this == other);
+        }
+
+        bool operator<(const FocusScopeKey_& other) const {
+            if (nativeDisplay != other.nativeDisplay) {
+                return nativeDisplay < other.nativeDisplay;
+            }
+            if (nativeHandle != other.nativeHandle) {
+                return nativeHandle < other.nativeHandle;
+            }
+            return logicalRoot < other.logicalRoot;
+        }
+    };
+
+    FocusScopeKey_ focusScopeKey_() const {
+        if (m_nativeWindowHandle.nativeHandle) {
+            return FocusScopeKey_{m_nativeWindowHandle.nativeHandle, m_nativeWindowHandle.nativeDisplay, nullptr};
+        }
+        return FocusScopeKey_{nullptr, nullptr, focusScopeRoot_()};
+    }
+
+    SwWidget* focusScopeRoot_() const {
+        SwWidget* root = const_cast<SwWidget*>(this);
+        while (true) {
+            SwWidget* parentWidget = dynamic_cast<SwWidget*>(root->parent());
+            if (!parentWidget) {
+                return root;
+            }
+            root = parentWidget;
+        }
+    }
+
+    static SwMap<FocusScopeKey_, SwWidget*>& focusOwnerMap_() {
+        static SwMap<FocusScopeKey_, SwWidget*> s_focusOwners;
+        return s_focusOwners;
+    }
+
+    static void removeFocusOwnerEntriesForWidget_(const SwWidget* widget) {
+        if (!widget) {
+            return;
+        }
+        auto& owners = focusOwnerMap_();
+        for (auto it = owners.begin(); it != owners.end();) {
+            if (it->second == widget) {
+                it = owners.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    static SwWidget* validatedFocusOwnerForKey_(const FocusScopeKey_& scopeKey) {
+        if (!scopeKey.nativeHandle && !scopeKey.logicalRoot) {
+            return nullptr;
+        }
+        auto& owners = focusOwnerMap_();
+        auto it = owners.find(scopeKey);
+        if (it == owners.end()) {
+            return nullptr;
+        }
+
+        SwWidget* owner = it->second;
+        if (!owner || !SwObject::isLive(owner)) {
+            owners.erase(it);
+            return nullptr;
+        }
+        if (owner->focusScopeKey_() != scopeKey || !owner->isFocusEligible_()) {
+            owners.erase(it);
+            owner->setFocusState_(false);
+            return nullptr;
+        }
+        return owner;
+    }
+
+    SwWidget* currentFocusOwnerInScope_() {
+        return validatedFocusOwnerForKey_(focusScopeKey_());
+    }
+
+    void rebindFocusOwnership_() {
+        if (!m_Focus) {
+            return;
+        }
+        removeFocusOwnerEntriesForWidget_(this);
+        focusOwnerMap_()[focusScopeKey_()] = this;
+    }
+
     void setNativeWindowHandle(const SwWidgetPlatformHandle& handle) {
         m_nativeWindowHandle = handle;
     }
 
     void setNativeWindowHandleRecursive(const SwWidgetPlatformHandle& handle) {
         setNativeWindowHandle(handle);
+        if (m_Focus) {
+            rebindFocusOwnership_();
+        }
         const auto& directChildren = children();
         size_t i = 0;
         while (i < directChildren.size()) {

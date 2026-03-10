@@ -347,6 +347,8 @@ private:
         if (m_popup) {
             m_popup->hide();
         }
+        m_pendingWidget = nullptr;
+        m_pendingText.clear();
     }
 
     SwToolTip() = default;

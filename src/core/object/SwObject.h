@@ -606,6 +606,12 @@ struct slot_factory_with_receiver {
 
 class SwObject {
 protected:
+    friend bool swIsObjectLive(const SwObject* object);
+    friend bool swDispatchEventToObject(SwObject* receiver, SwEvent* event);
+    friend bool swDispatchEventFilter(SwObject* filter, SwObject* watched, SwEvent* event);
+    friend bool swDispatchInstalledEventFilters(SwObject* watched, SwEvent* event);
+    friend bool swForwardPostedEventToReceiverThread(SwObject* receiver, SwEvent* event, int priority);
+
     /**
      * @brief Returns whether the object reports same Thread Handle.
      * @param a Value passed to the method.
@@ -689,6 +695,7 @@ protected:
     // Dynamic properties for designer/tooling scenarios.
     SwMap<SwString, SwAny> dynamicPropertyMap;
     SwMap<SwString, SwString> dynamicPropertyTypeNameMap;
+    SwList<SwObject*> m_eventFilters;
 
     PROPERTY(SwString, ObjectName, "")
 
@@ -775,6 +782,59 @@ public:
         }
 
         emit destroyed();
+    }
+
+    virtual bool event(SwEvent* event) {
+        if (!event) {
+            return false;
+        }
+        if (event->type() == EventType::ChildAdded || event->type() == EventType::ChildRemoved) {
+            childEvent(static_cast<SwChildEvent*>(event));
+            event->accept();
+            return true;
+        }
+        if (event->type() == EventType::DeferredDelete) {
+            delete this;
+            return true;
+        }
+        return false;
+    }
+
+    virtual bool eventFilter(SwObject* watched, SwEvent* event) {
+        SW_UNUSED(watched);
+        SW_UNUSED(event);
+        return false;
+    }
+
+    virtual void childEvent(SwChildEvent* event) {
+        if (!event) {
+            return;
+        }
+        switch (event->type()) {
+        case EventType::ChildAdded:
+            addChildEvent(event->child());
+            break;
+        case EventType::ChildRemoved:
+            removedChildEvent(event->child());
+            break;
+        default:
+            break;
+        }
+    }
+
+    void installEventFilter(SwObject* filterObj) {
+        if (!filterObj) {
+            return;
+        }
+        m_eventFilters.removeAll(filterObj);
+        m_eventFilters.push_back(filterObj);
+    }
+
+    void removeEventFilter(SwObject* filterObj) {
+        if (!filterObj) {
+            return;
+        }
+        m_eventFilters.removeAll(filterObj);
     }
 
     /**
@@ -895,14 +955,24 @@ public:
         }
         if (targetThread) {
             targetThread->postTask([meAsDurtyToClean]() {
-                delete meAsDurtyToClean;
+                if (!SwObject::isLive(meAsDurtyToClean)) {
+                    return;
+                }
+                if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
+                    app->postEvent(meAsDurtyToClean, new SwDeferredDeleteEvent());
+                } else {
+                    delete meAsDurtyToClean;
+                }
             });
             return;
         }
 
-        SwCoreApplication::instance()->postEvent([meAsDurtyToClean]() {
-            delete meAsDurtyToClean;
-        });
+        if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
+            app->postEvent(meAsDurtyToClean, new SwDeferredDeleteEvent());
+            return;
+        }
+
+        delete meAsDurtyToClean;
     }
 
     /**
@@ -971,7 +1041,8 @@ public:
     virtual void addChild(SwObject* child) {
         m_children.push_back(child);
         emit childAdded(child);
-        addChildEvent(child);
+        SwChildEvent event(EventType::ChildAdded, child);
+        SwCoreApplication::sendEvent(this, &event);
     }
 
     /**
@@ -985,7 +1056,8 @@ public:
     virtual void removeChild(SwObject* child) {
         m_children.removeAll(child);
         emit childRemoved(child);
-        removedChildEvent(child);
+        SwChildEvent event(EventType::ChildRemoved, child);
+        SwCoreApplication::sendEvent(this, &event);
     }
 
     /**
@@ -1899,8 +1971,12 @@ protected:
             ThreadHandle* receiverThread = receiverObject ? receiverObject->threadHandle() : nullptr;
 
             std::function<void()> task = [slot, receiverRaw, receiverObject, senderObject, args...]() mutable {
+                if (receiverRaw && !SwObject::isLive(receiverRaw)) {
+                    return;
+                }
+                SwObject* liveSender = senderObject && SwObject::isLive(senderObject) ? senderObject : nullptr;
                 if (receiverObject) {
-                    receiverObject->setSender(senderObject);
+                    receiverObject->setSender(liveSender);
                 }
                 slot->invoke(receiverRaw, args...);
             };
@@ -2042,3 +2118,76 @@ private:
     SwObject* currentSender = nullptr;
     ThreadHandle* m_threadAffinity = nullptr;
 };
+
+inline bool swIsObjectLive(const SwObject* object) {
+    return SwObject::isLive(object);
+}
+
+inline bool swDispatchEventToObject(SwObject* receiver, SwEvent* event) {
+    if (!receiver || !event || !SwObject::isLive(receiver)) {
+        return false;
+    }
+    return receiver->event(event);
+}
+
+inline bool swDispatchEventFilter(SwObject* filter, SwObject* watched, SwEvent* event) {
+    if (!filter || !watched || !event) {
+        return false;
+    }
+    if (!SwObject::isLive(filter) || !SwObject::isLive(watched)) {
+        return false;
+    }
+
+    ThreadHandle* filterThread = filter->threadHandle();
+    ThreadHandle* watchedThread = watched->threadHandle();
+    if (filterThread && watchedThread && !SwObject::isSameThreadHandle_(filterThread, watchedThread)) {
+        return false;
+    }
+
+    return filter->eventFilter(watched, event);
+}
+
+inline bool swDispatchInstalledEventFilters(SwObject* watched, SwEvent* event) {
+    if (!watched || !event || !SwObject::isLive(watched)) {
+        return false;
+    }
+
+    for (int i = static_cast<int>(watched->m_eventFilters.size()) - 1; i >= 0; --i) {
+        SwObject* filter = watched->m_eventFilters[static_cast<size_t>(i)];
+        if (swDispatchEventFilter(filter, watched, event)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+inline bool swForwardPostedEventToReceiverThread(SwObject* receiver, SwEvent* event, int priority) {
+    if (!receiver || !event || !SwObject::isLive(receiver)) {
+        return false;
+    }
+
+    ThreadHandle* targetThread = receiver->threadHandle();
+    if (!targetThread) {
+        return false;
+    }
+
+    const std::thread::id currentThreadId = std::this_thread::get_id();
+    const std::thread::id targetThreadId = targetThread->threadId();
+    if (targetThreadId != std::thread::id{} && currentThreadId == targetThreadId) {
+        return false;
+    }
+
+    targetThread->postTask([receiver, event, priority]() {
+        if (!SwObject::isLive(receiver)) {
+            delete event;
+            return;
+        }
+        if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
+            app->postEvent(receiver, event, priority);
+        } else {
+            delete event;
+        }
+    });
+    return true;
+}

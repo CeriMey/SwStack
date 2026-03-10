@@ -2,27 +2,48 @@
 
 #include "editor/SwCreatorEditorPage.h"
 #include "editor/SwCreatorEditorPaths.h"
+#include "theme/SwCreatorTheme.h"
 
 #include "SwMessageBox.h"
 
 SwCreatorEditorTabWidget::SwCreatorEditorTabWidget(SwWidget* parent)
     : SwTabWidget(parent) {
+    const auto& th = SwCreatorTheme::current();
     setTabStyle(SwTabWidget::TabStyle::Underline);
     setTabsFillSpace(false);
     setUsesScrollButtons(true);
     setTabsClosable(true);
     setMovable(true);
-    setStyleSheet(R"(
-        SwCreatorEditorTabWidget {
-            background-color: rgb(255, 255, 255);
-            border-width: 0px;
-        }
-        SwTabWidget {
-            background-color: rgb(255, 255, 255);
-            border-width: 0px;
-            color: rgb(30, 41, 59);
-        }
-    )");
+    setStyleSheet(
+        "SwCreatorEditorTabWidget {"
+        " background-color: rgba(0,0,0,0);"
+        " border-width: 0px;"
+        " surface-color: " + SwCreatorTheme::rgb(th.surface1) + ";"
+        " border-color: " + SwCreatorTheme::rgb(th.border) + ";"
+        " tab-bar-color: " + SwCreatorTheme::rgb(th.surface0) + ";"
+        " accent-color: " + SwCreatorTheme::rgb(th.accentPrimary) + ";"
+        " text-color: " + SwCreatorTheme::rgb(th.textPrimary) + ";"
+        " muted-text-color: " + SwCreatorTheme::rgb(th.textMuted) + ";"
+        " shadow-color-1: " + SwCreatorTheme::rgb(th.surface1) + ";"
+        " shadow-color-2: " + SwCreatorTheme::rgb(th.surface1) + ";"
+        " outer-padding: 0px;"
+        " page-padding: 0px;"
+        " tab-content-gap: 0px;"
+        " corner-radius: 0px;"
+        " tab-bar-radius: 0px;"
+        " tab-item-radius: 6px;"
+        " tab-bar-height: 40px;"
+        " bar-padding: 4px;"
+        " tab-padding-x: 16px;"
+        " tab-spacing: 2px;"
+        " tab-item-height: 34px;"
+        " min-tab-width: 118px;"
+        " indicator-thickness: 2px;"
+        " indicator-padding: 10px;"
+        " tab-bar-full-bleed: true;"
+        " tabs-fill-space: false;"
+        " }"
+    );
 
     SwObject::connect(this, &SwTabWidget::tabCloseRequested, this, [this](int index) {
         SwCreatorEditorPage* page = pageAt_(index);

@@ -5,6 +5,8 @@ install/
 log/
 bin/
 ProjectDev/
+exemples/37-HttpAppQuickstart/runtime/
+exemples/35-HttpServerSelfTest/runtime/
 
 # Secrets (Firebase, env files)
 *firebase-adminsdk-*.json

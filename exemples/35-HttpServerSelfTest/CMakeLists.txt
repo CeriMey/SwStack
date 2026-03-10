@@ -13,7 +13,22 @@ add_executable(HttpServerSelfTest
     SwHttpServerSelfTest.cpp
 )
 
-target_include_directories(HttpServerSelfTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+set(SW_HTTP_SERVER_SELFTEST_RUNTIME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/runtime")
+file(TO_CMAKE_PATH "${SW_HTTP_SERVER_SELFTEST_RUNTIME_DIR}/http_selftest_www"
+     SW_HTTP_SERVER_SELFTEST_STATIC_ROOT)
+file(TO_CMAKE_PATH "${SW_HTTP_SERVER_SELFTEST_RUNTIME_DIR}/http_selftest_tmp"
+     SW_HTTP_SERVER_SELFTEST_TEMP_ROOT)
+
+configure_file(
+    SwHttpServerSelfTestConfig.h.in
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/SwHttpServerSelfTestConfig.h
+    @ONLY
+)
+
+target_include_directories(HttpServerSelfTest PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_BINARY_DIR}/generated
+)
 
 if(WIN32)
     target_link_libraries(HttpServerSelfTest PRIVATE ws2_32)

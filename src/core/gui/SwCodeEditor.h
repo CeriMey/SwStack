@@ -24,6 +24,7 @@
 
 #include "SwCompleter.h"
 #include "SwPlainTextEdit.h"
+#include "SwScrollBar.h"
 #include "SwSyntaxHighlighter.h"
 #include "SwTextDecorationRenderer.h"
 #include "SwTextDocument.h"
@@ -31,9 +32,10 @@
 #include "SwTextExtraSelection.h"
 
 #include <algorithm>
+#include <cstring>
 #include <cwctype>
+#include <functional>
 #include <sstream>
-#include <vector>
 
 struct SwCodeEditorTheme {
     SwColor backgroundColor{255, 255, 255};
@@ -51,7 +53,11 @@ struct SwCodeEditorTheme {
     SwColor diagnosticErrorColor{220, 38, 38};
     SwColor diagnosticWarningColor{217, 119, 6};
     SwColor diagnosticInformationColor{37, 99, 235};
+    SwColor scrollBarTrackColor{236, 236, 236};
+    SwColor scrollBarThumbColor{200, 200, 200};
+    SwColor scrollBarThumbHoverColor{170, 170, 170};
     int borderRadius{10};
+    int scrollBarWidth{14};
 };
 
 inline SwCodeEditorTheme swCodeEditorDefaultTheme() {
@@ -75,7 +81,11 @@ inline SwCodeEditorTheme swCodeEditorVsCodeDarkTheme() {
     theme.diagnosticErrorColor = SwColor{244, 71, 71};
     theme.diagnosticWarningColor = SwColor{220, 180, 90};
     theme.diagnosticInformationColor = SwColor{79, 154, 255};
+    theme.scrollBarTrackColor = SwColor{30, 30, 30};
+    theme.scrollBarThumbColor = SwColor{78, 78, 78};
+    theme.scrollBarThumbHoverColor = SwColor{110, 110, 110};
     theme.borderRadius = 0;
+    theme.scrollBarWidth = 14;
     return theme;
 }
 
@@ -83,6 +93,12 @@ class SwCodeEditor : public SwPlainTextEdit {
     SW_OBJECT(SwCodeEditor, SwPlainTextEdit)
 
 public:
+    struct CompletionEntry {
+        SwString displayText;
+        SwString insertText;
+        SwString toolTip;
+    };
+
     explicit SwCodeEditor(SwWidget* parent = nullptr)
         : SwPlainTextEdit(parent) {
         setWordWrapEnabled(false);
@@ -91,10 +107,79 @@ public:
         m_document = new SwTextDocument(this);
         m_ownsDocument = true;
         bindDocument_();
-        SwObject::connect(this, &SwPlainTextEdit::textChanged, this, [this]() {
+        m_foldTimer = new SwTimer(this);
+        m_foldTimer->setInterval(250);
+        m_foldTimer->setSingleShot(true);
+        SwObject::connect(m_foldTimer, &SwTimer::timeout, this, [this]() {
             refreshFolding_();
+            update();
+        });
+        SwObject::connect(this, &SwPlainTextEdit::textChanged, this, [this]() {
+            const int newLineCount = documentLineCount_();
+            if (newLineCount != m_lastKnownLineCount) {
+                m_lastKnownLineCount = newLineCount;
+                syncVisibleLineCacheAfterTextChange_();
+            }
+            if (!m_suppressFoldRefresh) {
+                scheduleFoldRefresh_();
+            }
+            m_suppressFoldRefresh = false;
+            syncScrollBar_();
         });
         refreshFolding_();
+
+        m_vScrollBar = new SwScrollBar(SwScrollBar::Orientation::Vertical, this);
+        m_vScrollBar->hide();
+        m_vScrollBar->setSingleStep(1);
+        SwObject::connect(m_vScrollBar, &SwScrollBar::valueChanged, this, [this](int val) {
+            if (!m_syncingScrollBar) {
+                m_firstVisibleLine = val;
+                ensureVisibleDeferredHighlight_();
+                scheduleDeferredHighlightWork_();
+                update();
+            }
+        });
+
+        m_selectionScrollTimer = new SwTimer(this);
+        m_selectionScrollTimer->setInterval(30);
+        SwObject::connect(m_selectionScrollTimer, &SwTimer::timeout, this, [this]() {
+            if (!m_isSelecting) {
+                stopSelectionAutoScroll_();
+                return;
+            }
+            const size_t oldPos = m_cursorPos;
+            const size_t oldSelStart = m_selectionStart;
+            const size_t oldSelEnd = m_selectionEnd;
+            if (!applySelectionAutoScrollForPoint_(m_lastSelectionMousePos)) {
+                stopSelectionAutoScroll_();
+                return;
+            }
+            emitEditorSignals_(oldPos, oldSelStart, oldSelEnd);
+        });
+
+        m_deferredHighlightTimer = new SwTimer(this);
+        m_deferredHighlightTimer->setInterval(15);
+        m_deferredHighlightTimer->setSingleShot(true);
+        SwObject::connect(m_deferredHighlightTimer, &SwTimer::timeout, this, [this]() {
+            processDeferredHighlightChunk_();
+        });
+
+        SwObject::connect(this, &SwCodeEditor::VisibleChanged, this, [this](bool visible) {
+            if (!visible) {
+                if (m_foldTimer && m_foldTimer->isActive()) {
+                    m_foldTimer->stop();
+                }
+                stopDeferredHighlightWork_();
+                stopSelectionAutoScroll_();
+            } else if (m_foldDirty) {
+                scheduleFoldRefresh_();
+                scheduleDeferredHighlightWork_();
+            } else {
+                scheduleDeferredHighlightWork_();
+            }
+        });
+
+        syncScrollBar_();
     }
 
     void setPlainText(const SwString& text) override {
@@ -103,12 +188,24 @@ public:
             SwPlainTextEdit::setPlainText(text);
             return;
         }
+        if (m_highlighter && m_highlighter->document() != m_document) {
+            m_highlighter->setDocument(m_document);
+        }
+        const bool deferHighlight = shouldUseDeferredHighlight_(text) && m_highlighter != nullptr;
+        if (deferHighlight) {
+            m_highlighter->setAutoRehighlightSuspended(true);
+        }
         m_syncingToDocument = true;
         m_document->setPlainText(text);
         m_syncingToDocument = false;
+        if (deferHighlight) {
+            m_highlighter->setAutoRehighlightSuspended(false);
+        }
         SwPlainTextEdit::setPlainText(text);
-        if (m_highlighter && m_highlighter->document() != m_document) {
-            m_highlighter->setDocument(m_document);
+        syncScrollBar_();
+        if (deferHighlight) {
+            ensureVisibleDeferredHighlight_();
+            scheduleDeferredHighlightWork_();
         }
     }
 
@@ -168,8 +265,8 @@ public:
         const size_t oldSelStart = m_selectionStart;
         const size_t oldSelEnd = m_selectionEnd;
 
-        m_cursorPos = std::min(static_cast<size_t>(std::max(0, cursor.position())), m_text.size());
-        m_selectionStart = std::min(static_cast<size_t>(std::max(0, cursor.anchor())), m_text.size());
+        m_cursorPos = std::min(static_cast<size_t>(std::max(0, cursor.position())), documentLength_());
+        m_selectionStart = std::min(static_cast<size_t>(std::max(0, cursor.anchor())), documentLength_());
         m_selectionEnd = m_cursorPos;
 
         ensureCursorVisibleForCode_();
@@ -265,6 +362,20 @@ public:
         return m_completer;
     }
 
+    void setCompletionProvider(const std::function<SwList<CompletionEntry>(SwCodeEditor*,
+                                                                            const SwString&,
+                                                                            size_t,
+                                                                            bool)>& provider) {
+        m_completionProvider = provider;
+    }
+
+    void clearCompletionProvider() {
+        m_completionProvider = std::function<SwList<CompletionEntry>(SwCodeEditor*,
+                                                                     const SwString&,
+                                                                     size_t,
+                                                                     bool)>();
+    }
+
     void triggerCompletion() {
         if (!m_completer) {
             return;
@@ -342,6 +453,8 @@ public:
         m_theme = theme;
         m_focusAccent = theme.focusBorderColor;
         applyThemeStyle_();
+        layoutScrollBar_();
+        syncScrollBar_();
         update();
     }
 
@@ -350,24 +463,20 @@ public:
     }
 
     int lineNumberAreaWidth() const {
-        const int lineCount = std::max(1, m_document ? m_document->blockCount() : static_cast<int>(m_lines.size()));
-        const SwString digits = SwString::number(lineCount);
-        const int textWidth = SwWidgetPlatformAdapter::textWidthUntil(nativeWindowHandle(),
-                                                                     digits,
-                                                                     getFont(),
-                                                                     digits.size(),
-                                                                     64);
         if (!m_lineNumbersVisible) {
             return 0;
         }
-        return textWidth + 18 + foldMarkerAreaWidth_();
+        const int lineCount = documentLineCount_();
+        const int digitCount = static_cast<int>(SwString::number(lineCount).size());
+        const int charW = (m_cachedCharWidth > 0) ? m_cachedCharWidth : 8;
+        return digitCount * charW + 18 + foldMarkerAreaWidth_();
     }
 
     int firstVisibleBlock() const {
         if (foldingEnabled_()) {
             return documentLineForVisibleRow_(m_firstVisibleLine);
         }
-        return std::max(0, std::min(m_firstVisibleLine, std::max(0, static_cast<int>(m_lines.size()) - 1)));
+        return std::max(0, std::min(m_firstVisibleLine, std::max(0, documentLineCount_() - 1)));
     }
 
     SwRect blockBoundingRect(int blockNumber) const {
@@ -390,16 +499,12 @@ public:
             return SwRect{inner.x, inner.y, 1, lineHeightPx()};
         }
         const int row = cursorRow - firstRow;
-        const SwString& lineText = m_lines[visualLine];
+        const SwString lineText = documentLineText_(visualLine);
         const size_t column = (visualLine == ci.line)
             ? static_cast<size_t>(std::max(0, ci.col))
             : lineText.size();
         const size_t clampedCol = std::min(column, lineText.size());
-        const int x = inner.x + SwWidgetPlatformAdapter::textWidthUntil(nativeWindowHandle(),
-                                                                        lineText,
-                                                                        getFont(),
-                                                                        clampedCol,
-                                                                        std::max(1, inner.width));
+        const int x = inner.x + textWidthMono_(clampedCol);
         const int y = inner.y + row * lineHeightPx();
         return SwRect{x, y, 1, lineHeightPx()};
     }
@@ -426,6 +531,8 @@ protected:
 
     void resizeEvent(ResizeEvent* event) override {
         SwPlainTextEdit::resizeEvent(event);
+        layoutScrollBar_();
+        syncScrollBar_();
         updateRequest(rect(), 0);
     }
 
@@ -438,6 +545,8 @@ protected:
         if (!painter) {
             return;
         }
+
+        refreshCharWidthCache_();
 
         const SwRect bounds = rect();
         StyleSheet* sheet = getToolSheet();
@@ -559,27 +668,19 @@ protected:
                     }
                     continue;
                 }
-                if (selectionLine != i || selectionEnd <= selectionStart || i >= m_lineStarts.size()) {
+                if (selectionLine != i || selectionEnd <= selectionStart || i >= documentLineCount_()) {
                     continue;
                 }
-                const size_t lineStart = m_lineStarts[i];
-                const size_t lineLen = m_lines[i].size();
+                const size_t lineStart = effectiveLineStart_(i);
+                const size_t lineLen = documentLineLength_(i);
                 const size_t lineEnd = lineStart + lineLen;
                 const size_t segStart = (std::max)(selectionStart, lineStart);
                 const size_t segEnd = (std::min)(selectionEnd, lineEnd);
                 if (segStart >= segEnd) {
                     continue;
                 }
-                const int x1 = textRect.x + SwWidgetPlatformAdapter::textWidthUntil(nativeWindowHandle(),
-                                                                                     m_lines[i],
-                                                                                     getFont(),
-                                                                                     segStart - lineStart,
-                                                                                     std::max(1, textRect.width));
-                const int x2 = textRect.x + SwWidgetPlatformAdapter::textWidthUntil(nativeWindowHandle(),
-                                                                                     m_lines[i],
-                                                                                     getFont(),
-                                                                                     segEnd - lineStart,
-                                                                                     std::max(1, textRect.width));
+                const int x1 = textRect.x + textWidthMono_(segStart - lineStart);
+                const int x2 = textRect.x + textWidthMono_(segEnd - lineStart);
                 const int left = (std::min)(x1, x2);
                 const int right = (std::max)(x1, x2);
                 painter->fillRect(SwRect{left, lineRect.y, right - left, lineRect.height},
@@ -588,25 +689,17 @@ protected:
                                   0);
             }
 
-            if (hasSel && i < m_lineStarts.size()) {
-                const size_t lineStart = m_lineStarts[i];
-                const size_t lineLen = m_lines[i].size();
+            if (hasSel && i < documentLineCount_()) {
+                const size_t lineStart = effectiveLineStart_(i);
+                const size_t lineLen = documentLineLength_(i);
                 const size_t lineEnd = lineStart + lineLen;
                 const size_t segStart = (std::max)(selMin, lineStart);
                 const size_t segEnd = (std::min)(selMax, lineEnd);
                 if (segStart < segEnd) {
                     const size_t startCol = segStart - lineStart;
                     const size_t endCol = segEnd - lineStart;
-                    const int x1 = textRect.x + SwWidgetPlatformAdapter::textWidthUntil(nativeWindowHandle(),
-                                                                                         m_lines[i],
-                                                                                         getFont(),
-                                                                                         startCol,
-                                                                                         std::max(1, textRect.width));
-                    const int x2 = textRect.x + SwWidgetPlatformAdapter::textWidthUntil(nativeWindowHandle(),
-                                                                                         m_lines[i],
-                                                                                         getFont(),
-                                                                                         endCol,
-                                                                                         std::max(1, textRect.width));
+                    const int x1 = textRect.x + textWidthMono_(startCol);
+                    const int x2 = textRect.x + textWidthMono_(endCol);
                     const int left = (std::min)(x1, x2);
                     const int right = (std::max)(x1, x2);
                     painter->fillRect(SwRect{left, lineRect.y, right - left, lineRect.height},
@@ -620,7 +713,7 @@ protected:
             drawCollapsedLineIndicator_(painter, lineRect, i, contentEndX);
         }
 
-        if (m_text.isEmpty() && !m_placeholder.isEmpty() && !getFocus()) {
+        if (m_pieceTable.isEmpty() && !m_placeholder.isEmpty() && !getFocus()) {
             SwRect placeholderRect = textRect;
             placeholderRect.height = lineHeight;
             painter->drawText(placeholderRect,
@@ -657,13 +750,14 @@ protected:
             painter->popClipRect();
         }
 
+        paintChildren(event);
         painter->finalize();
     }
 
     void updateCursorFromPosition(int px, int py) override {
         const SwRect textRect = textRect_();
         const int lineHeight = lineHeightPx();
-        if (lineHeight <= 0 || m_lines.isEmpty()) {
+        if (lineHeight <= 0 || documentLineCount_() <= 0) {
             return;
         }
 
@@ -673,18 +767,22 @@ protected:
         if (py < textRect.y) {
             py = textRect.y;
         }
+        if (textRect.height > 0 && py >= textRect.y + textRect.height) {
+            py = textRect.y + textRect.height - 1;
+        }
 
         int row = (py - textRect.y) / lineHeight;
         row = std::max(0, row);
         const int visibleRow = clampInt(m_firstVisibleLine + row, 0, visibleLineCount_() - 1);
         const int lineIdx = documentLineForVisibleRow_(visibleRow);
         const int relativeX = std::max(0, px - textRect.x);
+        const SwString lineText = documentLineText_(lineIdx);
         const size_t col = SwWidgetPlatformAdapter::characterIndexAtPosition(nativeWindowHandle(),
-                                                                             m_lines[lineIdx],
+                                                                             lineText,
                                                                              getFont(),
                                                                              relativeX,
                                                                              std::max(1, textRect.width));
-        m_cursorPos = std::min(m_lineStarts[lineIdx] + std::min(col, m_lines[lineIdx].size()), m_text.size());
+        m_cursorPos = std::min(effectiveLineStart_(lineIdx) + std::min(col, lineText.size()), documentLength_());
     }
 
     void insertTextAt(size_t pos, const SwString& text) override {
@@ -692,13 +790,58 @@ protected:
             SwPlainTextEdit::insertTextAt(pos, text);
             return;
         }
-        SwString updated = m_text;
-        updated.insert(std::min(pos, updated.size()), text);
+        const size_t clamped = std::min(pos, documentLength_());
+        const bool multiline = containsNewline_(text);
+        const bool heavyMultilineEdit = multiline && shouldUseDeferredHighlight_(text);
+        const bool deferHighlight = heavyMultilineEdit && m_highlighter != nullptr;
+        if (deferHighlight) {
+            m_highlighter->setAutoRehighlightSuspended(true);
+        }
+        m_pieceTable.insert(clamped, text);
         m_syncingToDocument = true;
-        m_document->setPlainText(updated);
+        if (heavyMultilineEdit) {
+            syncDocumentFromPieceTable_();
+        } else if (multiline) {
+            const int lineIdx = lineIndexForPosition_(clamped);
+            int currentBlock = lineIdx;
+            int currentOffset = static_cast<int>(clamped - effectiveLineStart_(lineIdx));
+            m_document->beginBatchEdit();
+            size_t start = 0;
+            for (size_t i = 0; i <= text.size(); ++i) {
+                if (i == text.size() || text[i] == '\n') {
+                    if (i > start) {
+                        m_document->insertTextDirect(currentBlock,
+                                                     currentOffset,
+                                                     text.substr(start, i - start),
+                                                     SwTextCharFormat());
+                        currentOffset += static_cast<int>(i - start);
+                    }
+                    if (i < text.size()) {
+                        m_document->insertBlockDirect(currentBlock,
+                                                      currentOffset,
+                                                      SwTextBlockFormat(),
+                                                      SwTextCharFormat());
+                        ++currentBlock;
+                        currentOffset = 0;
+                    }
+                    start = i + 1;
+                }
+            }
+            m_document->endBatchEdit();
+        } else {
+            // O(log N) line lookup via binary search on m_lineStarts,
+            // then O(1) direct block access — bypasses blockPositionFromAbsolute.
+            const int lineIdx = lineIndexForPosition_(clamped);
+            const int offset = static_cast<int>(clamped - effectiveLineStart_(lineIdx));
+            m_document->insertTextDirect(lineIdx, offset, text, SwTextCharFormat());
+        }
         m_document->setModified(true);
         m_syncingToDocument = false;
-        m_text = updated;
+        if (deferHighlight) {
+            m_highlighter->setAutoRehighlightSuspended(false);
+            ensureVisibleDeferredHighlight_();
+            scheduleDeferredHighlightWork_();
+        }
     }
 
     void eraseTextAt(size_t pos, size_t len) override {
@@ -706,16 +849,32 @@ protected:
             SwPlainTextEdit::eraseTextAt(pos, len);
             return;
         }
-        if (len == 0 || pos >= m_text.size()) {
+        if (len == 0 || pos >= documentLength_()) {
             return;
         }
-        SwString updated = m_text;
-        updated.erase(pos, std::min(len, updated.size() - pos));
+        const size_t clampedLen = std::min(len, documentLength_() - pos);
+        // Check if deletion crosses a newline before modifying the piece table.
+        bool crossesNewline = false;
+        for (size_t i = pos; i < pos + clampedLen; ++i) {
+            if (documentCharAt_(i) == '\n') { crossesNewline = true; break; }
+        }
+        const bool heavyMultilineErase = crossesNewline && clampedLen >= 16384;
+        m_pieceTable.remove(pos, clampedLen);
         m_syncingToDocument = true;
-        m_document->setPlainText(updated);
+        if (heavyMultilineErase) {
+            syncDocumentFromPieceTable_();
+        } else if (crossesNewline) {
+            // Cross-block deletion: use absolute-position removeText
+            // (handles block merging).
+            m_document->removeText(static_cast<int>(pos), static_cast<int>(clampedLen));
+        } else {
+            // Single-block deletion: O(log N) line lookup + O(1) block access.
+            const int lineIdx = lineIndexForPosition_(pos);
+            const int offset = static_cast<int>(pos - effectiveLineStart_(lineIdx));
+            m_document->removeTextDirect(lineIdx, offset, static_cast<int>(clampedLen));
+        }
         m_document->setModified(true);
         m_syncingToDocument = false;
-        m_text = updated;
     }
 
     void mousePressEvent(MouseEvent* event) override {
@@ -738,8 +897,14 @@ protected:
                 return;
             }
         }
+        if (dispatchMousePressToScrollBar_(event)) {
+            stopSelectionAutoScroll_();
+            emitEditorSignals_(oldPos, oldSelStart, oldSelEnd);
+            return;
+        }
         SwPlainTextEdit::mousePressEvent(event);
         restoreViewportAfterMouseInteraction_(oldFirstVisibleLine);
+        stopSelectionAutoScroll_();
         emitEditorSignals_(oldPos, oldSelStart, oldSelEnd);
     }
 
@@ -752,8 +917,24 @@ protected:
         const size_t oldSelStart = m_selectionStart;
         const size_t oldSelEnd = m_selectionEnd;
         const int oldFirstVisibleLine = m_firstVisibleLine;
+        if (dispatchMouseMoveToScrollBar_(event)) {
+            stopSelectionAutoScroll_();
+            updateHoverToolTip_(event);
+            emitEditorSignals_(oldPos, oldSelStart, oldSelEnd);
+            return;
+        }
         SwPlainTextEdit::mouseMoveEvent(event);
         restoreViewportAfterMouseInteraction_(oldFirstVisibleLine);
+        m_lastSelectionMousePos = SwPoint{event->x(), event->y()};
+        if (m_isSelecting) {
+            const bool autoScrolled = applySelectionAutoScrollForPoint_(m_lastSelectionMousePos);
+            updateSelectionAutoScrollState_();
+            if (autoScrolled) {
+                event->accept();
+            }
+        } else {
+            stopSelectionAutoScroll_();
+        }
         updateHoverToolTip_(event);
         emitEditorSignals_(oldPos, oldSelStart, oldSelEnd);
     }
@@ -767,8 +948,17 @@ protected:
         const size_t oldSelStart = m_selectionStart;
         const size_t oldSelEnd = m_selectionEnd;
         const int oldFirstVisibleLine = m_firstVisibleLine;
+        const bool scrollBarWasDragging = (m_vScrollBar && m_vScrollBar->isSliderDown());
+        if (dispatchMouseReleaseToScrollBar_(event)) {
+            stopSelectionAutoScroll_();
+            if (scrollBarWasDragging || isPointInVerticalScrollBar_(event->x(), event->y())) {
+                emitEditorSignals_(oldPos, oldSelStart, oldSelEnd);
+                return;
+            }
+        }
         SwPlainTextEdit::mouseReleaseEvent(event);
         restoreViewportAfterMouseInteraction_(oldFirstVisibleLine);
+        stopSelectionAutoScroll_();
         emitEditorSignals_(oldPos, oldSelStart, oldSelEnd);
     }
 
@@ -781,8 +971,14 @@ protected:
         const size_t oldSelStart = m_selectionStart;
         const size_t oldSelEnd = m_selectionEnd;
         const int oldFirstVisibleLine = m_firstVisibleLine;
+        if (dispatchMouseDoubleClickToScrollBar_(event)) {
+            stopSelectionAutoScroll_();
+            emitEditorSignals_(oldPos, oldSelStart, oldSelEnd);
+            return;
+        }
         SwPlainTextEdit::mouseDoubleClickEvent(event);
         restoreViewportAfterMouseInteraction_(oldFirstVisibleLine);
+        stopSelectionAutoScroll_();
         emitEditorSignals_(oldPos, oldSelStart, oldSelEnd);
     }
 
@@ -815,6 +1011,7 @@ protected:
 
         const int maxFirst = std::max(0, visibleLineCount_() - visibleLines);
         m_firstVisibleLine = clampInt(m_firstVisibleLine - steps, 0, maxFirst);
+        syncScrollBar_();
         event->accept();
         update();
     }
@@ -829,6 +1026,11 @@ protected:
         const size_t oldSelEnd = m_selectionEnd;
         const int key = event->key();
         const wchar_t typedChar = typedCharacter_(event);
+        const bool altGrTextInput = event->isCtrlPressed() &&
+                                    event->isAltPressed() &&
+                                    typedChar != L'\0';
+        const bool shortcutCtrl = event->isCtrlPressed() && !altGrTextInput;
+        const bool plainAlt = event->isAltPressed() && !altGrTextInput;
 
         if (m_completer && m_completer->handleEditorKeyPress(event)) {
             emitEditorSignals_(oldPos, oldSelStart, oldSelEnd);
@@ -836,15 +1038,27 @@ protected:
             return;
         }
 
-        const bool ctrlSpace = event->isCtrlPressed() && (key == 32 || event->text() == L' ');
+        const bool ctrlSpace = shortcutCtrl && (key == 32 || event->text() == L' ');
         if (ctrlSpace) {
             triggerCompletion();
             event->accept();
             return;
         }
 
-        const bool plainTab = !event->isCtrlPressed() && !event->isAltPressed() && key == 9;
+        if (shortcutCtrl && SwWidgetPlatformAdapter::matchesShortcutKey(key, 'V')) {
+            pasteFromClipboardForCode_();
+            if (m_completer) {
+                m_completer->hidePopup();
+            }
+            update();
+            emitEditorSignals_(oldPos, oldSelStart, oldSelEnd);
+            event->accept();
+            return;
+        }
+
+        const bool plainTab = !shortcutCtrl && !plainAlt && key == 9;
         if (plainTab) {
+            m_suppressFoldRefresh = true;
             if (event->isShiftPressed()) {
                 unindentCurrentLine_();
             } else {
@@ -860,8 +1074,8 @@ protected:
             return;
         }
 
-        const bool plainReturn = !event->isCtrlPressed() &&
-                                 !event->isAltPressed() &&
+        const bool plainReturn = !shortcutCtrl &&
+                                 !plainAlt &&
                                  SwWidgetPlatformAdapter::isReturnKey(key);
         if (plainReturn) {
             insertIndentedNewLine_();
@@ -888,15 +1102,23 @@ protected:
             return;
         }
 
-        const bool isDeletionKey = !event->isCtrlPressed() &&
-                                   !event->isAltPressed() &&
+        const bool isDeletionKey = !shortcutCtrl &&
+                                   !plainAlt &&
                                    (SwWidgetPlatformAdapter::isBackspaceKey(key) ||
                                     SwWidgetPlatformAdapter::isDeleteKey(key));
-        const bool isTextInput = !event->isCtrlPressed() &&
-                                 !event->isAltPressed() &&
-                                 event->text() != L'\0' &&
-                                 std::iswcntrl(static_cast<wint_t>(event->text())) == 0;
+        const bool isTextInput = !shortcutCtrl &&
+                                 !plainAlt &&
+                                 typedChar != L'\0' &&
+                                 std::iswcntrl(static_cast<wint_t>(typedChar)) == 0;
         const bool shouldRefreshCompletion = isTextInput || isDeletionKey || (m_completer && m_completer->popupVisible());
+
+        // Suppress fold refresh for edits that cannot change fold structure.
+        // Only suppress for plain character input (not braces, not deletion,
+        // not replacement of a selection which could contain braces).
+        if (isTextInput && !isDeletionKey &&
+            typedChar != L'{' && typedChar != L'}' && !hasSelectedText()) {
+            m_suppressFoldRefresh = true;
+        }
 
         SwPlainTextEdit::keyPressEvent(event);
 
@@ -926,7 +1148,7 @@ private:
     };
 
     bool foldingEnabled_() const {
-        return m_codeFoldingEnabled && !wordWrapEnabled() && !m_lines.isEmpty();
+        return m_codeFoldingEnabled && !wordWrapEnabled() && documentLineCount_() > 0;
     }
 
     int foldMarkerRightInset_() const {
@@ -938,25 +1160,35 @@ private:
     }
 
     int visibleLineCount_() const {
+        if (m_identityVisibleLines) {
+            return documentLineCount_();
+        }
         if (m_visibleLineIndices.isEmpty()) {
-            return std::max(1, static_cast<int>(m_lines.size()));
+            return documentLineCount_();
         }
         return static_cast<int>(m_visibleLineIndices.size());
     }
 
     int documentLineForVisibleRow_(int row) const {
+        if (m_identityVisibleLines) {
+            return clampInt(row, 0, std::max(0, documentLineCount_() - 1));
+        }
         if (m_visibleLineIndices.isEmpty()) {
-            return clampInt(row, 0, std::max(0, static_cast<int>(m_lines.size()) - 1));
+            return clampInt(row, 0, std::max(0, documentLineCount_() - 1));
         }
         const int clampedRow = clampInt(row, 0, static_cast<int>(m_visibleLineIndices.size()) - 1);
         return m_visibleLineIndices[static_cast<size_t>(clampedRow)];
     }
 
     int visibleRowForDocumentLine_(int line) const {
-        if (line < 0 || line >= static_cast<int>(m_lines.size())) {
+        if (line < 0 || line >= documentLineCount_()) {
             return -1;
         }
-        if (m_visibleRowByLine.isEmpty()) {
+        if (m_identityVisibleLines) {
+            return line;
+        }
+        if (m_visibleRowByLine.isEmpty() ||
+            static_cast<int>(m_visibleRowByLine.size()) != documentLineCount_()) {
             return line;
         }
         return m_visibleRowByLine[static_cast<size_t>(line)];
@@ -980,7 +1212,7 @@ private:
         if (collapsedRegion >= 0) {
             return m_foldRegions[static_cast<size_t>(collapsedRegion)].startLine;
         }
-        return clampInt(line, 0, std::max(0, static_cast<int>(m_lines.size()) - 1));
+        return clampInt(line, 0, std::max(0, documentLineCount_() - 1));
     }
 
     int visibleLinesForViewport_() const {
@@ -1007,8 +1239,9 @@ private:
     }
 
     void ensureCursorVisibleForCode_() {
-        if (m_lines.isEmpty()) {
+        if (documentLineCount_() <= 0) {
             m_firstVisibleLine = 0;
+            syncScrollBar_();
             return;
         }
 
@@ -1023,11 +1256,15 @@ private:
             m_firstVisibleLine = visibleRow - visibleLines + 1;
         }
         clampFirstVisibleCodeLine_(visibleLines);
+        syncScrollBar_();
+        ensureVisibleDeferredHighlight_();
+        scheduleDeferredHighlightWork_();
     }
 
     void restoreViewportAfterMouseInteraction_(int previousFirstVisibleLine) {
         m_firstVisibleLine = previousFirstVisibleLine;
         clampFirstVisibleCodeLine_(visibleLinesForViewport_());
+        syncScrollBar_();
         update();
     }
 
@@ -1054,21 +1291,29 @@ private:
     }
 
     int foldRegionIndexForStartLine_(int line) const {
-        int bestIndex = -1;
-        for (int i = 0; i < static_cast<int>(m_foldRegions.size()); ++i) {
-            const FoldRegion& region = m_foldRegions[static_cast<size_t>(i)];
-            if (region.startLine != line) {
-                continue;
-            }
-            if (bestIndex < 0 || region.endLine > m_foldRegions[static_cast<size_t>(bestIndex)].endLine) {
-                bestIndex = i;
+        if (m_foldRegions.isEmpty() || line < 0) {
+            return -1;
+        }
+        int lo = 0;
+        int hi = static_cast<int>(m_foldRegions.size()) - 1;
+        int result = -1;
+        while (lo <= hi) {
+            const int mid = lo + (hi - lo) / 2;
+            const int midLine = m_foldRegions[static_cast<size_t>(mid)].startLine;
+            if (midLine < line) {
+                lo = mid + 1;
+            } else if (midLine > line) {
+                hi = mid - 1;
+            } else {
+                result = mid;
+                hi = mid - 1;
             }
         }
-        return bestIndex;
+        return result;
     }
 
     void coerceCursorIntoVisibleContent_(FoldMoveBias bias, bool preserveSelection) {
-        if (!foldingEnabled_() || m_lines.isEmpty()) {
+        if (!foldingEnabled_() || documentLineCount_() <= 0) {
             return;
         }
 
@@ -1080,15 +1325,15 @@ private:
 
         const FoldRegion& region = m_foldRegions[static_cast<size_t>(collapsedRegion)];
         int targetLine = region.startLine;
-        if (bias == FoldMoveBias::PreferEnd && region.endLine + 1 < static_cast<int>(m_lines.size())) {
+        if (bias == FoldMoveBias::PreferEnd && region.endLine + 1 < documentLineCount_()) {
             targetLine = region.endLine + 1;
         }
 
-        const size_t currentLineStart = m_lineStarts[static_cast<size_t>(currentLine)];
+        const size_t currentLineStart = effectiveLineStart_(currentLine);
         const size_t currentColumn = (m_cursorPos > currentLineStart) ? (m_cursorPos - currentLineStart) : 0;
-        const size_t targetStart = m_lineStarts[static_cast<size_t>(targetLine)];
-        const size_t targetColumn = std::min(currentColumn, m_lines[static_cast<size_t>(targetLine)].size());
-        m_cursorPos = std::min(targetStart + targetColumn, m_text.size());
+        const size_t targetStart = effectiveLineStart_(targetLine);
+        const size_t targetColumn = std::min(currentColumn, documentLineLength_(targetLine));
+        m_cursorPos = std::min(targetStart + targetColumn, documentLength_());
         if (preserveSelection) {
             m_selectionEnd = m_cursorPos;
         } else {
@@ -1115,6 +1360,11 @@ private:
         if (!foldingEnabled_()) {
             return parsed;
         }
+        const SwString text = toPlainText();
+        const size_t textLength = text.size();
+        if (textLength == 0) {
+            return parsed;
+        }
 
         enum class ParseState {
             Normal,
@@ -1133,9 +1383,9 @@ private:
         bool escaped = false;
         int currentLine = 0;
 
-        for (size_t i = 0; i < m_text.size(); ++i) {
-            const char ch = m_text[i];
-            const char next = (i + 1 < m_text.size()) ? m_text[i + 1] : '\0';
+        for (size_t i = 0; i < textLength; ++i) {
+            const char ch = text[i];
+            const char next = (i + 1 < textLength) ? text[i + 1] : '\0';
 
             switch (state) {
                 case ParseState::Normal:
@@ -1218,14 +1468,33 @@ private:
         m_visibleLineIndices.clear();
         m_visibleRowByLine.clear();
 
-        const int lineCount = static_cast<int>(m_lines.size());
+        const int lineCount = documentLineCount_();
         if (lineCount <= 0) {
+            m_identityVisibleLines = true;
             return;
         }
 
-        m_visibleRowByLine = SwVector<int>(static_cast<size_t>(lineCount), -1);
-        SwVector<char> hidden(static_cast<size_t>(lineCount), 0);
+        // Fast path: when no fold is collapsed, visible lines = all lines.
+        // Use identity flag — accessors return line index directly, O(1).
+        // No arrays allocated, no loop over 72K lines.
+        bool hasCollapsed = false;
+        for (int i = 0; i < static_cast<int>(m_foldRegions.size()); ++i) {
+            if (m_foldRegions[static_cast<size_t>(i)].collapsed) {
+                hasCollapsed = true;
+                break;
+            }
+        }
 
+        if (!hasCollapsed) {
+            m_identityVisibleLines = true;
+            return;
+        }
+
+        m_identityVisibleLines = false;
+        m_visibleLineIndices.reserve(static_cast<size_t>(lineCount));
+        m_visibleRowByLine.resize(static_cast<size_t>(lineCount));
+
+        SwVector<char> hidden(static_cast<size_t>(lineCount), 0);
         for (int i = 0; i < static_cast<int>(m_foldRegions.size()); ++i) {
             const FoldRegion& region = m_foldRegions[static_cast<size_t>(i)];
             if (!region.collapsed) {
@@ -1238,6 +1507,7 @@ private:
 
         for (int line = 0; line < lineCount; ++line) {
             if (hidden[static_cast<size_t>(line)] != 0) {
+                m_visibleRowByLine[static_cast<size_t>(line)] = -1;
                 continue;
             }
             m_visibleRowByLine[static_cast<size_t>(line)] = static_cast<int>(m_visibleLineIndices.size());
@@ -1284,6 +1554,7 @@ private:
         coerceCursorIntoVisibleContent_(FoldMoveBias::PreferStart, false);
         m_firstVisibleLine = anchorVisibleRowForDocumentLine_(previousTopDocumentLine);
         clampFirstVisibleCodeLine_(visibleLinesForViewport_());
+        syncScrollBar_();
         updateRequest(rect(), 0);
         update();
         return true;
@@ -1411,11 +1682,7 @@ private:
         }
 
         const SwString label("...");
-        const int labelWidth = SwWidgetPlatformAdapter::textWidthUntil(nativeWindowHandle(),
-                                                                       label,
-                                                                       getFont(),
-                                                                       label.size(),
-                                                                       std::max(1, lineRect.width));
+        const int labelWidth = textWidthMono_(label.size());
         const int x = std::min(lineRect.x + lineRect.width - labelWidth - 12,
                                std::max(lineRect.x + 12, contentEndX + 8));
         painter->drawText(SwRect{x, lineRect.y, labelWidth + 4, lineRect.height},
@@ -1441,13 +1708,13 @@ private:
                                                  : SwString("Click to collapse lines ");
         SwString tooltip = action + SwString::number(region.startLine + 1) + "-" + SwString::number(region.endLine + 1);
 
-        if (region.startLine < 0 || region.endLine >= static_cast<int>(m_lines.size()) || region.startLine > region.endLine) {
+        if (region.startLine < 0 || region.endLine >= documentLineCount_() || region.startLine > region.endLine) {
             return tooltip;
         }
 
         SwString blockText;
         for (int line = region.startLine; line <= region.endLine; ++line) {
-            SwString previewLine = m_lines[static_cast<size_t>(line)];
+            SwString previewLine = documentLineText_(line);
             previewLine.replace(SwString("\t"), SwString("    "));
             blockText += previewLine;
             if (line < region.endLine) {
@@ -1490,12 +1757,14 @@ private:
         SwObject::connect(m_document, &SwTextDocument::contentsChanged, this, [this]() {
             if (!m_syncingToDocument) {
                 syncFromDocument_();
+                update();
             }
-            update();
         });
         SwObject::connect(m_document, &SwTextDocument::blockCountChanged, this, [this]() {
-            updateRequest(rect(), 0);
-            update();
+            if (!m_syncingToDocument) {
+                updateRequest(rect(), 0);
+                update();
+            }
         });
     }
 
@@ -1506,6 +1775,13 @@ private:
         m_syncingFromDocument = true;
         SwPlainTextEdit::setPlainText(m_document->toPlainText());
         m_syncingFromDocument = false;
+    }
+
+    void syncDocumentFromPieceTable_() {
+        if (!m_document) {
+            return;
+        }
+        m_document->setPlainText(m_pieceTable.toPlainText());
     }
 
     SwRect gutterRect_() const {
@@ -1547,10 +1823,11 @@ private:
         const Padding pad = resolvePadding(sheet);
         const int borderWidth = resolvedBorderWidth_();
         const int gutterWidth = lineNumberAreaWidth();
+        const int sbWidth = (m_vScrollBar && m_vScrollBar->getVisible()) ? m_theme.scrollBarWidth : 0;
         SwRect inner{
             bounds.x + borderWidth + pad.left + gutterWidth,
             bounds.y + borderWidth + pad.top,
-            std::max(0, bounds.width - 2 * borderWidth - (pad.left + pad.right) - gutterWidth),
+            std::max(0, bounds.width - 2 * borderWidth - (pad.left + pad.right) - gutterWidth - sbWidth),
             std::max(0, bounds.height - 2 * borderWidth - (pad.top + pad.bottom))
         };
         return inner;
@@ -1566,11 +1843,11 @@ private:
     }
 
     int drawLineText_(SwPainter* painter, const SwRect& lineRect, int lineIndex, const SwColor& defaultTextColor) {
-        if (!painter || lineIndex < 0 || lineIndex >= static_cast<int>(m_lines.size())) {
+        if (!painter || lineIndex < 0 || lineIndex >= documentLineCount_()) {
             return lineRect.x;
         }
 
-        const SwString& lineText = m_lines[lineIndex];
+        const SwString lineText = documentLineText_(lineIndex);
         if (lineText.isEmpty()) {
             return lineRect.x;
         }
@@ -1581,11 +1858,7 @@ private:
                               DrawTextFormats(DrawTextFormat::Left | DrawTextFormat::VCenter | DrawTextFormat::SingleLine),
                               defaultTextColor,
                               getFont());
-            return lineRect.x + SwWidgetPlatformAdapter::textWidthUntil(nativeWindowHandle(),
-                                                                        lineText,
-                                                                        getFont(),
-                                                                        lineText.size(),
-                                                                        std::max(1, lineRect.width));
+            return lineRect.x + textWidthMono_(lineText.size());
         }
 
         const SwList<SwTextLayoutFormatRange> formats = mergedFormatsForLine_(lineIndex);
@@ -1595,15 +1868,14 @@ private:
                               DrawTextFormats(DrawTextFormat::Left | DrawTextFormat::VCenter | DrawTextFormat::SingleLine),
                               defaultTextColor,
                               getFont());
-            return lineRect.x + SwWidgetPlatformAdapter::textWidthUntil(nativeWindowHandle(),
-                                                                        lineText,
-                                                                        getFont(),
-                                                                        lineText.size(),
-                                                                        std::max(1, lineRect.width));
+            return lineRect.x + textWidthMono_(lineText.size());
         }
 
-        std::vector<SwTextCharFormat> perChar(lineText.size());
-        std::vector<bool> hasFormat(lineText.size(), false);
+        m_perCharFmtBuf.resize(lineText.size());
+        m_hasFormatBuf.resize(lineText.size());
+        std::memset(m_hasFormatBuf.data(), 0, lineText.size());
+        auto& perChar = m_perCharFmtBuf;
+        auto& hasFormat = m_hasFormatBuf;
         for (int i = 0; i < formats.size(); ++i) {
             const SwTextLayoutFormatRange& range = formats[i];
             const int start = std::max(0, range.start);
@@ -1613,7 +1885,7 @@ private:
                     perChar[static_cast<size_t>(c)].merge(range.format);
                 } else {
                     perChar[static_cast<size_t>(c)] = range.format;
-                    hasFormat[static_cast<size_t>(c)] = true;
+                    hasFormat[static_cast<size_t>(c)] = 1;
                 }
             }
         }
@@ -1621,7 +1893,7 @@ private:
         int x = lineRect.x;
         int segmentStart = 0;
         while (segmentStart < static_cast<int>(lineText.size())) {
-            const bool formatted = hasFormat[static_cast<size_t>(segmentStart)];
+            const char formatted = hasFormat[static_cast<size_t>(segmentStart)];
             int segmentEnd = segmentStart + 1;
             while (segmentEnd < static_cast<int>(lineText.size()) &&
                    hasFormat[static_cast<size_t>(segmentEnd)] == formatted &&
@@ -1636,11 +1908,7 @@ private:
             }
             const SwFont font = formatted ? fmt.toFont(getFont()) : getFont();
             const SwColor fg = (formatted && fmt.hasForeground()) ? fmt.foreground() : defaultTextColor;
-            const int width = SwWidgetPlatformAdapter::textWidthUntil(nativeWindowHandle(),
-                                                                      segmentText,
-                                                                      font,
-                                                                      segmentText.size(),
-                                                                      std::max(1, lineRect.width));
+            const int width = textWidthMono_(segmentText.size());
             const SwRect segmentRect{x, lineRect.y, std::max(1, width), lineRect.height};
             if (formatted && fmt.hasBackground()) {
                 painter->fillRect(segmentRect, fmt.background(), fmt.background(), 0);
@@ -1669,23 +1937,26 @@ private:
     }
 
     SwList<SwTextLayoutFormatRange> mergedFormatsForLine_(int lineIndex) const {
-        SwList<SwTextLayoutFormatRange> formats;
         if (!m_document || lineIndex < 0 || lineIndex >= m_document->blockCount()) {
-            return formats;
+            return SwList<SwTextLayoutFormatRange>();
         }
 
-        formats = m_document->blockAt(lineIndex).additionalFormats();
+        const SwList<SwTextLayoutFormatRange>& blockFormats = m_document->blockAt(lineIndex).additionalFormats();
+        if (m_diagnostics.isEmpty()) {
+            return blockFormats;
+        }
+        SwList<SwTextLayoutFormatRange> formats = blockFormats;
         appendDiagnosticFormatsForLine_(lineIndex, formats);
         return formats;
     }
 
     void appendDiagnosticFormatsForLine_(int lineIndex, SwList<SwTextLayoutFormatRange>& formats) const {
-        if (!m_document || lineIndex < 0 || lineIndex >= static_cast<int>(m_lines.size()) || lineIndex >= m_document->blockCount()) {
+        if (!m_document || lineIndex < 0 || lineIndex >= documentLineCount_() || lineIndex >= m_document->blockCount()) {
             return;
         }
 
         const int lineStart = m_document->absolutePosition(lineIndex, 0);
-        const int lineEnd = lineStart + static_cast<int>(m_lines[lineIndex].size());
+        const int lineEnd = lineStart + static_cast<int>(documentLineLength_(lineIndex));
         if (lineEnd <= lineStart) {
             return;
         }
@@ -1731,9 +2002,6 @@ private:
         if (!format.hasUnderlineColor()) {
             format.setUnderlineColor(diagnosticColor);
         }
-        if (!format.hasForeground()) {
-            format.setForeground(diagnosticColor);
-        }
         return format;
     }
 
@@ -1744,7 +2012,7 @@ private:
         }
 
         const int lineHeight = lineHeightPx();
-        if (lineHeight <= 0 || m_lines.isEmpty()) {
+        if (lineHeight <= 0 || documentLineCount_() <= 0) {
             return -1;
         }
 
@@ -1755,12 +2023,13 @@ private:
         const int visibleRow = clampInt(m_firstVisibleLine + row, 0, visibleLineCount_() - 1);
         const int lineIndex = documentLineForVisibleRow_(visibleRow);
         const int relativeX = px - textRect.x;
+        const SwString lineText = documentLineText_(lineIndex);
         const size_t column = SwWidgetPlatformAdapter::characterIndexAtPosition(nativeWindowHandle(),
-                                                                                m_lines[lineIndex],
+                                                                                lineText,
                                                                                 getFont(),
                                                                                 relativeX,
                                                                                 std::max(1, textRect.width));
-        const size_t clampedColumn = std::min(column, m_lines[lineIndex].size());
+        const size_t clampedColumn = std::min(column, lineText.size());
         return m_document ? m_document->absolutePosition(lineIndex, static_cast<int>(clampedColumn)) : -1;
     }
 
@@ -1818,14 +2087,14 @@ private:
         const size_t end = wordEndAt_(m_cursorPos);
 
         recordUndoState_();
+        const size_t removedLen = (end > start) ? (end - start) : 0;
         if (end > start) {
-            eraseTextAt(start, end - start);
+            eraseTextAt(start, removedLen);
         }
         insertTextAt(start, completion);
 
-        m_cursorPos = std::min(start + completion.size(), m_text.size());
+        m_cursorPos = std::min(start + completion.size(), documentLength_());
         m_selectionStart = m_selectionEnd = m_cursorPos;
-        rebuildLines();
         textChanged();
         ensureCursorVisibleForCode_();
         update();
@@ -1833,43 +2102,343 @@ private:
     }
 
     SwString wordUnderCursor_() const {
-        if (m_text.isEmpty()) {
+        if (m_pieceTable.isEmpty()) {
             return SwString();
         }
         const size_t start = wordStartAt_(m_cursorPos);
         const size_t end = wordEndAt_(m_cursorPos);
-        if (end <= start || start >= m_text.size()) {
+        if (end <= start || start >= documentLength_()) {
             return SwString();
         }
-        return m_text.substr(start, end - start);
+        return documentSubstring_(start, end - start);
     }
 
     SwString completionPrefixUnderCursor_() const {
-        if (m_text.isEmpty()) {
+        if (m_pieceTable.isEmpty()) {
             return SwString();
         }
         const size_t start = wordStartAt_(m_cursorPos);
-        const size_t end = std::min(m_cursorPos, m_text.size());
-        if (end <= start || start >= m_text.size()) {
+        const size_t end = std::min(m_cursorPos, documentLength_());
+        if (end <= start || start >= documentLength_()) {
             return SwString();
         }
-        return m_text.substr(start, end - start);
+        return documentSubstring_(start, end - start);
     }
 
     size_t wordStartAt_(size_t pos) const {
-        size_t p = std::min(pos, m_text.size());
-        while (p > 0 && isWordChar_(m_text[p - 1])) {
+        size_t p = std::min(pos, documentLength_());
+        while (p > 0 && isWordChar_(documentCharAt_(p - 1))) {
             --p;
         }
         return p;
     }
 
     size_t wordEndAt_(size_t pos) const {
-        size_t p = std::min(pos, m_text.size());
-        while (p < m_text.size() && isWordChar_(m_text[p])) {
+        size_t p = std::min(pos, documentLength_());
+        while (p < documentLength_() && isWordChar_(documentCharAt_(p))) {
             ++p;
         }
         return p;
+    }
+
+    static bool containsNewline_(const SwString& s) {
+        for (size_t i = 0; i < s.size(); ++i) {
+            if (s[i] == '\n') {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static bool shouldUseDeferredHighlight_(const SwString& text) {
+        if (text.size() < 16384) {
+            return false;
+        }
+        int newlineCount = 0;
+        for (size_t i = 0; i < text.size(); ++i) {
+            if (text[i] == '\n') {
+                ++newlineCount;
+                if (newlineCount >= 128) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    void scheduleFoldRefresh_() {
+        m_foldDirty = true;
+        if (m_foldTimer) {
+            m_foldTimer->start(250);
+        }
+    }
+
+    void syncVisibleLineCacheAfterTextChange_() {
+        rebuildVisibleLineCache_();
+        clampFirstVisibleCodeLine_(visibleLinesForViewport_());
+    }
+
+    void ensureVisibleDeferredHighlight_() {
+        if (!m_highlighter) {
+            return;
+        }
+        const int totalVisibleLines = visibleLineCount_();
+        if (totalVisibleLines <= 0) {
+            return;
+        }
+        const int visibleLines = visibleLinesForViewport_();
+        const int firstVisibleRow = clampInt(m_firstVisibleLine, 0, std::max(0, totalVisibleLines - 1));
+        const int lastVisibleRow = clampInt(firstVisibleRow + visibleLines + 8,
+                                            0,
+                                            std::max(0, totalVisibleLines - 1));
+        const int firstLine = documentLineForVisibleRow_(firstVisibleRow);
+        const int targetLine = documentLineForVisibleRow_(lastVisibleRow);
+
+        bool needsVisibleWindow = false;
+        if (m_document) {
+            const int blockCount = m_document->blockCount();
+            const int visibleFirstBlock = clampInt(firstLine, 0, std::max(0, blockCount - 1));
+            const int visibleLastBlock = clampInt(targetLine, 0, std::max(0, blockCount - 1));
+            for (int block = visibleFirstBlock; block <= visibleLastBlock; ++block) {
+                if (m_document->blockAt(block).userState() < 0) {
+                    needsVisibleWindow = true;
+                    break;
+                }
+            }
+            if (needsVisibleWindow) {
+                m_highlighter->rehighlightWindow(std::max(0, visibleFirstBlock - 8),
+                                                 std::min(blockCount - 1, visibleLastBlock + 8),
+                                                 512);
+            }
+        }
+
+        if (m_highlighter->hasDeferredRehighlight()) {
+            scheduleDeferredHighlightWork_();
+        }
+    }
+
+    bool processDeferredHighlightChunk_() {
+        if (!m_highlighter || !m_highlighter->hasDeferredRehighlight()) {
+            stopDeferredHighlightWork_();
+            return false;
+        }
+        const bool hasMore = m_highlighter->processDeferredRehighlight(256);
+        if (hasMore && isVisibleInHierarchy() && m_deferredHighlightTimer) {
+            m_deferredHighlightTimer->start(15);
+        }
+        return hasMore;
+    }
+
+    void scheduleDeferredHighlightWork_() {
+        if (!m_deferredHighlightTimer || !m_highlighter || !m_highlighter->hasDeferredRehighlight()) {
+            return;
+        }
+        if (!isVisibleInHierarchy()) {
+            return;
+        }
+        if (!m_deferredHighlightTimer->isActive()) {
+            m_deferredHighlightTimer->start(15);
+        }
+    }
+
+    void stopDeferredHighlightWork_() {
+        if (m_deferredHighlightTimer && m_deferredHighlightTimer->isActive()) {
+            m_deferredHighlightTimer->stop();
+        }
+    }
+
+    void pasteFromClipboardForCode_() {
+        if (m_readOnly) {
+            return;
+        }
+        SwGuiApplication* app = SwGuiApplication::instance(false);
+        SwPlatformIntegration* platform = app ? app->platformIntegration() : nullptr;
+        if (!platform) {
+            return;
+        }
+        SwString clip = platform->clipboardText();
+        if (clip.isEmpty()) {
+            return;
+        }
+        clip.replace("\r\n", "\n");
+        clip.replace("\r", "\n");
+        replaceSelectionWithText_(clip);
+        ensureCursorVisibleForCode_();
+    }
+
+    void layoutScrollBar_() {
+        if (!m_vScrollBar) {
+            return;
+        }
+        const SwRect bounds = rect();
+        const int bw = resolvedBorderWidth_();
+        const int sbWidth = m_theme.scrollBarWidth;
+        m_vScrollBar->setGeometry(
+            bounds.x + bounds.width - sbWidth - bw,
+            bounds.y + bw,
+            sbWidth,
+            std::max(0, bounds.height - 2 * bw));
+    }
+
+    bool isPointInVerticalScrollBar_(int px, int py) const {
+        if (!m_vScrollBar || !m_vScrollBar->getVisible()) {
+            return false;
+        }
+        const SwRect sb = m_vScrollBar->geometry();
+        return px >= sb.x && px < (sb.x + sb.width) && py >= sb.y && py < (sb.y + sb.height);
+    }
+
+    bool dispatchMousePressToScrollBar_(MouseEvent* event) {
+        if (!event || !m_vScrollBar || !m_vScrollBar->getVisible() || !isPointInVerticalScrollBar_(event->x(), event->y())) {
+            return false;
+        }
+        SwWidget::mousePressEvent(event);
+        return true;
+    }
+
+    bool dispatchMouseMoveToScrollBar_(MouseEvent* event) {
+        if (!event || !m_vScrollBar || !m_vScrollBar->getVisible()) {
+            return false;
+        }
+        if (!m_vScrollBar->isSliderDown() && !isPointInVerticalScrollBar_(event->x(), event->y())) {
+            return false;
+        }
+        SwWidget::mouseMoveEvent(event);
+        return true;
+    }
+
+    bool dispatchMouseReleaseToScrollBar_(MouseEvent* event) {
+        if (!event || !m_vScrollBar || !m_vScrollBar->getVisible()) {
+            return false;
+        }
+        if (!m_vScrollBar->isSliderDown() && !isPointInVerticalScrollBar_(event->x(), event->y())) {
+            return false;
+        }
+        SwWidget::mouseReleaseEvent(event);
+        return true;
+    }
+
+    bool dispatchMouseDoubleClickToScrollBar_(MouseEvent* event) {
+        if (!event || !m_vScrollBar || !m_vScrollBar->getVisible() || !isPointInVerticalScrollBar_(event->x(), event->y())) {
+            return false;
+        }
+        SwWidget::mouseDoubleClickEvent(event);
+        return true;
+    }
+
+    int selectionAutoScrollDirectionForPoint_(const SwPoint& point) const {
+        const SwRect textRect = textRect_();
+        if (textRect.height <= 0) {
+            return 0;
+        }
+        if (point.y < textRect.y) {
+            return -1;
+        }
+        if (point.y >= textRect.y + textRect.height) {
+            return 1;
+        }
+        return 0;
+    }
+
+    void updateSelectionAutoScrollState_() {
+        if (!m_selectionScrollTimer) {
+            return;
+        }
+        if (m_isSelecting && selectionAutoScrollDirectionForPoint_(m_lastSelectionMousePos) != 0) {
+            if (!m_selectionScrollTimer->isActive()) {
+                m_selectionScrollTimer->start();
+            }
+        } else {
+            stopSelectionAutoScroll_();
+        }
+    }
+
+    void stopSelectionAutoScroll_() {
+        if (m_selectionScrollTimer && m_selectionScrollTimer->isActive()) {
+            m_selectionScrollTimer->stop();
+        }
+    }
+
+    bool applySelectionAutoScrollForPoint_(const SwPoint& point) {
+        if (!m_isSelecting) {
+            return false;
+        }
+
+        const int direction = selectionAutoScrollDirectionForPoint_(point);
+        if (direction == 0) {
+            return false;
+        }
+
+        const int visibleLines = visibleLinesForViewport_();
+        const int maxFirst = std::max(0, visibleLineCount_() - visibleLines);
+        const SwRect textRect = textRect_();
+        const int lineHeight = std::max(1, lineHeightPx());
+        const int distance = (direction < 0)
+            ? (textRect.y - point.y)
+            : (point.y - (textRect.y + textRect.height) + 1);
+        const int step = std::max(1, 1 + distance / lineHeight);
+
+        const int oldFirstVisibleLine = m_firstVisibleLine;
+        const size_t oldCursorPos = m_cursorPos;
+        const size_t oldSelectionEnd = m_selectionEnd;
+
+        m_firstVisibleLine = clampInt(m_firstVisibleLine + direction * step, 0, maxFirst);
+        updateCursorFromPosition(point.x, point.y);
+        m_selectionEnd = m_cursorPos;
+        syncScrollBar_();
+
+        if (m_firstVisibleLine == oldFirstVisibleLine &&
+            m_cursorPos == oldCursorPos &&
+            m_selectionEnd == oldSelectionEnd) {
+            return false;
+        }
+
+        update();
+        return true;
+    }
+
+    void syncScrollBar_() {
+        if (!m_vScrollBar || m_syncingScrollBar) {
+            return;
+        }
+        const int lineHeight = lineHeightPx();
+        const SwRect tr = textRect_();
+        const int visibleLines = (lineHeight > 0) ? std::max(1, tr.height / lineHeight) : 1;
+        const int totalLines = visibleLineCount_();
+        const int maxFirst = std::max(0, totalLines - visibleLines);
+        const bool showScrollBar = maxFirst > 0;
+        const bool visibilityChanged = m_vScrollBar->getVisible() != showScrollBar;
+        m_firstVisibleLine = clampInt(m_firstVisibleLine, 0, maxFirst);
+        m_syncingScrollBar = true;
+        m_vScrollBar->setVisible(showScrollBar);
+        m_vScrollBar->setRange(0, maxFirst);
+        m_vScrollBar->setPageStep(visibleLines);
+        m_vScrollBar->setValue(m_firstVisibleLine);
+        m_syncingScrollBar = false;
+        if (visibilityChanged || showScrollBar) {
+            layoutScrollBar_();
+        }
+        ensureVisibleDeferredHighlight_();
+        if (visibilityChanged) {
+            update();
+        }
+    }
+
+    void refreshCharWidthCache_() {
+        const SwFont currentFont = getFont();
+        if (m_cachedCharWidth > 0 && m_cachedCharWidthFont == currentFont) {
+            return;
+        }
+        m_cachedCharWidthFont = currentFont;
+        m_cachedCharWidth = SwWidgetPlatformAdapter::textWidthUntil(
+            nativeWindowHandle(), SwString("M"), currentFont, 1, 8);
+        if (m_cachedCharWidth <= 0) {
+            m_cachedCharWidth = 8;
+        }
+    }
+
+    int textWidthMono_(size_t charCount) const {
+        return static_cast<int>(charCount) * m_cachedCharWidth;
     }
 
     static bool isWordChar_(char ch) {
@@ -1898,17 +2467,38 @@ private:
         return L'\0';
     }
 
-    int lineIndexForPosition_(size_t pos) const {
-        const size_t clamped = std::min(pos, m_text.size());
-        int line = 0;
-        for (int i = 0; i < m_lineStarts.size(); ++i) {
-            if (m_lineStarts[i] <= clamped) {
-                line = i;
-            } else {
-                break;
-            }
+    int documentLineCount_() const {
+        return std::max(1, m_document ? m_document->blockCount() : m_pieceTable.lineCount());
+    }
+
+    size_t documentLength_() const {
+        return m_pieceTable.totalLength();
+    }
+
+    SwString documentLineText_(int lineIndex) const {
+        if (lineIndex < 0 || lineIndex >= documentLineCount_()) {
+            return SwString();
         }
-        return line;
+        return m_pieceTable.lineContent(lineIndex);
+    }
+
+    size_t documentLineLength_(int lineIndex) const {
+        if (lineIndex < 0 || lineIndex >= documentLineCount_()) {
+            return 0;
+        }
+        return m_pieceTable.lineLength(lineIndex);
+    }
+
+    char documentCharAt_(size_t pos) const {
+        return m_pieceTable.charAt(pos);
+    }
+
+    SwString documentSubstring_(size_t pos, size_t len) const {
+        return m_pieceTable.substr(pos, len);
+    }
+
+    int lineIndexForPosition_(size_t pos) const {
+        return m_pieceTable.lineForOffset(pos);
     }
 
     void emitEditorSignals_(size_t oldPos, size_t oldSelStart, size_t oldSelEnd) {
@@ -1921,13 +2511,13 @@ private:
     }
 
     SwString indentationForLine_(int lineIndex) const {
-        if (lineIndex < 0 || lineIndex >= static_cast<int>(m_lines.size())) {
+        if (lineIndex < 0 || lineIndex >= documentLineCount_()) {
             return SwString();
         }
 
         SwString indentation;
         int column = 0;
-        const SwString& line = m_lines[lineIndex];
+        const SwString line = documentLineText_(lineIndex);
         for (size_t i = 0; i < line.size(); ++i) {
             if (line[i] == ' ') {
                 indentation.append(' ');
@@ -1945,11 +2535,11 @@ private:
 
     int visualColumnAtCursor_() const {
         const CursorInfo ci = cursorInfo();
-        if (ci.line < 0 || ci.line >= static_cast<int>(m_lines.size())) {
+        if (ci.line < 0 || ci.line >= documentLineCount_()) {
             return 0;
         }
 
-        const SwString& line = m_lines[ci.line];
+        const SwString line = documentLineText_(ci.line);
         const size_t columnEnd = std::min(static_cast<size_t>(std::max(0, ci.col)), line.size());
         int visualColumn = 0;
         for (size_t i = 0; i < columnEnd; ++i) {
@@ -1964,9 +2554,9 @@ private:
 
     char previousNonSpaceCharOnLine_(size_t pos) const {
         const CursorInfo ci = cursorInfo();
-        size_t cursor = std::min(pos, m_text.size());
+        size_t cursor = std::min(pos, documentLength_());
         while (cursor > ci.lineStart) {
-            const char ch = m_text[cursor - 1];
+            const char ch = documentCharAt_(cursor - 1);
             if (ch != ' ' && ch != '\t') {
                 return ch;
             }
@@ -1977,14 +2567,14 @@ private:
 
     char nextNonSpaceCharOnLine_(size_t pos) const {
         const CursorInfo ci = cursorInfo();
-        if (ci.line < 0 || ci.line >= static_cast<int>(m_lines.size())) {
+        if (ci.line < 0 || ci.line >= documentLineCount_()) {
             return '\0';
         }
 
-        const size_t lineEnd = ci.lineStart + m_lines[ci.line].size();
+        const size_t lineEnd = ci.lineStart + documentLineLength_(ci.line);
         size_t cursor = std::min(pos, lineEnd);
         while (cursor < lineEnd) {
-            const char ch = m_text[cursor];
+            const char ch = documentCharAt_(cursor);
             if (ch != ' ' && ch != '\t') {
                 return ch;
             }
@@ -1994,10 +2584,11 @@ private:
     }
 
     bool isWhitespaceOnlyBetween_(size_t start, size_t end) const {
-        const size_t from = std::min(start, m_text.size());
-        const size_t to = std::min(std::max(start, end), m_text.size());
+        const size_t from = std::min(start, documentLength_());
+        const size_t to = std::min(std::max(start, end), documentLength_());
         for (size_t i = from; i < to; ++i) {
-            if (m_text[i] != ' ' && m_text[i] != '\t') {
+            const char ch = documentCharAt_(i);
+            if (ch != ' ' && ch != '\t') {
                 return false;
             }
         }
@@ -2018,14 +2609,14 @@ private:
             CharLiteral
         };
 
-        std::vector<size_t> braceStack;
+        SwVector<size_t> braceStack;
         ParseState state = ParseState::Normal;
         bool escaped = false;
-        const size_t limit = std::min(m_cursorPos, m_text.size());
+        const size_t limit = std::min(m_cursorPos, documentLength_());
 
         for (size_t i = 0; i < limit; ++i) {
-            const char ch = m_text[i];
-            const char next = (i + 1 < limit) ? m_text[i + 1] : '\0';
+            const char ch = documentCharAt_(i);
+            const char next = (i + 1 < limit) ? documentCharAt_(i + 1) : '\0';
 
             switch (state) {
                 case ParseState::Normal:
@@ -2044,8 +2635,8 @@ private:
                     } else if (ch == '{') {
                         braceStack.push_back(i);
                     } else if (ch == '}') {
-                        if (!braceStack.empty()) {
-                            braceStack.pop_back();
+                        if (!braceStack.isEmpty()) {
+                            braceStack.removeAt(braceStack.size() - 1);
                         }
                     }
                     break;
@@ -2079,7 +2670,7 @@ private:
             }
         }
 
-        if (!braceStack.empty()) {
+        if (!braceStack.isEmpty()) {
             return indentationForPosition_(braceStack.back());
         }
 
@@ -2097,7 +2688,7 @@ private:
         }
 
         const CursorInfo ci = cursorInfo();
-        if (ci.line < 0 || ci.line >= static_cast<int>(m_lines.size())) {
+        if (ci.line < 0 || ci.line >= documentLineCount_()) {
             return false;
         }
 
@@ -2115,11 +2706,11 @@ private:
 
     void unindentCurrentLine_() {
         const CursorInfo ci = cursorInfo();
-        if (ci.line < 0 || ci.line >= static_cast<int>(m_lines.size())) {
+        if (ci.line < 0 || ci.line >= documentLineCount_()) {
             return;
         }
 
-        const SwString& line = m_lines[ci.line];
+        const SwString line = documentLineText_(ci.line);
         if (line.isEmpty()) {
             return;
         }
@@ -2142,7 +2733,6 @@ private:
         eraseTextAt(ci.lineStart, removeCount);
         m_cursorPos = (m_cursorPos >= ci.lineStart + removeCount) ? (m_cursorPos - removeCount) : ci.lineStart;
         m_selectionStart = m_selectionEnd = m_cursorPos;
-        rebuildLines();
         textChanged();
     }
 
@@ -2151,14 +2741,15 @@ private:
         const SwString targetIndent = indentationForMatchingOpeningBrace_();
         recordUndoState_();
 
-        if (m_cursorPos > ci.lineStart) {
-            eraseTextAt(ci.lineStart, m_cursorPos - ci.lineStart);
+        const size_t removedLen = (m_cursorPos > ci.lineStart) ? (m_cursorPos - ci.lineStart) : 0;
+        if (removedLen > 0) {
+            eraseTextAt(ci.lineStart, removedLen);
         }
 
-        insertTextAt(ci.lineStart, targetIndent + SwString("}"));
+        const SwString braceText = targetIndent + SwString("}");
+        insertTextAt(ci.lineStart, braceText);
         m_cursorPos = ci.lineStart + targetIndent.size() + 1;
         m_selectionStart = m_selectionEnd = m_cursorPos;
-        rebuildLines();
         textChanged();
     }
 
@@ -2206,6 +2797,23 @@ private:
             return;
         }
 
+        if (m_completionProvider) {
+            SwStandardItemModel* model = dynamic_cast<SwStandardItemModel*>(m_completer->model());
+            if (model) {
+                model->clear();
+                const SwList<CompletionEntry> entries =
+                    m_completionProvider(this, prefix, m_cursorPos, forceShow);
+                for (int i = 0; i < entries.size(); ++i) {
+                    SwStandardItem* row = new SwStandardItem(entries[i].displayText);
+                    row->setEditText(entries[i].insertText.isEmpty() ? entries[i].displayText : entries[i].insertText);
+                    if (!entries[i].toolTip.isEmpty()) {
+                        row->setToolTip(entries[i].toolTip);
+                    }
+                    model->appendRow(row);
+                }
+            }
+        }
+
         m_completer->setWidget(this);
         m_completer->setCompletionPrefix(prefix);
         m_completer->complete(cursorRect());
@@ -2241,11 +2849,20 @@ private:
     SwSyntaxHighlighter* m_highlighter{nullptr};
     SwTextDiagnosticsProvider* m_diagnosticsProvider{nullptr};
     SwCompleter* m_completer{nullptr};
+    std::function<SwList<CompletionEntry>(SwCodeEditor*, const SwString&, size_t, bool)> m_completionProvider;
+    SwTimer* m_foldTimer{nullptr};
+    SwTimer* m_deferredHighlightTimer{nullptr};
+    SwTimer* m_selectionScrollTimer{nullptr};
+    SwScrollBar* m_vScrollBar{nullptr};
+    bool m_syncingScrollBar{false};
     SwList<SwTextDiagnostic> m_diagnostics;
     SwList<SwTextExtraSelection> m_extraSelections;
     SwVector<FoldRegion> m_foldRegions;
     SwVector<int> m_visibleLineIndices;
     SwVector<int> m_visibleRowByLine;
+    SwVector<SwTextCharFormat> m_perCharFmtBuf;
+    SwVector<char> m_hasFormatBuf;
+    bool m_identityVisibleLines{true};
     bool m_lineNumbersVisible{true};
     bool m_codeFoldingEnabled{true};
     bool m_highlightCurrentLine{true};
@@ -2253,8 +2870,14 @@ private:
     bool m_syncingFromDocument{false};
     bool m_ownsDocument{false};
     bool m_autoCompletionEnabled{true};
+    bool m_foldDirty{false};
+    bool m_suppressFoldRefresh{false};
     int m_autoCompletionMinPrefixLength{2};
     int m_indentSize{4};
     int m_hoveredFoldStartLine{-1};
+    int m_lastKnownLineCount{0};
+    int m_cachedCharWidth{0};
+    SwFont m_cachedCharWidthFont;
+    SwPoint m_lastSelectionMousePos{0, 0};
     SwCodeEditorTheme m_theme{swCodeEditorDefaultTheme()};
 };

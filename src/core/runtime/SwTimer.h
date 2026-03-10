@@ -150,7 +150,12 @@ public:
         // ✅ si on n'est pas dans le thread d'affinité du timer, on forward
         if (threadHandle() && ThreadHandle::currentThread() != threadHandle()) {
             auto self = this;
-            threadHandle()->postTask([self]() { self->start(); });
+            threadHandle()->postTask([self]() {
+                if (!SwObject::isLive(self)) {
+                    return;
+                }
+                self->start();
+            });
             return;
         }
 
@@ -158,10 +163,14 @@ public:
             m_running = true;
             m_startTime = std::chrono::steady_clock::now();
 
-             m_timerId = SwCoreApplication::instance()->addTimer([this]() {
+             auto* self = this;
+             m_timerId = SwCoreApplication::instance()->addTimer([self]() {
+                 if (!SwObject::isLive(self)) {
+                     return;
+                 }
                  // Update internal state before emitting: slots may delete this timer.
-                 m_startTime = std::chrono::steady_clock::now();
-                 emit timeout();
+                 self->m_startTime = std::chrono::steady_clock::now();
+                 self->timeout();
              }, static_cast<int>(m_interval), m_singleShot);
          }
      }
@@ -172,7 +181,12 @@ public:
     void start(int ms) {
         if (threadHandle() && ThreadHandle::currentThread() != threadHandle()) {
             auto self = this;
-            threadHandle()->postTask([self, ms]() { self->start(ms); });
+            threadHandle()->postTask([self, ms]() {
+                if (!SwObject::isLive(self)) {
+                    return;
+                }
+                self->start(ms);
+            });
             return;
         }
         setInterval(ms);
@@ -186,7 +200,12 @@ public:
         // ✅ stop doit aussi s'exécuter dans le thread du timer
         if (threadHandle() && ThreadHandle::currentThread() != threadHandle()) {
             auto self = this;
-            threadHandle()->postTask([self]() { self->stop(); });
+            threadHandle()->postTask([self]() {
+                if (!SwObject::isLive(self)) {
+                    return;
+                }
+                self->stop();
+            });
             return;
         }
 

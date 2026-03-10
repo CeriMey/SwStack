@@ -55,11 +55,12 @@
  **************************************************************************************************/
 
 #include "SwWidget.h"
+#include "core/object/SwPointer.h"
 #include "core/types/SwVector.h"
 
 #if defined(_WIN32)
-#include "platform/win/SwWin32Painter.h"
 #include "core/runtime/SwCoreApplication.h"
+#include "platform/win/SwWindows.h"
 #endif
 
 class SwComboBox : public SwWidget {
@@ -635,6 +636,7 @@ private:
             : SwWidget(parent)
             , m_owner(owner)
             , m_root(root) {
+            setFocusPolicy(FocusPolicyEnum::NoFocus);
             setStyleSheet("SwWidget { background-color: rgba(0,0,0,0); border-width: 0px; }");
         }
 
@@ -674,7 +676,7 @@ private:
                                              event->isCtrlPressed(),
                                              event->isShiftPressed(),
                                              event->isAltPressed());
-                        static_cast<SwWidgetInterface*>(m_root)->mousePressEvent(&forwarded);
+                        m_root->dispatchMouseEventFromRoot(forwarded);
                     }
                     event->accept();
                     return;
@@ -710,6 +712,7 @@ private:
             : SwWidget(parent)
             , m_owner(owner) {
             setCursor(CursorType::Hand);
+            setFocusPolicy(FocusPolicyEnum::NoFocus);
             setStyleSheet("SwWidget { background-color: rgba(0,0,0,0); border-width: 0px; }");
         }
 
@@ -1055,6 +1058,7 @@ private:
 
         m_popupVisible = on;
         if (m_popupVisible) {
+            setFocus(true);
             syncPopupToCurrentIndex_();
 #if defined(_WIN32)
             if (openNativePopup_()) {
@@ -1269,6 +1273,27 @@ private:
 #if defined(_WIN32)
     static constexpr const wchar_t* popupClassName_() { return L"SwComboBoxPopup"; }
 
+    static void postGuardedPopupAction_(SwComboBox* comboBox, std::function<void(SwComboBox*)> fn) {
+        if (!comboBox || !fn) {
+            return;
+        }
+        if (auto* app = SwCoreApplication::instance(false)) {
+            const SwPointer<SwComboBox> self(comboBox);
+            app->postEvent([self, fn = std::move(fn)]() mutable {
+                if (!self) {
+                    return;
+                }
+                SwComboBox* liveSelf = self.data();
+                if (!SwObject::isLive(liveSelf)) {
+                    return;
+                }
+                fn(liveSelf);
+            });
+            return;
+        }
+        fn(comboBox);
+    }
+
     static void ensurePopupClassRegistered_() {
         static bool done = false;
         if (done) {
@@ -1315,9 +1340,7 @@ private:
             if (idx >= 0 && idx < self->count()) {
                 self->m_popupHighlightedIndex = idx;
                 // Post to avoid DestroyWindow from inside WndProc.
-                if (auto* app = SwCoreApplication::instance(false)) {
-                    app->postEvent([self]() { self->commitPopupHighlighted_(); });
-                }
+                postGuardedPopupAction_(self, [](SwComboBox* liveSelf) { liveSelf->commitPopupHighlighted_(); });
             }
             return 0;
         }
@@ -1335,15 +1358,11 @@ private:
         case WM_KEYDOWN: {
             const int key = static_cast<int>(wp);
             if (key == VK_ESCAPE) {
-                if (auto* app = SwCoreApplication::instance(false)) {
-                    app->postEvent([self]() { self->hidePopup(); });
-                }
+                postGuardedPopupAction_(self, [](SwComboBox* liveSelf) { liveSelf->hidePopup(); });
                 return 0;
             }
             if (key == VK_RETURN) {
-                if (auto* app = SwCoreApplication::instance(false)) {
-                    app->postEvent([self]() { self->commitPopupHighlighted_(); });
-                }
+                postGuardedPopupAction_(self, [](SwComboBox* liveSelf) { liveSelf->commitPopupHighlighted_(); });
                 return 0;
             }
             if (key == VK_UP) {
@@ -1371,11 +1390,7 @@ private:
         case WM_ACTIVATE: {
             if (LOWORD(wp) == WA_INACTIVE) {
                 self->m_lastNativePopupCloseMs = GetTickCount64();
-                if (auto* app = SwCoreApplication::instance(false)) {
-                    app->postEvent([self]() { self->hidePopup(); });
-                } else {
-                    self->hidePopup();
-                }
+                postGuardedPopupAction_(self, [](SwComboBox* liveSelf) { liveSelf->hidePopup(); });
             }
             return 0;
         }
@@ -1404,13 +1419,33 @@ private:
         HBITMAP memBmp = CreateCompatibleBitmap(hdc, cw, ch);
         HBITMAP oldBmp = static_cast<HBITMAP>(SelectObject(memDC, memBmp));
 
-        SwWin32Painter painter(memDC);
-        painter.clear(SwColor{0, 0, 0});
+        SwGuiApplication* guiApp = SwGuiApplication::instance(false);
+        if (!guiApp || !guiApp->platformIntegration()) {
+            SelectObject(memDC, oldBmp);
+            DeleteObject(memBmp);
+            DeleteDC(memDC);
+            return;
+        }
+
+        SwScopedPlatformPainter painter(guiApp->platformIntegration(),
+                                        SwMakePlatformPaintEvent(SwPlatformSize{cw, ch},
+                                                                 memDC,
+                                                                 m_nativePopupHwnd,
+                                                                 nullptr,
+                                                                 SwPlatformRect{0, 0, cw, ch}));
+        if (!painter) {
+            SelectObject(memDC, oldBmp);
+            DeleteObject(memBmp);
+            DeleteDC(memDC);
+            return;
+        }
+
+        painter->clear(SwColor{0, 0, 0});
         const int bw = m_nativePopupBorderWidth;
         SwRect bounds{0, 0, cw, ch};
         const auto& rr = m_nativePopupRadii;
-        painter.fillRoundedRect(bounds, rr.tl, rr.tr, rr.br, rr.bl,
-                                m_nativePopupBg, m_nativePopupBorderColor, bw);
+        painter->fillRoundedRect(bounds, rr.tl, rr.tr, rr.br, rr.bl,
+                                 m_nativePopupBg, m_nativePopupBorderColor, bw);
 
         const int n = count();
         const int visible = std::min(n, m_maxVisibleItems);
@@ -1428,22 +1463,24 @@ private:
             const bool selected = (index == m_currentIndex);
 
             if (hovered) {
-                painter.fillRoundedRect(row, 8, SwColor{244, 246, 250}, SwColor{244, 246, 250}, 0);
+                painter->fillRoundedRect(row, 8, SwColor{244, 246, 250}, SwColor{244, 246, 250}, 0);
             }
 
             const bool hasSelection = (m_currentIndex >= 0);
             const int textPadL = hasSelection ? 16 : 8;
             SwColor textColor = selected ? SwColor{24, 28, 36} : SwColor{30, 30, 30};
             SwRect textRect{row.x + textPadL, row.y, std::max(0, row.width - textPadL), row.height};
-            painter.drawText(textRect, itemText(index),
-                             DrawTextFormats(DrawTextFormat::Left | DrawTextFormat::VCenter | DrawTextFormat::SingleLine),
-                             textColor, getFont());
+            painter->drawText(textRect, itemText(index),
+                              DrawTextFormats(DrawTextFormat::Left | DrawTextFormat::VCenter | DrawTextFormat::SingleLine),
+                              textColor, getFont());
 
             if (selected) {
                 SwRect pill{row.x + 4, row.y + 6, 3, std::max(0, row.height - 12)};
-                painter.fillRoundedRect(pill, 2, m_accent, m_accent, 0);
+                painter->fillRoundedRect(pill, 2, m_accent, m_accent, 0);
             }
         }
+        painter->finalize();
+        painter->flush();
 
         BitBlt(hdc, 0, 0, cw, ch, memDC, 0, 0, SRCCOPY);
         SelectObject(memDC, oldBmp);

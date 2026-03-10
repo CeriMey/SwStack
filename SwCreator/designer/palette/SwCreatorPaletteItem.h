@@ -36,7 +36,6 @@ private:
     SwPoint rootWindowClientPos_(int localX, int localY) const;
 
     SwCreatorPaletteEntry m_entry;
-    bool m_hover{false};
     bool m_pressed{false};
     bool m_dragging{false};
     bool m_selected{false};

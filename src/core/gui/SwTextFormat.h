@@ -65,8 +65,8 @@ public:
     bool hasFontItalic() const                    { return m_hasItalic; }
 
     void setFontUnderline(bool on)                { setUnderlineStyle(on ? SingleUnderline : NoUnderline); }
-    bool fontUnderline() const                    { return m_underlineStyle != NoUnderline; }
-    bool hasFontUnderline() const                 { return m_hasUnderlineStyle; }
+    bool fontUnderline() const                    { return m_underlineStyle == SingleUnderline; }
+    bool hasFontUnderline() const                 { return m_hasUnderlineStyle && m_underlineStyle == SingleUnderline; }
 
     void setUnderlineStyle(UnderlineStyle style)  { m_underlineStyle = style; m_hasUnderlineStyle = true; }
     UnderlineStyle underlineStyle() const         { return m_underlineStyle; }

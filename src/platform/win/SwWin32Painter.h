@@ -51,8 +51,8 @@
 
 #include "platform/win/SwWindows.h"
 
-#include "core/gui/SwPainter.h"
 #include "core/gui/graphics/SwImage.h"
+#include "platform/SwPlatformIntegration.h"
 
 #include <wrl/client.h>
 #include <d2d1.h>
@@ -76,8 +76,13 @@
 #pragma comment(lib, "windowscodecs.lib")
 #pragma comment(lib, "msimg32.lib")
 
-class SwWin32Painter : public SwPainter {
+class SwWin32Painter : public SwPlatformPainter {
 public:
+    SwWin32Painter() = default;
+    ~SwWin32Painter() override {
+        end();
+    }
+
     /**
      * @brief Constructs a `SwWin32Painter` instance.
      * @param dc Value passed to the method.
@@ -87,11 +92,86 @@ public:
     explicit SwWin32Painter(HDC dc)
         : m_hdc(dc) {}
 
+    void begin(const SwPlatformPaintEvent& event) override {
+        end();
+
+        HDC paintDevice = static_cast<HDC>(event.nativePaintDevice);
+        if (!paintDevice) {
+            return;
+        }
+
+        m_surfaceSize = event.surfaceSize;
+        if (m_surfaceSize.width <= 0) {
+            m_surfaceSize.width = std::max(0, event.dirtyRect.width);
+        }
+        if (m_surfaceSize.height <= 0) {
+            m_surfaceSize.height = std::max(0, event.dirtyRect.height);
+        }
+
+        m_dirtyRect.left = event.dirtyRect.x;
+        m_dirtyRect.top = event.dirtyRect.y;
+        m_dirtyRect.right = event.dirtyRect.x + std::max(0, event.dirtyRect.width);
+        m_dirtyRect.bottom = event.dirtyRect.y + std::max(0, event.dirtyRect.height);
+        m_finalizeRequested = false;
+        m_presented = false;
+
+        const DWORD deviceType = GetObjectType(paintDevice);
+        if (deviceType == OBJ_MEMDC || m_surfaceSize.width <= 0 || m_surfaceSize.height <= 0) {
+            m_hdc = paintDevice;
+            if (m_dirtyRect.right <= m_dirtyRect.left || m_dirtyRect.bottom <= m_dirtyRect.top) {
+                RECT clip{};
+                if (GetClipBox(m_hdc, &clip) != ERROR) {
+                    m_dirtyRect = clip;
+                }
+            }
+            return;
+        }
+
+        HDC memDc = CreateCompatibleDC(paintDevice);
+        if (!memDc) {
+            m_hdc = paintDevice;
+            return;
+        }
+
+        HBITMAP bitmap = CreateCompatibleBitmap(paintDevice, m_surfaceSize.width, m_surfaceSize.height);
+        if (!bitmap) {
+            DeleteDC(memDc);
+            m_hdc = paintDevice;
+            return;
+        }
+
+        m_targetHdc = paintDevice;
+        m_backBitmap = bitmap;
+        m_oldBitmap = static_cast<HBITMAP>(SelectObject(memDc, bitmap));
+        m_hdc = memDc;
+        m_ownsBuffer = true;
+
+        if (m_dirtyRect.right <= m_dirtyRect.left || m_dirtyRect.bottom <= m_dirtyRect.top) {
+            m_dirtyRect = RECT{0, 0, m_surfaceSize.width, m_surfaceSize.height};
+        }
+    }
+
+    void end() override {
+        m_finalizeRequested = true;
+        presentIfNeeded_();
+        resetPaintState_();
+    }
+
+    void flush() override {
+        presentIfNeeded_();
+        if (m_hdc) {
+            GdiFlush();
+        }
+    }
+
     /**
      * @brief Clears the current object state.
      * @param color Value passed to the method.
      */
     void clear(const SwColor& color) override {
+        if (!m_hdc) {
+            return;
+        }
         RECT rect;
         GetClipBox(m_hdc, &rect);
         HBRUSH brush = createBrush(color);
@@ -110,6 +190,9 @@ public:
                   const SwColor& fillColor,
                   const SwColor& borderColor,
                   int borderWidth) override {
+        if (!m_hdc) {
+            return;
+        }
         RECT r = toRect(rect);
         HBRUSH brush = createBrush(fillColor);
         FillRect(m_hdc, &r, brush);
@@ -318,6 +401,9 @@ public:
     void drawRect(const SwRect& rect,
                   const SwColor& borderColor,
                   int borderWidth) override {
+        if (!m_hdc) {
+            return;
+        }
         RECT r = toRect(rect);
         HPEN pen = createPen(borderColor, borderWidth);
         HPEN oldPen = (HPEN)SelectObject(m_hdc, pen);
@@ -341,7 +427,7 @@ public:
                         int borderWidth,
                         int /*dashLen*/,
                         int /*gapLen*/) override {
-        if (rect.width <= 0 || rect.height <= 0) return;
+        if (!m_hdc || rect.width <= 0 || rect.height <= 0) return;
         const int bw = borderWidth > 0 ? borderWidth : 1;
         LOGBRUSH lb{BS_SOLID, toColorRef(color), 0};
         HPEN pen = ExtCreatePen(PS_GEOMETRIC | PS_DASH | PS_ENDCAP_FLAT | PS_JOIN_MITER,
@@ -739,6 +825,13 @@ public:
      */
     void* nativeHandle() override {
         return m_hdc;
+    }
+
+    void finalize() override {
+        m_finalizeRequested = true;
+        if (!m_deferPresent) {
+            presentIfNeeded_();
+        }
     }
 
 private:
@@ -1379,6 +1472,7 @@ private:
         UINT32 pixelsPerEm{0};
         D2D1_SIZE_U pixelSize{0, 0};
         D2D1_POINT_2L horizontalLeftOrigin{0, 0};
+        std::uint64_t lastAccessStamp{0};
     };
 
     bool createD2DBitmapFromPngData_(const void* data, UINT32 size, ID2D1Bitmap** outBitmap) const {
@@ -1460,6 +1554,7 @@ private:
 
         auto it = m_pngGlyphCache.find(key);
         if (it != m_pngGlyphCache.end()) {
+            it->second.lastAccessStamp = ++m_pngCacheAccessCounter;
             return &it->second;
         }
 
@@ -1495,6 +1590,19 @@ private:
 
         fontFace4->ReleaseGlyphImageData(glyphDataContext);
 
+        // Evict oldest entries when cache exceeds capacity.
+        static const std::size_t kMaxPngGlyphCacheSize = 512;
+        if (m_pngGlyphCache.size() >= kMaxPngGlyphCacheSize) {
+            auto oldest = m_pngGlyphCache.begin();
+            for (auto cur = m_pngGlyphCache.begin(); cur != m_pngGlyphCache.end(); ++cur) {
+                if (cur->second.lastAccessStamp < oldest->second.lastAccessStamp) {
+                    oldest = cur;
+                }
+            }
+            m_pngGlyphCache.erase(oldest);
+        }
+
+        entry.lastAccessStamp = ++m_pngCacheAccessCounter;
         auto inserted = m_pngGlyphCache.emplace(key, std::move(entry));
         if (!inserted.second) {
             return nullptr;
@@ -2052,11 +2160,82 @@ private:
     }
 
     static UINT translateAlignment(DrawTextFormats formats) {
-        return static_cast<UINT>(formats.raw());
+        return static_cast<UINT>(formats.raw()) | DT_NOPREFIX;
+    }
+
+    void presentIfNeeded_() {
+        if (!m_finalizeRequested || m_presented || !m_ownsBuffer || !m_targetHdc || !m_hdc) {
+            return;
+        }
+
+        int copyWidth = m_dirtyRect.right - m_dirtyRect.left;
+        int copyHeight = m_dirtyRect.bottom - m_dirtyRect.top;
+        if (copyWidth <= 0 || copyHeight <= 0) {
+            copyWidth = m_surfaceSize.width;
+            copyHeight = m_surfaceSize.height;
+            m_dirtyRect = RECT{0, 0, copyWidth, copyHeight};
+        }
+
+        BitBlt(m_targetHdc,
+               m_dirtyRect.left,
+               m_dirtyRect.top,
+               copyWidth,
+               copyHeight,
+               m_hdc,
+               m_dirtyRect.left,
+               m_dirtyRect.top,
+               SRCCOPY);
+        m_presented = true;
+    }
+
+    void resetPaintState_() {
+        if (m_hdc) {
+            while (m_clipDepth > 0) {
+                RestoreDC(m_hdc, -1);
+                --m_clipDepth;
+            }
+            GdiFlush();
+        }
+
+        m_d2dTarget.Reset();
+        m_textBrush.Reset();
+        m_pngGlyphCache.clear();
+        m_dwriteBitmapTarget.Reset();
+        m_bitmapTargetWidth = 0;
+        m_bitmapTargetHeight = 0;
+
+        if (m_ownsBuffer && m_hdc) {
+            if (m_oldBitmap) {
+                SelectObject(m_hdc, m_oldBitmap);
+                m_oldBitmap = nullptr;
+            }
+            if (m_backBitmap) {
+                DeleteObject(m_backBitmap);
+                m_backBitmap = nullptr;
+            }
+            DeleteDC(m_hdc);
+        }
+
+        m_hdc = nullptr;
+        m_targetHdc = nullptr;
+        m_ownsBuffer = false;
+        m_finalizeRequested = false;
+        m_presented = false;
+        m_surfaceSize = SwPlatformSize{};
+        m_dirtyRect = RECT{0, 0, 0, 0};
     }
 
     HDC m_hdc{nullptr};
+    HDC m_targetHdc{nullptr};
+    HBITMAP m_backBitmap{nullptr};
+    HBITMAP m_oldBitmap{nullptr};
     int m_clipDepth{0};
+    bool m_ownsBuffer{false};
+    bool m_finalizeRequested{false};
+    bool m_deferPresent{true};
+    bool m_presented{false};
+    SwPlatformSize m_surfaceSize{};
+    RECT m_dirtyRect{0, 0, 0, 0};
 
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> m_d2dTarget;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> m_textBrush;
@@ -2066,6 +2245,7 @@ private:
     SwColor m_cachedBrushColor{0, 0, 0};
     bool m_hasBrushColorCache{false};
     std::unordered_map<PngGlyphCacheKey, PngGlyphCacheEntry, PngGlyphCacheKeyHash> m_pngGlyphCache;
+    std::uint64_t m_pngCacheAccessCounter{0};
     Microsoft::WRL::ComPtr<IDWriteBitmapRenderTarget> m_dwriteBitmapTarget;
     UINT32 m_bitmapTargetWidth{0};
     UINT32 m_bitmapTargetHeight{0};

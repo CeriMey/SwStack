@@ -10,6 +10,20 @@
 #include "SwFile.h"
 #include "SwDebug.h"
 
+#if defined(__has_include)
+#if __has_include("SwHttpServerSelfTestConfig.h")
+#include "SwHttpServerSelfTestConfig.h"
+#endif
+#endif
+
+#ifndef SW_HTTP_SERVER_SELFTEST_STATIC_ROOT
+#define SW_HTTP_SERVER_SELFTEST_STATIC_ROOT "exemples/35-HttpServerSelfTest/runtime/http_selftest_www"
+#endif
+
+#ifndef SW_HTTP_SERVER_SELFTEST_TEMP_ROOT
+#define SW_HTTP_SERVER_SELFTEST_TEMP_ROOT "exemples/35-HttpServerSelfTest/runtime/http_selftest_tmp"
+#endif
+
 struct ParsedHttpResponse {
     bool valid = false;
     int statusCode = 0;
@@ -159,7 +173,7 @@ private:
     SwByteArray m_responseRaw;
     SwByteArray m_staticFixture;
     SwByteArray m_multipartPayload;
-    SwString m_staticRoot = "http_selftest_www";
+    SwString m_staticRoot = SW_HTTP_SERVER_SELFTEST_STATIC_ROOT;
     SwString m_staticFileName = "http_selftest_large.bin";
     bool m_caseDone = false;
 
@@ -560,7 +574,7 @@ int main(int argc, char* argv[]) {
     limits.maxMultipartParts = 32;
     limits.maxMultipartPartHeadersBytes = 8 * 1024;
     limits.enableMultipartFileStreaming = true;
-    limits.multipartTempDirectory = "http_selftest_tmp";
+    limits.multipartTempDirectory = SW_HTTP_SERVER_SELFTEST_TEMP_ROOT;
     server.setLimits(limits);
     server.setTrailingSlashPolicy(SwHttpRouter::TrailingSlashPolicy::RedirectToNoSlash);
 
@@ -659,7 +673,7 @@ int main(int argc, char* argv[]) {
     staticOptions.enableRange = true;
     staticOptions.ioChunkBytes = 1024;
     staticOptions.cacheControl = "no-cache";
-    server.mountStatic("/static", "http_selftest_www", staticOptions);
+    server.mountStatic("/static", SW_HTTP_SERVER_SELFTEST_STATIC_ROOT, staticOptions);
 
     {
         SwMap<SwString, SwString> params;

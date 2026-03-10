@@ -52,7 +52,6 @@
 
 #if defined(_WIN32)
 #include "platform/win/SwWindows.h"
-#include "platform/win/SwWin32Painter.h"
 #include <cstdint>
 #endif
 
@@ -113,11 +112,35 @@ public:
 
         HBITMAP oldBitmap = static_cast<HBITMAP>(SelectObject(memDc, dib));
 
-        SwWin32Painter painter(memDc);
-        painter.clear(SwColor{255, 255, 255});
+        SwGuiApplication* guiApp = SwGuiApplication::instance(false);
+        if (!guiApp || !guiApp->platformIntegration()) {
+            SelectObject(memDc, oldBitmap);
+            DeleteObject(dib);
+            DeleteDC(memDc);
+            ReleaseDC(nullptr, screenDc);
+            return false;
+        }
 
-        PaintEvent paintEvent(&painter, rect);
-        widget->paintEvent(&paintEvent);
+        SwScopedPlatformPainter painter(guiApp->platformIntegration(),
+                                        SwMakePlatformPaintEvent(SwPlatformSize{rect.width, rect.height},
+                                                                 memDc,
+                                                                 nullptr,
+                                                                 nullptr,
+                                                                 SwPlatformRect{0, 0, rect.width, rect.height}));
+        if (!painter) {
+            SelectObject(memDc, oldBitmap);
+            DeleteObject(dib);
+            DeleteDC(memDc);
+            ReleaseDC(nullptr, screenDc);
+            return false;
+        }
+
+        painter->clear(SwColor{255, 255, 255});
+
+        PaintEvent paintEvent(painter.asPainter(), rect);
+        SwCoreApplication::sendEvent(widget, &paintEvent);
+        painter->finalize();
+        painter->flush();
 
         const int strideBytes = rect.width * 4;
         SwByteArray png = encodePngRgb24(static_cast<const std::uint8_t*>(bits),
@@ -354,4 +377,3 @@ private:
     }
 #endif
 };
-

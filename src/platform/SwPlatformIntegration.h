@@ -56,6 +56,7 @@
 #include <vector>
 
 class SwGuiApplication;
+#include "core/gui/SwPainter.h"
 #include "core/types/SwString.h"
 
 enum class SwMouseButton {
@@ -139,6 +140,69 @@ struct SwPlatformRect {
         : x(px), y(py), width(w), height(h) {}
 };
 
+enum class SwPlatformWindowRole {
+    MainWindow,
+    Dialog,
+    ToolWindow
+};
+
+struct SwPlatformWindowOptions {
+    SwPlatformWindowRole role{SwPlatformWindowRole::MainWindow};
+    void* ownerHandle{nullptr};
+    bool resizable{true};
+    bool minimizable{true};
+    bool maximizable{true};
+    bool showInTaskbar{true};
+};
+
+struct SwPlatformPaintEvent {
+    SwPlatformRect dirtyRect{};
+    SwPlatformSize surfaceSize{};
+    void* nativePaintDevice{nullptr};
+    void* nativeWindowHandle{nullptr};
+    void* nativeDisplay{nullptr};
+};
+
+inline SwPlatformPaintEvent SwMakePlatformPaintEvent(const SwPlatformSize& surfaceSize,
+                                                     void* nativePaintDevice,
+                                                     void* nativeWindowHandle = nullptr,
+                                                     void* nativeDisplay = nullptr,
+                                                     const SwPlatformRect& dirtyRect = SwPlatformRect()) {
+    SwPlatformPaintEvent event;
+    event.dirtyRect = dirtyRect;
+    event.surfaceSize = surfaceSize;
+    event.nativePaintDevice = nativePaintDevice;
+    event.nativeWindowHandle = nativeWindowHandle ? nativeWindowHandle : nativePaintDevice;
+    event.nativeDisplay = nativeDisplay;
+    return event;
+}
+
+inline SwPlatformPaintEvent SwResolvePlatformPaintEvent(const SwPlatformPaintEvent& baseEvent,
+                                                        const SwPlatformSize& fallbackSurfaceSize,
+                                                        void* fallbackPaintDevice = nullptr,
+                                                        void* fallbackWindowHandle = nullptr,
+                                                        void* fallbackDisplay = nullptr) {
+    SwPlatformPaintEvent resolved = baseEvent;
+
+    if (!resolved.nativePaintDevice) {
+        resolved.nativePaintDevice = fallbackPaintDevice ? fallbackPaintDevice : fallbackWindowHandle;
+    }
+    if (!resolved.nativeWindowHandle) {
+        resolved.nativeWindowHandle = fallbackWindowHandle ? fallbackWindowHandle : resolved.nativePaintDevice;
+    }
+    if (!resolved.nativeDisplay) {
+        resolved.nativeDisplay = fallbackDisplay;
+    }
+    if (resolved.surfaceSize.width <= 0 || resolved.surfaceSize.height <= 0) {
+        resolved.surfaceSize = fallbackSurfaceSize;
+    }
+    if (resolved.dirtyRect.width <= 0 || resolved.dirtyRect.height <= 0) {
+        resolved.dirtyRect = SwPlatformRect{0, 0, resolved.surfaceSize.width, resolved.surfaceSize.height};
+    }
+
+    return resolved;
+}
+
 struct SwKeyEvent {
     int keyCode{0};
     bool ctrl{false};
@@ -190,12 +254,22 @@ struct SwWindowCallbacks {
      * @brief Performs the `function<void` operation.
      * @return The requested function<void.
      */
+    std::function<void()> mouseLeaveHandler;
+    /**
+     * @brief Performs the `function<void` operation.
+     * @return The requested function<void.
+     */
     std::function<void(const SwMouseEvent&)> mouseWheelHandler;
     /**
      * @brief Performs the `function<void` operation.
      * @return The requested function<void.
      */
     std::function<void(const SwKeyEvent&)> keyPressHandler;
+    /**
+     * @brief Performs the `function<void` operation.
+     * @return The requested function<void.
+     */
+    std::function<void(const SwKeyEvent&)> keyReleaseHandler;
     /**
      * @brief Returns the current function<void.
      * @return The current function<void.
@@ -209,7 +283,7 @@ struct SwWindowCallbacks {
      *
      * @details The returned value reflects the state currently stored by the instance.
      */
-    std::function<void()> paintRequestHandler;
+    std::function<void(const SwPlatformPaintEvent&)> paintRequestHandler;
 };
 
 class SwPlatformImage {
@@ -264,7 +338,7 @@ public:
     virtual void clear(std::uint32_t argb) = 0;
 };
 
-class SwPlatformPainter {
+class SwPlatformPainter : public SwPainter {
 public:
     /**
      * @brief Destroys the `SwPlatformPainter` instance.
@@ -278,7 +352,7 @@ public:
      * @param surface Value passed to the method.
      * @return The requested begin.
      */
-    virtual void begin(void* surface) = 0;
+    virtual void begin(const SwPlatformPaintEvent& event) = 0;
     /**
      * @brief Returns the current end.
      * @return The current end.
@@ -294,20 +368,6 @@ public:
      */
     virtual void flush() = 0;
 
-    /**
-     * @brief Performs the `drawImage` operation.
-     * @return The requested draw Image.
-     */
-    virtual void drawImage(const SwPlatformImage&,
-                           const SwPlatformRect&,
-                           const SwPlatformPoint&) {}
-
-    /**
-     * @brief Performs the `fillRect` operation.
-     * @param uint32_t Value passed to the method.
-     * @return The requested fill Rect.
-     */
-    virtual void fillRect(const SwPlatformRect&, std::uint32_t /*argb*/) {}
 };
 
 class SwPlatformWindow {
@@ -369,6 +429,13 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     virtual void* nativeHandle() const = 0;
+    /**
+     * @brief Returns an optional native display / connection handle associated with the window.
+     * @return The current native display handle, or nullptr when the backend does not use one.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
+    virtual void* nativeDisplay() const = 0;
 };
 
 class SwPlatformIntegration {
@@ -405,7 +472,8 @@ public:
     virtual std::unique_ptr<SwPlatformWindow> createWindow(const std::string& title,
                                                            int width,
                                                            int height,
-                                                           const SwWindowCallbacks& callbacks) = 0;
+                                                           const SwWindowCallbacks& callbacks,
+                                                           const SwPlatformWindowOptions& options = {}) = 0;
 
     /**
      * @brief Returns the current painter.
@@ -466,4 +534,32 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     virtual const char* name() const = 0;
+};
+
+class SwScopedPlatformPainter {
+public:
+    SwScopedPlatformPainter(SwPlatformIntegration* integration, const SwPlatformPaintEvent& event) {
+        if (!integration) {
+            return;
+        }
+
+        m_painter = integration->createPainter();
+        if (m_painter) {
+            m_painter->begin(event);
+        }
+    }
+
+    ~SwScopedPlatformPainter() {
+        if (m_painter) {
+            m_painter->end();
+        }
+    }
+
+    SwPlatformPainter* get() const { return m_painter.get(); }
+    SwPainter* asPainter() const { return m_painter.get(); }
+    SwPlatformPainter* operator->() const { return m_painter.get(); }
+    explicit operator bool() const { return m_painter != nullptr; }
+
+private:
+    std::unique_ptr<SwPlatformPainter> m_painter;
 };

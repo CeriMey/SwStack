@@ -819,10 +819,13 @@ private:
             SwColor bgChecked{241, 245, 249};
 
             SwColor border{226, 232, 240};
+            SwColor borderChecked = darken_(border, 12);
             SwColor textColor{15, 23, 42};
+            SwColor textColorChecked{textColor};
             SwColor textColorDisabled{148, 163, 184};
 
             SwColor indicator{71, 85, 105};
+            SwColor indicatorChecked{51, 65, 85};
             SwColor indicatorDisabled{148, 163, 184};
 
             int borderWidth = 1;
@@ -839,9 +842,12 @@ private:
             (void)tryParseColor_(sheet, styleValue_(sheet, hierarchy, "background-color-pressed"), bgPressed);
             (void)tryParseColor_(sheet, styleValue_(sheet, hierarchy, "background-color-checked"), bgChecked);
             (void)tryParseColor_(sheet, styleValue_(sheet, hierarchy, "border-color"), border);
+            (void)tryParseColor_(sheet, styleValue_(sheet, hierarchy, "border-color-checked"), borderChecked);
             (void)tryParseColor_(sheet, styleValue_(sheet, hierarchy, "color"), textColor);
+            (void)tryParseColor_(sheet, styleValue_(sheet, hierarchy, "color-checked"), textColorChecked);
             (void)tryParseColor_(sheet, styleValue_(sheet, hierarchy, "color-disabled"), textColorDisabled);
             (void)tryParseColor_(sheet, styleValue_(sheet, hierarchy, "indicator-color"), indicator);
+            (void)tryParseColor_(sheet, styleValue_(sheet, hierarchy, "indicator-color-checked"), indicatorChecked);
             (void)tryParseColor_(sheet, styleValue_(sheet, hierarchy, "indicator-color-disabled"), indicatorDisabled);
 
             const SwString bw = styleValue_(sheet, hierarchy, "border-width");
@@ -887,6 +893,7 @@ private:
 
             // State tweaks.
             SwColor fill = bg;
+            SwColor outline = border;
             SwColor text = textColor;
             SwColor icon = indicator;
 
@@ -902,9 +909,12 @@ private:
 
             if (isChecked() && getEnable()) {
                 fill = bgChecked;
+                outline = borderChecked;
+                text = textColorChecked;
+                icon = indicatorChecked;
             }
 
-            paintRoundedRectWithCorners_(painter, bounds, tl, tr, br, bl, fill, border, borderWidth);
+            paintRoundedRectWithCorners_(painter, bounds, tl, tr, br, bl, fill, outline, borderWidth);
 
             // Chevron indicator (collapsed: right, expanded: down).
             const int indicatorSize = clampInt_(std::min(bounds.width, bounds.height) / 4, 8, 14);
@@ -1298,17 +1308,19 @@ private:
                 background-color: rgb(248, 250, 252);
                 background-color-hover: rgb(241, 245, 249);
                 background-color-pressed: rgb(226, 232, 240);
-                background-color-checked: rgb(241, 245, 249);
+                background-color-checked: rgb(248, 250, 252);
                 border-color: rgb(226, 232, 240);
+                border-color-checked: rgb(203, 213, 225);
                 border-width: 1px;
                 border-radius: 10px;
                 color: rgb(15, 23, 42);
+                color-checked: rgb(15, 23, 42);
                 color-disabled: rgb(148, 163, 184);
                 indicator-color: rgb(71, 85, 105);
+                indicator-color-checked: rgb(51, 65, 85);
                 indicator-color-disabled: rgb(148, 163, 184);
                 padding: 6px 10px;
             }
         )");
     }
 };
-

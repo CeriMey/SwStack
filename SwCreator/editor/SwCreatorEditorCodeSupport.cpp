@@ -1,4 +1,5 @@
 #include "editor/SwCreatorEditorCodeSupport.h"
+#include "theme/SwCreatorTheme.h"
 
 #include "SwCodeEditor.h"
 #include "SwCppSyntaxHighlighter.h"
@@ -25,14 +26,12 @@ void swCreatorConfigureCodeEditor(SwCodeEditor* editor, const SwString& filePath
         return;
     }
 
+    const auto& th = SwCreatorTheme::current();
+
     editor->setTheme(swCodeEditorVsCodeDarkTheme());
-    editor->setStyleSheet(R"(
-        SwCodeEditor {
-            background-color: rgb(30, 30, 30);
-            border-width: 0px;
-            color: rgb(220, 220, 220);
-        }
-    )");
+    editor->setStyleSheet(
+        "SwCodeEditor { background-color: " + SwCreatorTheme::rgb(th.editorBg)
+        + "; border-width: 0px; color: " + SwCreatorTheme::rgb(th.editorText) + "; }");
 
     if (!isCppLikeFile_(filePath)) {
         return;

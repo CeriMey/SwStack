@@ -71,6 +71,7 @@
 #include <mutex>
 #include <map>
 #include <queue>
+#include <memory>
 #include <chrono>
 #include <atomic>
 #include <functional>
@@ -89,6 +90,7 @@ static constexpr const char* kSwLogCategory_SwCoreApplication = "sw.core.runtime
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+
 #include <winsock2.h>
 #include "platform/win/SwWindows.h"
 #include <mmsystem.h>
@@ -110,6 +112,8 @@ static constexpr const char* kSwLogCategory_SwCoreApplication = "sw.core.runtime
 #include "SwString.h"
 #include "SwList.h"
 #include "SwMutex.h"
+#include "SwEvent.h"
+#include "SwEventDispatchSupport.h"
 #include <thread>
 
 
@@ -261,6 +265,12 @@ class SwCoreApplication {
     friend class SwEventLoop;
 
 private:
+    struct PostedObjectEvent_ {
+        SwObject* receiver{nullptr};
+        std::unique_ptr<SwEvent> event;
+        int priority{0};
+    };
+
 #if !defined(_WIN32)
     static int unixWatchdogSignalNumber_() { return SIGUSR2; }
 
@@ -285,6 +295,10 @@ private:
     }
 
     static void unixWatchdogPreemptSignalHandler_(int /*signalNumber*/, siginfo_t* /*info*/, void* uctx) {
+#if defined(__ANDROID__)
+         (void)uctx;
+         return;
+#else
          SwCoreApplication* app = SwCoreApplication::instance(false);
          if (!app) return;
          LPVOID runningFiber = app->m_runningFiber.load(std::memory_order_relaxed);
@@ -329,6 +343,7 @@ private:
          ucontext_t mainCtx = mainFiber->context;
          (void)::sigdelset(&mainCtx.uc_sigmask, unixWatchdogSignalNumber_());
          (void)::setcontext(&mainCtx);
+#endif
      }
 
     static void installUnixSignalHandlersOnce_() {
@@ -347,11 +362,13 @@ private:
             (void)::sigaction(SIGTERM, &term, nullptr);
 
             // Watchdog preemption: best-effort "async yield" to the main fiber.
+#if !defined(__ANDROID__)
             struct sigaction wd {};
             wd.sa_flags = SA_SIGINFO;
             wd.sa_sigaction = &SwCoreApplication::unixWatchdogPreemptSignalHandler_;
             (void)::sigemptyset(&wd.sa_mask);
             (void)::sigaction(unixWatchdogSignalNumber_(), &wd, nullptr);
+#endif
         });
     }
 #endif
@@ -555,6 +572,39 @@ public:
     }
 
     /**
+     * @brief Posts an event object to a specific receiver, close to `QCoreApplication::postEvent`.
+     *
+     * Ownership of `event` is transferred to the event queue unless delivery is rerouted to the
+     * receiver thread or dropped because the receiver is invalid.
+     */
+    void postEvent(SwObject* receiver, SwEvent* event, int priority = 0) {
+        if (!receiver || !event) {
+            delete event;
+            return;
+        }
+
+        if (swForwardPostedEventToReceiverThread(receiver, event, priority)) {
+            return;
+        }
+
+        PostedObjectEvent_ postedEvent;
+        postedEvent.receiver = receiver;
+        postedEvent.event.reset(event);
+        postedEvent.priority = priority;
+
+        {
+            std::lock_guard<std::mutex> lock(eventQueueMutex);
+            if (priority > 0) {
+                priorityPostedEventQueue_.push_back(std::move(postedEvent));
+            } else {
+                postedEventQueue_.push_back(std::move(postedEvent));
+            }
+        }
+        cv.notify_one();
+        signalWakeup_();
+    }
+
+    /**
      * @brief Posts a high-priority event (processed before normal events).
      *
      * Useful for latency-sensitive wakeups (ex: RPC completions) when the normal event queue is busy.
@@ -582,6 +632,86 @@ public:
         if (tls == this) {
             SwCoreApplication::release();
         }
+    }
+
+    /**
+     * @brief Delivers an event immediately to a receiver, close to `QCoreApplication::sendEvent`.
+     */
+    static bool sendEvent(SwObject* receiver, SwEvent* event) {
+        if (!receiver || !event || !swIsObjectLive(receiver)) {
+            return false;
+        }
+
+        if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
+            return app->notify(receiver, event);
+        }
+
+        if (swDispatchInstalledEventFilters(receiver, event)) {
+            return true;
+        }
+        return swDispatchEventToObject(receiver, event);
+    }
+
+    /**
+     * @brief Processes queued posted events, optionally filtered by receiver and type.
+     */
+    static void sendPostedEvents(SwObject* receiver = nullptr, EventType type = EventType::None) {
+        if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
+            app->sendPostedEventsImpl_(receiver, type);
+        }
+    }
+
+    /**
+     * @brief Central event delivery hook.
+     */
+    virtual bool notify(SwObject* receiver, SwEvent* event) {
+        if (!receiver || !event || !swIsObjectLive(receiver)) {
+            return false;
+        }
+
+        const bool previousKernelDispatch = event->isKernelDispatched();
+        event->setKernelDispatched(true);
+
+        const int filterCount = static_cast<int>(applicationEventFilters_.size());
+        for (int i = filterCount - 1; i >= 0; --i) {
+            SwObject* filter = applicationEventFilters_[static_cast<size_t>(i)];
+            if (swDispatchEventFilter(filter, receiver, event)) {
+                event->accept();
+                event->setKernelDispatched(previousKernelDispatch);
+                return true;
+            }
+        }
+
+        if (swDispatchInstalledEventFilters(receiver, event)) {
+            event->accept();
+            event->setKernelDispatched(previousKernelDispatch);
+            return true;
+        }
+
+        const bool handled = swDispatchEventToObject(receiver, event);
+        event->setKernelDispatched(previousKernelDispatch);
+        return handled;
+    }
+
+    void installEventFilter(SwObject* filterObj) {
+        if (!filterObj) {
+            return;
+        }
+        applicationEventFilters_.erase(std::remove(applicationEventFilters_.begin(),
+                                                   applicationEventFilters_.end(),
+                                                   filterObj),
+                                       applicationEventFilters_.end());
+        applicationEventFilters_.push_back(filterObj);
+    }
+
+    void removeEventFilter(SwObject* filterObj) {
+        if (!filterObj) {
+            return;
+        }
+        applicationEventFilters_.erase(std::remove(applicationEventFilters_.begin(),
+                                                   applicationEventFilters_.end(),
+                                                   filterObj),
+                                       applicationEventFilters_.end());
     }
 
     /**
@@ -754,22 +884,47 @@ public:
          std::unique_lock<std::mutex> lock(eventQueueMutex);
 
         // Wait for an event if the queue is empty and waiting is allowed
-        if (priorityEventQueue.empty() && eventQueue.empty() && timers.empty() && waitForEvent) {
+        if (priorityEventQueue.empty() &&
+            priorityPostedEventQueue_.empty() &&
+            eventQueue.empty() &&
+            postedEventQueue_.empty() &&
+            timers.empty() &&
+            waitForEvent) {
             cv.wait(lock);
         }
 
         // Process the next event if available
-        if (!priorityEventQueue.empty() || !eventQueue.empty()) {
+        if (!priorityEventQueue.empty() ||
+            !priorityPostedEventQueue_.empty() ||
+            !eventQueue.empty() ||
+            !postedEventQueue_.empty()) {
             std::function<void()> event;
+            PostedObjectEvent_ postedEvent;
+            bool hasPostedEvent = false;
+
             if (!priorityEventQueue.empty()) {
                 event = priorityEventQueue.front();
                 priorityEventQueue.pop();
+            } else if (!priorityPostedEventQueue_.empty()) {
+                postedEvent = std::move(priorityPostedEventQueue_.front());
+                priorityPostedEventQueue_.pop_front();
+                hasPostedEvent = true;
             } else {
-                event = eventQueue.front();
-                eventQueue.pop();
+                if (!eventQueue.empty()) {
+                    event = eventQueue.front();
+                    eventQueue.pop();
+                } else {
+                    postedEvent = std::move(postedEventQueue_.front());
+                    postedEventQueue_.pop_front();
+                    hasPostedEvent = true;
+                }
             }
             lock.unlock(); // Unlock before running the event in a fiber
-             runEventInFiber(event);
+            if (hasPostedEvent) {
+                dispatchPostedEvent_(std::move(postedEvent));
+            } else {
+                runEventInFiber(event);
+            }
              // Run any ready fibers immediately (avoids extra loop latency after wakeups).
              resumeReadyFibers();
              return 0; // An event was processed, so no delay is required
@@ -790,7 +945,10 @@ public:
             }
         }
 
-        if (!priorityEventQueue.empty() || !eventQueue.empty()) {
+        if (!priorityEventQueue.empty() ||
+            !priorityPostedEventQueue_.empty() ||
+            !eventQueue.empty() ||
+            !postedEventQueue_.empty()) {
             return 0;
         }
         // No pending work: wait indefinitely unless a timer is scheduled.
@@ -803,8 +961,70 @@ public:
      */
     bool hasPendingEvents() {
         std::lock_guard<std::mutex> lock(eventQueueMutex);
-        return !priorityEventQueue.empty() || !eventQueue.empty() || !timers.empty();
+        return !priorityEventQueue.empty() ||
+               !priorityPostedEventQueue_.empty() ||
+               !eventQueue.empty() ||
+               !postedEventQueue_.empty() ||
+               !timers.empty();
     }
+
+private:
+    void dispatchPostedEvent_(PostedObjectEvent_ postedEvent) {
+        if (!postedEvent.event || !postedEvent.receiver || !swIsObjectLive(postedEvent.receiver)) {
+            return;
+        }
+        notify(postedEvent.receiver, postedEvent.event.get());
+    }
+
+    void sendPostedEventsImpl_(SwObject* receiver, EventType type) {
+        while (true) {
+            PostedObjectEvent_ postedEvent;
+            bool found = false;
+
+            {
+                std::lock_guard<std::mutex> lock(eventQueueMutex);
+                auto matchEvent = [receiver, type](const PostedObjectEvent_& candidate) {
+                    if (receiver && candidate.receiver != receiver) {
+                        return false;
+                    }
+                    if (type != EventType::None && candidate.event && candidate.event->type() != type) {
+                        return false;
+                    }
+                    return true;
+                };
+
+                for (auto it = priorityPostedEventQueue_.begin(); it != priorityPostedEventQueue_.end(); ++it) {
+                    if (!matchEvent(*it)) {
+                        continue;
+                    }
+                    postedEvent = std::move(*it);
+                    priorityPostedEventQueue_.erase(it);
+                    found = true;
+                    break;
+                }
+
+                if (!found) {
+                    for (auto it = postedEventQueue_.begin(); it != postedEventQueue_.end(); ++it) {
+                        if (!matchEvent(*it)) {
+                            continue;
+                        }
+                        postedEvent = std::move(*it);
+                        postedEventQueue_.erase(it);
+                        found = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!found) {
+                return;
+            }
+
+            dispatchPostedEvent_(std::move(postedEvent));
+        }
+    }
+
+public:
 
     /**
      * @brief Exits the application with a specified exit code.
@@ -1901,6 +2121,7 @@ protected:
      * @details The returned value reflects the state currently stored by the instance.
      */
     std::queue<std::function<void()>> eventQueue; ///< Queue of events to process.
+    std::deque<PostedObjectEvent_> postedEventQueue_; ///< Object-event queue.
     /**
      * @brief Returns the current function<void.
      * @return The current function<void.
@@ -1908,6 +2129,8 @@ protected:
      * @details The returned value reflects the state currently stored by the instance.
      */
     std::queue<std::function<void()>> priorityEventQueue; ///< High-priority event queue.
+    std::deque<PostedObjectEvent_> priorityPostedEventQueue_; ///< High-priority object-event queue.
+    std::vector<SwObject*> applicationEventFilters_; ///< Application-wide event filters.
     std::mutex eventQueueMutex; ///< Mutex protecting access to the event queue.
     std::condition_variable cv; ///< Condition variable for event waiting.
 
@@ -2259,5 +2482,7 @@ static BOOL WINAPI ConsoleHandler(DWORD ctrlType) {
 #else
 // Unix signal handlers are installed by SwCoreApplication::installUnixSignalHandlersOnce_().
 #endif
+
+#include "SwObject.h"
 
 #endif // SW_CORE_RUNTIME_SWCOREAPPLICATION_H

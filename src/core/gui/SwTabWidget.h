@@ -826,8 +826,57 @@ private:
         return {};
     }
 
+    bool parseColorValue_(const SwString& value, SwColor& out) const {
+        if (value.isEmpty()) {
+            return false;
+        }
+
+        StyleSheet* sheet = const_cast<SwTabWidget*>(this)->getToolSheet();
+        if (!sheet) {
+            return false;
+        }
+
+        try {
+            out = clampColor(sheet->parseColor(value, nullptr));
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
     bool applyStyleSheetOverrides_() {
         bool changed = false;
+
+        auto applyPixels = [&](const char* propName, int& target, int minValue, int maxValue) {
+            SwString value = styleProp_(propName);
+            if (value.isEmpty()) {
+                return;
+            }
+
+            int px = parsePixelValue_(value, target);
+            px = clampInt(px, minValue, maxValue);
+            if (px != target) {
+                target = px;
+                changed = true;
+            }
+        };
+
+        auto applyColor = [&](const char* propName, SwColor& target) {
+            SwString value = styleProp_(propName);
+            if (value.isEmpty()) {
+                return;
+            }
+
+            SwColor parsed = target;
+            if (!parseColorValue_(value, parsed)) {
+                return;
+            }
+
+            if (parsed.r != target.r || parsed.g != target.g || parsed.b != target.b) {
+                target = parsed;
+                changed = true;
+            }
+        };
 
         SwString v = styleProp_("tab-bar-full-bleed");
         if (!v.isEmpty()) {
@@ -838,17 +887,7 @@ private:
             }
         }
 
-        v = styleProp_("indicator-padding");
-        if (!v.isEmpty()) {
-            int px = parsePixelValue_(v, m_indicatorPadding);
-            if (px < 0) {
-                px = 0;
-            }
-            if (px != m_indicatorPadding) {
-                m_indicatorPadding = px;
-                changed = true;
-            }
-        }
+        applyPixels("indicator-padding", m_indicatorPadding, 0, 512);
 
         v = styleProp_("tabs-fill-space");
         if (!v.isEmpty()) {
@@ -858,6 +897,32 @@ private:
                 changed = true;
             }
         }
+
+        applyColor("surface-color", m_surfaceColor);
+        applyColor("border-color", m_borderColor);
+        applyColor("tab-bar-color", m_tabBarColor);
+        applyColor("accent-color", m_accentColor);
+        applyColor("text-color", m_textColor);
+        applyColor("muted-text-color", m_mutedTextColor);
+        applyColor("shadow-color-1", m_shadowColor1);
+        applyColor("shadow-color-2", m_shadowColor2);
+
+        applyPixels("outer-padding", m_outerPadding, 0, 256);
+        applyPixels("page-padding", m_pagePadding, 0, 256);
+        applyPixels("tab-content-gap", m_tabToContentGap, 0, 256);
+        applyPixels("corner-radius", m_cornerRadius, 0, 256);
+        applyPixels("tab-bar-radius", m_tabBarRadius, 0, 256);
+        applyPixels("tab-item-radius", m_tabItemRadius, 0, 256);
+        applyPixels("indicator-thickness", m_indicatorThickness, 0, 32);
+        applyPixels("tab-bar-height", m_tabBarHeight, 24, 160);
+        applyPixels("tab-bar-width", m_tabBarWidth, 80, 320);
+        applyPixels("bar-padding", m_barPadding, 0, 64);
+        applyPixels("tab-padding-x", m_tabPaddingX, 0, 80);
+        applyPixels("tab-text-indent", m_tabTextIndent, 0, 80);
+        applyPixels("tab-spacing", m_tabSpacing, 0, 48);
+        applyPixels("tab-item-height", m_tabItemHeight, 24, 120);
+        applyPixels("min-tab-width", m_minTabWidth, 0, 512);
+        applyPixels("min-tab-height", m_minTabHeight, 0, 256);
 
         return changed;
     }
@@ -1199,10 +1264,8 @@ private:
 
         if (shadow1.height < 0) shadow1.height = 0;
         if (shadow2.height < 0) shadow2.height = 0;
-        const SwColor shadowColor1 = SwColor{226, 230, 238};
-        const SwColor shadowColor2 = SwColor{214, 219, 230};
-        painter->fillRoundedRect(shadow1, r, shadowColor1, shadowColor1, 0);
-        painter->fillRoundedRect(shadow2, r, shadowColor2, shadowColor2, 0);
+        painter->fillRoundedRect(shadow1, r, m_shadowColor1, m_shadowColor1, 0);
+        painter->fillRoundedRect(shadow2, r, m_shadowColor2, m_shadowColor2, 0);
 
         painter->fillRoundedRect(outer, r, m_surfaceColor, m_borderColor, 1);
     }
@@ -1225,8 +1288,8 @@ private:
         const SwRect bar = mapLocalRectToAbsolute_(barLocal);
         const SwRect area = mapLocalRectToAbsolute_(areaLocal);
 
-        const SwColor onSurface = SwColor{17, 24, 39};
-        const SwColor muted = SwColor{107, 114, 128};
+        const SwColor onSurface = m_textColor;
+        const SwColor muted = m_mutedTextColor;
         const SwColor hoverBg = mix(m_tabBarColor, m_surfaceColor, 65);
         const SwColor accent = m_accentColor;
 
@@ -1636,6 +1699,10 @@ private:
     SwColor m_borderColor{226, 232, 240};
     SwColor m_tabBarColor{243, 244, 246};
     SwColor m_accentColor{59, 130, 246};
+    SwColor m_textColor{17, 24, 39};
+    SwColor m_mutedTextColor{107, 114, 128};
+    SwColor m_shadowColor1{226, 230, 238};
+    SwColor m_shadowColor2{214, 219, 230};
 
     int m_outerPadding{12};
     int m_pagePadding{14};

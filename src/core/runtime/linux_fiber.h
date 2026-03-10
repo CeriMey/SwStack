@@ -49,7 +49,7 @@
 
 static constexpr const char* kSwLogCategory_linux_fiber = "sw.core.runtime.linux_fiber";
 
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(__ANDROID__)
 
 #include <ucontext.h>
 
@@ -81,8 +81,8 @@ using SIZE_T = std::size_t;
 using LPFIBER_START_ROUTINE = VOID(WINAPI *)(LPVOID);
 #endif
 
-namespace swcore::linux_fiber
-{
+namespace swcore {
+namespace linux_fiber {
 constexpr std::size_t kDefaultStackSize = 64 * 1024;
 
 struct Fiber
@@ -109,7 +109,8 @@ inline void fiber_entry(uintptr_t fiberPtr)
         fiber->startRoutine(fiber->parameter);
     }
 }
-} // namespace swcore::linux_fiber
+} // namespace linux_fiber
+} // namespace swcore
 
 inline LPVOID ConvertThreadToFiber(LPVOID)
 {
@@ -218,6 +219,131 @@ inline void DeleteFiber(LPVOID fiberPtr)
         currentFiberRef() = nullptr;
     }
 
+    delete fiber;
+}
+
+#elif defined(__ANDROID__)
+
+#include <cstddef>
+#include <cstdint>
+#include <new>
+
+#include "SwDebug.h"
+
+#ifndef WINAPI
+#define WINAPI
+#endif
+
+#ifndef VOID
+#define VOID void
+#endif
+
+#ifndef LPVOID
+using LPVOID = void *;
+#endif
+
+#ifndef SIZE_T
+using SIZE_T = std::size_t;
+#endif
+
+#ifndef LPFIBER_START_ROUTINE
+using LPFIBER_START_ROUTINE = VOID(WINAPI *)(LPVOID);
+#endif
+
+namespace swcore {
+namespace linux_fiber {
+
+struct Fiber {
+    LPFIBER_START_ROUTINE startRoutine{nullptr};
+    LPVOID parameter{nullptr};
+    bool isMain{false};
+    bool executed{false};
+};
+
+inline Fiber*& currentFiberRef() {
+    static thread_local Fiber* current = nullptr;
+    return current;
+}
+
+inline Fiber*& mainFiberRef() {
+    static thread_local Fiber* mainFiber = nullptr;
+    return mainFiber;
+}
+
+} // namespace linux_fiber
+} // namespace swcore
+
+inline LPVOID ConvertThreadToFiber(LPVOID) {
+    using namespace swcore::linux_fiber;
+    Fiber*& current = currentFiberRef();
+    if (current) {
+        return current;
+    }
+
+    Fiber* fiber = new (std::nothrow) Fiber();
+    if (!fiber) {
+        swCError(kSwLogCategory_linux_fiber) << "[linux_fiber] Failed to allocate fake main fiber";
+        return nullptr;
+    }
+    fiber->isMain = true;
+    current = fiber;
+    mainFiberRef() = fiber;
+    return fiber;
+}
+
+inline LPVOID CreateFiber(SIZE_T, LPFIBER_START_ROUTINE routine, LPVOID parameter) {
+    using namespace swcore::linux_fiber;
+    Fiber* fiber = new (std::nothrow) Fiber();
+    if (!fiber) {
+        swCError(kSwLogCategory_linux_fiber) << "[linux_fiber] Failed to allocate fake fiber";
+        return nullptr;
+    }
+    fiber->startRoutine = routine;
+    fiber->parameter = parameter;
+    return fiber;
+}
+
+inline LPVOID GetCurrentFiber() {
+    return swcore::linux_fiber::currentFiberRef();
+}
+
+inline void SwitchToFiber(LPVOID fiberPtr) {
+    using namespace swcore::linux_fiber;
+    Fiber* target = reinterpret_cast<Fiber*>(fiberPtr);
+    if (!target) {
+        return;
+    }
+
+    Fiber*& current = currentFiberRef();
+    Fiber*& mainFiber = mainFiberRef();
+    if (!mainFiber) {
+        mainFiber = reinterpret_cast<Fiber*>(ConvertThreadToFiber(nullptr));
+    }
+
+    if (target->isMain) {
+        current = target;
+        return;
+    }
+
+    if (target->executed) {
+        current = mainFiber;
+        return;
+    }
+
+    current = target;
+    target->executed = true;
+    if (target->startRoutine) {
+        target->startRoutine(target->parameter);
+    }
+    current = mainFiber;
+}
+
+inline void DeleteFiber(LPVOID fiberPtr) {
+    using namespace swcore::linux_fiber;
+    Fiber* fiber = reinterpret_cast<Fiber*>(fiberPtr);
+    if (!fiber || fiber->isMain) {
+        return;
+    }
     delete fiber;
 }
 

@@ -103,6 +103,7 @@ public:
      * @details The instance is initialized and prepared for immediate use.
      */
     SwString(const char* str) : data_(str ? str : "") {}
+    SwString(const char* str, size_t len) : data_(str ? std::string(str, len) : std::string()) {}
 #ifdef QT_CORE_LIB
     /**
      * @brief Constructs a `SwString` instance.
@@ -1171,6 +1172,7 @@ public:
      * @return The requested append.
      */
     SwString& append(const char* cstr) { data_ += (cstr ? std::string(cstr) : std::string()); return *this; }
+    SwString& append(const char* data, size_t length) { if (data && length > 0) { data_.append(data, length); } return *this; }
     /**
      * @brief Performs the `append` operation.
      * @param ch Value passed to the method.

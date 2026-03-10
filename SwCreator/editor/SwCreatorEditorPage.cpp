@@ -2,6 +2,7 @@
 
 #include "editor/SwCreatorEditorCodeSupport.h"
 #include "editor/SwCreatorEditorPaths.h"
+#include "theme/SwCreatorTheme.h"
 
 #include "SwCodeEditor.h"
 #include "SwFile.h"
@@ -11,7 +12,8 @@
 
 SwCreatorEditorPage::SwCreatorEditorPage(SwWidget* parent)
     : SwWidget(parent) {
-    setStyleSheet("SwCreatorEditorPage { background-color: rgb(30, 30, 30); border-width: 0px; }");
+    const auto& th = SwCreatorTheme::current();
+    setStyleSheet("SwCreatorEditorPage { background-color: " + SwCreatorTheme::rgb(th.editorBg) + "; border-width: 0px; }");
 
     SwVerticalLayout* layout = new SwVerticalLayout(this);
     layout->setMargin(0);

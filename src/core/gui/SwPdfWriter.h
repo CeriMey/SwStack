@@ -107,7 +107,7 @@ public:
         std::string name = "Helvetica";
         // Map common font families
         std::wstring family = font.getFamily();
-        std::string familyStr(family.begin(), family.end());
+        std::string familyStr = SwString::fromWCharArray(family.c_str()).toStdString();
         if (familyStr.find("Courier") != std::string::npos || familyStr.find("Mono") != std::string::npos) {
             name = font.getWeight() == Bold ? "Courier-Bold" : "Courier";
             if (font.isItalic()) name += (font.getWeight() == Bold) ? "BoldOblique" : "-Oblique";
@@ -226,10 +226,13 @@ public:
         // M+1..P = Content stream objects
 
         int nextObj = 1;
-        std::vector<long> offsets; // byte offsets for xref
+        std::vector<std::streamoff> offsets; // byte offsets for xref
+        auto currentOffset = [&]() -> std::streamoff {
+            return static_cast<std::streamoff>(file.tellp());
+        };
 
         auto writeObj = [&](const std::string& content) {
-            offsets.push_back(file.tellp());
+            offsets.push_back(currentOffset());
             file << nextObj << " 0 obj\n" << content << "\nendobj\n";
             ++nextObj;
         };
@@ -241,12 +244,12 @@ public:
         writeObj("<< /Type /Catalog /Pages 2 0 R >>");
 
         // --- Object 2: Pages (placeholder, written later) ---
-        long pagesOffset = file.tellp();
-        offsets.push_back(pagesOffset);
+        const std::streampos pagesOffset = file.tellp();
+        offsets.push_back(currentOffset());
         // Reserve space — we'll rewrite this object at the end
         std::string pagesPlaceholder(512, ' ');
         file << "2 0 obj\n" << pagesPlaceholder << "\nendobj\n";
-        long pagesReservedEnd = file.tellp();
+        const std::streampos pagesReservedEnd = file.tellp();
         ++nextObj;
 
         // --- Font objects ---
@@ -294,7 +297,7 @@ public:
         }
 
         // --- Rewrite Pages object ---
-        long afterPages = file.tellp();
+        const std::streampos afterPages = file.tellp();
         file.seekp(pagesOffset);
         std::ostringstream pagesOss;
         pagesOss << "2 0 obj\n<< /Type /Pages /Kids [";
@@ -312,13 +315,13 @@ public:
         file.seekp(afterPages);
 
         // --- Cross-reference table ---
-        long xrefOffset = file.tellp();
+        const std::streamoff xrefOffset = currentOffset();
         file << "xref\n";
         file << "0 " << nextObj << "\n";
         file << "0000000000 65535 f \n";
         for (size_t i = 0; i < offsets.size(); ++i) {
             char buf[32];
-            std::snprintf(buf, sizeof(buf), "%010ld 00000 n \n", offsets[i]);
+            std::snprintf(buf, sizeof(buf), "%010lld 00000 n \n", static_cast<long long>(offsets[i]));
             file << buf;
         }
 

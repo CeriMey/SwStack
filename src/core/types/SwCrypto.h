@@ -74,11 +74,14 @@ static constexpr const char* kSwLogCategory_SwCrypto = "sw.core.types.swcrypto";
 //==============================//
 //            Linux             //
 //==============================//
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(__ANDROID__)
   // OpenSSL pour Linux
   #include <openssl/evp.h>
   #include <openssl/hmac.h>
   #include <openssl/err.h>
+  #define SW_CRYPTO_HAS_OPENSSL 1
+#else
+  #define SW_CRYPTO_HAS_OPENSSL 0
 #endif
 
 
@@ -656,7 +659,7 @@ public:
         if (hAlgorithm) BcryptWrapper::CloseAlgorithmProvider(hAlgorithm, 0);
 
         return hexEncode(hashValue);
-    #else
+    #elif SW_CRYPTO_HAS_OPENSSL
         const EVP_MD* md = EVP_sha256();
         if (!md) throw std::runtime_error("EVP_sha256 unavailable.");
         EVP_MD_CTX* ctx = EVP_MD_CTX_new();
@@ -695,6 +698,8 @@ public:
         EVP_MD_CTX_free(ctx);
         hash.resize(outLen);
         return hexEncode(hash);
+    #else
+        throw std::runtime_error("File checksum is not available on Android yet.");
     #endif
     }
 
@@ -756,7 +761,7 @@ private:
         if (hHash) BcryptWrapper::DestroyHash(hHash);
         if (hAlgorithm) BcryptWrapper::CloseAlgorithmProvider(hAlgorithm, 0);
         return hashValue;
-    #else
+    #elif SW_CRYPTO_HAS_OPENSSL
         const EVP_MD* md = nullptr;
         switch (algo) {
         case HashAlgo::SHA1:   md = EVP_sha1();   break;
@@ -778,6 +783,8 @@ private:
         EVP_MD_CTX_free(ctx);
         out.resize(outLen);
         return out;
+    #else
+        throw std::runtime_error("Hash computation is not available on Android yet.");
     #endif
     }
 
@@ -817,7 +824,7 @@ private:
         if (hHash) BcryptWrapper::DestroyHash(hHash);
         if (hAlgorithm) BcryptWrapper::CloseAlgorithmProvider(hAlgorithm, 0);
         return hashValue;
-    #else
+    #elif SW_CRYPTO_HAS_OPENSSL
         unsigned int outLen = 0;
         std::vector<unsigned char> out(EVP_MD_size(EVP_sha256()));
         unsigned char* rv = HMAC(EVP_sha256(),
@@ -828,6 +835,8 @@ private:
         if (!rv) throw std::runtime_error("HMAC failed.");
         out.resize(outLen);
         return out;
+    #else
+        throw std::runtime_error("HMAC-SHA256 is not available on Android yet.");
     #endif
     }
 
@@ -896,7 +905,7 @@ private:
         if (hAlgorithm) BcryptWrapper::CloseAlgorithmProvider(hAlgorithm, 0);
         return output;
 
-    #else
+    #elif SW_CRYPTO_HAS_OPENSSL
         const size_t blockSize = 16; // AES
         if (key.size() != 16 && key.size() != 24 && key.size() != 32)
             throw std::invalid_argument("Invalid AES key size. Key must be 16, 24, or 32 bytes.");
@@ -947,6 +956,11 @@ private:
         EVP_CIPHER_CTX_free(ctx);
         output.resize(outLen1 + outLen2);
         return output;
+    #else
+        (void)data;
+        (void)key;
+        (void)encrypt;
+        throw std::runtime_error("AES-ECB is not available on Android yet.");
     #endif
     }
 

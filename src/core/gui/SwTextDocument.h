@@ -34,12 +34,31 @@
 #include <functional>
 #include <memory>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <vector>
 
 class SwTextDocument;
 class SwTextCursor;
 class SwTextDocumentLayout;
+
+namespace swTextDocumentDetail {
+inline int sizeToInt(size_t value) {
+    return value <= static_cast<size_t>(std::numeric_limits<int>::max())
+        ? static_cast<int>(value)
+        : std::numeric_limits<int>::max();
+}
+
+inline bool parseCssRgbTriplet(const std::string& text, int& r, int& g, int& b) {
+    std::istringstream stream(text);
+    char firstComma = '\0';
+    char secondComma = '\0';
+    stream >> std::ws >> r >> std::ws >> firstComma
+           >> std::ws >> g >> std::ws >> secondComma
+           >> std::ws >> b >> std::ws;
+    return stream && firstComma == ',' && secondComma == ',' && stream.eof();
+}
+}
 
 struct SwTextLayoutFormatRange {
     int start{0};
@@ -93,11 +112,14 @@ public:
 
     // --- Text content ---
     SwString text() const {
-        SwString result;
-        for (int i = 0; i < m_fragments.size(); ++i) {
-            result.append(m_fragments[i].text());
+        if (m_textCacheDirty) {
+            m_textCache.clear();
+            for (int i = 0; i < m_fragments.size(); ++i) {
+                m_textCache.append(m_fragments[i].text());
+            }
+            m_textCacheDirty = false;
         }
-        return result;
+        return m_textCache;
     }
 
     int length() const {
@@ -109,16 +131,17 @@ public:
     }
 
     // --- Fragments ---
-    int fragmentCount() const { return m_fragments.size(); }
+    int fragmentCount() const { return swTextDocumentDetail::sizeToInt(m_fragments.size()); }
     const SwTextFragment& fragmentAt(int index) const { return m_fragments[index]; }
     SwTextFragment& fragmentAt(int index) { return m_fragments[index]; }
 
-    void appendFragment(const SwTextFragment& frag) { m_fragments.append(frag); }
+    void appendFragment(const SwTextFragment& frag) { m_fragments.append(frag); m_textCacheDirty = true; }
     void insertFragment(int index, const SwTextFragment& frag) {
         m_fragments.insert(index, frag);
+        m_textCacheDirty = true;
     }
-    void removeFragment(int index) { m_fragments.removeAt(index); }
-    void clearFragments() { m_fragments.clear(); }
+    void removeFragment(int index) { m_fragments.removeAt(index); m_textCacheDirty = true; }
+    void clearFragments() { m_fragments.clear(); m_textCacheDirty = true; }
 
     // --- Block format ---
     SwTextBlockFormat blockFormat() const                    { return m_blockFormat; }
@@ -157,12 +180,13 @@ public:
     void setUserData(SwTextBlockUserData* data) { m_userData.reset(data); }
     void clearUserData() { m_userData.reset(); }
 
-    SwList<SwTextLayoutFormatRange> additionalFormats() const { return m_additionalFormats; }
+    const SwList<SwTextLayoutFormatRange>& additionalFormats() const { return m_additionalFormats; }
     void setAdditionalFormats(const SwList<SwTextLayoutFormatRange>& formats) { m_additionalFormats = formats; }
     void clearAdditionalFormats() { m_additionalFormats.clear(); }
 
     // --- Insert text at position within block ---
     void insertText(int pos, const SwString& text, const SwTextCharFormat& fmt) {
+        m_textCacheDirty = true;
         if (m_fragments.isEmpty()) {
             m_fragments.append(SwTextFragment(text, fmt));
             return;
@@ -207,6 +231,7 @@ public:
     // --- Remove text range within block ---
     void removeText(int pos, int count) {
         if (count <= 0) return;
+        m_textCacheDirty = true;
         int remaining = count;
         int cursor = 0;
         for (int i = 0; i < m_fragments.size() && remaining > 0;) {
@@ -274,6 +299,8 @@ private:
     int m_userState{-1};
     std::shared_ptr<SwTextBlockUserData> m_userData;
     SwList<SwTextLayoutFormatRange> m_additionalFormats;
+    mutable SwString m_textCache;
+    mutable bool m_textCacheDirty{true};
 
     void splitAt(int pos) {
         int cursor = 0;
@@ -293,17 +320,19 @@ private:
     }
 
     void normalize() {
-        for (int i = m_fragments.size() - 1; i >= 0; --i) {
-            if (m_fragments[i].isEmpty()) {
-                m_fragments.removeAt(i);
+        for (size_t i = m_fragments.size(); i > 0; --i) {
+            const size_t index = i - 1;
+            if (m_fragments[index].isEmpty()) {
+                m_fragments.removeAt(index);
             }
         }
-        for (int i = m_fragments.size() - 1; i > 0; --i) {
-            if (m_fragments[i].charFormat() == m_fragments[i - 1].charFormat()) {
-                SwString merged = m_fragments[i - 1].text();
-                merged.append(m_fragments[i].text());
-                m_fragments[i - 1].setText(merged);
-                m_fragments.removeAt(i);
+        for (size_t i = m_fragments.size(); i > 1; --i) {
+            const size_t index = i - 1;
+            if (m_fragments[index].charFormat() == m_fragments[index - 1].charFormat()) {
+                SwString merged = m_fragments[index - 1].text();
+                merged.append(m_fragments[index].text());
+                m_fragments[index - 1].setText(merged);
+                m_fragments.removeAt(index);
             }
         }
     }
@@ -321,7 +350,7 @@ public:
     SwTextListFormat format() const               { return m_format; }
     void setFormat(const SwTextListFormat& fmt)    { m_format = fmt; }
 
-    int count() const { return m_blockIndices.size(); }
+    int count() const { return swTextDocumentDetail::sizeToInt(m_blockIndices.size()); }
     void addBlockIndex(int idx) { m_blockIndices.append(idx); }
     int blockIndex(int i) const { return m_blockIndices[i]; }
     void removeBlockIndex(int idx) {
@@ -457,7 +486,7 @@ public:
     }
 
     // --- Block access ---
-    int blockCount() const { return m_blocks.size(); }
+    int blockCount() const { return swTextDocumentDetail::sizeToInt(m_blocks.size()); }
 
     SwTextBlock& blockAt(int index) { return m_blocks[index]; }
     const SwTextBlock& blockAt(int index) const { return m_blocks[index]; }
@@ -479,6 +508,34 @@ public:
     }
 
     int revision() const { return m_revision; }
+    int lastEditBlockHint() const { return m_lastEditBlockHint; }
+    void clearEditBlockHint() { m_lastEditBlockHint = -1; }
+
+    void beginBatchEdit() {
+        m_batchEditing = true;
+        m_batchOldBlockCount = blockCount();
+        m_batchContentsChangePos = 0;
+        m_batchContentsChangeRemoved = 0;
+        m_batchContentsChangeAdded = 0;
+        m_batchHasChanges = false;
+        m_lastEditBlockHint = -1;
+    }
+
+    void endBatchEdit() {
+        if (!m_batchEditing) return;
+        const int oldBlockCount = m_batchOldBlockCount;
+        m_batchEditing = false;
+        renumberBlocks();
+        if (blockCount() != oldBlockCount) {
+            emit blockCountChanged();
+        }
+        if (m_batchHasChanges) {
+            emit contentsChange(m_batchContentsChangePos,
+                                m_batchContentsChangeRemoved,
+                                m_batchContentsChangeAdded);
+            emit contentsChanged();
+        }
+    }
 
     // --- Position mapping: absolute position <-> (block, offset) ---
     struct BlockPosition {
@@ -620,12 +677,86 @@ public:
         // Insert the new block after current
         int insertIdx = bp.blockIndex + 1;
         m_blocks.insert(insertIdx, newBlock);
-        renumberBlocks();
         m_modified = true;
         ++m_revision;
+        if (m_batchEditing) {
+            recordBatchChange_(absPos, 0, 1, bp.blockIndex);
+            return;
+        }
+        renumberBlocks();
         if (blockCount() != oldBlockCount) {
             emit blockCountChanged();
         }
+        emit contentsChange(absPos, 0, 1);
+        emit contentsChanged();
+    }
+
+    void insertBlockDirect(int blockIndex,
+                           int offset,
+                           const SwTextBlockFormat& blockFmt,
+                           const SwTextCharFormat& charFmt) {
+        if (blockIndex < 0 || blockIndex >= m_blocks.size()) return;
+        const int oldBlockCount = blockCount();
+        SwTextBlock& current = m_blocks[blockIndex];
+
+        SwTextBlock newBlock;
+        newBlock.setBlockFormat(blockFmt);
+
+        int cursor = 0;
+        for (int i = 0; i < current.fragmentCount(); ++i) {
+            int fragLen = current.fragmentAt(i).length();
+            if (offset <= cursor) {
+                newBlock.appendFragment(current.fragmentAt(i));
+            } else if (offset < cursor + fragLen) {
+                int splitOffset = offset - cursor;
+                SwString after = current.fragmentAt(i).text().substr(splitOffset);
+                if (!after.isEmpty()) {
+                    newBlock.appendFragment(SwTextFragment(after, current.fragmentAt(i).charFormat()));
+                }
+                current.fragmentAt(i).setText(current.fragmentAt(i).text().substr(0, splitOffset));
+            }
+            cursor += fragLen;
+        }
+
+        while (current.fragmentCount() > 0) {
+            int total = 0;
+            for (int i = 0; i < current.fragmentCount(); ++i) {
+                total += current.fragmentAt(i).length();
+            }
+            if (total <= offset) break;
+            bool removed = false;
+            for (int i = current.fragmentCount() - 1; i >= 0; --i) {
+                int c = 0;
+                for (int j = 0; j <= i; ++j) c += current.fragmentAt(j).length();
+                if (c > offset) {
+                    const int fragStart = c - current.fragmentAt(i).length();
+                    if (fragStart >= offset) {
+                        current.removeFragment(i);
+                        removed = true;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            if (!removed) break;
+        }
+
+        const int insertIdx = blockIndex + 1;
+        m_blocks.insert(insertIdx, newBlock);
+        m_modified = true;
+        ++m_revision;
+
+        const int absPos = absolutePosition(blockIndex, offset);
+        if (m_batchEditing) {
+            recordBatchChange_(absPos, 0, 1, blockIndex);
+            return;
+        }
+
+        renumberBlocksFrom(insertIdx);
+        if (blockCount() != oldBlockCount) {
+            emit blockCountChanged();
+        }
+        m_lastEditBlockHint = blockIndex;
         emit contentsChange(absPos, 0, 1);
         emit contentsChanged();
     }
@@ -636,7 +767,44 @@ public:
         m_blocks[bp.blockIndex].insertText(bp.offset, text, fmt);
         m_modified = true;
         ++m_revision;
+        if (m_batchEditing) {
+            recordBatchChange_(absPos, 0, static_cast<int>(text.size()), bp.blockIndex);
+            return;
+        }
         emit contentsChange(absPos, 0, static_cast<int>(text.size()));
+        emit contentsChanged();
+    }
+
+    void insertTextDirect(int blockIndex, int offset, const SwString& text, const SwTextCharFormat& fmt) {
+        if (text.isEmpty() || blockIndex < 0 || blockIndex >= m_blocks.size()) return;
+        m_blocks[blockIndex].insertText(offset, text, fmt);
+        m_modified = true;
+        ++m_revision;
+        m_lastEditBlockHint = blockIndex;
+        if (m_batchEditing) {
+            recordBatchChange_(absolutePosition(blockIndex, offset),
+                               0,
+                               static_cast<int>(text.size()),
+                               blockIndex);
+            return;
+        }
+        // pos arg is not used by the highlighter (it uses m_lastEditBlockHint
+        // for O(1) block lookup). Passing blockIndex avoids an O(N) scan.
+        emit contentsChange(blockIndex, 0, static_cast<int>(text.size()));
+        emit contentsChanged();
+    }
+
+    void removeTextDirect(int blockIndex, int offset, int count) {
+        if (count <= 0 || blockIndex < 0 || blockIndex >= m_blocks.size()) return;
+        m_blocks[blockIndex].removeText(offset, count);
+        m_modified = true;
+        ++m_revision;
+        m_lastEditBlockHint = blockIndex;
+        if (m_batchEditing) {
+            recordBatchChange_(absolutePosition(blockIndex, offset), count, 0, blockIndex);
+            return;
+        }
+        emit contentsChange(blockIndex, count, 0);
         emit contentsChanged();
     }
 
@@ -671,6 +839,10 @@ public:
         renumberBlocks();
         m_modified = true;
         ++m_revision;
+        if (m_batchEditing) {
+            recordBatchChange_(absPos, requested - remaining, 0, blockPositionFromAbsolute(absPos).blockIndex);
+            return;
+        }
         if (blockCount() != oldBlockCount) {
             emit blockCountChanged();
         }
@@ -730,7 +902,7 @@ public:
         return list;
     }
 
-    int listCount() const { return m_lists.size(); }
+    int listCount() const { return swTextDocumentDetail::sizeToInt(m_lists.size()); }
     SwTextList* listAt(int index) const { return m_lists[index]; }
 
     // --- Tables ---
@@ -754,7 +926,7 @@ public:
         return table;
     }
 
-    int tableCount() const { return m_tables.size(); }
+    int tableCount() const { return swTextDocumentDetail::sizeToInt(m_tables.size()); }
     SwTextTable* tableAt(int index) const { return m_tables[index]; }
 
     // Find table at a given block
@@ -838,10 +1010,41 @@ private:
     SwTextCharFormat m_defaultCharFormat;
     bool m_modified{false};
     bool m_undoRedoEnabled{true};
+    bool m_batchEditing{false};
+    int m_batchOldBlockCount{0};
+    int m_batchContentsChangePos{0};
+    int m_batchContentsChangeRemoved{0};
+    int m_batchContentsChangeAdded{0};
+    bool m_batchHasChanges{false};
     int m_revision{0};
+    int m_lastEditBlockHint{-1};
+
+    void recordBatchChange_(int pos, int removed, int added, int blockHint) {
+        if (!m_batchHasChanges) {
+            m_batchContentsChangePos = pos;
+            m_batchHasChanges = true;
+        } else {
+            m_batchContentsChangePos = std::min(m_batchContentsChangePos, pos);
+        }
+        m_batchContentsChangeRemoved += removed;
+        m_batchContentsChangeAdded += added;
+        if (blockHint >= 0) {
+            if (m_lastEditBlockHint < 0 || blockHint < m_lastEditBlockHint) {
+                m_lastEditBlockHint = blockHint;
+            }
+        }
+    }
 
     void renumberBlocks() {
-        for (int i = 0; i < m_blocks.size(); ++i) {
+        renumberBlocksFrom(0);
+    }
+
+    void renumberBlocksFrom(int startIndex) {
+        for (int i = startIndex; i < m_blocks.size(); ++i) {
+            if (m_blocks[i].blockNumber() == i) {
+                // All blocks from here are already correctly numbered.
+                break;
+            }
             m_blocks[i].setBlockNumber(i);
         }
     }
@@ -923,8 +1126,7 @@ inline void SwTextDocument::setHtml(const SwString& html) {
             if (end != std::string::npos) {
                 std::string inner = c.substr(start, end - start);
                 int r = 0, g = 0, b = 0;
-                if (std::sscanf(inner.c_str(), "%d,%d,%d", &r, &g, &b) == 3 ||
-                    std::sscanf(inner.c_str(), " %d , %d , %d", &r, &g, &b) == 3) {
+                if (swTextDocumentDetail::parseCssRgbTriplet(inner, r, g, b)) {
                     out = {r, g, b};
                     return true;
                 }
@@ -944,7 +1146,7 @@ inline void SwTextDocument::setHtml(const SwString& html) {
             m_blocks.append(currentBlock);
         }
         currentBlock = SwTextBlock();
-        currentBlock.setBlockNumber(m_blocks.size());
+        currentBlock.setBlockNumber(swTextDocumentDetail::sizeToInt(m_blocks.size()));
         currentBlock.setBlockFormat(blockFmt);
         blockFmt = SwTextBlockFormat();
         hasContent = false;
@@ -1288,7 +1490,7 @@ inline void SwTextDocument::setHtml(const SwString& html) {
                         if (tableFmt.cellPadding() == 0) tableFmt.setCellPadding(4);
                         SwTextTable* tbl = new SwTextTable(numRows, numCols);
                         tbl->setTableFormat(tableFmt);
-                        tbl->setStartBlock(m_blocks.size());
+                        tbl->setStartBlock(swTextDocumentDetail::sizeToInt(m_blocks.size()));
                         m_tables.append(tbl);
 
                         for (int r = 0; r < numRows; ++r) {
@@ -1356,11 +1558,11 @@ inline void SwTextDocument::setHtml(const SwString& html) {
                         }
                         // Insert a placeholder block in the document
                         SwTextBlock tableBlock;
-                        tableBlock.setBlockNumber(m_blocks.size());
+                        tableBlock.setBlockNumber(swTextDocumentDetail::sizeToInt(m_blocks.size()));
                         m_blocks.append(tableBlock);
                         hasContent = false;
                         currentBlock = SwTextBlock();
-                        currentBlock.setBlockNumber(m_blocks.size());
+                        currentBlock.setBlockNumber(swTextDocumentDetail::sizeToInt(m_blocks.size()));
                     }
                 }
             }

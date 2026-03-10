@@ -54,6 +54,7 @@
  *
  *   SwGraphicsSceneEvent          (base)
  *   SwGraphicsSceneMouseEvent     (press / move / release / double-click)
+ *   SwGraphicsSceneKeyEvent       (press / release)
  *   SwGraphicsSceneWheelEvent
  *   SwGraphicsSceneHoverEvent     (enter / move / leave)
  *   SwGraphicsSceneContextMenuEvent
@@ -76,9 +77,13 @@
 
 #include "SwGraphicsTypes.h"
 #include "Sw.h"
+#include "SwEvent.h"
 #include "platform/SwPlatformIntegration.h"
 
 class SwWidget;
+class SwGraphicsItem;
+class SwGraphicsScene;
+class KeyEvent;
 
 // ---------------------------------------------------------------------------
 // Event type enum for graphics scene events
@@ -89,6 +94,8 @@ enum class SwGraphicsSceneEventType {
     GraphicsSceneMouseRelease,
     GraphicsSceneMouseMove,
     GraphicsSceneMouseDoubleClick,
+    GraphicsSceneKeyPress,
+    GraphicsSceneKeyRelease,
     GraphicsSceneWheel,
     GraphicsSceneHoverEnter,
     GraphicsSceneHoverMove,
@@ -102,6 +109,11 @@ enum class SwGraphicsSceneEventType {
     GraphicsSceneResize,
     FocusIn,
     FocusOut
+};
+
+enum class SwGraphicsSceneKeyDispatchType {
+    Press,
+    Release
 };
 
 // ---------------------------------------------------------------------------
@@ -202,6 +214,50 @@ private:
     SwGraphicsSceneEventType m_type{SwGraphicsSceneEventType::None};
     bool m_accepted{false};
     SwWidget* m_widget{nullptr};
+};
+
+/**
+ * @brief Kernel-visible wrapper used while a scene dispatches input toward graphics items.
+ *
+ * This event is synchronous-only: it borrows the wrapped payload for the duration of the
+ * current `SwCoreApplication::sendEvent` call and must not be posted.
+ */
+class SwGraphicsSceneDispatchEvent : public SwEvent {
+public:
+    SwGraphicsSceneDispatchEvent(SwGraphicsScene* scene,
+                                 SwGraphicsItem* targetItem,
+                                 SwGraphicsSceneEvent* graphicsEvent)
+        : SwEvent(EventType::GraphicsSceneDispatch)
+        , m_scene(scene)
+        , m_targetItem(targetItem)
+        , m_graphicsEvent(graphicsEvent) {}
+
+    SwGraphicsSceneDispatchEvent(SwGraphicsScene* scene,
+                                 SwGraphicsItem* targetItem,
+                                 KeyEvent* keyEvent,
+                                 SwGraphicsSceneKeyDispatchType keyDispatchType)
+        : SwEvent(EventType::GraphicsSceneDispatch)
+        , m_scene(scene)
+        , m_targetItem(targetItem)
+        , m_keyEvent(keyEvent)
+        , m_keyDispatchType(keyDispatchType) {}
+
+    SwGraphicsScene* scene() const { return m_scene; }
+    SwGraphicsItem* targetItem() const { return m_targetItem; }
+
+    SwGraphicsSceneEvent* graphicsEvent() const { return m_graphicsEvent; }
+    bool hasGraphicsEvent() const { return m_graphicsEvent != nullptr; }
+
+    KeyEvent* keyEvent() const { return m_keyEvent; }
+    bool hasKeyEvent() const { return m_keyEvent != nullptr; }
+    SwGraphicsSceneKeyDispatchType keyDispatchType() const { return m_keyDispatchType; }
+
+private:
+    SwGraphicsScene* m_scene{nullptr};
+    SwGraphicsItem* m_targetItem{nullptr};
+    SwGraphicsSceneEvent* m_graphicsEvent{nullptr};
+    KeyEvent* m_keyEvent{nullptr};
+    SwGraphicsSceneKeyDispatchType m_keyDispatchType{SwGraphicsSceneKeyDispatchType::Press};
 };
 
 // ---------------------------------------------------------------------------
@@ -419,6 +475,41 @@ private:
     SwPointF m_buttonDownPos{};
     SwPointF m_buttonDownScenePos{};
     SwPoint m_buttonDownScreenPos{0, 0};
+};
+
+// ---------------------------------------------------------------------------
+// SwGraphicsSceneKeyEvent
+// ---------------------------------------------------------------------------
+class SwGraphicsSceneKeyEvent : public SwGraphicsSceneEvent {
+public:
+    explicit SwGraphicsSceneKeyEvent(SwGraphicsSceneEventType type)
+        : SwGraphicsSceneEvent(type) {}
+
+    int key() const { return m_key; }
+    void setKey(int key) { m_key = key; }
+
+    bool isCtrlPressed() const { return m_ctrlPressed; }
+    void setCtrlPressed(bool pressed) { m_ctrlPressed = pressed; }
+
+    bool isShiftPressed() const { return m_shiftPressed; }
+    void setShiftPressed(bool pressed) { m_shiftPressed = pressed; }
+
+    bool isAltPressed() const { return m_altPressed; }
+    void setAltPressed(bool pressed) { m_altPressed = pressed; }
+
+    wchar_t text() const { return m_textChar; }
+    void setText(wchar_t text) { m_textChar = text; }
+
+    bool isTextProvided() const { return m_textProvided; }
+    void setTextProvided(bool provided) { m_textProvided = provided; }
+
+private:
+    int m_key{0};
+    bool m_ctrlPressed{false};
+    bool m_shiftPressed{false};
+    bool m_altPressed{false};
+    wchar_t m_textChar{L'\0'};
+    bool m_textProvided{false};
 };
 
 // ---------------------------------------------------------------------------

@@ -105,6 +105,15 @@ public:
      */
     SwString text() const { return m_text; }
 
+    void setEditText(const SwString& text) {
+        m_editText = text;
+        m_hasEditText = true;
+    }
+
+    SwString editText() const { return m_hasEditText ? m_editText : m_text; }
+
+    bool hasEditText() const { return m_hasEditText; }
+
     /**
      * @brief Sets the tool Tip.
      * @param text Value passed to the method.
@@ -288,9 +297,11 @@ private:
     }
 
     SwString m_text;
+    SwString m_editText;
     SwString m_toolTip;
     SwImage  m_icon;
     bool m_editable{false};
+    bool m_hasEditText{false};
     SwStandardItem* m_parent{nullptr};
     int m_rowInParent{-1};
     int m_columnInParent{-1};
@@ -451,8 +462,11 @@ public:
         if (role == SwItemDataRole::DecorationRole) {
             return SwAny::from<SwImage>(item->icon());
         }
-        if (role == SwItemDataRole::DisplayRole || role == SwItemDataRole::EditRole) {
+        if (role == SwItemDataRole::DisplayRole) {
             return SwAny(item->text());
+        }
+        if (role == SwItemDataRole::EditRole) {
+            return SwAny(item->editText());
         }
         return SwAny();
     }
@@ -505,7 +519,11 @@ public:
         } catch (...) {
             return false;
         }
-        item->setText(text);
+        if (role == SwItemDataRole::EditRole) {
+            item->setEditText(text);
+        } else {
+            item->setText(text);
+        }
         dataChanged(index, index);
         return true;
     }

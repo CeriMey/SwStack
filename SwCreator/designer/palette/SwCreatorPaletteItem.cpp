@@ -4,6 +4,7 @@
 #include "SwPainter.h"
 #include "SwWidgetPlatformAdapter.h"
 #include "designer/SwCreatorSystemDragDrop.h"
+#include "theme/SwCreatorTheme.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -55,21 +56,22 @@ void SwCreatorPaletteItem::paintEvent(PaintEvent* event) {
         return;
     }
 
+    const auto& th = SwCreatorTheme::current();
     const SwRect r = rect();
 
-    SwColor text{15, 23, 42};
+    SwColor text = th.textPrimary;
 
     bool paintBg = false;
-    SwColor bg{255, 255, 255};
+    SwColor bg = th.surface2;
 
     if (m_selected) {
-        bg = SwColor{219, 234, 254};
+        bg = th.selectionBg;
         paintBg = true;
     } else if (m_pressed) {
-        bg = SwColor{241, 245, 249};
+        bg = th.pressedBg;
         paintBg = true;
-    } else if (m_hover) {
-        bg = SwColor{248, 250, 252};
+    } else if (getHover()) {
+        bg = th.hoverBg;
         paintBg = true;
     }
 
@@ -141,12 +143,6 @@ void SwCreatorPaletteItem::mouseMoveEvent(MouseEvent* event) {
     if (!event) {
         return;
     }
-    const bool inside = isPointInside(event->x(), event->y());
-    if (inside != m_hover) {
-        m_hover = inside;
-        update();
-    }
-
     if (!m_pressed || !getEnable()) {
         return;
     }
@@ -166,6 +162,11 @@ void SwCreatorPaletteItem::mouseMoveEvent(MouseEvent* event) {
             // because we may not receive a clean MouseRelease event afterward.
             m_pressed = false;
             m_dragging = false;
+            // The OLE drag loop consumed the mouse release, so the framework's logical mouse
+            // grab (set when we accepted the original press) is still active. Clear it so that
+            // the next click is dispatched normally to whatever widget is under the cursor.
+            mouseGrabberWidget_() = nullptr;
+            mouseGrabButtons_() = 0;
             update();
             event->accept();
             return;
@@ -188,8 +189,9 @@ void SwCreatorPaletteItem::drawIcon_(SwPainter* painter, const SwRect& rect, con
         return;
     }
 
-    const SwColor stroke{71, 85, 105};
-    const SwColor fill{226, 232, 240};
+    const auto& th = SwCreatorTheme::current();
+    const SwColor stroke = th.textSecondary;
+    const SwColor fill = th.surface4;
 
     painter->fillRoundedRect(rect, 4, fill, stroke, 1);
 
@@ -232,7 +234,7 @@ void SwCreatorPaletteItem::drawIcon_(SwPainter* painter, const SwRect& rect, con
     }
 
     if (cls == "SwPushButton" || cls == "SwToolButton") {
-        painter->fillRoundedRect(SwRect{x + 3, y + 4, w - 6, h - 8}, 4, SwColor{241, 245, 249}, stroke, 2);
+        painter->fillRoundedRect(SwRect{x + 3, y + 4, w - 6, h - 8}, 4, th.surface3, stroke, 2);
         return;
     }
     if (cls == "SwLabel") {
@@ -241,7 +243,7 @@ void SwCreatorPaletteItem::drawIcon_(SwPainter* painter, const SwRect& rect, con
         return;
     }
     if (cls == "SwLineEdit") {
-        painter->fillRoundedRect(SwRect{x + 3, y + 5, w - 6, h - 10}, 3, SwColor{255, 255, 255}, stroke, 2);
+        painter->fillRoundedRect(SwRect{x + 3, y + 5, w - 6, h - 10}, 3, th.surface1, stroke, 2);
         line(x + 6, y + 8, x + 6, y + h - 8);
         return;
     }
@@ -257,14 +259,14 @@ void SwCreatorPaletteItem::drawIcon_(SwPainter* painter, const SwRect& rect, con
         return;
     }
     if (cls == "SwComboBox") {
-        painter->fillRoundedRect(SwRect{x + 3, y + 5, w - 6, h - 10}, 3, SwColor{255, 255, 255}, stroke, 2);
+        painter->fillRoundedRect(SwRect{x + 3, y + 5, w - 6, h - 10}, 3, th.surface1, stroke, 2);
         line(x + w - 7, y + 7, x + w - 4, y + 10);
         line(x + w - 4, y + 10, x + w - 7, y + 13);
         return;
     }
     if (cls == "SwProgressBar") {
         box(x + 3, y + 6, w - 6, h - 12);
-        painter->fillRect(SwRect{x + 4, y + 7, (w - 8) / 2, h - 14}, SwColor{59, 130, 246}, SwColor{59, 130, 246}, 0);
+        painter->fillRect(SwRect{x + 4, y + 7, (w - 8) / 2, h - 14}, th.accentSecondary, th.accentSecondary, 0);
         return;
     }
     if (cls == "SwPlainTextEdit" || cls == "SwTextEdit") {

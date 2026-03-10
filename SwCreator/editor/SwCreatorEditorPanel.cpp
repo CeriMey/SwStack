@@ -2,6 +2,7 @@
 
 #include "editor/SwCreatorEditorPaths.h"
 #include "editor/SwCreatorEditorTabWidget.h"
+#include "theme/SwCreatorTheme.h"
 
 #include "SwDir.h"
 #include "SwFileDialog.h"
@@ -11,12 +12,27 @@
 #include "SwMessageBox.h"
 #include "SwSplitter.h"
 
+namespace {
+
+SwWidget* dialogHost_(SwWidget* preferredParent, SwWidget* fallbackParent) {
+    SwWidget* current = preferredParent ? preferredParent : fallbackParent;
+    SwWidget* root = current;
+    while (current) {
+        root = current;
+        current = dynamic_cast<SwWidget*>(current->parent());
+    }
+    return root;
+}
+
+} // namespace
+
 SwCreatorEditorPanel::SwCreatorEditorPanel(SwWidget* parent)
     : SwWidget(parent) {
-    setStyleSheet("SwCreatorEditorPanel { background-color: rgba(0,0,0,0); border-width: 0px; }");
+    const auto& th = SwCreatorTheme::current();
+    setStyleSheet("SwCreatorEditorPanel { background-color: " + SwCreatorTheme::rgb(th.surface1) + "; border-width: 0px; }");
 
     SwVerticalLayout* layout = new SwVerticalLayout(this);
-    layout->setMargin(6);
+    layout->setMargin(0);
     layout->setSpacing(0);
     setLayout(layout);
 
@@ -24,23 +40,29 @@ SwCreatorEditorPanel::SwCreatorEditorPanel(SwWidget* parent)
     m_splitter->setHandleWidth(4);
     layout->addWidget(m_splitter, 1, 0);
 
-    m_explorer = new SwFileExplorer(m_splitter);
+    m_explorer = new SwFileExplorer(m_splitter, false, false);
     m_explorer->setTitle("Explorer");
+    m_explorer->setStyleSheet(
+        "SwFileExplorer { background-color: " + SwCreatorTheme::rgb(th.surface2) + "; border-width: 0px; }");
+    if (m_explorer->treeWidget()) {
+        m_explorer->treeWidget()->setStyleSheet(
+            "SwTreeWidget { background-color: " + SwCreatorTheme::rgb(th.surface2)
+            + "; border-color: " + SwCreatorTheme::rgb(th.borderLight)
+            + "; border-width: 0px; border-radius: 0px;"
+            " color: " + SwCreatorTheme::rgb(th.textPrimary) + "; }");
+    }
     m_tabs = new SwCreatorEditorTabWidget(m_splitter);
     m_tabs->setMinimumSize(420, 0);
 
     m_splitter->addWidget(m_explorer);
     m_splitter->addWidget(m_tabs);
-    m_splitter->setSizes(SwVector<int>{320, 1120});
+    m_splitter->setSizes(SwVector<int>{220, 1220});
 
     SwObject::connect(m_explorer, &SwFileExplorer::pathActivated, this, [this](const SwString& filePath) {
         if (m_tabs && m_tabs->openFile(filePath)) {
             m_explorer->setCurrentPath(filePath);
             emitStateChanged_();
         }
-    });
-    SwObject::connect(m_explorer, &SwFileExplorer::workspaceBrowseRequested, this, [this]() {
-        (void)openFolderDialog(this);
     });
     SwObject::connect(m_tabs, &SwCreatorEditorTabWidget::currentFileChanged, this, [this](const SwString& filePath) {
         if (m_explorer) {
@@ -87,7 +109,7 @@ void SwCreatorEditorPanel::openPath(const SwString& rawPath) {
 
 bool SwCreatorEditorPanel::openFileDialog(SwWidget* dialogParent) {
     const SwString startPath = m_rootPath.isEmpty() ? SwDir::currentPath() : m_rootPath;
-    const SwString filePath = SwFileDialog::getOpenFileName(dialogParent,
+    const SwString filePath = SwFileDialog::getOpenFileName(dialogHost_(dialogParent, this),
                                                             "Open file",
                                                             startPath,
                                                             "All Files (*.*)");
@@ -101,7 +123,7 @@ bool SwCreatorEditorPanel::openFileDialog(SwWidget* dialogParent) {
 
 bool SwCreatorEditorPanel::openFolderDialog(SwWidget* dialogParent) {
     const SwString startPath = m_rootPath.isEmpty() ? SwDir::currentPath() : m_rootPath;
-    const SwString folderPath = SwFileDialog::getExistingDirectory(dialogParent,
+    const SwString folderPath = SwFileDialog::getExistingDirectory(dialogHost_(dialogParent, this),
                                                                    "Open folder",
                                                                    startPath);
     if (folderPath.isEmpty()) {
@@ -109,6 +131,7 @@ bool SwCreatorEditorPanel::openFolderDialog(SwWidget* dialogParent) {
     }
 
     setRootPath(folderPath);
+    reloadExplorer();
     return true;
 }
 
@@ -166,15 +189,7 @@ SwString SwCreatorEditorPanel::windowTitle() const {
         if (hasCurrentFileDirty()) {
             title += " *";
         }
-        if (!m_rootPath.isEmpty()) {
-            title += SwString(" - ") + m_rootPath;
-        }
         title += " - SwCreatorEditor";
-        return title;
-    }
-
-    if (!m_rootPath.isEmpty()) {
-        return m_rootPath + " - SwCreatorEditor";
     }
 
     return title;

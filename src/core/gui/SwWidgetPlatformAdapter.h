@@ -49,6 +49,7 @@
 #include "Sw.h"
 #include "SwFont.h"
 #include "SwString.h"
+#include "platform/SwPlatformTarget.h"
 
 #include <algorithm>
 #include <cctype>
@@ -61,9 +62,11 @@
 #include <locale>
 #include <sstream>
 
-#if defined(_WIN32)
+#if SW_PLATFORM_WIN32
 #include "platform/win/SwWindows.h"
-#elif defined(__linux__)
+#elif SW_PLATFORM_ANDROID
+#include "platform/android/SwAndroidPlatformIntegration.h"
+#elif SW_PLATFORM_X11
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
@@ -122,6 +125,7 @@ public:
      * @return The requested invalidate Rect.
      */
     static void invalidateRect(const SwWidgetPlatformHandle& handle, const SwRect& rect);
+    static void flushDamage();
     /**
      * @brief Performs the `clientRect` operation.
      * @param handle Value passed to the method.
@@ -281,7 +285,7 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     static bool isShiftModifierActive();
-#if defined(__linux__)
+#if SW_PLATFORM_X11
     /**
      * @brief Performs the `requestSyntheticExpose` operation.
      * @param window Value passed to the method.
@@ -297,7 +301,7 @@ public:
 #endif
 
 private:
-#if defined(__linux__)
+#if SW_PLATFORM_X11
     struct LinuxExposeTracker {
         std::mutex mutex;
         std::unordered_set<std::uintptr_t> pending;
@@ -308,7 +312,32 @@ private:
     static int approximateWidth(const SwString& text, size_t length, int defaultWidth);
 };
 
-#if defined(_WIN32)
+inline bool swWidgetPlatformIsUtf8ContinuationByte_(unsigned char byte) {
+    return (byte & 0xC0U) == 0x80U;
+}
+
+inline size_t swWidgetPlatformClampUtf8Boundary_(const std::string& utf8, size_t offset) {
+    if (offset >= utf8.size()) {
+        return utf8.size();
+    }
+    while (offset > 0 && swWidgetPlatformIsUtf8ContinuationByte_(static_cast<unsigned char>(utf8[offset]))) {
+        --offset;
+    }
+    return offset;
+}
+
+inline size_t swWidgetPlatformNextUtf8Boundary_(const std::string& utf8, size_t offset) {
+    if (offset >= utf8.size()) {
+        return utf8.size();
+    }
+    size_t next = swWidgetPlatformClampUtf8Boundary_(utf8, offset) + 1;
+    while (next < utf8.size() && swWidgetPlatformIsUtf8ContinuationByte_(static_cast<unsigned char>(utf8[next]))) {
+        ++next;
+    }
+    return next;
+}
+
+#if SW_PLATFORM_WIN32
 
 inline void SwWidgetPlatformAdapter::setCursor(CursorType cursor) {
     LPCTSTR cursorId = IDC_ARROW;
@@ -331,6 +360,16 @@ inline void SwWidgetPlatformAdapter::setCursor(CursorType cursor) {
     }
 }
 
+// ── Damage-region accumulator ────────────────────────────────────────
+// Instead of issuing one InvalidateRect per widget, we accumulate dirty
+// rects into a single union per HWND.  flushDamage() issues one
+// InvalidateRect call with the accumulated region.  This turns O(N)
+// syscalls per update() tree walk into O(1).
+inline std::map<HWND, RECT>& pendingDamage_() {
+    static std::map<HWND, RECT> s_damage;
+    return s_damage;
+}
+
 inline void SwWidgetPlatformAdapter::invalidateRect(const SwWidgetPlatformHandle& handle,
                                                     const SwRect& rect) {
     HWND hwnd = nativeHandleAs<HWND>(handle);
@@ -342,10 +381,27 @@ inline void SwWidgetPlatformAdapter::invalidateRect(const SwWidgetPlatformHandle
     r.top = rect.y;
     r.right = rect.x + rect.width;
     r.bottom = rect.y + rect.height;
-    ::InvalidateRect(hwnd, &r, FALSE);
-    // Trigger an immediate paint on the GUI thread so frames are not stuck behind idle waits.
-    ::PostMessage(hwnd, WM_NULL, 0,0);
 
+    auto& damage = pendingDamage_();
+    auto it = damage.find(hwnd);
+    if (it == damage.end()) {
+        damage[hwnd] = r;
+    } else {
+        // Union of existing damage and new rect
+        RECT& d = it->second;
+        if (r.left   < d.left)   d.left   = r.left;
+        if (r.top    < d.top)    d.top    = r.top;
+        if (r.right  > d.right)  d.right  = r.right;
+        if (r.bottom > d.bottom) d.bottom = r.bottom;
+    }
+}
+
+inline void SwWidgetPlatformAdapter::flushDamage() {
+    auto& damage = pendingDamage_();
+    for (auto& kv : damage) {
+        ::InvalidateRect(kv.first, &kv.second, FALSE);
+    }
+    damage.clear();
 }
 
 inline SwRect SwWidgetPlatformAdapter::clientRect(const SwWidgetPlatformHandle& handle) {
@@ -415,16 +471,26 @@ inline size_t SwWidgetPlatformAdapter::characterIndexAtPosition(const SwWidgetPl
     SIZE charSize{};
     int currentX = 0;
     size_t index = 0;
-    std::string buffer = text.toStdString();
-    for (; index < buffer.size(); ++index) {
-        char ch = buffer[index];
-        if (!GetTextExtentPoint32A(hdc, &ch, 1, &charSize)) {
+    const std::string utf8 = text.toStdString();
+    for (; index < utf8.size();) {
+        const size_t next = swWidgetPlatformNextUtf8Boundary_(utf8, index);
+        const SwString segment(utf8.data() + index, next - index);
+        std::wstring wide;
+        try {
+            wide = segment.toStdWString();
+        } catch (...) {
+            index = next;
+            continue;
+        }
+        if (!GetTextExtentPoint32W(hdc, wide.c_str(), static_cast<int>(wide.size()), &charSize)) {
+            index = next;
             continue;
         }
         if (currentX + charSize.cx / 2 >= relativeX) {
             break;
         }
         currentX += charSize.cx;
+        index = next;
     }
 
     if (oldFont) {
@@ -455,10 +521,18 @@ inline int SwWidgetPlatformAdapter::textWidthUntil(const SwWidgetPlatformHandle&
     }
 
     SIZE textSize{};
-    SwString segment = text.substr(0, length);
-    std::string utf8 = segment.toStdString();
-    if (!utf8.empty()) {
-        GetTextExtentPoint32A(hdc, utf8.c_str(), static_cast<int>(utf8.size()), &textSize);
+    const std::string utf8 = text.toStdString();
+    const size_t clampedLength = swWidgetPlatformClampUtf8Boundary_(utf8, length);
+    if (clampedLength > 0) {
+        const SwString segment(utf8.data(), clampedLength);
+        try {
+            const std::wstring wide = segment.toStdWString();
+            if (!wide.empty()) {
+                GetTextExtentPoint32W(hdc, wide.c_str(), static_cast<int>(wide.size()), &textSize);
+            }
+        } catch (...) {
+            textSize.cx = approximateWidth(text, clampedLength, defaultWidth);
+        }
     }
 
     if (oldFont) {
@@ -555,7 +629,162 @@ inline bool SwWidgetPlatformAdapter::isShiftModifierActive() {
     return (GetKeyState(VK_SHIFT) & 0x8000) != 0;
 }
 
-#elif defined(__linux__)
+#elif SW_PLATFORM_ANDROID
+
+inline void SwWidgetPlatformAdapter::setCursor(CursorType) {}
+
+inline void SwWidgetPlatformAdapter::invalidateRect(const SwWidgetPlatformHandle& handle,
+                                                    const SwRect&) {
+    SwAndroidPlatformWindow* window =
+        nativeHandleAs<SwAndroidPlatformWindow*>(handle);
+    if (!window) {
+        return;
+    }
+    window->requestUpdate();
+}
+
+inline void SwWidgetPlatformAdapter::flushDamage() {}
+
+inline SwRect SwWidgetPlatformAdapter::clientRect(const SwWidgetPlatformHandle& handle) {
+    SwAndroidPlatformWindow* window =
+        nativeHandleAs<SwAndroidPlatformWindow*>(handle);
+    if (!window) {
+        return SwRect{0, 0, 0, 0};
+    }
+    return window->clientRect();
+}
+
+inline SwPoint SwWidgetPlatformAdapter::clientOriginOnScreen(const SwWidgetPlatformHandle&) {
+    return SwPoint{0, 0};
+}
+
+inline SwRect SwWidgetPlatformAdapter::windowFrameRect(const SwWidgetPlatformHandle& handle) {
+    return clientRect(handle);
+}
+
+inline size_t SwWidgetPlatformAdapter::characterIndexAtPosition(const SwWidgetPlatformHandle&,
+                                                                const SwString& text,
+                                                                SwFont font,
+                                                                int relativeX,
+                                                                int defaultWidth) {
+    const int advance = std::max(1, swandroid::charAdvanceForFont(font));
+    if (advance <= 0) {
+        return approximateIndex(text, relativeX, defaultWidth);
+    }
+    const int clamped = std::max(0, relativeX);
+    const size_t approx = static_cast<size_t>(clamped / advance);
+    return std::min(approx, text.length());
+}
+
+inline int SwWidgetPlatformAdapter::textWidthUntil(const SwWidgetPlatformHandle&,
+                                                   const SwString& text,
+                                                   SwFont font,
+                                                   size_t length,
+                                                   int defaultWidth) {
+    const size_t clampedLength = std::min(length, text.length());
+    const int advance = std::max(1, swandroid::charAdvanceForFont(font));
+    if (advance <= 0) {
+        return approximateWidth(text, clampedLength, defaultWidth);
+    }
+    return static_cast<int>(clampedLength) * advance;
+}
+
+inline bool SwWidgetPlatformAdapter::isBackspaceKey(int keyCode) {
+    return keyCode == AKEYCODE_DEL;
+}
+
+inline bool SwWidgetPlatformAdapter::isDeleteKey(int keyCode) {
+    return keyCode == AKEYCODE_FORWARD_DEL;
+}
+
+inline bool SwWidgetPlatformAdapter::isLeftArrowKey(int keyCode) {
+    return keyCode == AKEYCODE_DPAD_LEFT;
+}
+
+inline bool SwWidgetPlatformAdapter::isRightArrowKey(int keyCode) {
+    return keyCode == AKEYCODE_DPAD_RIGHT;
+}
+
+inline bool SwWidgetPlatformAdapter::isUpArrowKey(int keyCode) {
+    return keyCode == AKEYCODE_DPAD_UP;
+}
+
+inline bool SwWidgetPlatformAdapter::isDownArrowKey(int keyCode) {
+    return keyCode == AKEYCODE_DPAD_DOWN;
+}
+
+inline bool SwWidgetPlatformAdapter::isHomeKey(int keyCode) {
+    return keyCode == AKEYCODE_MOVE_HOME || keyCode == AKEYCODE_HOME;
+}
+
+inline bool SwWidgetPlatformAdapter::isEndKey(int keyCode) {
+    return keyCode == AKEYCODE_MOVE_END;
+}
+
+inline bool SwWidgetPlatformAdapter::isReturnKey(int keyCode) {
+    return keyCode == AKEYCODE_ENTER || keyCode == AKEYCODE_NUMPAD_ENTER;
+}
+
+inline bool SwWidgetPlatformAdapter::isEscapeKey(int keyCode) {
+    return keyCode == AKEYCODE_ESCAPE || keyCode == AKEYCODE_BACK;
+}
+
+inline bool SwWidgetPlatformAdapter::isCapsLockKey(int keyCode) {
+    return keyCode == AKEYCODE_CAPS_LOCK;
+}
+
+inline bool SwWidgetPlatformAdapter::matchesShortcutKey(int keyCode, char letter) {
+    const char upper = static_cast<char>(std::toupper(static_cast<unsigned char>(letter)));
+    if (upper < 'A' || upper > 'Z') {
+        return false;
+    }
+    return keyCode == (AKEYCODE_A + (upper - 'A'));
+}
+
+inline bool SwWidgetPlatformAdapter::translateCharacter(int keyCode,
+                                                        bool shiftPressed,
+                                                        bool capsLock,
+                                                        char& outChar) {
+    if (keyCode >= AKEYCODE_A && keyCode <= AKEYCODE_Z) {
+        char base = static_cast<char>('a' + (keyCode - AKEYCODE_A));
+        const bool upper = shiftPressed ^ capsLock;
+        outChar = upper
+            ? static_cast<char>(std::toupper(static_cast<unsigned char>(base)))
+            : base;
+        return true;
+    }
+
+    if (keyCode >= AKEYCODE_0 && keyCode <= AKEYCODE_9) {
+        static const char shifted[] = {')', '!', '@', '#', '$', '%', '^', '&', '*', '('};
+        outChar = shiftPressed
+            ? shifted[keyCode - AKEYCODE_0]
+            : static_cast<char>('0' + (keyCode - AKEYCODE_0));
+        return true;
+    }
+
+    switch (keyCode) {
+    case AKEYCODE_SPACE: outChar = ' '; return true;
+    case AKEYCODE_MINUS: outChar = shiftPressed ? '_' : '-'; return true;
+    case AKEYCODE_EQUALS: outChar = shiftPressed ? '+' : '='; return true;
+    case AKEYCODE_LEFT_BRACKET: outChar = shiftPressed ? '{' : '['; return true;
+    case AKEYCODE_RIGHT_BRACKET: outChar = shiftPressed ? '}' : ']'; return true;
+    case AKEYCODE_SEMICOLON: outChar = shiftPressed ? ':' : ';'; return true;
+    case AKEYCODE_APOSTROPHE: outChar = shiftPressed ? '"' : '\''; return true;
+    case AKEYCODE_COMMA: outChar = shiftPressed ? '<' : ','; return true;
+    case AKEYCODE_PERIOD: outChar = shiftPressed ? '>' : '.'; return true;
+    case AKEYCODE_SLASH: outChar = shiftPressed ? '?' : '/'; return true;
+    case AKEYCODE_BACKSLASH: outChar = shiftPressed ? '|' : '\\'; return true;
+    case AKEYCODE_GRAVE: outChar = shiftPressed ? '~' : '`'; return true;
+    default: break;
+    }
+    return false;
+}
+
+inline bool SwWidgetPlatformAdapter::isShiftModifierActive() {
+    return false;
+}
+
+#elif SW_PLATFORM_X11
 
 inline SwWidgetPlatformAdapter::LinuxExposeTracker& SwWidgetPlatformAdapter::exposeTracker() {
     static LinuxExposeTracker tracker;
@@ -747,6 +976,11 @@ inline void SwWidgetPlatformAdapter::invalidateRect(const SwWidgetPlatformHandle
 
     XSendEvent(display, window, False, ExposureMask, &exposeEvent);
     XFlush(display);
+}
+
+inline void SwWidgetPlatformAdapter::flushDamage() {
+    // X11: invalidateRect already sends XSendEvent + XFlush per call,
+    // so there is no pending damage to flush.  This is a no-op.
 }
 
 inline SwRect SwWidgetPlatformAdapter::clientRect(const SwWidgetPlatformHandle& handle) {
@@ -963,6 +1197,7 @@ inline bool SwWidgetPlatformAdapter::isShiftModifierActive() {
 
 inline void SwWidgetPlatformAdapter::setCursor(CursorType) {}
 inline void SwWidgetPlatformAdapter::invalidateRect(const SwWidgetPlatformHandle&, const SwRect&) {}
+inline void SwWidgetPlatformAdapter::flushDamage() {}
 inline SwRect SwWidgetPlatformAdapter::clientRect(const SwWidgetPlatformHandle&) { return SwRect{0, 0, 0, 0}; }
 inline SwPoint SwWidgetPlatformAdapter::clientOriginOnScreen(const SwWidgetPlatformHandle&) { return SwPoint{0, 0}; }
 inline SwRect SwWidgetPlatformAdapter::windowFrameRect(const SwWidgetPlatformHandle&) { return SwRect{0, 0, 0, 0}; }

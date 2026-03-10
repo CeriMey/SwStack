@@ -14,8 +14,8 @@ public:
     explicit SwCreatorEditorPanel(SwWidget* parent = nullptr);
 
     void openPath(const SwString& path);
-    bool openFileDialog(SwWidget* dialogParent);
-    bool openFolderDialog(SwWidget* dialogParent);
+    bool openFileDialog(SwWidget* dialogParent = nullptr);
+    bool openFolderDialog(SwWidget* dialogParent = nullptr);
     void setRootPath(const SwString& rootPath);
     void reloadExplorer();
 

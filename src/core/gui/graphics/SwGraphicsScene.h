@@ -401,15 +401,27 @@ public:
         if (old) {
             old->setHasFocus_(false);
             SwFocusEvent ev(SwGraphicsSceneEventType::FocusOut, reason);
-            old->focusOutEvent(&ev);
+            dispatchSceneEventToItem_(old, &ev);
         }
         m_focusItem = item;
         if (item) {
             item->setHasFocus_(true);
             SwFocusEvent ev(SwGraphicsSceneEventType::FocusIn, reason);
-            item->focusInEvent(&ev);
+            dispatchSceneEventToItem_(item, &ev);
         }
         emit focusItemChanged();
+    }
+
+    bool event(SwEvent* event) override {
+        if (!event) {
+            return false;
+        }
+
+        if (event->type() == EventType::GraphicsSceneDispatch) {
+            return dispatchGraphicsSceneEvent_(static_cast<SwGraphicsSceneDispatchEvent*>(event));
+        }
+
+        return SwObject::event(event);
     }
 
     /// Clears scene focus by removing the currently focused item.
@@ -646,45 +658,14 @@ public:
      */
     void mousePressEvent_(const SwPointF& scenePos, const SwPoint& screenPos,
                           SwMouseButton button, int modifiers) {
-        SwGraphicsItem* target = itemAt(scenePos);
+        SwGraphicsSceneMouseEvent ev(SwGraphicsSceneEventType::GraphicsSceneMousePress);
+        ev.setScenePos(scenePos);
+        ev.setScreenPos(screenPos);
+        ev.setButton(button);
+        ev.setModifiers(modifiers);
 
-        // Handle selection
-        if (!m_stickyFocus || target) {
-            if (!(modifiers & SwKeyboardModifier::ControlModifier)) {
-                // Clear selection unless ctrl is held
-                bool hadSelection = false;
-                for (auto* item : m_items) {
-                    if (item && item->isSelected()) { item->setSelected(false); hadSelection = true; }
-                }
-                if (hadSelection) emit selectionChanged();
-            }
-        }
-
-        if (target) {
-            if (target->testFlag(SwGraphicsItem::ItemIsSelectable))
-                target->setSelected(!target->isSelected());
-            if (target->testFlag(SwGraphicsItem::ItemIsFocusable))
-                setFocusItem(target, SwFocusEvent::MouseFocusReason);
-
-            m_mouseGrabberItem = target;
-            m_lastMouseScenePos = scenePos;
-            m_lastMouseScreenPos = screenPos;
-
-            SwGraphicsSceneMouseEvent ev(SwGraphicsSceneEventType::GraphicsSceneMousePress);
-            ev.setScenePos(scenePos);
-            ev.setPos(target->mapFromScene(scenePos));
-            ev.setScreenPos(screenPos);
-            ev.setButton(button);
-            ev.setModifiers(modifiers);
-            ev.setButtonDownPos(button, target->mapFromScene(scenePos));
-            ev.setButtonDownScenePos(button, scenePos);
-            ev.setButtonDownScreenPos(button, screenPos);
-            target->mousePressEvent(&ev);
-
-            // Handle ItemIsMovable
-            if (target->testFlag(SwGraphicsItem::ItemIsMovable))
-                m_movingItem = target;
-        }
+        SwGraphicsSceneDispatchEvent dispatchEvent(this, itemAt(scenePos), &ev);
+        SwCoreApplication::sendEvent(this, &dispatchEvent);
     }
 
     /**
@@ -695,67 +676,18 @@ public:
      */
     void mouseMoveEvent_(const SwPointF& scenePos, const SwPoint& screenPos,
                          int buttons, int modifiers) {
-        // Hover tracking
-        SwGraphicsItem* hoverTarget = itemAt(scenePos);
-        if (hoverTarget != m_lastHoverItem) {
-            if (m_lastHoverItem && m_lastHoverItem->acceptHoverEvents()) {
-                m_lastHoverItem->setIsUnderMouse_(false);
-                SwGraphicsSceneHoverEvent ev(SwGraphicsSceneEventType::GraphicsSceneHoverLeave);
-                ev.setScenePos(scenePos);
-                ev.setPos(m_lastHoverItem->mapFromScene(scenePos));
-                ev.setScreenPos(screenPos);
-                ev.setLastScenePos(m_lastMouseScenePos);
-                ev.setLastPos(m_lastHoverItem->mapFromScene(m_lastMouseScenePos));
-                ev.setLastScreenPos(m_lastMouseScreenPos);
-                m_lastHoverItem->hoverLeaveEvent(&ev);
-            }
-            if (hoverTarget && hoverTarget->acceptHoverEvents()) {
-                hoverTarget->setIsUnderMouse_(true);
-                SwGraphicsSceneHoverEvent ev(SwGraphicsSceneEventType::GraphicsSceneHoverEnter);
-                ev.setScenePos(scenePos);
-                ev.setPos(hoverTarget->mapFromScene(scenePos));
-                ev.setScreenPos(screenPos);
-                ev.setLastScenePos(m_lastMouseScenePos);
-                ev.setLastPos(hoverTarget->mapFromScene(m_lastMouseScenePos));
-                ev.setLastScreenPos(m_lastMouseScreenPos);
-                hoverTarget->hoverEnterEvent(&ev);
-            }
-            m_lastHoverItem = hoverTarget;
-        } else if (hoverTarget && hoverTarget->acceptHoverEvents()) {
-            SwGraphicsSceneHoverEvent ev(SwGraphicsSceneEventType::GraphicsSceneHoverMove);
-            ev.setScenePos(scenePos);
-            ev.setPos(hoverTarget->mapFromScene(scenePos));
-            ev.setScreenPos(screenPos);
-            ev.setLastScenePos(m_lastMouseScenePos);
-            ev.setLastPos(hoverTarget->mapFromScene(m_lastMouseScenePos));
-            ev.setLastScreenPos(m_lastMouseScreenPos);
-            hoverTarget->hoverMoveEvent(&ev);
-        }
+        SwGraphicsSceneMouseEvent ev(SwGraphicsSceneEventType::GraphicsSceneMouseMove);
+        ev.setScenePos(scenePos);
+        ev.setScreenPos(screenPos);
+        ev.setLastScenePos(m_lastMouseScenePos);
+        ev.setLastScreenPos(m_lastMouseScreenPos);
+        ev.setButtons(buttons);
+        ev.setModifiers(modifiers);
 
-        // ItemIsMovable drag
-        if (m_movingItem && (buttons & SwMouseButtons::LeftButton)) {
-            double dx = scenePos.x - m_lastMouseScenePos.x;
-            double dy = scenePos.y - m_lastMouseScenePos.y;
-            m_movingItem->moveBy(dx, dy);
-        }
-
-        // Mouse grab target
-        SwGraphicsItem* target = m_mouseGrabberItem ? m_mouseGrabberItem : hoverTarget;
-        if (target) {
-            SwGraphicsSceneMouseEvent ev(SwGraphicsSceneEventType::GraphicsSceneMouseMove);
-            ev.setScenePos(scenePos);
-            ev.setPos(target->mapFromScene(scenePos));
-            ev.setScreenPos(screenPos);
-            ev.setLastScenePos(m_lastMouseScenePos);
-            ev.setLastPos(target->mapFromScene(m_lastMouseScenePos));
-            ev.setLastScreenPos(m_lastMouseScreenPos);
-            ev.setButtons(buttons);
-            ev.setModifiers(modifiers);
-            target->mouseMoveEvent(&ev);
-        }
-
-        m_lastMouseScenePos = scenePos;
-        m_lastMouseScreenPos = screenPos;
+        SwGraphicsSceneDispatchEvent dispatchEvent(this,
+                                                   m_mouseGrabberItem ? m_mouseGrabberItem : itemAt(scenePos),
+                                                   &ev);
+        SwCoreApplication::sendEvent(this, &dispatchEvent);
     }
 
     /**
@@ -766,23 +698,18 @@ public:
      */
     void mouseReleaseEvent_(const SwPointF& scenePos, const SwPoint& screenPos,
                             SwMouseButton button, int modifiers) {
-        m_movingItem = nullptr;
-        SwGraphicsItem* target = m_mouseGrabberItem;
-        m_mouseGrabberItem = nullptr;
+        SwGraphicsSceneMouseEvent ev(SwGraphicsSceneEventType::GraphicsSceneMouseRelease);
+        ev.setScenePos(scenePos);
+        ev.setScreenPos(screenPos);
+        ev.setButton(button);
+        ev.setModifiers(modifiers);
+        ev.setLastScenePos(m_lastMouseScenePos);
+        ev.setLastScreenPos(m_lastMouseScreenPos);
 
-        if (!target) target = itemAt(scenePos);
-        if (target) {
-            SwGraphicsSceneMouseEvent ev(SwGraphicsSceneEventType::GraphicsSceneMouseRelease);
-            ev.setScenePos(scenePos);
-            ev.setPos(target->mapFromScene(scenePos));
-            ev.setScreenPos(screenPos);
-            ev.setButton(button);
-            ev.setModifiers(modifiers);
-            ev.setLastScenePos(m_lastMouseScenePos);
-            ev.setLastPos(target->mapFromScene(m_lastMouseScenePos));
-            ev.setLastScreenPos(m_lastMouseScreenPos);
-            target->mouseReleaseEvent(&ev);
-        }
+        SwGraphicsSceneDispatchEvent dispatchEvent(this,
+                                                   m_mouseGrabberItem ? m_mouseGrabberItem : itemAt(scenePos),
+                                                   &ev);
+        SwCoreApplication::sendEvent(this, &dispatchEvent);
     }
 
     /**
@@ -793,16 +720,14 @@ public:
      */
     void mouseDoubleClickEvent_(const SwPointF& scenePos, const SwPoint& screenPos,
                                 SwMouseButton button, int modifiers) {
-        SwGraphicsItem* target = itemAt(scenePos);
-        if (target) {
-            SwGraphicsSceneMouseEvent ev(SwGraphicsSceneEventType::GraphicsSceneMouseDoubleClick);
-            ev.setScenePos(scenePos);
-            ev.setPos(target->mapFromScene(scenePos));
-            ev.setScreenPos(screenPos);
-            ev.setButton(button);
-            ev.setModifiers(modifiers);
-            target->mouseDoubleClickEvent(&ev);
-        }
+        SwGraphicsSceneMouseEvent ev(SwGraphicsSceneEventType::GraphicsSceneMouseDoubleClick);
+        ev.setScenePos(scenePos);
+        ev.setScreenPos(screenPos);
+        ev.setButton(button);
+        ev.setModifiers(modifiers);
+
+        SwGraphicsSceneDispatchEvent dispatchEvent(this, itemAt(scenePos), &ev);
+        SwCoreApplication::sendEvent(this, &dispatchEvent);
     }
 
     /**
@@ -813,33 +738,37 @@ public:
      */
     void wheelEvent_(const SwPointF& scenePos, const SwPoint& screenPos,
                      int delta, int modifiers) {
-        SwGraphicsItem* target = itemAt(scenePos);
-        if (target) {
-            SwGraphicsSceneWheelEvent ev;
-            ev.setScenePos(scenePos);
-            ev.setPos(target->mapFromScene(scenePos));
-            ev.setScreenPos(screenPos);
-            ev.setDelta(delta);
-            ev.setModifiers(modifiers);
-            target->wheelEvent(&ev);
-        }
+        SwGraphicsSceneWheelEvent ev;
+        ev.setScenePos(scenePos);
+        ev.setScreenPos(screenPos);
+        ev.setDelta(delta);
+        ev.setModifiers(modifiers);
+
+        SwGraphicsSceneDispatchEvent dispatchEvent(this, itemAt(scenePos), &ev);
+        SwCoreApplication::sendEvent(this, &dispatchEvent);
     }
 
     /// Forwards a key press to the keyboard grabber item or the focused item.
     void keyPressEvent_(KeyEvent* event) {
-        if (m_keyboardGrabberItem) {
-            m_keyboardGrabberItem->keyPressEvent(event);
-        } else if (m_focusItem) {
-            m_focusItem->keyPressEvent(event);
+        SwGraphicsSceneDispatchEvent dispatchEvent(this,
+                                                   m_keyboardGrabberItem ? m_keyboardGrabberItem : m_focusItem,
+                                                   event,
+                                                   SwGraphicsSceneKeyDispatchType::Press);
+        SwCoreApplication::sendEvent(this, &dispatchEvent);
+        if (event) {
+            event->setAccepted(dispatchEvent.isAccepted());
         }
     }
 
     /// Forwards a key release to the keyboard grabber item or the focused item.
     void keyReleaseEvent_(KeyEvent* event) {
-        if (m_keyboardGrabberItem) {
-            m_keyboardGrabberItem->keyReleaseEvent(event);
-        } else if (m_focusItem) {
-            m_focusItem->keyReleaseEvent(event);
+        SwGraphicsSceneDispatchEvent dispatchEvent(this,
+                                                   m_keyboardGrabberItem ? m_keyboardGrabberItem : m_focusItem,
+                                                   event,
+                                                   SwGraphicsSceneKeyDispatchType::Release);
+        SwCoreApplication::sendEvent(this, &dispatchEvent);
+        if (event) {
+            event->setAccepted(dispatchEvent.isAccepted());
         }
     }
 
@@ -849,15 +778,14 @@ public:
      * @param modifiers Keyboard modifier bitmask.
      */
     void contextMenuEvent_(const SwPointF& scenePos, const SwPoint& screenPos, int modifiers) {
-        SwGraphicsItem* target = itemAt(scenePos);
-        if (target) {
-            SwGraphicsSceneContextMenuEvent ev;
-            ev.setScenePos(scenePos);
-            ev.setPos(target->mapFromScene(scenePos));
-            ev.setScreenPos(screenPos);
-            ev.setModifiers(modifiers);
-            target->contextMenuEvent(&ev);
-        }
+        SwGraphicsSceneContextMenuEvent ev;
+        ev.setScenePos(scenePos);
+        ev.setScreenPos(screenPos);
+        ev.setModifiers(modifiers);
+        ev.setReason(SwGraphicsSceneContextMenuEvent::Mouse);
+
+        SwGraphicsSceneDispatchEvent dispatchEvent(this, itemAt(scenePos), &ev);
+        SwCoreApplication::sendEvent(this, &dispatchEvent);
     }
 
     // ===================================================================
@@ -877,6 +805,265 @@ signals:
     DECLARE_SIGNAL_VOID(focusItemChanged);           ///< Emitted after focus moves to another scene item or is cleared.
 
 private:
+    bool dispatchGraphicsSceneEvent_(SwGraphicsSceneDispatchEvent* event) {
+        if (!event) {
+            return false;
+        }
+
+        if (event->hasGraphicsEvent()) {
+            const bool handled = handleGraphicsSceneEvent_(event->graphicsEvent());
+            if (handled) {
+                event->accept();
+            } else {
+                event->ignore();
+            }
+            return handled;
+        }
+
+        if (event->hasKeyEvent()) {
+            const bool handled = handleKeyEvent_(event->keyEvent(), event->keyDispatchType());
+            if (handled) {
+                event->accept();
+            } else {
+                event->ignore();
+            }
+            return handled;
+        }
+
+        return false;
+    }
+
+    bool handleGraphicsSceneEvent_(SwGraphicsSceneEvent* event) {
+        if (!event) {
+            return false;
+        }
+
+        switch (event->type()) {
+        case SwGraphicsSceneEventType::GraphicsSceneMousePress:
+            return handleMousePressEvent_(static_cast<SwGraphicsSceneMouseEvent*>(event));
+        case SwGraphicsSceneEventType::GraphicsSceneMouseMove:
+            return handleMouseMoveEvent_(static_cast<SwGraphicsSceneMouseEvent*>(event));
+        case SwGraphicsSceneEventType::GraphicsSceneMouseRelease:
+            return handleMouseReleaseEvent_(static_cast<SwGraphicsSceneMouseEvent*>(event));
+        case SwGraphicsSceneEventType::GraphicsSceneMouseDoubleClick:
+            return handleMouseDoubleClickEvent_(static_cast<SwGraphicsSceneMouseEvent*>(event));
+        case SwGraphicsSceneEventType::GraphicsSceneWheel:
+            return handleWheelEvent_(static_cast<SwGraphicsSceneWheelEvent*>(event));
+        case SwGraphicsSceneEventType::GraphicsSceneContextMenu:
+            return handleContextMenuEvent_(static_cast<SwGraphicsSceneContextMenuEvent*>(event));
+        default:
+            return false;
+        }
+    }
+
+    bool handleMousePressEvent_(SwGraphicsSceneMouseEvent* event) {
+        if (!event) {
+            return false;
+        }
+
+        const SwPointF scenePos = event->scenePos();
+        const int modifiers = event->modifiers();
+        SwGraphicsItem* target = itemAt(scenePos);
+
+        if (!m_stickyFocus || target) {
+            if (!(modifiers & SwKeyboardModifier::ControlModifier)) {
+                bool hadSelection = false;
+                for (auto* item : m_items) {
+                    if (item && item->isSelected()) { item->setSelected(false); hadSelection = true; }
+                }
+                if (hadSelection) emit selectionChanged();
+            }
+        }
+
+        if (!target) {
+            return false;
+        }
+
+        if (target->testFlag(SwGraphicsItem::ItemIsSelectable))
+            target->setSelected(!target->isSelected());
+        if (target->testFlag(SwGraphicsItem::ItemIsFocusable))
+            setFocusItem(target, SwFocusEvent::MouseFocusReason);
+
+        m_mouseGrabberItem = target;
+        m_lastMouseScenePos = scenePos;
+        m_lastMouseScreenPos = event->screenPos();
+
+        event->setPos(target->mapFromScene(scenePos));
+        event->setButtonDownPos(event->button(), target->mapFromScene(scenePos));
+        event->setButtonDownScenePos(event->button(), scenePos);
+        event->setButtonDownScreenPos(event->button(), event->screenPos());
+        const bool handled = dispatchSceneEventToItem_(target, event);
+
+        if (target->testFlag(SwGraphicsItem::ItemIsMovable))
+            m_movingItem = target;
+
+        return handled;
+    }
+
+    bool handleMouseMoveEvent_(SwGraphicsSceneMouseEvent* event) {
+        if (!event) {
+            return false;
+        }
+
+        const SwPointF scenePos = event->scenePos();
+        const SwPoint screenPos = event->screenPos();
+        SwGraphicsItem* hoverTarget = itemAt(scenePos);
+
+        if (hoverTarget != m_lastHoverItem) {
+            if (m_lastHoverItem && m_lastHoverItem->acceptHoverEvents()) {
+                m_lastHoverItem->setIsUnderMouse_(false);
+                SwGraphicsSceneHoverEvent hoverLeaveEvent(SwGraphicsSceneEventType::GraphicsSceneHoverLeave);
+                hoverLeaveEvent.setScenePos(scenePos);
+                hoverLeaveEvent.setPos(m_lastHoverItem->mapFromScene(scenePos));
+                hoverLeaveEvent.setScreenPos(screenPos);
+                hoverLeaveEvent.setLastScenePos(m_lastMouseScenePos);
+                hoverLeaveEvent.setLastPos(m_lastHoverItem->mapFromScene(m_lastMouseScenePos));
+                hoverLeaveEvent.setLastScreenPos(m_lastMouseScreenPos);
+                dispatchSceneEventToItem_(m_lastHoverItem, &hoverLeaveEvent);
+            }
+            if (hoverTarget && hoverTarget->acceptHoverEvents()) {
+                hoverTarget->setIsUnderMouse_(true);
+                SwGraphicsSceneHoverEvent hoverEnterEvent(SwGraphicsSceneEventType::GraphicsSceneHoverEnter);
+                hoverEnterEvent.setScenePos(scenePos);
+                hoverEnterEvent.setPos(hoverTarget->mapFromScene(scenePos));
+                hoverEnterEvent.setScreenPos(screenPos);
+                hoverEnterEvent.setLastScenePos(m_lastMouseScenePos);
+                hoverEnterEvent.setLastPos(hoverTarget->mapFromScene(m_lastMouseScenePos));
+                hoverEnterEvent.setLastScreenPos(m_lastMouseScreenPos);
+                dispatchSceneEventToItem_(hoverTarget, &hoverEnterEvent);
+            }
+            m_lastHoverItem = hoverTarget;
+        } else if (hoverTarget && hoverTarget->acceptHoverEvents()) {
+            SwGraphicsSceneHoverEvent hoverMoveEvent(SwGraphicsSceneEventType::GraphicsSceneHoverMove);
+            hoverMoveEvent.setScenePos(scenePos);
+            hoverMoveEvent.setPos(hoverTarget->mapFromScene(scenePos));
+            hoverMoveEvent.setScreenPos(screenPos);
+            hoverMoveEvent.setLastScenePos(m_lastMouseScenePos);
+            hoverMoveEvent.setLastPos(hoverTarget->mapFromScene(m_lastMouseScenePos));
+            hoverMoveEvent.setLastScreenPos(m_lastMouseScreenPos);
+            dispatchSceneEventToItem_(hoverTarget, &hoverMoveEvent);
+        }
+
+        if (m_movingItem && (event->buttons() & SwMouseButtons::LeftButton)) {
+            double dx = scenePos.x - m_lastMouseScenePos.x;
+            double dy = scenePos.y - m_lastMouseScenePos.y;
+            m_movingItem->moveBy(dx, dy);
+        }
+
+        SwGraphicsItem* target = m_mouseGrabberItem ? m_mouseGrabberItem : hoverTarget;
+        bool handled = false;
+        if (target) {
+            event->setPos(target->mapFromScene(scenePos));
+            event->setLastPos(target->mapFromScene(m_lastMouseScenePos));
+            handled = dispatchSceneEventToItem_(target, event);
+        }
+
+        m_lastMouseScenePos = scenePos;
+        m_lastMouseScreenPos = screenPos;
+        return handled;
+    }
+
+    bool handleMouseReleaseEvent_(SwGraphicsSceneMouseEvent* event) {
+        if (!event) {
+            return false;
+        }
+
+        const SwPointF scenePos = event->scenePos();
+        m_movingItem = nullptr;
+        SwGraphicsItem* target = m_mouseGrabberItem;
+        m_mouseGrabberItem = nullptr;
+
+        if (!target) target = itemAt(scenePos);
+        if (!target) {
+            return false;
+        }
+
+        event->setPos(target->mapFromScene(scenePos));
+        event->setLastPos(target->mapFromScene(m_lastMouseScenePos));
+        return dispatchSceneEventToItem_(target, event);
+    }
+
+    bool handleMouseDoubleClickEvent_(SwGraphicsSceneMouseEvent* event) {
+        if (!event) {
+            return false;
+        }
+
+        SwGraphicsItem* target = itemAt(event->scenePos());
+        if (!target) {
+            return false;
+        }
+
+        event->setPos(target->mapFromScene(event->scenePos()));
+        return dispatchSceneEventToItem_(target, event);
+    }
+
+    bool handleWheelEvent_(SwGraphicsSceneWheelEvent* event) {
+        if (!event) {
+            return false;
+        }
+
+        SwGraphicsItem* target = itemAt(event->scenePos());
+        if (!target) {
+            return false;
+        }
+
+        event->setPos(target->mapFromScene(event->scenePos()));
+        return dispatchSceneEventToItem_(target, event);
+    }
+
+    bool handleContextMenuEvent_(SwGraphicsSceneContextMenuEvent* event) {
+        if (!event) {
+            return false;
+        }
+
+        SwGraphicsItem* target = itemAt(event->scenePos());
+        if (!target) {
+            return false;
+        }
+
+        event->setPos(target->mapFromScene(event->scenePos()));
+        return dispatchSceneEventToItem_(target, event);
+    }
+
+    bool handleKeyEvent_(KeyEvent* event, SwGraphicsSceneKeyDispatchType dispatchType) {
+        if (!event) {
+            return false;
+        }
+
+        SwGraphicsItem* target = m_keyboardGrabberItem ? m_keyboardGrabberItem : m_focusItem;
+        if (!target) {
+            return false;
+        }
+
+        SwGraphicsSceneKeyEvent sceneEvent(dispatchType == SwGraphicsSceneKeyDispatchType::Release
+                                               ? SwGraphicsSceneEventType::GraphicsSceneKeyRelease
+                                               : SwGraphicsSceneEventType::GraphicsSceneKeyPress);
+        sceneEvent.setKey(event->key());
+        sceneEvent.setCtrlPressed(event->isCtrlPressed());
+        sceneEvent.setShiftPressed(event->isShiftPressed());
+        sceneEvent.setAltPressed(event->isAltPressed());
+        sceneEvent.setText(event->text());
+        sceneEvent.setTextProvided(event->isTextProvided());
+        const bool handled = dispatchSceneEventToItem_(target, &sceneEvent);
+        event->setAccepted(sceneEvent.isAccepted());
+        return handled;
+    }
+
+    bool dispatchSceneEventToItem_(SwGraphicsItem* target, SwGraphicsSceneEvent* event) {
+        if (!target || !event) {
+            return false;
+        }
+
+        for (int i = static_cast<int>(target->m_sceneEventFilters.size()) - 1; i >= 0; --i) {
+            SwGraphicsItem* filter = target->m_sceneEventFilters[static_cast<size_t>(i)];
+            if (filter && filter->sceneEventFilter(target, event)) {
+                event->accept();
+                return true;
+            }
+        }
+
+        return target->sceneEvent(event);
+    }
     void sortItemsByZ_(std::vector<SwGraphicsItem*>& v, int order) const {
         if (order == 1) // descending
             std::stable_sort(v.begin(), v.end(), [](SwGraphicsItem* a, SwGraphicsItem* b) { return a->zValue() > b->zValue(); });
