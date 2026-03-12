@@ -19,7 +19,7 @@ WaMessageEdit::WaMessageEdit(const SwString& placeholderText, SwWidget* parent)
         }
 
         const int visible = visibleLines_();
-        const int maxFirst = std::max(0, m_lines.size() - visible);
+        const int maxFirst = std::max(0, effectiveLineCount_() - visible);
         m_firstVisibleLine = clampInt(value, 0, maxFirst);
         update();
     });
@@ -49,7 +49,7 @@ int WaMessageEdit::preferredHeight() {
         return std::max(m_minHeightPx, height());
     }
 
-    const int lineCount = std::max(1, m_lines.size());
+    const int lineCount = std::max(1, effectiveLineCount_());
     const int clampedLines = std::min(m_maxLines, lineCount);
 
     const int innerH = clampedLines * lh;
@@ -141,7 +141,7 @@ void WaMessageEdit::updateScrollBar_() {
     }
 
     const int visible = visibleLines_();
-    const int maxFirst = std::max(0, m_lines.size() - visible);
+    const int maxFirst = std::max(0, effectiveLineCount_() - visible);
 
     m_syncingScrollBar = true;
     m_scrollBar->setRange(0, maxFirst);

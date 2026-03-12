@@ -335,6 +335,14 @@ private:
 
          // Force execution back to the main fiber context (best-effort).
          //
+         // WARNING: setcontext() is NOT async-signal-safe per POSIX. This is
+         // technically undefined behavior. It works reliably on glibc (x86_64,
+         // aarch64) because glibc's setcontext is a thin syscall wrapper, but
+         // may break on musl, non-glibc, or future toolchains with shadow stacks.
+         // The alternative would be siglongjmp, but it cannot restore the full
+         // ucontext (FP state, signal mask) needed for correct fiber resumption.
+         // This tradeoff is accepted: watchdog preemption is best-effort.
+         //
          // Note: On modern x86_64 toolchains with CET enabled (shadow stacks / IBT),
          // returning from the signal handler with a manually patched ucontext can
          // crash due to inconsistent shadow-stack state. Using setcontext() here
@@ -506,6 +514,7 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     double getLoadPercentage() const {
+        std::lock_guard<std::mutex> lock(measurementsMutex_);
         if (totalTimeMicroseconds == 0) {
             return 0.0;
         }
@@ -519,6 +528,7 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     double getLastSecondLoadPercentage() {
+        std::lock_guard<std::mutex> lock(measurementsMutex_);
         auto now = std::chrono::steady_clock::now();
         auto oneSecondAgo = now - std::chrono::seconds(1);
 
@@ -721,8 +731,12 @@ public:
      * @return The identifier of the created timer.
      */
     int addTimer(std::function<void()> callback, int interval, bool singleShot = false) {
-        int timerId = nextTimerId++;
-        timers.insert(timerId, new _T(callback, interval, singleShot));
+        int timerId;
+        {
+            std::lock_guard<std::mutex> lock(eventQueueMutex);
+            timerId = nextTimerId++;
+            timers.insert(timerId, new _T(callback, interval, singleShot));
+        }
         signalWakeup_();
         return timerId;
     }
@@ -732,24 +746,27 @@ public:
      * @param timerId Identifier of the timer to remove.
      */
     void removeTimer(int timerId) {
-        auto it = timers.find(timerId);
-        if (it != timers.end()) {
-            _T* toDelete = it->second;
-            timers.erase(it);
-            if (processingTimersDepth_ > 0) {
-                pendingTimerDeletes_.push_back(toDelete);
-            } else {
-                delete toDelete;
+        {
+            std::lock_guard<std::mutex> lock(eventQueueMutex);
+            auto it = timers.find(timerId);
+            if (it != timers.end()) {
+                _T* toDelete = it->second;
+                timers.erase(it);
+                if (processingTimersDepth_ > 0) {
+                    pendingTimerDeletes_.push_back(toDelete);
+                } else {
+                    delete toDelete;
+                }
             }
-        }
-        auto itOld = timers.find(-1);
-        if (itOld != timers.end()) {
-            _T* toDelete = itOld->second;
-            timers.erase(itOld);
-            if (processingTimersDepth_ > 0) {
-                pendingTimerDeletes_.push_back(toDelete);
-            } else {
-                delete toDelete;
+            auto itOld = timers.find(-1);
+            if (itOld != timers.end()) {
+                _T* toDelete = itOld->second;
+                timers.erase(itOld);
+                if (processingTimersDepth_ > 0) {
+                    pendingTimerDeletes_.push_back(toDelete);
+                } else {
+                    delete toDelete;
+                }
             }
         }
         signalWakeup_();
@@ -800,22 +817,25 @@ public:
             auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(currentTime - lastTime).count();
             lastTime = currentTime;
 
-            // On met à jour le temps total
-            totalTimeMicroseconds += (uint64_t)elapsed;
-            // On ajoute à totalBusyTimeMicroseconds le temps occupé de cette itération
-            totalBusyTimeMicroseconds += (uint64_t)busyElapsedIteration;
+            {
+                std::lock_guard<std::mutex> lock(measurementsMutex_);
+                // On met à jour le temps total
+                totalTimeMicroseconds += (uint64_t)elapsed;
+                // On ajoute à totalBusyTimeMicroseconds le temps occupé de cette itération
+                totalBusyTimeMicroseconds += (uint64_t)busyElapsedIteration;
 
-            // On enregistre la mesure de cette itération
-            measurements.push_back({
-                currentTime,
-                (uint64_t)busyElapsedIteration,
-                (uint64_t)elapsed
-            });
+                // On enregistre la mesure de cette itération
+                measurements.push_back({
+                    currentTime,
+                    (uint64_t)busyElapsedIteration,
+                    (uint64_t)elapsed
+                });
 
-            // Nettoyage des mesures plus vieilles que 1 seconde
-            auto oneSecondAgo = currentTime - std::chrono::seconds(1);
-            while (!measurements.empty() && measurements.front().timestamp < oneSecondAgo) {
-                measurements.pop_front();
+                // Nettoyage des mesures plus vieilles que 1 seconde
+                auto oneSecondAgo = currentTime - std::chrono::seconds(1);
+                while (!measurements.empty() && measurements.front().timestamp < oneSecondAgo) {
+                    measurements.pop_front();
+                }
             }
 
             auto totalElapsed = std::chrono::duration_cast<std::chrono::microseconds>(currentTime - startTime).count();
@@ -828,7 +848,7 @@ public:
                 waitForWork_(sleepDuration);
             }
         }
-        return exitCode;
+        return exitCode.load(std::memory_order_acquire);
     }
 
 
@@ -945,11 +965,14 @@ public:
             }
         }
 
-        if (!priorityEventQueue.empty() ||
-            !priorityPostedEventQueue_.empty() ||
-            !eventQueue.empty() ||
-            !postedEventQueue_.empty()) {
-            return 0;
+        {
+            std::lock_guard<std::mutex> lock(eventQueueMutex);
+            if (!priorityEventQueue.empty() ||
+                !priorityPostedEventQueue_.empty() ||
+                !eventQueue.empty() ||
+                !postedEventQueue_.empty()) {
+                return 0;
+            }
         }
         // No pending work: wait indefinitely unless a timer is scheduled.
         return minTimeUntilNext != (std::numeric_limits<int>::max)() ? minTimeUntilNext : -1;
@@ -1031,7 +1054,7 @@ public:
      * @param code Exit code.
      */
     void exit(int code = 0) {
-        exitCode = code;
+        exitCode.store(code, std::memory_order_release);
         quit();
     }
 
@@ -1648,16 +1671,20 @@ protected:
      */
     void enableHighPrecisionTimers() {
 #if defined(_WIN32)
-        HMODULE hWinMM = LoadLibrary(TEXT("winmm.dll"));
-        if (hWinMM) {
-            auto timeBeginPeriodFunc = (MMRESULT(WINAPI*)(UINT))GetProcAddress(hWinMM, "timeBeginPeriod");
+        // Load winmm.dll and keep it loaded for the lifetime of the process.
+        // Calling FreeLibrary after timeBeginPeriod can undo the resolution
+        // change on some Windows 11 builds, reverting to the 15.6ms default.
+        if (!hWinMM_) {
+            hWinMM_ = LoadLibrary(TEXT("winmm.dll"));
+        }
+        if (hWinMM_) {
+            auto timeBeginPeriodFunc = (MMRESULT(WINAPI*)(UINT))GetProcAddress(hWinMM_, "timeBeginPeriod");
             if (timeBeginPeriodFunc) {
                 MMRESULT result = timeBeginPeriodFunc(1);
                 if (result != TIMERR_NOERROR) {
                     swCError(kSwLogCategory_SwCoreApplication) << "Failed to enable high precision timers. Code: " << result;
                 }
             }
-            FreeLibrary(hWinMM);
         }
 #endif
     }
@@ -1667,13 +1694,13 @@ protected:
      */
     void disableHighPrecisionTimers() {
 #if defined(_WIN32)
-        HMODULE hWinMM = LoadLibrary(TEXT("winmm.dll"));
-        if (hWinMM) {
-            auto timeEndPeriodFunc = (MMRESULT(WINAPI*)(UINT))GetProcAddress(hWinMM, "timeEndPeriod");
+        if (hWinMM_) {
+            auto timeEndPeriodFunc = (MMRESULT(WINAPI*)(UINT))GetProcAddress(hWinMM_, "timeEndPeriod");
             if (timeEndPeriodFunc) {
                 timeEndPeriodFunc(1);
             }
-            FreeLibrary(hWinMM);
+            FreeLibrary(hWinMM_);
+            hWinMM_ = nullptr;
         }
 #endif
     }
@@ -1768,13 +1795,25 @@ protected:
      *
      * @param lpParameter Pointer to the function to execute within the fiber.
      */
+    static void executeCallbackSafely_(const std::function<void()>& callback) {
+        try {
+            callback();
+        } catch (const std::exception& e) {
+            swCError(kSwLogCategory_SwCoreApplication)
+                << "Unhandled exception in SwCoreApplication callback: " << e.what();
+        } catch (...) {
+            swCError(kSwLogCategory_SwCoreApplication)
+                << "Unhandled unknown exception in SwCoreApplication callback";
+        }
+    }
+
     static VOID WINAPI FiberProc(LPVOID lpParameter) {
         std::function<void()>* callback = reinterpret_cast<std::function<void()>*>(lpParameter);
 
         // Execute the callback function. Once we return from this function call,
         // we know that the callback has fully completed its execution, including
         // any yields that might have occurred during its lifetime.
-        (*callback)();
+        executeCallbackSafely_(*callback);
 
         // At this point, the callback is guaranteed to have finished, so we can
         // safely delete the allocated std::function. By managing the lifetime
@@ -1824,7 +1863,7 @@ protected:
 #else
             swCError(kSwLogCategory_SwCoreApplication) << "Failed to create fiber.";
 #endif
-            (*cbPtr)();
+            executeCallbackSafely_(*cbPtr);
             delete cbPtr;
             return;
         }
@@ -2033,58 +2072,70 @@ protected:
         ++processingTimersDepth_;
 
         // Timer callbacks can start/stop other timers, which mutates `timers`.
-        // Iterate over a stable snapshot of timer IDs to avoid iterator/pointer invalidation.
-        std::vector<int> timerIds;
-        timerIds.reserve(timers.size());
-        for (const auto& kv : timers) {
-            timerIds.push_back(kv.first);
+        // Build a snapshot of ready timers under a single lock, then execute
+        // callbacks outside the lock to avoid holding it during user code.
+        struct ReadyTimer { _T* timer; bool singleShot; };
+        std::vector<ReadyTimer> readyTimers;
+        int minTimeUntilNext = (std::numeric_limits<int>::max)();
+
+        {
+            std::lock_guard<std::mutex> lock(eventQueueMutex);
+            for (auto it = timers.begin(); it != timers.end(); ) {
+                _T* currentTimer = it->second;
+                if (!currentTimer) {
+                    ++it;
+                    continue;
+                }
+                if (currentTimer->isReady()) {
+                    bool isSingleShot = currentTimer->singleShot;
+                    readyTimers.push_back({currentTimer, isSingleShot});
+                    if (isSingleShot) {
+                        it = timers.erase(it);
+                        continue;
+                    }
+                }
+                ++it;
+            }
         }
 
-        for (int timerId : timerIds) {
-            auto it = timers.find(timerId);
-            if (it == timers.end()) {
-                continue;
-            }
-
-            _T* currentTimer = it->second;
-            if (!currentTimer || !currentTimer->isReady()) {
-                continue;
-            }
-
-            if (currentTimer->singleShot) {
-                _T* toDelete = currentTimer;
-                timers.erase(it);
-
+        // Execute callbacks outside the lock.
+        for (auto& rt : readyTimers) {
+            if (rt.singleShot) {
+                _T* toDelete = rt.timer;
                 std::function<void()> timerEvent = [toDelete]() {
                     toDelete->execute();
                     delete toDelete;
                 };
                 runEventInFiber(timerEvent);
             } else {
-                std::function<void()> timerEvent = [currentTimer]() {
-                    currentTimer->execute();
+                _T* t = rt.timer;
+                std::function<void()> timerEvent = [t]() {
+                    t->execute();
                 };
                 runEventInFiber(timerEvent);
             }
         }
 
-        int minTimeUntilNext = (std::numeric_limits<int>::max)();
-        for (const auto& kv : timers) {
-            _T* currentTimer = kv.second;
-            if (!currentTimer) {
-                continue;
+        // Compute next wake-up under a single lock.
+        {
+            std::lock_guard<std::mutex> lock(eventQueueMutex);
+            for (const auto& kv : timers) {
+                _T* currentTimer = kv.second;
+                if (!currentTimer) {
+                    continue;
+                }
+                const int timeUntilNext = currentTimer->timeUntilReady();
+                if (timeUntilNext < minTimeUntilNext) {
+                    minTimeUntilNext = timeUntilNext;
+                }
             }
-            const int timeUntilNext = currentTimer->timeUntilReady();
-            if (timeUntilNext < minTimeUntilNext) {
-                minTimeUntilNext = timeUntilNext;
-            }
-        }
 
-        if (--processingTimersDepth_ == 0 && !pendingTimerDeletes_.isEmpty()) {
-            for (size_t i = 0; i < pendingTimerDeletes_.size(); ++i) {
-                delete pendingTimerDeletes_[i];
+            if (--processingTimersDepth_ == 0 && !pendingTimerDeletes_.isEmpty()) {
+                for (size_t i = 0; i < pendingTimerDeletes_.size(); ++i) {
+                    delete pendingTimerDeletes_[i];
+                }
+                pendingTimerDeletes_.clear();
             }
-            pendingTimerDeletes_.clear();
         }
 
         return minTimeUntilNext;
@@ -2101,7 +2152,7 @@ protected:
 
 protected:
     std::atomic<bool> running; ///< Indicates if the event loop is running.
-    int exitCode; ///< Exit code of the application.
+    std::atomic<int> exitCode; ///< Exit code of the application.
 #if defined(_WIN32)
     HANDLE mainThreadHandle;
     DWORD mainThreadId;
@@ -2109,6 +2160,9 @@ protected:
     pthread_t mainThreadPthread_{};
 #endif
 
+#if defined(_WIN32)
+    HMODULE hWinMM_ = nullptr; ///< winmm.dll handle kept alive for timeBeginPeriod.
+#endif
     std::thread watchdogThread;
     std::atomic<bool> watchdogRunning{ false };
     std::atomic<bool> fireWatchDog{ false };
@@ -2141,6 +2195,7 @@ protected:
     };
     // Queue des mesures sur la dernière seconde environ
     std::deque<IterationMeasurement> measurements;
+    mutable std::mutex measurementsMutex_; ///< Protects measurements, totalBusyTimeMicroseconds, totalTimeMicroseconds.
 
     uint64_t totalBusyTimeMicroseconds = 0;
     uint64_t totalTimeMicroseconds = 0;
@@ -2162,9 +2217,9 @@ protected:
 
 private:
     void cleanupAllFibers_() {
-#if defined(_WIN32)
         // Best-effort cleanup for any remaining fibers (yielded or ready) before shutdown.
         // Without this, long-lived runtimes can leave fibers allocated until process exit.
+        // Works on both Windows (native fibers) and Linux (linux_fiber.h emulation).
         std::vector<LPVOID> toDelete;
         {
             SwMutexLocker lk(getYieldMutex());
@@ -2190,7 +2245,6 @@ private:
             // DeleteFiber is safe only when the fiber is not executing.
             DeleteFiber(toDelete[i]);
         }
-#endif
     }
 
     void initWakeup_() {

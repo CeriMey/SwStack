@@ -383,6 +383,12 @@ private:
     struct LinePart {
         int startOffset{0};   // offset within the block
         int length{0};        // character count
+
+        LinePart() {}
+
+        LinePart(int start, int len)
+            : startOffset(start)
+            , length(len) {}
     };
 
     struct BlockLayout {

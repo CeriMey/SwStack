@@ -55,6 +55,7 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <unordered_set>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -83,6 +84,7 @@ public:
      */
     explicit Thread(const SwString& name = "Thread")
         : m_name(name) {
+        registerLiveThread_(this);
     }
 
     /**
@@ -91,6 +93,7 @@ public:
      * @details Use this hook to release any resources that remain associated with the instance.
      */
     ~Thread() {
+        unregisterLiveThread_(this);
         if (!m_isAdopted) {
             quit();
             wait();
@@ -112,8 +115,9 @@ public:
         }
 
         m_shouldQuit = false;
-        m_thread = std::thread([this]() { threadEntry(); });
         std::unique_lock<std::mutex> lock(m_startMutex);
+        m_appReady = false;
+        m_thread = std::thread([this]() { threadEntry(); });
         m_startCv.wait(lock, [this]() { return m_appReady; });
         return m_running;
     }
@@ -236,6 +240,14 @@ public:
         return s_thread;
     }
 
+    static bool isLive(const Thread* thread) {
+        if (!thread) {
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(liveThreadsMutex());
+        return liveThreads().count(thread) > 0;
+    }
+
     /**
      * @brief Adopts the current thread if it already owns a SwCoreApplication.
      *
@@ -315,6 +327,7 @@ private:
           m_running(adopted),
           m_isAdopted(adopted),
           m_app(existingApp) {
+        registerLiveThread_(this);
         if (adopted) {
             m_appReady = true;
         }
@@ -352,6 +365,10 @@ private:
         m_ownedApp.reset();
 
         m_running = false;
+        {
+            std::lock_guard<std::mutex> lock(m_startMutex);
+            m_appReady = false;
+        }
         detachAllObjects();
         invokeFinishedCallback();
         localThreadInstance() = nullptr;
@@ -411,6 +428,32 @@ private:
     static std::map<std::thread::id, Thread*>& registry() {
         static std::map<std::thread::id, Thread*> s_registry;
         return s_registry;
+    }
+
+    static void registerLiveThread_(const Thread* thread) {
+        if (!thread) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(liveThreadsMutex());
+        liveThreads().insert(thread);
+    }
+
+    static void unregisterLiveThread_(const Thread* thread) {
+        if (!thread) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(liveThreadsMutex());
+        liveThreads().erase(thread);
+    }
+
+    static std::mutex& liveThreadsMutex() {
+        static std::mutex s_mutex;
+        return s_mutex;
+    }
+
+    static std::unordered_set<const Thread*>& liveThreads() {
+        static std::unordered_set<const Thread*> s_threads;
+        return s_threads;
     }
 
     void invokeStartedCallback() {

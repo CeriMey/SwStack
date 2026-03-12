@@ -541,6 +541,12 @@ public:
     struct BlockPosition {
         int blockIndex{-1};
         int offset{0};
+
+        BlockPosition() {}
+
+        BlockPosition(int index, int blockOffset)
+            : blockIndex(index)
+            , offset(blockOffset) {}
     };
 
     BlockPosition blockPositionFromAbsolute(int absPos) const {

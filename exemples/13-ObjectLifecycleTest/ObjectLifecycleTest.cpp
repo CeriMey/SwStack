@@ -13,6 +13,30 @@ struct TestResult {
     std::string detail;
 };
 
+class SignalSource : public SwObject {
+    DECLARE_SIGNAL(ping, int);
+};
+
+class SignalSink : public SwObject {
+public:
+    void onPing(int value) {
+        ++m_receivedCount;
+        m_lastValue = value;
+    }
+
+    int receivedCount() const {
+        return m_receivedCount;
+    }
+
+    int lastValue() const {
+        return m_lastValue;
+    }
+
+private:
+    int m_receivedCount = 0;
+    int m_lastValue = -1;
+};
+
 int main(int argc, char* argv[]) {
     SwCoreApplication app(argc, argv);
 
@@ -93,6 +117,21 @@ int main(int argc, char* argv[]) {
     addResult("deleteLater emits destruction signals",
               delayedDestroyed && !deleteLaterTimeout,
               deleteLaterTimeout ? "timeout waiting for deleteLater" : "");
+
+    SignalSource source;
+    SignalSink* sink = new SignalSink();
+    SwObject::connect(&source, &SignalSource::ping, sink, &SignalSink::onPing, DirectConnection);
+    source.ping(7);
+    addResult("Signal receiver invoked before destruction",
+              sink->receivedCount() == 1 && sink->lastValue() == 7);
+    addResult("Sender tracks live receiver connection", source.connectionCount() == 1);
+
+    delete sink;
+    sink = nullptr;
+
+    addResult("Dead receiver connections are auto-purged", source.connectionCount() == 0);
+    source.ping(11);
+    addResult("Sender stays clean after emitting post-destruction", source.connectionCount() == 0);
 
     delete root;
     root = nullptr;

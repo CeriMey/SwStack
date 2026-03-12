@@ -1279,7 +1279,8 @@ private:
         }
         if (auto* app = SwCoreApplication::instance(false)) {
             const SwPointer<SwComboBox> self(comboBox);
-            app->postEvent([self, fn = std::move(fn)]() mutable {
+            std::function<void(SwComboBox*)> fnCopy = fn;
+            app->postEvent([self, fnCopy]() mutable {
                 if (!self) {
                     return;
                 }
@@ -1287,7 +1288,7 @@ private:
                 if (!SwObject::isLive(liveSelf)) {
                     return;
                 }
-                fn(liveSelf);
+                fnCopy(liveSelf);
             });
             return;
         }

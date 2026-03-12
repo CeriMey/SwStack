@@ -1211,7 +1211,7 @@ protected:
 
         childPaintRect.x -= parentRect.x;
         childPaintRect.y -= parentRect.y;
-        result.ownedPainter = std::make_unique<SwOffsetPainter>(result.painter, parentRect.x, parentRect.y);
+        result.ownedPainter.reset(new SwOffsetPainter(result.painter, parentRect.x, parentRect.y));
         result.painter = result.ownedPainter.get();
         result.paintRect = childPaintRect;
         return result;
@@ -2046,6 +2046,13 @@ protected:
         const void* nativeHandle{nullptr};
         const void* nativeDisplay{nullptr};
         const SwWidget* logicalRoot{nullptr};
+
+        FocusScopeKey_() {}
+
+        FocusScopeKey_(const void* handle, const void* display, const SwWidget* root)
+            : nativeHandle(handle)
+            , nativeDisplay(display)
+            , logicalRoot(root) {}
 
         bool operator==(const FocusScopeKey_& other) const {
             return nativeHandle == other.nativeHandle &&

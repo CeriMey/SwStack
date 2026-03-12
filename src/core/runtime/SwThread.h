@@ -55,6 +55,8 @@
 #include <thread>
 #include <utility>
 
+static constexpr const char* kSwLogCategory_SwThread = "sw.core.runtime.swthread";
+
 /**
  * @class SwThread
  * @brief High-level wrapper around atomic::Thread with a familiar API.
@@ -103,9 +105,17 @@ public:
 
     /**
      * @brief Starts the underlying thread.
+     *
+     * Calling start() on an already-running thread is a no-op that returns false
+     * and logs a warning.
      */
     virtual bool start() {
         if (!m_threadHandle) {
+            swCWarning(kSwLogCategory_SwThread) << "start() called on SwThread with no handle";
+            return false;
+        }
+        if (m_threadHandle->isRunning()) {
+            swCWarning(kSwLogCategory_SwThread) << "start() called on already-running SwThread '" << m_name << "'";
             return false;
         }
         bool started = m_threadHandle->start();
@@ -190,21 +200,35 @@ public:
 
     /**
      * @brief Returns the SwThread wrapper for the current thread, adopting it if necessary.
+     *
+     * If the cached localWrapper has been destroyed (no longer live), it is cleared
+     * and re-resolved via the global wrapperMap to avoid dangling pointers.
+     * Adopted threads are stored in a static list to avoid memory leaks.
      */
     static SwThread* currentThread() {
-        if (localWrapper()) {
-            return localWrapper();
+        SwThread*& cached = localWrapper();
+        // Revalidate: the cached wrapper may have been destroyed.
+        if (cached && !SwObject::isLive(cached)) {
+            cached = nullptr;
+        }
+        if (cached) {
+            return cached;
         }
         sw::atomic::Thread* handle = sw::atomic::Thread::currentThread();
         if (!handle) {
             return nullptr;
         }
         if (auto wrapper = wrapperFor(handle)) {
-            localWrapper() = wrapper;
+            cached = wrapper;
             return wrapper;
         }
         auto adopted = new SwThread(handle, "AdoptedThread", true, nullptr);
-        localWrapper() = adopted;
+        // Track adopted threads to avoid memory leak.
+        {
+            SwMutexLocker lock(wrapperMutex());
+            adoptedThreads_().append(adopted);
+        }
+        cached = adopted;
         return adopted;
     }
 
@@ -221,8 +245,25 @@ public:
             return wrapper;
         }
         auto adopted = new SwThread(handle, name, true, nullptr);
+        {
+            SwMutexLocker lock(wrapperMutex());
+            adoptedThreads_().append(adopted);
+        }
         localWrapper() = adopted;
         return adopted;
+    }
+
+    /**
+     * @brief Releases all adopted thread wrappers created by currentThread()/adoptCurrentThread().
+     *
+     * Should be called during application shutdown to avoid memory leaks.
+     */
+    static void cleanupAdoptedThreads() {
+        SwMutexLocker lock(wrapperMutex());
+        for (int i = 0; i < adoptedThreads_().size(); ++i) {
+            delete adoptedThreads_()[i];
+        }
+        adoptedThreads_().clear();
     }
 
     /**
@@ -325,6 +366,11 @@ private:
         return wrapper;
     }
 
+    static SwList<SwThread*>& adoptedThreads_() {
+        static SwList<SwThread*> s_adopted;
+        return s_adopted;
+    }
+
     std::unique_ptr<sw::atomic::Thread> m_ownedThread;
     sw::atomic::Thread* m_threadHandle = nullptr;
     bool m_isAdopted = false;
@@ -336,5 +382,5 @@ inline void SwObject::moveToThread(SwThread* targetThread) {
 }
 
 inline SwThread* SwObject::thread() const {
-    return SwThread::fromHandle(m_threadAffinity);
+    return SwThread::fromHandle(threadHandle());
 }

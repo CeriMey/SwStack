@@ -52,8 +52,14 @@
 #include "SwMutex.h"
 #include "SwList.h"
 #include "SwString.h"
+#include "SwTimer.h"
 #include "SwVector.h"
-#include "SwEventLoop.h"
+
+#include "SwDebug.h"
+
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
 
 #if defined(_WIN32)
 #include "platform/win/SwWindows.h"
@@ -322,6 +328,8 @@ private:
     Callable m_callable;
 };
 
+static constexpr const char* kSwLogCategory_SwThreadPool = "sw.core.runtime.swthreadpool";
+
 /**
  * @class SwThreadPool
  * @brief Thread pool built on top of SwThread workers.
@@ -359,14 +367,18 @@ public:
      */
     explicit SwThreadPool(SwObject* parent = nullptr)
         : SwObject(parent),
+          m_alive(std::make_shared<std::atomic<bool>>(true)),
           m_maxThreadCount(detectIdealThreadCount_()),
+          m_maxQueuedTaskCount(0),
           m_expiryTimeout(30000),
           m_stackSize(0),
           m_threadPriority(InheritPriority),
           m_serviceLevel(QualityOfServiceAuto),
           m_reservedThreads(0),
           m_runningTasks(0),
+          m_rejectedTaskCount(0),
           m_nextWorkerId(0),
+          m_nextTaskSequence(0),
           m_waitingForDone(false),
           m_stopping(false) {
         if (m_maxThreadCount < 1) {
@@ -380,6 +392,7 @@ public:
      * @details Use this hook to release any resources that remain associated with the instance.
      */
     ~SwThreadPool() override {
+        m_alive->store(false, std::memory_order_release);
         shutdown_();
     }
 
@@ -406,16 +419,40 @@ public:
             return;
         }
 
-        SwMutexLocker locker(&m_mutex);
-        cleanupRetiredWorkersLocked_(locker);
-        if (m_stopping || m_waitingForDone) {
+        bool accepted = false;
+        bool rejectedByBackpressure = false;
+        int rejectedQueuedTaskCount = 0;
+        int rejectedMaxQueuedTaskCount = -1;
+        {
+            SwMutexLocker locker(&m_mutex);
+            cleanupRetiredWorkersLocked_(locker);
+            if (!m_stopping && !m_waitingForDone) {
+                accepted = assignTaskLocked_(runnable,
+                                            priority,
+                                            false,
+                                            false,
+                                            &rejectedByBackpressure);
+                if (!accepted && rejectedByBackpressure) {
+                    ++m_rejectedTaskCount;
+                    rejectedQueuedTaskCount = queuedTaskCountLocked_();
+                    rejectedMaxQueuedTaskCount = effectiveMaxQueuedTaskCountLocked_();
+                }
+            }
+        }
+
+        if (!accepted) {
+            if (rejectedByBackpressure) {
+                swCWarning(kSwLogCategory_SwThreadPool)
+                    << "SwThreadPool saturated; rejecting task because queuedTaskCount="
+                    << rejectedQueuedTaskCount
+                    << " reached maxQueuedTaskCount="
+                    << rejectedMaxQueuedTaskCount;
+            }
             deleteIfAutoDelete_(runnable);
             return;
         }
 
-        if (!tryStartLocked_(runnable, priority)) {
-            enqueueLocked_(runnable, priority);
-        }
+        notifyStateChanged_();
     }
 
     /**
@@ -464,12 +501,19 @@ public:
             return false;
         }
 
-        SwMutexLocker locker(&m_mutex);
-        cleanupRetiredWorkersLocked_(locker);
-        if (m_stopping || m_waitingForDone) {
-            return false;
+        bool started = false;
+        {
+            SwMutexLocker locker(&m_mutex);
+            cleanupRetiredWorkersLocked_(locker);
+            if (!m_stopping && !m_waitingForDone) {
+                started = assignTaskLocked_(runnable, 0, false, true, nullptr);
+            }
         }
-        return tryStartLocked_(runnable, 0);
+
+        if (started) {
+            notifyStateChanged_();
+        }
+        return started;
     }
 
     /**
@@ -526,19 +570,57 @@ public:
             return;
         }
 
-        SwMutexLocker locker(&m_mutex);
-        cleanupRetiredWorkersLocked_(locker);
-        if (m_stopping || m_waitingForDone) {
+        bool accepted = false;
+        bool consumedReserved = false;
+        bool rejectedByBackpressure = false;
+        int rejectedQueuedTaskCount = 0;
+        int rejectedMaxQueuedTaskCount = -1;
+        {
+            SwMutexLocker locker(&m_mutex);
+            cleanupRetiredWorkersLocked_(locker);
+            if (!m_stopping && !m_waitingForDone) {
+                if (m_reservedThreads > 0) {
+                    accepted = assignTaskLocked_(runnable,
+                                                0,
+                                                true,
+                                                true,
+                                                &rejectedByBackpressure);
+                    if (accepted) {
+                        --m_reservedThreads;
+                        consumedReserved = true;
+                    }
+                }
+                if (!accepted) {
+                    accepted = assignTaskLocked_(runnable,
+                                                0,
+                                                true,
+                                                false,
+                                                &rejectedByBackpressure);
+                }
+                if (!accepted && consumedReserved) {
+                    ++m_reservedThreads;
+                }
+                if (!accepted && rejectedByBackpressure) {
+                    ++m_rejectedTaskCount;
+                    rejectedQueuedTaskCount = queuedTaskCountLocked_();
+                    rejectedMaxQueuedTaskCount = effectiveMaxQueuedTaskCountLocked_();
+                }
+            }
+        }
+
+        if (!accepted) {
+            if (rejectedByBackpressure) {
+                swCWarning(kSwLogCategory_SwThreadPool)
+                    << "SwThreadPool saturated; rejecting reserved-thread task because queuedTaskCount="
+                    << rejectedQueuedTaskCount
+                    << " reached maxQueuedTaskCount="
+                    << rejectedMaxQueuedTaskCount;
+            }
             deleteIfAutoDelete_(runnable);
             return;
         }
 
-        --m_reservedThreads;
-
-        if (!tryStartLocked_(runnable, 0, true)) {
-            ++m_reservedThreads;
-            enqueueLocked_(runnable, 0);
-        }
+        notifyStateChanged_();
     }
 
     /**
@@ -584,25 +666,55 @@ public:
             return false;
         }
 
-        SwMutexLocker locker(&m_mutex);
-        cleanupRetiredWorkersLocked_(locker);
-        const int count = static_cast<int>(m_pendingTasks.size());
-        for (int i = 0; i < count; ++i) {
-            if (m_pendingTasks[static_cast<size_t>(i)].runnable == runnable) {
-                m_pendingTasks.removeAt(static_cast<size_t>(i));
-                return true;
+        bool removed = false;
+        {
+            SwMutexLocker locker(&m_mutex);
+            cleanupRetiredWorkersLocked_(locker);
+            const int workerCount = m_workers.size();
+            for (int workerIndex = 0; workerIndex < workerCount && !removed; ++workerIndex) {
+                WorkerEntry* worker = m_workers[static_cast<size_t>(workerIndex)];
+                if (!worker) {
+                    continue;
+                }
+
+                const int count = static_cast<int>(worker->queuedTasks.size());
+                for (int i = 0; i < count; ++i) {
+                    if (worker->queuedTasks[static_cast<size_t>(i)].runnable == runnable) {
+                        worker->queuedTasks.removeAt(static_cast<size_t>(i));
+                        if (!worker->running && worker->queuedTasks.isEmpty()) {
+                            ++worker->idleToken;
+                            scheduleWorkerExpiryCheckLocked_(worker);
+                        }
+                        removed = true;
+                        break;
+                    }
+                }
             }
         }
-        return false;
+
+        if (removed) {
+            notifyStateChanged_();
+        }
+        return removed;
     }
 
     /**
      * @brief Clears the current object state.
      */
     void clear() {
-        SwMutexLocker locker(&m_mutex);
-        cleanupRetiredWorkersLocked_(locker);
-        clearPendingLocked_();
+        bool cleared = false;
+        {
+            SwMutexLocker locker(&m_mutex);
+            cleanupRetiredWorkersLocked_(locker);
+            cleared = clearQueuedTasksLocked_();
+            if (cleared) {
+                scheduleIdleExpiryLocked_();
+            }
+        }
+
+        if (cleared) {
+            notifyStateChanged_();
+        }
     }
 
     /**
@@ -614,21 +726,25 @@ public:
         {
             SwMutexLocker locker(&m_mutex);
             cleanupRetiredWorkersLocked_(locker);
+            if (isCurrentThreadWorkerLocked_()) {
+                swCWarning(kSwLogCategory_SwThreadPool)
+                    << "waitForDone() called from a SwThreadPool worker; refusing to self-block";
+                return false;
+            }
             if (m_waitingForDone) {
                 return false;
             }
             m_waitingForDone = true;
         }
 
-        bool ok = awaitQuiescent_(deadline);
-        if (ok) {
-            ok = retireAllWorkers_(deadline);
-        }
+        const bool ok = awaitQuiescent_(deadline);
 
         {
             SwMutexLocker locker(&m_mutex);
             m_waitingForDone = false;
+            cleanupRetiredWorkersLocked_(locker);
         }
+        notifyStateChanged_();
         return ok;
     }
 
@@ -662,6 +778,14 @@ public:
         SwMutexLocker locker(&m_mutex);
         cleanupRetiredWorkersLocked_(locker);
         m_expiryTimeout = expiryTimeout;
+        const int count = m_workers.size();
+        for (int i = 0; i < count; ++i) {
+            WorkerEntry* worker = m_workers[static_cast<size_t>(i)];
+            if (worker) {
+                worker->expiryTimeoutMs = expiryTimeout;
+            }
+        }
+        scheduleIdleExpiryLocked_();
     }
 
     /**
@@ -676,6 +800,29 @@ public:
     }
 
     /**
+     * @brief Returns the current max queued Task Count.
+     * @return The effective max queued Task Count, or `-1` when unbounded.
+     *
+     * @details By default the limit is adaptive and scales with the configured max thread count.
+     */
+    int maxQueuedTaskCount() const {
+        SwMutexLocker locker(&m_mutex);
+        return effectiveMaxQueuedTaskCountLocked_();
+    }
+
+    /**
+     * @brief Sets the max queued Task Count.
+     * @param maxQueuedTaskCount Value passed to the method.
+     *
+     * @details A negative value disables backpressure, `0` restores the adaptive default,
+     * and a positive value applies a hard queue limit.
+     */
+    void setMaxQueuedTaskCount(int maxQueuedTaskCount) {
+        SwMutexLocker locker(&m_mutex);
+        m_maxQueuedTaskCount = maxQueuedTaskCount;
+    }
+
+    /**
      * @brief Sets the max Thread Count.
      * @param maxThreadCount Value passed to the method.
      *
@@ -685,7 +832,8 @@ public:
         SwMutexLocker locker(&m_mutex);
         cleanupRetiredWorkersLocked_(locker);
         m_maxThreadCount = (maxThreadCount < 1) ? 1 : maxThreadCount;
-        dispatchPendingLocked_();
+        rebalanceLocked_(false);
+        scheduleIdleExpiryLocked_();
     }
 
     /**
@@ -697,6 +845,20 @@ public:
     int activeThreadCount() const {
         SwMutexLocker locker(&m_mutex);
         return m_runningTasks + m_reservedThreads;
+    }
+
+    /**
+     * @brief Returns the current queued Task Count.
+     * @return The number of tasks currently waiting in worker queues.
+     */
+    int queuedTaskCount() const {
+        SwMutexLocker locker(&m_mutex);
+        return queuedTaskCountLocked_();
+    }
+
+    int rejectedTaskCount() const {
+        SwMutexLocker locker(&m_mutex);
+        return m_rejectedTaskCount;
     }
 
     /**
@@ -713,8 +875,11 @@ public:
     void releaseThread() {
         SwMutexLocker locker(&m_mutex);
         cleanupRetiredWorkersLocked_(locker);
-        --m_reservedThreads;
-        dispatchPendingLocked_();
+        if (m_reservedThreads > 0) {
+            --m_reservedThreads;
+        }
+        rebalanceLocked_(false);
+        scheduleIdleExpiryLocked_();
     }
 
     /**
@@ -794,28 +959,44 @@ public:
         }
 
         SwMutexLocker locker(&m_mutex);
+        return containsThreadIdLocked_(thread->threadId());
+    }
+
+private:
+    bool containsThreadIdLocked_(const std::thread::id& threadId) const {
+        if (threadId == std::thread::id{}) {
+            return false;
+        }
         const int count = m_workers.size();
         for (int i = 0; i < count; ++i) {
             const WorkerEntry* worker = m_workers[static_cast<size_t>(i)];
-            if (worker && worker->thread == thread) {
+            if (worker && worker->thread && worker->thread->threadId() == threadId) {
                 return true;
             }
         }
         return false;
     }
 
-private:
+    bool isCurrentThreadWorkerLocked_() const {
+        return containsThreadIdLocked_(std::this_thread::get_id());
+    }
+
     struct TaskItem {
         SwRunnable* runnable = nullptr;
         int priority = 0;
+        unsigned long long sequence = 0;
     };
 
     struct WorkerEntry {
         int id = 0;
         SwThread* thread = nullptr;
-        bool busy = false;
+        SwList<TaskItem> queuedTasks;
+        bool running = false;
+        bool dispatchPosted = false;
+        bool retiring = false;
         unsigned int idleToken = 0;
         int expiryTimeoutMs = 30000;
+        long long lastActiveMs = 0;
     };
 
     static int detectIdealThreadCount_() {
@@ -827,17 +1008,6 @@ private:
 #else
         const long count = sysconf(_SC_NPROCESSORS_ONLN);
         return (count > 0) ? static_cast<int>(count) : 1;
-#endif
-    }
-
-    static void sleepMs_(int ms) {
-        if (ms <= 0) {
-            return;
-        }
-#if defined(_WIN32)
-        Sleep(static_cast<DWORD>(ms));
-#else
-        usleep(static_cast<useconds_t>(ms * 1000));
 #endif
     }
 
@@ -917,6 +1087,41 @@ private:
         applyCurrentThreadScheduling_(priority, qos);
     }
 
+    static int defaultMaxQueuedTaskCountForThreadCount_(int maxThreadCount) {
+        const int safeThreadCount = (maxThreadCount < 1) ? 1 : maxThreadCount;
+        if (safeThreadCount > (2147483647 / 32)) {
+            return 2147483647;
+        }
+        return safeThreadCount * 32;
+    }
+
+    int effectiveMaxQueuedTaskCountLocked_() const {
+        if (m_maxQueuedTaskCount < 0) {
+            return -1;
+        }
+        if (m_maxQueuedTaskCount == 0) {
+            return defaultMaxQueuedTaskCountForThreadCount_(m_maxThreadCount);
+        }
+        return m_maxQueuedTaskCount;
+    }
+
+    int queuedTaskCountLocked_() const {
+        int queuedTaskCount = 0;
+        const int count = m_workers.size();
+        for (int i = 0; i < count; ++i) {
+            const WorkerEntry* worker = m_workers[static_cast<size_t>(i)];
+            if (!worker) {
+                continue;
+            }
+            queuedTaskCount += static_cast<int>(worker->queuedTasks.size());
+        }
+        return queuedTaskCount;
+    }
+
+    static bool taskWouldQueueLocked_(const WorkerEntry* worker) {
+        return worker && (worker->running || worker->dispatchPosted || !worker->queuedTasks.isEmpty());
+    }
+
     int effectiveCapacityLocked_(bool ignoreReserved = false) const {
         int capacity = m_maxThreadCount;
         if (!ignoreReserved && !m_stopping) {
@@ -928,15 +1133,16 @@ private:
         return capacity;
     }
 
-    WorkerEntry* findIdleWorkerLocked_() const {
-        const int count = m_workers.size();
-        for (int i = 0; i < count; ++i) {
-            WorkerEntry* worker = m_workers[static_cast<size_t>(i)];
-            if (worker && !worker->busy) {
-                return worker;
-            }
+    int workerLoadLocked_(const WorkerEntry* worker) const {
+        if (!worker) {
+            return 2147483647;
         }
-        return nullptr;
+
+        int load = static_cast<int>(worker->queuedTasks.size());
+        if (worker->running || worker->dispatchPosted) {
+            ++load;
+        }
+        return load;
     }
 
     WorkerEntry* findWorkerByIdLocked_(int workerId) const {
@@ -950,7 +1156,7 @@ private:
         return nullptr;
     }
 
-    void removeWorkerLocked_(WorkerEntry* worker) {
+    void removeActiveWorkerLocked_(WorkerEntry* worker) {
         if (!worker) {
             return;
         }
@@ -958,6 +1164,19 @@ private:
         for (int i = 0; i < count; ++i) {
             if (m_workers[static_cast<size_t>(i)] == worker) {
                 m_workers.removeAt(i);
+                return;
+            }
+        }
+    }
+
+    void removeRetiredWorkerLocked_(WorkerEntry* worker) {
+        if (!worker) {
+            return;
+        }
+        const int count = static_cast<int>(m_retiredWorkers.size());
+        for (int i = 0; i < count; ++i) {
+            if (m_retiredWorkers[static_cast<size_t>(i)] == worker) {
+                m_retiredWorkers.removeAt(static_cast<size_t>(i));
                 return;
             }
         }
@@ -974,6 +1193,13 @@ private:
             worker->thread = nullptr;
         }
         delete worker;
+    }
+
+    void notifyStateChanged_() {
+        {
+            std::lock_guard<std::mutex> lock(m_waitMutex);
+        }
+        m_waitCondition.notify_all();
     }
 
     void cleanupRetiredWorkersLocked_(SwMutexLocker& locker) {
@@ -999,8 +1225,126 @@ private:
         locker.relock();
     }
 
+    void enqueueTaskItemLocked_(WorkerEntry* worker, const TaskItem& item) {
+        if (!worker || !item.runnable) {
+            return;
+        }
+
+        const int count = static_cast<int>(worker->queuedTasks.size());
+        int insertAt = count;
+        for (int i = 0; i < count; ++i) {
+            const TaskItem& current = worker->queuedTasks[static_cast<size_t>(i)];
+            if (item.priority > current.priority ||
+                (item.priority == current.priority && item.sequence < current.sequence)) {
+                insertAt = i;
+                break;
+            }
+        }
+
+        if (insertAt >= count) {
+            worker->queuedTasks.append(item);
+        } else {
+            worker->queuedTasks.insert(static_cast<size_t>(insertAt), item);
+        }
+    }
+
+    void enqueueTaskLocked_(WorkerEntry* worker, SwRunnable* runnable, int priority) {
+        TaskItem item;
+        item.runnable = runnable;
+        item.priority = priority;
+        item.sequence = ++m_nextTaskSequence;
+        enqueueTaskItemLocked_(worker, item);
+    }
+
+    WorkerEntry* chooseWorkerLocked_(bool ignoreReserved, bool requireImmediate) {
+        const int capacity = effectiveCapacityLocked_(ignoreReserved);
+
+        WorkerEntry* bestWorker = nullptr;
+        int bestLoad = 2147483647;
+        long long bestActivity = 0;
+
+        const int count = m_workers.size();
+        for (int i = 0; i < count; ++i) {
+            WorkerEntry* worker = m_workers[static_cast<size_t>(i)];
+            if (!worker || worker->retiring || !worker->thread) {
+                continue;
+            }
+
+            const int load = workerLoadLocked_(worker);
+            if (requireImmediate && load != 0) {
+                continue;
+            }
+
+            if (!bestWorker ||
+                load < bestLoad ||
+                (load == bestLoad && worker->lastActiveMs < bestActivity)) {
+                bestWorker = worker;
+                bestLoad = load;
+                bestActivity = worker->lastActiveMs;
+            }
+        }
+
+        if (!bestWorker) {
+            if (m_workers.size() < capacity) {
+                return createWorkerLocked_();
+            }
+            return nullptr;
+        }
+
+        if (!requireImmediate && bestLoad > 0 && m_workers.size() < capacity) {
+            WorkerEntry* freshWorker = createWorkerLocked_();
+            if (freshWorker) {
+                return freshWorker;
+            }
+        }
+
+        return bestWorker;
+    }
+
+    WorkerEntry* findBusiestWorkerLocked_() const {
+        WorkerEntry* busiest = nullptr;
+        int highestLoad = 0;
+
+        const int count = m_workers.size();
+        for (int i = 0; i < count; ++i) {
+            WorkerEntry* worker = m_workers[static_cast<size_t>(i)];
+            if (!worker || worker->retiring) {
+                continue;
+            }
+
+            const int load = workerLoadLocked_(worker);
+            if (!busiest || load > highestLoad) {
+                busiest = worker;
+                highestLoad = load;
+            }
+        }
+
+        return busiest;
+    }
+
+    void scheduleWorkerDispatchLocked_(WorkerEntry* worker) {
+        if (!worker || !worker->thread || worker->retiring || worker->running ||
+            worker->dispatchPosted || worker->queuedTasks.isEmpty()) {
+            return;
+        }
+
+        worker->dispatchPosted = true;
+
+        const int workerId = worker->id;
+        SwThreadPool* pool = this;
+        std::weak_ptr<std::atomic<bool>> aliveGuard(m_alive);
+        worker->thread->postTask([pool, workerId, aliveGuard]() {
+            auto alive = aliveGuard.lock();
+            if (!alive || !alive->load(std::memory_order_acquire)) {
+                return;
+            }
+            pool->drainOneTaskOnWorker_(workerId);
+        });
+    }
+
     void scheduleWorkerExpiryCheckLocked_(WorkerEntry* worker) {
-        if (!worker || !worker->thread) {
+        if (!worker || !worker->thread || worker->retiring || worker->running ||
+            worker->dispatchPosted || !worker->queuedTasks.isEmpty()) {
             return;
         }
 
@@ -1012,62 +1356,28 @@ private:
         const int workerId = worker->id;
         const unsigned int token = worker->idleToken;
         SwThreadPool* pool = this;
-        worker->thread->postTask([pool, workerId, token, timeout]() {
-            if (timeout > 0) {
-                SwEventLoop::swsleep(timeout);
-            }
-            pool->onWorkerExpiryTimeout_(workerId, token);
+        std::weak_ptr<std::atomic<bool>> aliveGuard(m_alive);
+        worker->thread->postTask([pool, workerId, token, timeout, aliveGuard]() {
+            SwTimer::singleShot(timeout, [pool, workerId, token, aliveGuard]() {
+                auto alive = aliveGuard.lock();
+                if (!alive || !alive->load(std::memory_order_acquire)) {
+                    return;
+                }
+                pool->onWorkerExpiryTimeout_(workerId, token);
+            });
         });
-    }
-
-    void onWorkerExpiryTimeout_(int workerId, unsigned int token) {
-        WorkerEntry* workerToStop = nullptr;
-        {
-            SwMutexLocker locker(&m_mutex);
-            if (m_stopping || m_waitingForDone) {
-                return;
-            }
-
-            WorkerEntry* worker = findWorkerByIdLocked_(workerId);
-            if (!worker) {
-                return;
-            }
-            if (worker->busy) {
-                return;
-            }
-            if (worker->idleToken != token) {
-                return;
-            }
-            if (!m_pendingTasks.isEmpty()) {
-                return;
-            }
-
-            removeWorkerLocked_(worker);
-
-            SwThread* currentWrapper = SwThread::currentThread();
-            const bool onSameWorkerThread =
-                currentWrapper && worker->thread &&
-                (currentWrapper->handle() == worker->thread->handle());
-
-            if (onSameWorkerThread) {
-                worker->thread->quit();
-                m_retiredWorkers.append(worker);
-                return;
-            }
-
-            workerToStop = worker;
-        }
-
-        stopSingleWorker_(workerToStop);
     }
 
     WorkerEntry* createWorkerLocked_() {
         WorkerEntry* worker = new WorkerEntry();
         worker->id = ++m_nextWorkerId;
         worker->thread = new SwThread("SwThreadPoolWorker_" + SwString::number(worker->id), nullptr);
-        worker->busy = false;
+        worker->running = false;
+        worker->dispatchPosted = false;
+        worker->retiring = false;
         worker->idleToken = 0;
         worker->expiryTimeoutMs = m_expiryTimeout;
+        worker->lastActiveMs = SwDeadlineTimer::nowMs();
 
         const unsigned int workerStackSize = m_stackSize;
         const ThreadPriority workerPriority = m_threadPriority;
@@ -1084,117 +1394,240 @@ private:
         worker->thread->postTask([workerStackSize, workerPriority, workerQos]() {
             applyCurrentThreadSettings_(workerStackSize, workerPriority, workerQos);
         });
+        std::weak_ptr<std::atomic<bool>> aliveGuard(m_alive);
+        SwObject::connect(worker->thread, &SwThread::finished, [this, aliveGuard]() {
+            auto alive = aliveGuard.lock();
+            if (!alive || !alive->load(std::memory_order_acquire)) {
+                return;
+            }
+            notifyStateChanged_();
+        });
 
         m_workers.push_back(worker);
         return worker;
     }
 
-    bool tryStartLocked_(SwRunnable* runnable, int priority, bool ignoreReserved = false) {
-        SW_UNUSED(priority);
+    bool assignTaskLocked_(SwRunnable* runnable,
+                           int priority,
+                           bool ignoreReserved,
+                           bool requireImmediate,
+                           bool* rejectedByBackpressure) {
+        if (rejectedByBackpressure) {
+            *rejectedByBackpressure = false;
+        }
 
-        const int capacity = effectiveCapacityLocked_(ignoreReserved);
-        if (m_runningTasks >= capacity) {
+        WorkerEntry* worker = chooseWorkerLocked_(ignoreReserved, requireImmediate);
+        if (!worker) {
             return false;
         }
 
-        WorkerEntry* worker = findIdleWorkerLocked_();
-        if (!worker) {
-            if (m_workers.size() >= capacity) {
-                return false;
+        const int maxQueuedTaskCount = effectiveMaxQueuedTaskCountLocked_();
+        if (maxQueuedTaskCount >= 0 &&
+            taskWouldQueueLocked_(worker) &&
+            queuedTaskCountLocked_() >= maxQueuedTaskCount) {
+            if (rejectedByBackpressure) {
+                *rejectedByBackpressure = true;
             }
-            worker = createWorkerLocked_();
-            if (!worker) {
-                return false;
-            }
+            return false;
         }
 
-        dispatchRunnableLocked_(worker, runnable);
+        enqueueTaskLocked_(worker, runnable, priority);
+        scheduleWorkerDispatchLocked_(worker);
         return true;
     }
 
-    void dispatchRunnableLocked_(WorkerEntry* worker, SwRunnable* runnable) {
-        if (!worker || !worker->thread || !runnable) {
-            return;
-        }
-
-        worker->busy = true;
-        ++m_runningTasks;
-
-        SwThreadPool* pool = this;
-        worker->thread->postTask([pool, worker, runnable]() {
-            runnable->run();
-            if (runnable->autoDelete()) {
-                delete runnable;
-            }
-            pool->onRunnableFinished_(worker);
-        });
-    }
-
-    void enqueueLocked_(SwRunnable* runnable, int priority) {
-        TaskItem item;
-        item.runnable = runnable;
-        item.priority = priority;
-
-        const int count = static_cast<int>(m_pendingTasks.size());
-        int insertAt = count;
-        for (int i = 0; i < count; ++i) {
-            const TaskItem& current = m_pendingTasks[static_cast<size_t>(i)];
-            if (item.priority > current.priority) {
-                insertAt = i;
-                break;
-            }
-        }
-
-        if (insertAt >= count) {
-            m_pendingTasks.append(item);
-        } else {
-            m_pendingTasks.insert(static_cast<size_t>(insertAt), item);
-        }
-    }
-
-    void dispatchPendingLocked_() {
-        while (!m_pendingTasks.isEmpty()) {
-            const int capacity = effectiveCapacityLocked_(false);
-            if (m_runningTasks >= capacity) {
+    void rebalanceLocked_(bool ignoreReserved) {
+        const int capacity = effectiveCapacityLocked_(ignoreReserved);
+        while (m_workers.size() < capacity) {
+            WorkerEntry* source = findBusiestWorkerLocked_();
+            if (!source || source->queuedTasks.isEmpty() || workerLoadLocked_(source) <= 1) {
                 return;
             }
 
-            WorkerEntry* worker = findIdleWorkerLocked_();
-            if (!worker) {
-                if (m_workers.size() >= capacity) {
-                    return;
-                }
-                worker = createWorkerLocked_();
-                if (!worker) {
-                    return;
-                }
+            WorkerEntry* target = createWorkerLocked_();
+            if (!target) {
+                return;
             }
 
-            TaskItem item = m_pendingTasks.first();
-            m_pendingTasks.removeAt(0);
-            dispatchRunnableLocked_(worker, item.runnable);
+            TaskItem item = source->queuedTasks.first();
+            source->queuedTasks.removeAt(0);
+            enqueueTaskItemLocked_(target, item);
+            scheduleWorkerDispatchLocked_(target);
         }
     }
 
-    void clearPendingLocked_() {
-        const int count = static_cast<int>(m_pendingTasks.size());
+    void scheduleIdleExpiryLocked_() {
+        const int count = m_workers.size();
         for (int i = 0; i < count; ++i) {
-            deleteIfAutoDelete_(m_pendingTasks[static_cast<size_t>(i)].runnable);
+            WorkerEntry* worker = m_workers[static_cast<size_t>(i)];
+            if (!worker) {
+                continue;
+            }
+            if (!worker->running && !worker->dispatchPosted && worker->queuedTasks.isEmpty()) {
+                ++worker->idleToken;
+                scheduleWorkerExpiryCheckLocked_(worker);
+            }
         }
-        m_pendingTasks.clear();
     }
 
-    void onRunnableFinished_(WorkerEntry* worker) {
-        SwMutexLocker locker(&m_mutex);
-        if (m_runningTasks > 0) {
-            --m_runningTasks;
+    bool clearQueuedTasksLocked_() {
+        bool cleared = false;
+        const int workerCount = m_workers.size();
+        for (int workerIndex = 0; workerIndex < workerCount; ++workerIndex) {
+            WorkerEntry* worker = m_workers[static_cast<size_t>(workerIndex)];
+            if (!worker) {
+                continue;
+            }
+
+            const int count = static_cast<int>(worker->queuedTasks.size());
+            for (int i = 0; i < count; ++i) {
+                deleteIfAutoDelete_(worker->queuedTasks[static_cast<size_t>(i)].runnable);
+                cleared = true;
+            }
+            worker->queuedTasks.clear();
         }
-        if (worker) {
-            worker->busy = false;
+        return cleared;
+    }
+
+    bool isQuiescentLocked_() const {
+        if (m_runningTasks != 0) {
+            return false;
+        }
+
+        const int count = m_workers.size();
+        for (int i = 0; i < count; ++i) {
+            const WorkerEntry* worker = m_workers[static_cast<size_t>(i)];
+            if (!worker) {
+                continue;
+            }
+            if (worker->running || worker->dispatchPosted || !worker->queuedTasks.isEmpty()) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    void drainOneTaskOnWorker_(int workerId) {
+        TaskItem item;
+        bool hasTask = false;
+
+        // Capture a weak guard BEFORE run() — the runnable could delete this pool.
+        // After run() returns, the guard lets us detect that `this` is gone.
+        std::weak_ptr<std::atomic<bool>> aliveGuard(m_alive);
+
+        {
+            SwMutexLocker locker(&m_mutex);
+            WorkerEntry* worker = findWorkerByIdLocked_(workerId);
+            if (!worker) {
+                return;
+            }
+
+            worker->dispatchPosted = false;
+            if (worker->retiring || worker->running || worker->queuedTasks.isEmpty()) {
+                return;
+            }
+
+            item = worker->queuedTasks.first();
+            worker->queuedTasks.removeAt(0);
+            worker->running = true;
             ++worker->idleToken;
-            scheduleWorkerExpiryCheckLocked_(worker);
+            ++m_runningTasks;
+            worker->lastActiveMs = SwDeadlineTimer::nowMs();
+            hasTask = (item.runnable != nullptr);
         }
-        dispatchPendingLocked_();
+
+        notifyStateChanged_();
+
+        if (hasTask) {
+            try {
+                item.runnable->run();
+            } catch (const std::exception& e) {
+                swCError(kSwLogCategory_SwThreadPool) << "SwRunnable::run() threw exception on worker "
+                    << workerId << ": " << e.what() << " — continuing execution";
+            } catch (...) {
+                swCError(kSwLogCategory_SwThreadPool) << "SwRunnable::run() threw unknown exception on worker "
+                    << workerId << " — continuing execution";
+            }
+            deleteIfAutoDelete_(item.runnable);
+        }
+
+        // The runnable's run() may have destroyed the pool (e.g. `delete pool`).
+        // If so, `this` is freed — we must not touch any member.
+        auto alive = aliveGuard.lock();
+        if (!alive || !alive->load(std::memory_order_acquire)) {
+            return;
+        }
+
+        onRunnableFinished_(workerId);
+    }
+
+    void onRunnableFinished_(int workerId) {
+        WorkerEntry* worker = nullptr;
+        bool scheduleNext = false;
+        bool scheduleExpiry = false;
+
+        {
+            SwMutexLocker locker(&m_mutex);
+            worker = findWorkerByIdLocked_(workerId);
+            if (m_runningTasks > 0) {
+                --m_runningTasks;
+            }
+            if (!worker) {
+                return;
+            }
+
+            worker->running = false;
+            worker->lastActiveMs = SwDeadlineTimer::nowMs();
+            if (!worker->retiring && !worker->queuedTasks.isEmpty()) {
+                scheduleWorkerDispatchLocked_(worker);
+                scheduleNext = true;
+            } else if (!worker->retiring) {
+                ++worker->idleToken;
+                scheduleExpiry = true;
+            }
+        }
+
+        notifyStateChanged_();
+
+        if (!scheduleNext && scheduleExpiry) {
+            SwMutexLocker locker(&m_mutex);
+            WorkerEntry* freshWorker = findWorkerByIdLocked_(workerId);
+            if (freshWorker) {
+                scheduleWorkerExpiryCheckLocked_(freshWorker);
+            }
+        }
+    }
+
+    void onWorkerExpiryTimeout_(int workerId, unsigned int token) {
+        WorkerEntry* worker = nullptr;
+        {
+            SwMutexLocker locker(&m_mutex);
+            if (m_stopping || m_waitingForDone) {
+                return;
+            }
+
+            worker = findWorkerByIdLocked_(workerId);
+            if (!worker) {
+                return;
+            }
+            if (worker->retiring || worker->running || worker->dispatchPosted || !worker->queuedTasks.isEmpty()) {
+                return;
+            }
+            if (worker->idleToken != token) {
+                return;
+            }
+
+            worker->retiring = true;
+            removeActiveWorkerLocked_(worker);
+            m_retiredWorkers.append(worker);
+        }
+
+        notifyStateChanged_();
+
+        if (worker && worker->thread) {
+            worker->thread->quit();
+        }
     }
 
     void shutdown_() {
@@ -1203,20 +1636,26 @@ private:
             if (m_stopping) {
                 return;
             }
+            if (isCurrentThreadWorkerLocked_()) {
+                swCError(kSwLogCategory_SwThreadPool)
+                    << "SwThreadPool shutdown requested from one of its own workers; aborting shutdown to avoid self-deadlock";
+                return;
+            }
             m_stopping = true;
         }
+        notifyStateChanged_();
 
-        // Destruction waits for all queued/running tasks to finish.
         waitForDone(-1);
+        stopAllWorkers_();
     }
 
     bool awaitQuiescent_(const SwDeadlineTimer& deadline) {
-        while (true) {
+        std::unique_lock<std::mutex> waitLocker(m_waitMutex);
+        for (;;) {
             {
                 SwMutexLocker locker(&m_mutex);
                 cleanupRetiredWorkersLocked_(locker);
-                dispatchPendingLocked_();
-                if (m_runningTasks == 0 && m_pendingTasks.isEmpty()) {
+                if (isQuiescentLocked_()) {
                     return true;
                 }
             }
@@ -1225,11 +1664,18 @@ private:
                 return false;
             }
 
-            sleepMs_(1);
+            const int remaining = deadline.remainingTime();
+            if (remaining < 0) {
+                m_waitCondition.wait(waitLocker);
+            } else if (remaining > 0) {
+                m_waitCondition.wait_for(waitLocker, std::chrono::milliseconds(remaining));
+            } else {
+                return false;
+            }
         }
     }
 
-    bool retireAllWorkers_(const SwDeadlineTimer& deadline) {
+    void stopAllWorkers_() {
         SwVector<WorkerEntry*> workersToStop;
         {
             SwMutexLocker locker(&m_mutex);
@@ -1251,47 +1697,31 @@ private:
             }
         }
 
-        while (true) {
-            bool allStopped = true;
-            for (int i = 0; i < count; ++i) {
-                WorkerEntry* worker = workersToStop[static_cast<size_t>(i)];
-                if (worker && worker->thread && worker->thread->isRunning()) {
-                    allStopped = false;
-                    break;
-                }
-            }
-
-            if (allStopped) {
-                break;
-            }
-
-            if (deadline.hasExpired()) {
-                return false;
-            }
-
-            sleepMs_(1);
-        }
-
         for (int i = 0; i < count; ++i) {
             WorkerEntry* worker = workersToStop[static_cast<size_t>(i)];
             stopSingleWorker_(worker);
         }
-        return true;
+        notifyStateChanged_();
     }
 
+    std::shared_ptr<std::atomic<bool>> m_alive;
     mutable SwMutex m_mutex;
-    SwList<TaskItem> m_pendingTasks;
     SwVector<WorkerEntry*> m_workers;
     SwList<WorkerEntry*> m_retiredWorkers;
+    std::mutex m_waitMutex;
+    std::condition_variable m_waitCondition;
 
     int m_maxThreadCount;
+    int m_maxQueuedTaskCount;
     int m_expiryTimeout;
     unsigned int m_stackSize;
     ThreadPriority m_threadPriority;
     QualityOfService m_serviceLevel;
     int m_reservedThreads;
     int m_runningTasks;
+    int m_rejectedTaskCount;
     int m_nextWorkerId;
+    unsigned long long m_nextTaskSequence;
     bool m_waitingForDone;
     bool m_stopping;
 };

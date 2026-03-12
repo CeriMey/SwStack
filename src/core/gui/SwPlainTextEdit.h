@@ -68,7 +68,7 @@ protected:
     };
 
     enum class UndoMergeKind {
-        None,
+        NoMerge,
         InsertText,
         Backspace,
         DeleteForward
@@ -1366,7 +1366,7 @@ protected:
     }
 
     bool shouldMergeUndoState_(UndoMergeKind kind) const {
-        if (kind == UndoMergeKind::None || m_undoStack.isEmpty()) {
+        if (kind == UndoMergeKind::NoMerge || m_undoStack.isEmpty()) {
             return false;
         }
         if (m_lastUndoMergeKind != kind || hasSelectedText()) {
@@ -1379,7 +1379,7 @@ protected:
                 return m_cursorPos == m_lastUndoMergeCursorPos;
             case UndoMergeKind::DeleteForward:
                 return m_cursorPos == m_lastUndoMergeCursorPos;
-            case UndoMergeKind::None:
+            case UndoMergeKind::NoMerge:
             default:
                 return false;
         }
@@ -1391,11 +1391,11 @@ protected:
     }
 
     void resetUndoMergeState_() {
-        m_lastUndoMergeKind = UndoMergeKind::None;
+        m_lastUndoMergeKind = UndoMergeKind::NoMerge;
         m_lastUndoMergeCursorPos = static_cast<size_t>(-1);
     }
 
-    void recordUndoState_(UndoMergeKind kind = UndoMergeKind::None) {
+    void recordUndoState_(UndoMergeKind kind = UndoMergeKind::NoMerge) {
         if (!m_undoRedoEnabled) {
             return;
         }
@@ -1430,7 +1430,7 @@ protected:
         update();
     }
 
-    void replaceSelectionWithText_(const SwString& text, UndoMergeKind mergeKind = UndoMergeKind::None) {
+    void replaceSelectionWithText_(const SwString& text, UndoMergeKind mergeKind = UndoMergeKind::NoMerge) {
         size_t start = m_cursorPos;
         size_t end = m_cursorPos;
         if (hasSelectedText()) {
@@ -1444,7 +1444,7 @@ protected:
             return;
         }
         if (end > start) {
-            mergeKind = UndoMergeKind::None;
+            mergeKind = UndoMergeKind::NoMerge;
         }
         recordUndoState_(mergeKind);
 
@@ -1512,7 +1512,7 @@ protected:
     size_t m_undoLimit{200};
     SwVector<EditState> m_undoStack;
     SwVector<EditState> m_redoStack;
-    UndoMergeKind m_lastUndoMergeKind{UndoMergeKind::None};
+    UndoMergeKind m_lastUndoMergeKind{UndoMergeKind::NoMerge};
     size_t m_lastUndoMergeCursorPos{static_cast<size_t>(-1)};
 
     bool m_caretVisible{true};

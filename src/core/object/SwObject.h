@@ -68,6 +68,8 @@
 #include <unordered_set>
 #include <cstring>
 #include <string>
+#include "SwReadWriteLock.h"
+#include "SwVector.h"
 static constexpr const char* kSwLogCategory_SwObject = "sw.core.object.swobject";
 
 #if defined(__GNUG__)
@@ -79,7 +81,12 @@ class SwThread;
 using ThreadHandle = sw::atomic::Thread;
 
 namespace swcore_compat {
-#if __cplusplus >= 201402L
+#if defined(_MSVC_LANG)
+#define SWCORE_CPLUSPLUS _MSVC_LANG
+#else
+#define SWCORE_CPLUSPLUS __cplusplus
+#endif
+#if SWCORE_CPLUSPLUS >= 201402L
 template<typename T>
 using decay_t = std::decay_t<T>;
 template<std::size_t... I>
@@ -105,6 +112,8 @@ template<std::size_t N>
 using make_index_sequence = typename make_index_sequence_impl<N>::type;
 #endif
 } // namespace swcore_compat
+
+#undef SWCORE_CPLUSPLUS
 
 
 
@@ -355,10 +364,20 @@ enum ConnectionType {
     BlockingQueuedConnection
 };
 
+class ISlotBase {
+public:
+    virtual ~ISlotBase() {}
+    virtual void* receiverRaw() const = 0;
+};
 
+template<typename... Args>
+class ITypedSlot : public ISlotBase {
+public:
+    virtual void invokeRaw(Args... args) = 0;
+};
 
 template<typename T, typename... Args>
-class ISlot {
+class ISlot : public ITypedSlot<Args...> {
 public:
     /**
      * @brief Destroys the `ISlot` instance.
@@ -379,7 +398,13 @@ public:
      *
      * @details The returned value reflects the state currently stored by the instance.
      */
-    virtual T* receiveur() = 0;
+    virtual T* receiveur() const = 0;
+    void* receiverRaw() const override {
+        return static_cast<void*>(receiveur());
+    }
+    void invokeRaw(Args... args) override {
+        invoke(receiveur(), args...);
+    }
 };
 
 // Slot pour une méthode membre
@@ -403,17 +428,15 @@ public:
     void invoke(T* instance, Args... args) override {
         (instance->*method)(args...);
     }
-
     /**
      * @brief Returns the current receiveur.
      * @return The current receiveur.
      *
      * @details The returned value reflects the state currently stored by the instance.
      */
-    T* receiveur() override {
+    T* receiveur() const override {
         return instance;
     }
-
     /**
      * @brief Performs the `void` operation.
      */
@@ -453,7 +476,7 @@ public:
      *
      * @details The returned value reflects the state currently stored by the instance.
      */
-    T* receiveur() override {
+    T* receiveur() const override {
         return receiver_;
     }
 
@@ -487,7 +510,7 @@ public:
      *
      * @details The returned value reflects the state currently stored by the instance.
      */
-    void* receiveur() override {
+    void* receiveur() const override {
         return nullptr;
     }
 
@@ -676,6 +699,12 @@ protected:
         );
     }
 
+    using ConnectionEntry = std::pair<std::shared_ptr<ISlotBase>, ConnectionType>;
+    using ConnectionList = SwVector<ConnectionEntry>;
+    using ConnectionMap = SwMap<SwString, ConnectionList>;
+    using TypedConnectionMap = SwMap<SignalKey, ConnectionList>;
+    using ReceiverBackrefCounts = SwMap<SwObject*, int>;
+
     SwMap<SwString, void*> __nameToFunction__;
     /**
      * @brief Performs the `function<void` operation.
@@ -720,7 +749,7 @@ public:
      */
     static bool isLive(const void* ptr) {
         if (!ptr) return false;
-        std::lock_guard<std::mutex> lk(s_liveObjectsMutex_());
+        SwReadLocker lk(s_liveObjectsMutex_());
         return s_liveObjects_().count(ptr) > 0;
     }
 
@@ -737,13 +766,13 @@ public:
            */
           m_parent(nullptr)
     {
-        { std::lock_guard<std::mutex> lk(s_liveObjectsMutex_()); s_liveObjects_().insert(this); }
+        { SwWriteLocker lk(s_liveObjectsMutex_()); s_liveObjects_().insert(this); }
         setParent(parent);
         ThreadHandle* currentThread = ThreadHandle::currentThread();
         if (!currentThread) {
             currentThread = ThreadHandle::sharedFallbackThread();
         }
-        if (currentThread) {
+        if (currentThread && ThreadHandle::isLive(currentThread)) {
             m_threadAffinity = currentThread;
             currentThread->attachObject(this);
         }
@@ -757,7 +786,8 @@ public:
      * and deleting child objects if necessary (commented out here for customization).
      */
     virtual ~SwObject() {
-        { std::lock_guard<std::mutex> lk(s_liveObjectsMutex_()); s_liveObjects_().erase(this); }
+        { SwWriteLocker lk(s_liveObjectsMutex_()); s_liveObjects_().erase(this); }
+        disconnectFromAllSenders_();
         auto localChildren = m_children;
         m_children.clear();
         for (auto* child : localChildren) {
@@ -776,12 +806,14 @@ public:
             oldParent->removeChild(this);
         }
 
-        if (m_threadAffinity) {
-            m_threadAffinity->detachObject(this);
+        ThreadHandle* affinity = threadHandle();
+        if (affinity) {
+            affinity->detachObject(this);
             m_threadAffinity = nullptr;
         }
 
         emit destroyed();
+        disconnectAllSlots();
     }
 
     virtual bool event(SwEvent* event) {
@@ -880,6 +912,9 @@ public:
      * @brief Returns the internal thread hosting this object.
      */
     ThreadHandle* threadHandle() const {
+        if (!m_threadAffinity || !ThreadHandle::isLive(m_threadAffinity)) {
+            return nullptr;
+        }
         return m_threadAffinity;
     }
 
@@ -897,18 +932,23 @@ public:
      * @param targetThread Destination thread. If nullptr, the current thread wrapper is used.
      */
     void moveToThread(ThreadHandle* targetThread) {
+        if (targetThread && !ThreadHandle::isLive(targetThread)) {
+            targetThread = nullptr;
+        }
         if (!targetThread) {
             targetThread = ThreadHandle::currentThread();
             if (!targetThread) {
                 targetThread = ThreadHandle::sharedFallbackThread();
             }
         }
-        if (!targetThread || isSameThreadHandle_(targetThread, m_threadAffinity)) {
+        ThreadHandle* currentAffinity = threadHandle();
+        if (!targetThread || !ThreadHandle::isLive(targetThread) ||
+            isSameThreadHandle_(targetThread, currentAffinity)) {
             return;
         }
 
-        if (m_threadAffinity) {
-            m_threadAffinity->detachObject(this);
+        if (currentAffinity) {
+            currentAffinity->detachObject(this);
         }
 
         m_threadAffinity = targetThread;
@@ -1426,25 +1466,36 @@ public:
      * @return The requested disconnect.
      */
     static void disconnect(Sender* sender, const SwString& signalName, Receiver* receiver, void (Receiver::*slot)()) {
-        // Vérifie si le signal existe
-        if (sender->connections.find(signalName) != sender->connections.end()) {
-            auto& slotsConnetion = sender->connections[signalName];
-            slotsConnetion.erase(
-                std::remove_if(slotsConnetion.begin(), slotsConnetion.end(),
-                    [receiver, slot](const std::pair<void*, ConnectionType>& connection) {
-                        // Vérifie si le slot correspond
-                        auto* baseSlot = static_cast<ISlot<Receiver>*>(connection.first);
-                        auto* memberSlot = dynamic_cast<SlotMember<Receiver>*>(baseSlot);
-                        return memberSlot && memberSlot->receiveur() == receiver && memberSlot->methodPtr() == slot;
-                    }),
-                slotsConnetion.end()
-            );
+        if (!sender) {
+            return;
+        }
+        ReceiverBackrefCounts removedCounts;
+        {
+            SwWriteLocker lock(sender->connectionsMutex_);
+            // Vérifie si le signal existe
+            if (sender->connections.find(signalName) != sender->connections.end()) {
+                auto& slotsConnetion = sender->connections[signalName];
+                const size_t previousSize = slotsConnetion.size();
+                slotsConnetion.erase(
+                    std::remove_if(slotsConnetion.begin(), slotsConnetion.end(),
+                        [receiver, slot](const ConnectionEntry& connection) {
+                            auto* memberSlot = dynamic_cast<SlotMember<Receiver>*>(static_cast<ISlotBase*>(connection.first.get()));
+                            return memberSlot && memberSlot->receiveur() == receiver && memberSlot->methodPtr() == slot;
+                        }),
+                    slotsConnetion.end()
+                );
 
-            // Si plus de slots, supprime l'entrée pour le signal
-            if (slotsConnetion.empty()) {
-                sender->connections.remove(signalName);
+                incrementReceiverCount_(removedCounts,
+                                        receiverObjectForRaw_(receiver),
+                                        static_cast<int>(previousSize - slotsConnetion.size()));
+
+                // Si plus de slots, supprime l'entrée pour le signal
+                if (slotsConnetion.isEmpty()) {
+                    sender->connections.remove(signalName);
+                }
             }
         }
+        sender->unregisterReceiverBackrefs_(removedCounts);
     }
 
     template<typename Sender, typename Receiver, typename... SignalArgs>
@@ -1455,26 +1506,39 @@ public:
      * @return The requested disconnect.
      */
     static void disconnect(Sender* sender, void (Sender::*signal)(SignalArgs...), Receiver* receiver, void (Receiver::*slot)(SignalArgs...)) {
-        auto key = createSignalKey(signal);
-        auto it = sender->typedConnections.find(key);
-        if (it == sender->typedConnections.end()) {
+        if (!sender) {
             return;
         }
+        ReceiverBackrefCounts removedCounts;
+        {
+            SwWriteLocker lock(sender->connectionsMutex_);
+            auto key = createSignalKey(signal);
+            auto it = sender->typedConnections.find(key);
+            if (it == sender->typedConnections.end()) {
+                return;
+            }
 
-        auto& slotsConnetion = it->second;
-        slotsConnetion.erase(
-            std::remove_if(slotsConnetion.begin(), slotsConnetion.end(),
-                [receiver, slot](const std::pair<void*, ConnectionType>& connection) {
-                    auto* baseSlot = static_cast<ISlot<Receiver, SignalArgs...>*>(connection.first);
-                    auto* memberSlot = dynamic_cast<SlotMember<Receiver, SignalArgs...>*>(baseSlot);
-                    return memberSlot && memberSlot->receiveur() == receiver && memberSlot->methodPtr() == slot;
-                }),
-            slotsConnetion.end()
-        );
+            auto& slotsConnetion = it->second;
+            const size_t previousSize = slotsConnetion.size();
+            slotsConnetion.erase(
+                std::remove_if(slotsConnetion.begin(), slotsConnetion.end(),
+                    [receiver, slot](const ConnectionEntry& connection) {
+                        auto* memberSlot =
+                            dynamic_cast<SlotMember<Receiver, SignalArgs...>*>(static_cast<ISlotBase*>(connection.first.get()));
+                        return memberSlot && memberSlot->receiveur() == receiver && memberSlot->methodPtr() == slot;
+                    }),
+                slotsConnetion.end()
+            );
 
-        if (slotsConnetion.empty()) {
-            sender->typedConnections.erase(it);
+            incrementReceiverCount_(removedCounts,
+                                    receiverObjectForRaw_(receiver),
+                                    static_cast<int>(previousSize - slotsConnetion.size()));
+
+            if (slotsConnetion.isEmpty()) {
+                sender->typedConnections.erase(it);
+            }
         }
+        sender->unregisterReceiverBackrefs_(removedCounts);
     }
 
     /**
@@ -1494,43 +1558,40 @@ public:
      * @return The requested disconnect.
      */
     static void disconnect(Sender* sender, Receiver* receiver) {
-        // Parcourt tous les signaux et déconnecte ceux associés au receiver
-        for (auto it = sender->connections.begin(); it != sender->connections.end(); ) {
-            auto& slotsConnetion = it->second;
-            slotsConnetion.erase(
-                std::remove_if(slotsConnetion.begin(), slotsConnetion.end(),
-                    [receiver](const std::pair<void*, ConnectionType>& connection) {
-                        // Vérifie si le slot correspond
-                        auto* memberSlot = dynamic_cast<SlotMember<Receiver>*>(static_cast<ISlot<Receiver>*>(connection.first));
-                        return memberSlot && memberSlot->receiveur() == receiver;
-                    }),
-                slotsConnetion.end()
-            );
+        if (!sender) {
+            return;
+        }
+        ReceiverBackrefCounts removedCounts;
+        {
+            SwWriteLocker lock(sender->connectionsMutex_);
+            // Parcourt tous les signaux et déconnecte ceux associés au receiver
+            for (auto it = sender->connections.begin(); it != sender->connections.end(); ) {
+                auto& slotsConnetion = it->second;
+                incrementReceiverCount_(removedCounts,
+                                        receiverObjectForRaw_(receiver),
+                                        removeReceiverConnectionsFromList_(slotsConnetion, receiver));
 
-            // Si plus de slots pour ce signal, supprime l'entrée
-            if (slotsConnetion.empty()) {
-                it = sender->connections.erase(it);
-            } else {
-                ++it;
+                // Si plus de slots pour ce signal, supprime l'entrée
+                if (slotsConnetion.isEmpty()) {
+                    it = sender->connections.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            for (auto it = sender->typedConnections.begin(); it != sender->typedConnections.end(); ) {
+                auto& slotsConnetion = it->second;
+                incrementReceiverCount_(removedCounts,
+                                        receiverObjectForRaw_(receiver),
+                                        removeReceiverConnectionsFromList_(slotsConnetion, receiver));
+
+                if (slotsConnetion.isEmpty()) {
+                    it = sender->typedConnections.erase(it);
+                } else {
+                    ++it;
+                }
             }
         }
-        for (auto it = sender->typedConnections.begin(); it != sender->typedConnections.end(); ) {
-            auto& slotsConnetion = it->second;
-            slotsConnetion.erase(
-                std::remove_if(slotsConnetion.begin(), slotsConnetion.end(),
-                    [receiver](const std::pair<void*, ConnectionType>& connection) {
-                        auto* memberSlot = dynamic_cast<SlotMember<Receiver>*>(static_cast<ISlot<Receiver>*>(connection.first));
-                        return memberSlot && memberSlot->receiveur() == receiver;
-                    }),
-                slotsConnetion.end()
-            );
-
-            if (slotsConnetion.empty()) {
-                it = sender->typedConnections.erase(it);
-            } else {
-                ++it;
-            }
-        }
+        sender->unregisterReceiverBackrefs_(removedCounts);
     }
 
     /**
@@ -1552,10 +1613,17 @@ public:
      * @param type Value passed to the method.
      */
     void addConnection(const SwString& signalName, ISlot<Args...>* slot, ConnectionType type) {
-        if (connections.find(signalName) == connections.end()) {
-            connections[signalName] = std::vector<std::pair<void*, ConnectionType>>();
+        ReceiverBackrefCounts addedCounts;
+        {
+            SwWriteLocker lock(connectionsMutex_);
+            if (connections.find(signalName) == connections.end()) {
+                connections[signalName] = ConnectionList();
+            }
+            std::shared_ptr<ISlotBase> slotHolder(slot);
+            incrementReceiverCount_(addedCounts, receiverObjectForSlot_(slotHolder));
+            connections[signalName].push_back(std::make_pair(std::move(slotHolder), type));
         }
-        connections[signalName].push_back(std::make_pair(static_cast<void*>(slot), type));
+        registerReceiverBackrefs_(addedCounts);
     }
 
     template<typename... Args>
@@ -1566,7 +1634,14 @@ public:
      * @param type Value passed to the method.
      */
     void addConnection(const SignalKey& key, ISlot<Args...>* slot, ConnectionType type) {
-        typedConnections[key].push_back(std::make_pair(static_cast<void*>(slot), type));
+        ReceiverBackrefCounts addedCounts;
+        {
+            SwWriteLocker lock(connectionsMutex_);
+            std::shared_ptr<ISlotBase> slotHolder(slot);
+            incrementReceiverCount_(addedCounts, receiverObjectForSlot_(slotHolder));
+            typedConnections[key].push_back(std::make_pair(std::move(slotHolder), type));
+        }
+        registerReceiverBackrefs_(addedCounts);
     }
 
     /**
@@ -1602,63 +1677,63 @@ public:
      * If any connections exist, they are removed, and a message is logged.
      */
     void disconnectAllSlots() {
-        if (!connections.empty() || !typedConnections.empty()) {
-            connections.clear();
-            typedConnections.clear();
-            swCDebug(kSwLogCategory_SwObject) << "Tous les slots ont été déconnectés pour cet objet.";
+        ReceiverBackrefCounts removedCounts;
+        {
+            SwWriteLocker lock(connectionsMutex_);
+            if (!connections.empty() || !typedConnections.empty()) {
+                collectReceiverCountsFromMap_(connections, removedCounts);
+                collectReceiverCountsFromMap_(typedConnections, removedCounts);
+                connections.clear();
+                typedConnections.clear();
+            }
         }
+        unregisterReceiverBackrefs_(removedCounts);
     }
 
-    /**
-     * @brief Disconnects all slots associated with a specific receiver.
-     *
-     * This function iterates through all connections of this SwObject and removes any
-     * slots that are associated with the provided receiver SwObject.
-     *
-     * @tparam Receiver The type of the receiver SwObject.
-     * @param receiver A pointer to the receiver SwObject whose slots need to be disconnected.
-     *
-     * Logs a message indicating that all slots linked to the receiver have been disconnected.
-     */
     template <typename Receiver>
-    /**
-     * @brief Performs the `disconnectReceiver` operation.
-     * @param receiver Value passed to the method.
-     */
     void disconnectReceiver(Receiver* receiver) {
+        ReceiverBackrefCounts removedCounts;
+        {
+            SwWriteLocker lock(connectionsMutex_);
+            SwObject* receiverObject = receiverObjectForRaw_(receiver);
+            for (auto it = connections.begin(); it != connections.end(); ) {
+                ConnectionList& currentSlots = it->second;
+                incrementReceiverCount_(removedCounts,
+                                        receiverObject,
+                                        removeReceiverConnectionsFromList_(currentSlots, receiver));
+                if (currentSlots.isEmpty()) {
+                    it = connections.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            for (auto it = typedConnections.begin(); it != typedConnections.end(); ) {
+                ConnectionList& currentSlots = it->second;
+                incrementReceiverCount_(removedCounts,
+                                        receiverObject,
+                                        removeReceiverConnectionsFromList_(currentSlots, receiver));
+                if (currentSlots.isEmpty()) {
+                    it = typedConnections.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+        unregisterReceiverBackrefs_(removedCounts);
+    }
+
+    int connectionCount() const {
+        SwReadLocker lock(connectionsMutex_);
+        int count = 0;
         for (auto it = connections.begin(); it != connections.end(); ++it) {
-            std::vector<std::pair<void*, ConnectionType>>& currentSlots = it->second;
-            currentSlots.erase(std::remove_if(currentSlots.begin(), currentSlots.end(),
-                [receiver](std::pair<void*, ConnectionType>& slotPair) {
-                    SlotMember<Receiver>* slot = static_cast<SlotMember<Receiver>*>(slotPair.first);
-                    return slot && slot->receiveur() == receiver;
-                }),
-                currentSlots.end());
+            count += static_cast<int>(it->second.size());
         }
         for (auto it = typedConnections.begin(); it != typedConnections.end(); ++it) {
-            std::vector<std::pair<void*, ConnectionType>>& currentSlots = it->second;
-            currentSlots.erase(std::remove_if(currentSlots.begin(), currentSlots.end(),
-                [receiver](std::pair<void*, ConnectionType>& slotPair) {
-                    SlotMember<Receiver>* slot = static_cast<SlotMember<Receiver>*>(slotPair.first);
-                    return slot && slot->receiveur() == receiver;
-                }),
-                currentSlots.end());
+            count += static_cast<int>(it->second.size());
         }
-        swCDebug(kSwLogCategory_SwObject) << "Tous les slots liés au receiver ont été déconnectés.";
+        return count;
     }
 
-    /**
-     * @brief Sets the value of a specified property.
-     *
-     * This function assigns a new value to a property identified by its name. If the property
-     * is not initialized, it triggers the registration of all properties. It verifies if the
-     * property exists and if the provided value matches the expected type before setting it.
-     *
-     * @param propertyName The name of the property to be updated.
-     * @param value The new value to assign to the property, encapsulated in a SwAny SwObject.
-     *
-     * @note Logs a message if the property is not found or if the value type does not match the expected type.
-     */
     void setProperty(const SwString& propertyName, SwAny value) {
         // Vérifier si la propriété existe dans la map
         if (propertySetterMap.find(propertyName) != propertySetterMap.end()) {
@@ -1925,9 +2000,16 @@ protected:
      * @param args Value passed to the method.
      */
     void emitSignal(const SwString& signalName, Args... args) {
-        auto it = connections.find(signalName);
-        if (it != connections.end()) {
-            dispatchSlots(it->second, args...);
+        SwVector<std::pair<std::shared_ptr<ISlotBase>, ConnectionType>> slotListCopy;
+        {
+            SwReadLocker lock(connectionsMutex_);
+            auto it = connections.find(signalName);
+            if (it != connections.end()) {
+                slotListCopy = it->second;
+            }
+        }
+        if (!slotListCopy.isEmpty()) {
+            dispatchSlots(slotListCopy, args...);
         }
     }
 
@@ -1938,9 +2020,16 @@ protected:
      * @param args Value passed to the method.
      */
     void emitSignal(const SignalKey& key, Args... args) {
-        auto it = typedConnections.find(key);
-        if (it != typedConnections.end()) {
-            dispatchSlots(it->second, args...);
+        SwVector<std::pair<std::shared_ptr<ISlotBase>, ConnectionType>> slotListCopy;
+        {
+            SwReadLocker lock(connectionsMutex_);
+            auto it = typedConnections.find(key);
+            if (it != typedConnections.end()) {
+                slotListCopy = it->second;
+            }
+        }
+        if (!slotListCopy.isEmpty()) {
+            dispatchSlots(slotListCopy, args...);
         }
     }
 
@@ -1950,18 +2039,18 @@ protected:
      * @param slotList Value passed to the method.
      * @param args Value passed to the method.
      */
-    void dispatchSlots(std::vector<std::pair<void*, ConnectionType>>& slotList, Args... args) {
+    void dispatchSlots(const SwVector<std::pair<std::shared_ptr<ISlotBase>, ConnectionType>>& slotList, Args... args) {
         SwObject* senderObject = this;
         ThreadHandle* senderThread = this->threadHandle();
         if (!senderThread) {
             senderThread = ThreadHandle::currentThread();
         }
 
-        for (auto& connection : slotList) {
-            auto slotPtr = connection.first;
+        for (const auto& connection : slotList) {
+            const std::shared_ptr<ISlotBase>& slotPtr = connection.first;
             auto type = connection.second;
-            ISlot<void, Args...>* slot = static_cast<ISlot<void, Args...>*>(slotPtr);
-            void* receiverRaw = slot ? slot->receiveur() : nullptr;
+            auto* slot = slotPtr ? dynamic_cast<ITypedSlot<Args...>*>(slotPtr.get()) : nullptr;
+            void* receiverRaw = slot ? slot->receiverRaw() : nullptr;
             // Guard against a receiver that was destroyed after connect() but before this dispatch.
             // isLive() checks an external registry — safe to call on freed pointers.
             if (receiverRaw && !isLive(receiverRaw)) {
@@ -1970,7 +2059,7 @@ protected:
             SwObject* receiverObject = receiverRaw ? static_cast<SwObject*>(receiverRaw) : nullptr;
             ThreadHandle* receiverThread = receiverObject ? receiverObject->threadHandle() : nullptr;
 
-            std::function<void()> task = [slot, receiverRaw, receiverObject, senderObject, args...]() mutable {
+            std::function<void()> task = [slotPtr, receiverRaw, receiverObject, senderObject, args...]() mutable {
                 if (receiverRaw && !SwObject::isLive(receiverRaw)) {
                     return;
                 }
@@ -1978,7 +2067,10 @@ protected:
                 if (receiverObject) {
                     receiverObject->setSender(liveSender);
                 }
-                slot->invoke(receiverRaw, args...);
+                auto* slot = slotPtr ? dynamic_cast<ITypedSlot<Args...>*>(slotPtr.get()) : nullptr;
+                if (slot) {
+                    slot->invokeRaw(args...);
+                }
             };
 
             switch (type) {
@@ -2012,6 +2104,9 @@ protected:
         if (!task) {
             return;
         }
+        if (targetThread && !ThreadHandle::isLive(targetThread)) {
+            targetThread = nullptr;
+        }
         if (targetThread) {
             targetThread->postTask(std::move(task));
         } else {
@@ -2037,6 +2132,13 @@ protected:
         ThreadHandle* senderThread = this->threadHandle();
         if (!senderThread) {
             senderThread = ThreadHandle::currentThread();
+        }
+        if (targetThread && !ThreadHandle::isLive(targetThread)) {
+            targetThread = nullptr;
+        }
+        if (targetThread && !targetThread->isRunning()) {
+            task();
+            return;
         }
         if (!targetThread || isSameThreadHandle_(targetThread, senderThread)) {
             task();
@@ -2094,6 +2196,113 @@ protected:
         return func;
     }
 
+    static SwObject* receiverObjectForRaw_(const void* receiverRaw) {
+        if (!receiverRaw || !SwObject::isLive(receiverRaw)) {
+            return nullptr;
+        }
+        return const_cast<SwObject*>(static_cast<const SwObject*>(receiverRaw));
+    }
+
+    static SwObject* receiverObjectForSlot_(const std::shared_ptr<ISlotBase>& slot) {
+        return receiverObjectForRaw_(slot ? slot->receiverRaw() : nullptr);
+    }
+
+    static void incrementReceiverCount_(ReceiverBackrefCounts& counts, SwObject* receiver, int amount = 1) {
+        if (!receiver || amount <= 0) {
+            return;
+        }
+        counts[receiver] += amount;
+    }
+
+    static void collectReceiverCountsFromList_(const ConnectionList& connectionsToCollect, ReceiverBackrefCounts& counts) {
+        for (size_t index = 0; index < connectionsToCollect.size(); ++index) {
+            incrementReceiverCount_(counts, receiverObjectForSlot_(connectionsToCollect[index].first));
+        }
+    }
+
+    template<typename TMap>
+    static void collectReceiverCountsFromMap_(const TMap& connectionsToCollect, ReceiverBackrefCounts& counts) {
+        for (auto it = connectionsToCollect.begin(); it != connectionsToCollect.end(); ++it) {
+            collectReceiverCountsFromList_(it->second, counts);
+        }
+    }
+
+    static int removeReceiverConnectionsFromList_(ConnectionList& connectionsToFilter, const void* receiver) {
+        const size_t previousSize = connectionsToFilter.size();
+        connectionsToFilter.erase(
+            std::remove_if(connectionsToFilter.begin(), connectionsToFilter.end(),
+                [receiver](const ConnectionEntry& connection) {
+                    return connection.first && connection.first->receiverRaw() == receiver;
+                }),
+            connectionsToFilter.end());
+        return static_cast<int>(previousSize - connectionsToFilter.size());
+    }
+
+    void registerSenderBackref_(SwObject* sender, int amount = 1) {
+        if (!sender || amount <= 0) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(receiverBackrefsMutex_);
+        receiverBackrefs_[sender] += amount;
+    }
+
+    void unregisterSenderBackref_(SwObject* sender, int amount = 1) {
+        if (!sender || amount <= 0) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(receiverBackrefsMutex_);
+        auto it = receiverBackrefs_.find(sender);
+        if (it == receiverBackrefs_.end()) {
+            return;
+        }
+        if (it->second <= amount) {
+            receiverBackrefs_.remove(sender);
+        } else {
+            it->second -= amount;
+        }
+    }
+
+    void registerReceiverBackrefs_(const ReceiverBackrefCounts& counts) {
+        for (auto it = counts.begin(); it != counts.end(); ++it) {
+            SwObject* receiver = it->first;
+            if (!receiver || !SwObject::isLive(receiver)) {
+                continue;
+            }
+            receiver->registerSenderBackref_(this, it->second);
+        }
+    }
+
+    void unregisterReceiverBackrefs_(const ReceiverBackrefCounts& counts) {
+        for (auto it = counts.begin(); it != counts.end(); ++it) {
+            SwObject* receiver = it->first;
+            if (!receiver || !SwObject::isLive(receiver)) {
+                continue;
+            }
+            receiver->unregisterSenderBackref_(this, it->second);
+        }
+    }
+
+    SwVector<SwObject*> senderBackrefSnapshot_() {
+        SwVector<SwObject*> senders;
+        std::lock_guard<std::mutex> lock(receiverBackrefsMutex_);
+        for (auto it = receiverBackrefs_.begin(); it != receiverBackrefs_.end(); ++it) {
+            senders.push_back(it->first);
+        }
+        receiverBackrefs_.clear();
+        return senders;
+    }
+
+    void disconnectFromAllSenders_() {
+        const SwVector<SwObject*> senders = senderBackrefSnapshot_();
+        for (size_t index = 0; index < senders.size(); ++index) {
+            SwObject* sender = senders[index];
+            if (!sender || !SwObject::isLive(sender)) {
+                continue;
+            }
+            sender->disconnectReceiver(this);
+        }
+    }
+
 signals:
     DECLARE_SIGNAL_VOID(destroyed)
     DECLARE_SIGNAL(childRemoved, SwObject*)
@@ -2108,13 +2317,16 @@ private:
         static std::unordered_set<const void*> s;
         return s;
     }
-    static std::mutex& s_liveObjectsMutex_() {
-        static std::mutex m;
+    static SwReadWriteLock& s_liveObjectsMutex_() {
+        static SwReadWriteLock m;
         return m;
     }
     SwMap<SwString, SwString> properties;
-    SwMap<SwString, std::vector<std::pair<void*, ConnectionType>>> connections;
-    SwMap<SignalKey, std::vector<std::pair<void*, ConnectionType>>> typedConnections;
+    mutable SwReadWriteLock connectionsMutex_;
+    ConnectionMap connections;
+    TypedConnectionMap typedConnections;
+    mutable std::mutex receiverBackrefsMutex_;
+    ReceiverBackrefCounts receiverBackrefs_;
     SwObject* currentSender = nullptr;
     ThreadHandle* m_threadAffinity = nullptr;
 };

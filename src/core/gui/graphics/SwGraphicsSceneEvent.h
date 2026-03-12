@@ -89,7 +89,7 @@ class KeyEvent;
 // Event type enum for graphics scene events
 // ---------------------------------------------------------------------------
 enum class SwGraphicsSceneEventType {
-    None,
+    NoEvent,
     GraphicsSceneMousePress,
     GraphicsSceneMouseRelease,
     GraphicsSceneMouseMove,
@@ -211,7 +211,7 @@ public:
     void setWidget(SwWidget* w) { m_widget = w; }
 
 private:
-    SwGraphicsSceneEventType m_type{SwGraphicsSceneEventType::None};
+    SwGraphicsSceneEventType m_type{SwGraphicsSceneEventType::NoEvent};
     bool m_accepted{false};
     SwWidget* m_widget{nullptr};
 };
