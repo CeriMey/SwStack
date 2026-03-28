@@ -11,7 +11,7 @@ Sources de reference:
 - `SwNode/SwComponentContainer/SwComponentContainer.cpp` (container: config, threads, RPC, reconciliation).
 - `src/core/remote/SwRemoteObjectComponent.h` (API plugin + macros `SW_REGISTER_COMPONENT_NODE*` + symbole exporte).
 - `src/core/remote/SwRemoteObjectComponentRegistry.h` (registry type -> create/destroy).
-- `src/core/runtime/SwLibrary.h` (chargement dynamique + resolution du suffixe `.dll/.so/.dylib`).
+- `src/core/runtime/SwPluginLoader.h` (chargement de plugins; s'appuie sur `SwLibrary` pour le backend DLL/SO).
 - `src/core/remote/SwRemoteObjectNode.h` (CLI: `SW_REMOTE_OBJECT_NODE`).
 
 ## Build
@@ -106,7 +106,7 @@ Changer le mode force un "restart" in-process: `onThreadingModeChanged_()` fait 
 
 ### Symbole exporte
 
-Le container charge une DLL/SO via `SwLibrary` puis cherche le symbole:
+Le container charge une DLL/SO via `SwPluginLoader` puis cherche le symbole:
 - `sw::component::plugin::registerSymbolV1()` -> `"swRegisterRemoteObjectComponentsV1"`
 
 Il appelle ensuite la fonction `RegisterFnV1(registry*)` (cf `SwNode/SwComponentContainer/SwComponentContainer.cpp::loadPlugin_()`).
@@ -147,7 +147,7 @@ Tous les retours sont des `SwString` contenant du JSON compact:
 - `loadPlugin(path)` -> `{ ok, err? }`
 - `listPlugins()` -> array JSON des plugins charges (cles internes = paths resolus)
 - `listPluginsInfo()` -> array JSON d'objets `{ path, library, components }`
-  - `library` contient l'introspection `SwLibrary::introspectionJson()`
+  - `library` contient l'introspection exposee par `SwPluginLoader::introspectionJson()`
   - `components` est la liste des types ajoutes par ce plugin
 - `loadComponent(typeName, nameSpace, objectName, paramsJson)` -> `{ ok, target? , err? }`
   - `paramsJson` doit etre un object JSON sous forme de string (string vide = `{}`)

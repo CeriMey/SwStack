@@ -20,7 +20,7 @@ int main(int argc, char** argv) {
     SwCoreApplication app(argc, argv);
 
     std::string url = "rtsp://172.16.40.81:5004/video";
-    std::string dumpPath = "rtsp_dump.h264";
+    std::string dumpPath = "rtsp_dump.bin";
     std::string localBind;
     uint16_t rtpPort = 0;
     uint16_t rtcpPort = 0;
@@ -39,7 +39,7 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "[RtspUdpClient] Connecting to " << url << std::endl;
-    std::cout << "[RtspUdpClient] Writing raw H264 to " << dumpPath << std::endl;
+    std::cout << "[RtspUdpClient] Writing raw video elementary stream to " << dumpPath << std::endl;
 
     FILE* raw = nullptr;
 #if defined(_WIN32)
@@ -56,6 +56,7 @@ int main(int argc, char** argv) {
 
     std::atomic<uint64_t> packetCount{0};
     std::atomic<uint64_t> byteCount{0};
+    std::atomic<int> firstCodec{-1};
 
     auto source = std::make_shared<SwRtspUdpSource>(SwString(url.c_str()), nullptr);
     if (!localBind.empty()) {
@@ -65,8 +66,15 @@ int main(int argc, char** argv) {
         source->forceLocalBind(SwString(localBind.empty() ? "0.0.0.0" : localBind.c_str()), rtpPort, rtcpPort);
     }
     source->setPacketCallback([&](const SwVideoPacket& packet) {
-        if (packet.codec() != SwVideoPacket::Codec::H264) {
+        if (packet.payload().isEmpty() || packet.carriesRawFrame()) {
             return;
+        }
+        const int codecValue = static_cast<int>(packet.codec());
+        int expectedCodec = -1;
+        if (firstCodec.compare_exchange_strong(expectedCodec, codecValue)) {
+            std::cout << "[RtspUdpClient] first codec=" << codecValue
+                      << " key=" << (packet.isKeyFrame() ? 1 : 0)
+                      << " bytes=" << packet.payload().size() << std::endl;
         }
         ++packetCount;
         byteCount += static_cast<uint64_t>(packet.payload().size());
@@ -75,7 +83,8 @@ int main(int argc, char** argv) {
         }
         if ((packetCount % 100) == 0) {
             std::cout << "[RtspUdpClient] packets=" << packetCount.load()
-                      << " bytes=" << byteCount.load() << std::endl;
+                      << " bytes=" << byteCount.load()
+                      << " codec=" << codecValue << std::endl;
         }
     });
 

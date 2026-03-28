@@ -46,7 +46,6 @@
 
 #include "SwIODevice.h"
 #include "SwString.h"
-#include "SwTimer.h"
 #include "SwByteArray.h"
 #include "SwDebug.h"
 #include "SwMutex.h"
@@ -58,7 +57,9 @@
 #include <utility>
 #include <cstdint>
 #include <algorithm>
+#include <chrono>
 #include <iostream>
+#include <thread>
 static constexpr const char* kSwLogCategory_SwUdpSocket = "sw.core.io.swudpsocket";
 
 
@@ -122,10 +123,6 @@ public:
         std::memset(&m_remoteAddr, 0, sizeof(m_remoteAddr));
         std::memset(&m_boundAddr, 0, sizeof(m_boundAddr));
         m_readBuffer.resize(m_maxDatagramSize);
-
-        m_pollTimer = new SwTimer(5, this);
-        SwObject::connect(m_pollTimer, &SwTimer::timeout, [this]() { pollSocket(); });
-        m_pollTimer->start(5);
     }
 
     /**
@@ -135,9 +132,7 @@ public:
      */
     ~SwUdpSocket() override {
         close();
-        if (m_pollTimer) {
-            m_pollTimer->stop();
-        }
+        stopMonitoring_();
 #if defined(_WIN32)
         WSACleanup();
 #endif
@@ -442,6 +437,41 @@ public:
     }
 
     /**
+     * @brief Returns the current pending Datagram count.
+     * @return The current pending Datagram count.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
+    size_t pendingDatagramCount() const {
+        SwMutexLocker lock(m_queueMutex);
+        return static_cast<size_t>(m_pending.size());
+    }
+
+    /**
+     * @brief Returns the total number of datagrams received from the OS.
+     * @return The total number of datagrams received from the OS.
+     */
+    uint64_t totalReceivedDatagrams() const {
+        return m_totalReceivedDatagrams.load();
+    }
+
+    /**
+     * @brief Returns the total number of datagrams dropped locally due to queue pressure.
+     * @return The total number of locally dropped datagrams.
+     */
+    uint64_t droppedDatagrams() const {
+        return m_totalQueueDrops.load();
+    }
+
+    /**
+     * @brief Returns the maximum pending datagram depth reached since open.
+     * @return The maximum observed pending datagram depth.
+     */
+    uint64_t queueHighWatermark() const {
+        return m_queueHighWatermark.load();
+    }
+
+    /**
      * @brief Returns the current local Address.
      * @return The current local Address.
      *
@@ -524,7 +554,9 @@ public:
      * @details The call affects the runtime state associated with the underlying resource or service.
      */
     void close() override {
+        stopMonitoring_();
         if (!isSocketValid()) {
+            m_readyReadPosted.store(false);
             return;
         }
 #if defined(_WIN32)
@@ -534,8 +566,15 @@ public:
         ::close(m_socket);
         m_socket = -1;
 #endif
-        m_pending.clear();
-        m_senderQueue.clear();
+        {
+            SwMutexLocker lock(m_queueMutex);
+            m_pending.clear();
+            m_senderQueue.clear();
+        }
+        m_totalReceivedDatagrams.store(0);
+        m_totalQueueDrops.store(0);
+        m_queueHighWatermark.store(0);
+        m_readyReadPosted.store(false);
         m_state = SocketState::UnconnectedState;
         m_remoteSet = false;
         m_remoteAddress.clear();
@@ -580,6 +619,10 @@ private:
         }
 #endif
         applyReceiveBufferSize();
+        m_totalReceivedDatagrams.store(0);
+        m_totalQueueDrops.store(0);
+        m_queueHighWatermark.store(0);
+        startMonitoring_();
     }
 
     bool isSocketValid() const {
@@ -647,16 +690,19 @@ private:
         return SwString(buffer);
     }
 
-    void pollSocket() {
+    void pollSocket_(int timeoutMs) {
         if (!isSocketValid()) {
             return;
+        }
+        if (timeoutMs < 0) {
+            timeoutMs = 0;
         }
         fd_set readSet;
         FD_ZERO(&readSet);
         FD_SET(m_socket, &readSet);
         timeval tv{};
-        tv.tv_sec = 0;
-        tv.tv_usec = 0;
+        tv.tv_sec = timeoutMs / 1000;
+        tv.tv_usec = (timeoutMs % 1000) * 1000;
 #if defined(_WIN32)
         int ready = select(0, &readSet, nullptr, nullptr, &tv);
 #else
@@ -676,6 +722,7 @@ private:
                       << " bound=" << m_boundAddress.toStdString() << ":" << m_boundPort;
         }
 
+        bool receivedAny = false;
         while (true) {
             sockaddr_in sender{};
 #if defined(_WIN32)
@@ -698,16 +745,23 @@ private:
                 }
                 break;
             }
+            receivedAny = true;
+            ++m_totalReceivedDatagrams;
             {
                 SwMutexLocker lock(m_queueMutex);
                 m_pending.append(SwByteArray(m_readBuffer.data(), static_cast<size_t>(bytes)));
                 m_senderQueue.append(SwPair<SwString, uint16_t>(senderToString(sender), ntohs(sender.sin_port)));
+                const uint64_t queueDepth = static_cast<uint64_t>(m_pending.size());
+                if (queueDepth > m_queueHighWatermark.load()) {
+                    m_queueHighWatermark.store(queueDepth);
+                }
                 if (m_pending.size() > m_maxPendingDatagrams) {
                     size_t droppedBytes = m_pending.firstRef().size();
                     m_pending.removeAt(0);
                     if (!m_senderQueue.isEmpty()) {
                         m_senderQueue.removeAt(0);
                     }
+                    ++m_totalQueueDrops;
                     swCWarning(kSwLogCategory_SwUdpSocket) << "[SwUdpSocket] Dropping oldest datagram (" << droppedBytes
                                 << " bytes) due to queue pressure (limit=" << m_maxPendingDatagrams << ")";
                 }
@@ -718,8 +772,63 @@ private:
                           << " from=" << senderToString(sender).toStdString()
                           << ":" << ntohs(sender.sin_port);
             }
-            readyRead();
         }
+        if (receivedAny) {
+            scheduleReadyRead_();
+        }
+    }
+
+    void scheduleReadyRead_() {
+        if (m_readyReadPosted.exchange(true)) {
+            return;
+        }
+        auto notify = [this]() {
+            if (!SwObject::isLive(this)) {
+                return;
+            }
+            m_readyReadPosted.store(false);
+            if (!hasPendingDatagrams()) {
+                return;
+            }
+            readyRead();
+        };
+
+        ThreadHandle* affinity = threadHandle();
+        if (affinity && ThreadHandle::currentThread() != affinity) {
+            affinity->postTask(std::move(notify));
+            return;
+        }
+        notify();
+    }
+
+    void monitorLoop_() {
+#if defined(_WIN32)
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+#endif
+        while (m_monitorActive.load()) {
+            if (!isSocketValid()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                continue;
+            }
+            pollSocket_(50);
+        }
+    }
+
+    void startMonitoring_() {
+        if (m_monitorActive.exchange(true)) {
+            return;
+        }
+        m_monitorThread = std::thread([this]() {
+            monitorLoop_();
+        });
+    }
+
+    void stopMonitoring_() {
+        m_monitorActive.store(false);
+        if (m_monitorThread.joinable()) {
+            m_monitorThread.join();
+        }
+        m_readyReadPosted.store(false);
     }
 
     uint32_t inetAddr(const SwString& text) const {
@@ -781,7 +890,6 @@ private:
     sockaddr_in m_remoteAddr{};
     sockaddr_in m_boundAddr{};
     bool m_remoteSet{false};
-    SwTimer* m_pollTimer{nullptr};
     mutable SwMutex m_queueMutex;
     SwList<SwByteArray> m_pending;
     SwList<SwPair<SwString, uint16_t>> m_senderQueue;
@@ -795,8 +903,14 @@ private:
     int m_lastSystemError{0};
     std::atomic<uint64_t> m_debugRxCount{0};
     std::atomic<uint64_t> m_debugSelectCount{0};
+    std::atomic<uint64_t> m_totalReceivedDatagrams{0};
+    std::atomic<uint64_t> m_totalQueueDrops{0};
+    std::atomic<uint64_t> m_queueHighWatermark{0};
+    std::atomic<bool> m_monitorActive{false};
+    std::atomic<bool> m_readyReadPosted{false};
     int m_receiveBufferSize{0};
     size_t m_maxDatagramSize{2048};
     size_t m_maxPendingDatagrams{512};
     SwByteArray m_readBuffer;
+    std::thread m_monitorThread{};
 };

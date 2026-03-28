@@ -49,6 +49,8 @@
 
 #include "media/SwVideoFrame.h"
 #include "media/SwVideoPacket.h"
+#include "core/types/SwList.h"
+#include "core/types/SwString.h"
 
 #include <functional>
 #include <map>
@@ -166,6 +168,19 @@ public:
     }
 };
 
+struct SwVideoDecoderDescriptor {
+    SwVideoPacket::Codec codec{SwVideoPacket::Codec::Unknown};
+    SwString id;
+    SwString displayName;
+    int priority{0};
+    bool shareable{false};
+    bool available{true};
+
+    bool isValid() const {
+        return codec != SwVideoPacket::Codec::Unknown && !id.isEmpty();
+    }
+};
+
 class SwVideoDecoderFactory {
 public:
     using Creator = std::function<std::shared_ptr<SwVideoDecoder>()>;
@@ -192,6 +207,32 @@ public:
                          Creator creator,
                          int priority = 0,
                          bool shareable = false) {
+        registerDecoder(codec,
+                        SwString(),
+                        SwString(),
+                        std::move(creator),
+                        priority,
+                        shareable,
+                        true);
+    }
+
+    /**
+     * @brief Performs the `registerDecoder` operation.
+     * @param codec Value passed to the method.
+     * @param id Value passed to the method.
+     * @param displayName Value passed to the method.
+     * @param creator Value passed to the method.
+     * @param priority Value passed to the method.
+     * @param shareable Value passed to the method.
+     * @param available Value passed to the method.
+     */
+    void registerDecoder(SwVideoPacket::Codec codec,
+                         const SwString& id,
+                         const SwString& displayName,
+                         Creator creator,
+                         int priority = 0,
+                         bool shareable = false,
+                         bool available = true) {
         if (!creator) {
             return;
         }
@@ -199,11 +240,15 @@ public:
         auto& entries = m_decoders[codec];
         entries.emplace_back();
         auto& entry = entries.back();
+        entry.descriptor.codec = codec;
+        entry.descriptor.id = id.isEmpty() ? generateAnonymousIdLocked(codec) : id;
+        entry.descriptor.displayName = displayName.isEmpty() ? entry.descriptor.id : displayName;
+        entry.descriptor.priority = priority;
+        entry.descriptor.shareable = shareable;
+        entry.descriptor.available = available;
         entry.factory = std::move(creator);
-        entry.priority = priority;
-        entry.shareable = shareable;
         std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
-            return a.priority > b.priority;
+            return a.descriptor.priority > b.descriptor.priority;
         });
     }
 
@@ -219,25 +264,83 @@ public:
             return nullptr;
         }
         for (auto& entry : it->second) {
-            if (entry.shareable) {
-                for (auto poolIt = entry.pool.begin(); poolIt != entry.pool.end();) {
-                    if (auto decoder = poolIt->lock()) {
-                        return decoder;
-                    }
-                    poolIt = entry.pool.erase(poolIt);
-                }
-            }
-            if (entry.factory) {
-                auto decoder = entry.factory();
-                if (decoder && entry.shareable) {
-                    entry.pool.emplace_back(decoder);
-                }
-                if (decoder) {
-                    return decoder;
-                }
+            auto decoder = acquireEntryLocked(entry);
+            if (decoder) {
+                return decoder;
             }
         }
         return nullptr;
+    }
+
+    /**
+     * @brief Performs the `acquire` operation.
+     * @param codec Value passed to the method.
+     * @param id Value passed to the method.
+     * @return The requested acquire.
+     */
+    std::shared_ptr<SwVideoDecoder> acquire(SwVideoPacket::Codec codec, const SwString& id) {
+        SwMutexLocker lock(m_mutex);
+        auto it = m_decoders.find(codec);
+        if (it == m_decoders.end()) {
+            return nullptr;
+        }
+        for (auto& entry : it->second) {
+            if (entry.descriptor.id != id) {
+                continue;
+            }
+            return acquireEntryLocked(entry);
+        }
+        return nullptr;
+    }
+
+    /**
+     * @brief Returns the registered decoder descriptors for the given codec.
+     * @param codec Value passed to the method.
+     * @param availableOnly Value passed to the method.
+     * @return The registered descriptors ordered by priority.
+     */
+    SwList<SwVideoDecoderDescriptor> list(SwVideoPacket::Codec codec,
+                                          bool availableOnly = true) const {
+        SwList<SwVideoDecoderDescriptor> descriptors;
+        SwMutexLocker lock(m_mutex);
+        auto it = m_decoders.find(codec);
+        if (it == m_decoders.end()) {
+            return descriptors;
+        }
+        for (const auto& entry : it->second) {
+            if (availableOnly && !entry.descriptor.available) {
+                continue;
+            }
+            descriptors.append(entry.descriptor);
+        }
+        return descriptors;
+    }
+
+    /**
+     * @brief Returns whether a decoder id is registered for the given codec.
+     * @param codec Value passed to the method.
+     * @param id Value passed to the method.
+     * @param availableOnly Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
+    bool contains(SwVideoPacket::Codec codec,
+                  const SwString& id,
+                  bool availableOnly = true) const {
+        SwMutexLocker lock(m_mutex);
+        auto it = m_decoders.find(codec);
+        if (it == m_decoders.end()) {
+            return false;
+        }
+        for (const auto& entry : it->second) {
+            if (entry.descriptor.id != id) {
+                continue;
+            }
+            if (availableOnly && !entry.descriptor.available) {
+                return false;
+            }
+            return true;
+        }
+        return false;
     }
 
     /**
@@ -249,21 +352,80 @@ public:
         return acquire(codec);
     }
 
+    /**
+     * @brief Creates the requested create.
+     * @param codec Value passed to the method.
+     * @param id Value passed to the method.
+     * @return The resulting create.
+     */
+    std::shared_ptr<SwVideoDecoder> create(SwVideoPacket::Codec codec, const SwString& id) {
+        return acquire(codec, id);
+    }
+
 private:
     struct Entry {
+        SwVideoDecoderDescriptor descriptor;
         Creator factory;
-        int priority{0};
-        bool shareable{false};
         std::vector<std::weak_ptr<SwVideoDecoder>> pool;
     };
 
+    std::shared_ptr<SwVideoDecoder> acquireEntryLocked(Entry& entry) {
+        if (!entry.descriptor.available) {
+            return nullptr;
+        }
+        if (entry.descriptor.shareable) {
+            for (auto poolIt = entry.pool.begin(); poolIt != entry.pool.end();) {
+                if (auto decoder = poolIt->lock()) {
+                    return decoder;
+                }
+                poolIt = entry.pool.erase(poolIt);
+            }
+        }
+        if (!entry.factory) {
+            return nullptr;
+        }
+        auto decoder = entry.factory();
+        if (decoder && entry.descriptor.shareable) {
+            entry.pool.emplace_back(decoder);
+        }
+        return decoder;
+    }
+
+    SwString generateAnonymousIdLocked(SwVideoPacket::Codec codec) {
+        int& counter = m_anonymousIds[codec];
+        ++counter;
+        return SwString("decoder-") + SwString(std::to_string(static_cast<int>(codec))) +
+               SwString("-") + SwString(std::to_string(counter));
+    }
+
     SwVideoDecoderFactory() {
-        registerDecoder(SwVideoPacket::Codec::RawRGB, []() { return std::make_shared<SwPassthroughVideoDecoder>(); }, -1, true);
-        registerDecoder(SwVideoPacket::Codec::RawBGR, []() { return std::make_shared<SwPassthroughVideoDecoder>(); }, -1, true);
-        registerDecoder(SwVideoPacket::Codec::RawRGBA, []() { return std::make_shared<SwPassthroughVideoDecoder>(); }, -1, true);
-        registerDecoder(SwVideoPacket::Codec::RawBGRA, []() { return std::make_shared<SwPassthroughVideoDecoder>(); }, -1, true);
+        registerDecoder(SwVideoPacket::Codec::RawRGB,
+                        "passthrough",
+                        "Passthrough",
+                        []() { return std::make_shared<SwPassthroughVideoDecoder>(); },
+                        -1,
+                        true);
+        registerDecoder(SwVideoPacket::Codec::RawBGR,
+                        "passthrough",
+                        "Passthrough",
+                        []() { return std::make_shared<SwPassthroughVideoDecoder>(); },
+                        -1,
+                        true);
+        registerDecoder(SwVideoPacket::Codec::RawRGBA,
+                        "passthrough",
+                        "Passthrough",
+                        []() { return std::make_shared<SwPassthroughVideoDecoder>(); },
+                        -1,
+                        true);
+        registerDecoder(SwVideoPacket::Codec::RawBGRA,
+                        "passthrough",
+                        "Passthrough",
+                        []() { return std::make_shared<SwPassthroughVideoDecoder>(); },
+                        -1,
+                        true);
     }
 
     mutable SwMutex m_mutex;
     std::map<SwVideoPacket::Codec, std::vector<Entry>> m_decoders;
+    std::map<SwVideoPacket::Codec, int> m_anonymousIds;
 };

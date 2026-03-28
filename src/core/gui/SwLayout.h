@@ -48,6 +48,7 @@
  */
 
 #include <algorithm>
+#include <functional>
 #include <limits>
 #include <numeric>
 #include <vector>
@@ -411,6 +412,10 @@ public:
         return {0, 0};
     }
 
+    virtual void forEachManagedWidget(const std::function<void(SwWidgetInterface*)>& visitor) const {
+        SW_UNUSED(visitor);
+    }
+
     void updateGeometry() {
         if (!m_parentWidget) {
             return;
@@ -423,6 +428,16 @@ public:
     }
 
 protected:
+    void adoptWidgetToParent_(SwWidgetInterface* widget) const {
+        if (!widget || !m_parentWidget) {
+            return;
+        }
+        if (widget->parent() == m_parentWidget) {
+            return;
+        }
+        widget->setParent(m_parentWidget);
+    }
+
     SwRect contentRect() const {
         if (!m_parentWidget) {
             return {0, 0, 0, 0};
@@ -499,6 +514,7 @@ public:
         if (!widget || containsWidget_(widget)) {
             return;
         }
+        adoptWidgetToParent_(widget);
         insertItemInternal_(normalizeIndex_(index), new SwWidgetItem(widget), std::max(0, stretch), minSize);
     }
 
@@ -535,6 +551,18 @@ public:
             return 0;
         }
         return m_items[static_cast<size_t>(index)].stretch;
+    }
+
+    void forEachManagedWidget(const std::function<void(SwWidgetInterface*)>& visitor) const override {
+        if (!visitor) {
+            return;
+        }
+        for (const Item& item : m_items) {
+            SwWidgetInterface* widget = item.item ? item.item->widget() : nullptr;
+            if (widget) {
+                visitor(widget);
+            }
+        }
     }
 
     SwSize sizeHint() const override {
@@ -703,6 +731,7 @@ private:
         if (!item) {
             return;
         }
+        adoptWidgetToParent_(item->widget());
         Item entry;
         entry.item = item;
         entry.stretch = std::max(0, stretch);
@@ -902,6 +931,7 @@ public:
         if (!item || row < 0 || column < 0 || rowSpan <= 0 || columnSpan <= 0) {
             return;
         }
+        adoptWidgetToParent_(item->widget());
         Cell cell;
         cell.item = item;
         cell.row = row;
@@ -921,6 +951,7 @@ public:
                 return;
             }
         }
+        adoptWidgetToParent_(widget);
         addItem(new SwWidgetItem(widget), row, column, rowSpan, columnSpan);
     }
 
@@ -946,6 +977,18 @@ public:
 
     SwSize minimumSizeHint() const override {
         return layoutSizeHint_(true);
+    }
+
+    void forEachManagedWidget(const std::function<void(SwWidgetInterface*)>& visitor) const override {
+        if (!visitor) {
+            return;
+        }
+        for (const Cell& cell : m_cells) {
+            SwWidgetInterface* widget = cell.item ? cell.item->widget() : nullptr;
+            if (widget) {
+                visitor(widget);
+            }
+        }
     }
 
 protected:
@@ -1228,6 +1271,8 @@ public:
         if (!label || !field) {
             return;
         }
+        adoptWidgetToParent_(label);
+        adoptWidgetToParent_(field);
         addRowItems_(new SwWidgetItem(label), new SwWidgetItem(field));
     }
 
@@ -1236,6 +1281,7 @@ public:
             delete item;
             return;
         }
+        adoptWidgetToParent_(item->widget());
 
         const size_t rowIndex = static_cast<size_t>(row);
         if (rowIndex >= m_rows.size()) {
@@ -1260,6 +1306,7 @@ public:
         if (!widget) {
             return;
         }
+        adoptWidgetToParent_(widget);
         setItem(row, column, new SwWidgetItem(widget));
     }
 
@@ -1267,6 +1314,7 @@ public:
         if (!item) {
             return;
         }
+        adoptWidgetToParent_(item->widget());
         if (!m_pending) {
             m_pending = item;
             return;
@@ -1279,6 +1327,7 @@ public:
         if (!widget) {
             return;
         }
+        adoptWidgetToParent_(widget);
         addItem(new SwWidgetItem(widget));
     }
 
@@ -1325,6 +1374,28 @@ public:
 
     SwSize minimumSizeHint() const override {
         return layoutSizeHint_(true);
+    }
+
+    void forEachManagedWidget(const std::function<void(SwWidgetInterface*)>& visitor) const override {
+        if (!visitor) {
+            return;
+        }
+        if (m_pending) {
+            SwWidgetInterface* widget = m_pending->widget();
+            if (widget) {
+                visitor(widget);
+            }
+        }
+        for (const Row& row : m_rows) {
+            SwWidgetInterface* label = row.label ? row.label->widget() : nullptr;
+            if (label) {
+                visitor(label);
+            }
+            SwWidgetInterface* field = row.field ? row.field->widget() : nullptr;
+            if (field) {
+                visitor(field);
+            }
+        }
     }
 
 protected:

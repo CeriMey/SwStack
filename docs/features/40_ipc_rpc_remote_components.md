@@ -15,7 +15,7 @@ Inclut:
 - client RPC typé (templates Ret/Args),
 - côté serveur RPC via `SwRemoteObject` (helpers `ipcExposeRpc*`),
 - discovery/proxy objects (`SwProxyObject*`),
-- plugins/components: registry + macro d’enregistrement + chargement via `SwLibrary`.
+- plugins/components: registry + macro d’enregistrement + chargement via `SwPluginLoader` (backend `SwLibrary`).
 
 Exclut:
 - pub/sub SHM bas niveau (documenté dans `docs/features/30_ipc_shared_memory_pubsub.md`).
@@ -72,7 +72,8 @@ Principe:
 Références:
 - `src/core/remote/SwRemoteObjectComponentRegistry.h` (typeName → create/destroy)
 - `src/core/remote/SwRemoteObjectComponent.h` (macro `SW_REGISTER_COMPONENT_NODE`, symbole exporté)
-- `src/core/runtime/SwLibrary.h` (LoadLibrary/dlopen)
+- `src/core/runtime/SwPluginLoader.h` (chargeur de plugin)
+- `src/core/runtime/SwLibrary.h` (backend bas niveau LoadLibrary/dlopen)
 - Exemple container: `SwNode/SwComponentContainer/SwComponentContainer.cpp`
 
 ## 4) Flux d’exécution (Comment)
@@ -96,7 +97,7 @@ sequenceDiagram
 ### Container/plugins (résumé)
 
 - Le container lit une “composition” (plugins + composants).
-- Charge chaque plugin via `SwLibrary`.
+- Charge chaque plugin via `SwPluginLoader`.
 - Appelle la fonction d’enregistrement du plugin pour remplir `SwRemoteObjectComponentRegistry`.
 - Instancie les composants demandés (`type`, `ns`, `name`, `params`) et applique la config.
 
@@ -129,6 +130,7 @@ RPC/remotes:
 Plugins/components:
 - `src/core/remote/SwRemoteObjectComponentRegistry.h`
 - `src/core/remote/SwRemoteObjectComponent.h`
+- `src/core/runtime/SwPluginLoader.h`
 - `src/core/runtime/SwLibrary.h`
 
 Exemples:

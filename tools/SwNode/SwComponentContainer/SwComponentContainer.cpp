@@ -1,6 +1,6 @@
 #include "SwRemoteObjectComponent.h"
 #include "SwRemoteObjectComponentRegistry.h"
-#include "SwLibrary.h"
+#include "SwPluginLoader.h"
 #include "SwTimer.h"
 #include "SwRemoteObject.h"
 #include "SwThread.h"
@@ -55,7 +55,10 @@ class SwComponentContainer : public SwRemoteObject {
         SwTimer::singleShot(0, this, &SwComponentContainer::postInit_);
     }
 
-    ~SwComponentContainer() override { shutdown_(); }
+    ~SwComponentContainer() override {
+        shutdown_();
+        releasePlugins_();
+    }
 
     // Manual API (also exposed over RPC).
     bool loadPlugin(const SwString& path) {
@@ -70,7 +73,8 @@ class SwComponentContainer : public SwRemoteObject {
     SwStringList listPlugins() const {
         SwStringList out;
         out.reserve(plugins_.size());
-        for (std::map<std::string, SwLibrary>::const_iterator it = plugins_.begin(); it != plugins_.end(); ++it) {
+        for (std::map<std::string, std::unique_ptr<SwPluginLoader> >::const_iterator it = plugins_.begin();
+             it != plugins_.end(); ++it) {
             out.append(SwString(it->first));
         }
         return out;
@@ -270,7 +274,8 @@ class SwComponentContainer : public SwRemoteObject {
         const SwString qLeafNoExt = stripPluginLeafSuffix_(qLeafLower);
 
         SwString best;
-        for (std::map<std::string, SwLibrary>::const_iterator it = plugins_.begin(); it != plugins_.end(); ++it) {
+        for (std::map<std::string, std::unique_ptr<SwPluginLoader> >::const_iterator it = plugins_.begin();
+             it != plugins_.end(); ++it) {
             SwString k(it->first);
             k.replace("\\", "/");
             SwString leaf = k;
@@ -300,7 +305,8 @@ class SwComponentContainer : public SwRemoteObject {
 
     SwString rpcListPlugins_() const {
         SwJsonArray a;
-        for (std::map<std::string, SwLibrary>::const_iterator it = plugins_.begin(); it != plugins_.end(); ++it) {
+        for (std::map<std::string, std::unique_ptr<SwPluginLoader> >::const_iterator it = plugins_.begin();
+             it != plugins_.end(); ++it) {
             a.append(SwJsonValue(it->first));
         }
         SwJsonDocument d;
@@ -311,9 +317,11 @@ class SwComponentContainer : public SwRemoteObject {
     SwString rpcListPluginsInfo_() const {
         SwJsonArray out;
 
-        for (std::map<std::string, SwLibrary>::const_iterator it = plugins_.begin(); it != plugins_.end(); ++it) {
+        for (std::map<std::string, std::unique_ptr<SwPluginLoader> >::const_iterator it = plugins_.begin();
+             it != plugins_.end(); ++it) {
             const std::string& key = it->first;
-            const SwLibrary& lib = it->second;
+            if (!it->second) continue;
+            const SwPluginLoader& lib = *(it->second);
 
             SwJsonObject o;
             o["path"] = SwJsonValue(key);
@@ -506,34 +514,35 @@ class SwComponentContainer : public SwRemoteObject {
             return false;
         }
 
-        // Load the library first; use the resolved path as canonical key.
-        SwLibrary lib;
-        if (!lib.load(path)) {
-            if (errOut) *errOut = lib.lastError();
+        std::unique_ptr<SwPluginLoader> loader(new SwPluginLoader(path));
+        if (!loader->load()) {
+            if (errOut) *errOut = loader->errorString();
             return false;
         }
 
-        const SwString resolved = lib.path();
+        const SwString resolved = loader->fileName();
         const std::string key = resolved.toStdString();
         if (plugins_.find(key) != plugins_.end()) {
-            // Already loaded.
-            lib.unload();
+            // Already loaded; release the temporary loader reference.
+            (void)loader->unload();
             return true;
         }
 
-        void* sym = lib.resolve(sw::component::plugin::registerSymbolV1());
+        void* sym = loader->resolve(sw::component::plugin::registerSymbolV1());
         if (!sym) {
-            lib.unload();
             if (errOut) {
-                *errOut = SwString("plugin missing symbol: ") + sw::component::plugin::registerSymbolV1();
+                *errOut = loader->errorString().isEmpty()
+                              ? (SwString("plugin missing symbol: ") + sw::component::plugin::registerSymbolV1())
+                              : loader->errorString();
             }
+            (void)loader->unload();
             return false;
         }
 
         sw::component::plugin::RegisterFnV1 fn = reinterpret_cast<sw::component::plugin::RegisterFnV1>(sym);
         if (!fn) {
-            lib.unload();
             if (errOut) *errOut = SwString("invalid register function pointer");
+            (void)loader->unload();
             return false;
         }
 
@@ -543,8 +552,8 @@ class SwComponentContainer : public SwRemoteObject {
 
         const bool ok = fn(&registry_);
         if (!ok) {
-            lib.unload();
             if (errOut) *errOut = SwString("plugin register returned false");
+            (void)loader->unload();
             return false;
         }
 
@@ -558,7 +567,7 @@ class SwComponentContainer : public SwRemoteObject {
             }
         }
 
-        plugins_.insert(std::make_pair(key, std::move(lib)));
+        plugins_.insert(std::make_pair(key, std::move(loader)));
         pluginTypes_.insert(std::make_pair(key, newTypes));
         return true;
     }
@@ -878,12 +887,22 @@ class SwComponentContainer : public SwRemoteObject {
         pluginThreads_.clear();
     }
 
+    void releasePlugins_() {
+        for (std::map<std::string, std::unique_ptr<SwPluginLoader> >::iterator it = plugins_.begin();
+             it != plugins_.end(); ++it) {
+            if (!it->second) continue;
+            (void)it->second->unload();
+        }
+        plugins_.clear();
+        pluginTypes_.clear();
+    }
+
     SwStringList pluginPaths_{};
     SwAny compositionSpec_{};
     SwString threadingMode_{};
 
     SwRemoteObjectComponentRegistry registry_{};
-    std::map<std::string, SwLibrary> plugins_{};
+    std::map<std::string, std::unique_ptr<SwPluginLoader> > plugins_{};
     std::map<std::string, SwStringList> pluginTypes_{};
     std::map<std::string, std::unique_ptr<SwThread>> pluginThreads_{};
     std::map<std::string, ComponentInfo> components_{};

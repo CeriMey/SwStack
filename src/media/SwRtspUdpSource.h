@@ -52,12 +52,18 @@
  * (single NAL, STAP-A, FU-A) to emit SwVideoPacket::H264 packets.
  **************************************************************************************************/
 
+#include "media/SwMediaUrl.h"
+#include "media/SwMediaOpenOptions.h"
 #include "media/SwVideoSource.h"
 #include "media/SwVideoPacket.h"
+#include "media/rtp/SwMpegTsDemux.h"
+#include "media/rtp/SwRtpDepacketizerH264.h"
+#include "media/rtp/SwRtpDepacketizerH265.h"
+#include "media/rtp/SwRtpSession.h"
+#include "media/rtp/SwRtpSessionDescriptor.h"
 #include "core/io/SwTcpSocket.h"
 #include "core/io/SwUdpSocket.h"
 #include "core/runtime/SwTimer.h"
-#include "core/runtime/SwThread.h"
 #include "core/types/SwByteArray.h"
 #include "SwDebug.h"
 
@@ -65,6 +71,7 @@
 #include <atomic>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -72,13 +79,13 @@
 #include <iostream>
 #include <functional>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <random>
 #include <sstream>
 #include <string>
 #include <vector>
-#include <thread>
 static constexpr const char* kSwLogCategory_SwRtspUdpSource = "sw.media.swrtspudpsource";
 
 
@@ -98,28 +105,36 @@ public:
      * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
      */
     SwRtspUdpSource(const SwString& url, SwObject* parent = nullptr)
-        : m_parent(parent), m_url(url) {
+        : m_url(url) {
+        SW_UNUSED(parent);
         parseUrl();
-        m_rtspSocket = new SwTcpSocket(m_parent);
-        m_rtpSocket = new SwUdpSocket(m_parent);
-        m_rtcpSocket = new SwUdpSocket(m_parent);
-        tuneUdpSocket(m_rtpSocket, 4 * 1024 * 1024, 64 * 1024, 160);
-        tuneUdpSocket(m_rtcpSocket, 1 * 1024 * 1024, 4096, 32);
-        m_reconnectTimer = new SwTimer(m_reconnectDelayMs, m_parent);
+        m_callbackContext = new SwObject();
+        m_rtspSocket = new SwTcpSocket();
+        m_reconnectTimer = new SwTimer(m_reconnectDelayMs);
         m_reconnectTimer->setSingleShot(true);
-        SwObject::connect(m_reconnectTimer, &SwTimer::timeout, [this]() { attemptReconnect(); });
-        m_keepAliveTimer = new SwTimer(15000, m_parent);
+        SwObject::connect(m_reconnectTimer, &SwTimer::timeout, m_callbackContext, [this]() { attemptReconnect(); });
+        m_keepAliveTimer = new SwTimer(15000);
+        m_monitorTimer = new SwTimer(100);
 
-        SwObject::connect(m_keepAliveTimer, &SwTimer::timeout, [this]() { sendKeepAlive(); });
+        SwObject::connect(m_keepAliveTimer, &SwTimer::timeout, m_callbackContext, [this]() { sendKeepAlive(); });
+        SwObject::connect(m_monitorTimer, &SwTimer::timeout, m_callbackContext, [this]() {
+            maybeSendRtcpKeepAlive();
+            drainBufferedRtpPackets(true);
+            checkRtpTimeout();
+        });
 
-        SwObject::connect(m_rtspSocket, &SwTcpSocket::connected, [this]() {
+        SwObject::connect(m_rtspSocket, &SwTcpSocket::connected, m_callbackContext, [this]() {
             m_ctrlBuffer.clear();
             m_cseq = 0;
             m_sessionId.clear();
             m_state = RtspStep::Options;
             sendOptions();
         });
-        SwObject::connect(m_rtspSocket, &SwTcpSocket::disconnected, [this]() {
+        SwObject::connect(m_rtspSocket, &SwTcpSocket::readyRead, m_callbackContext, [this]() {
+            readControlSocket();
+            handleControlBuffer();
+        });
+        SwObject::connect(m_rtspSocket, &SwTcpSocket::disconnected, m_callbackContext, [this]() {
             if (m_rtspDisconnectSuppress.load() > 0) {
                 return;
             }
@@ -127,10 +142,20 @@ public:
             stopStreaming(false);
             scheduleReconnect("RTSP disconnected");
         });
-        SwObject::connect(m_rtspSocket, &SwTcpSocket::errorOccurred, [this](int code) {
+        SwObject::connect(m_rtspSocket, &SwTcpSocket::errorOccurred, m_callbackContext, [this](int code) {
             swCError(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] RTSP socket error: " << code;
             stopStreaming(false);
             scheduleReconnect("RTSP socket error");
+        });
+
+        m_h264Depacketizer.setPacketCallback([this](const SwVideoPacket& packet) {
+            emitRecoveredPacket_(packet);
+        });
+        m_h265Depacketizer.setPacketCallback([this](const SwVideoPacket& packet) {
+            emitRecoveredPacket_(packet);
+        });
+        m_sharedTsDemux.setPacketCallback([this](const SwVideoPacket& packet) {
+            emitRecoveredPacket_(packet);
         });
     }
 
@@ -179,14 +204,67 @@ public:
     }
 
     /**
+     * @brief Performs the `stripFmtpPayloadPrefix` operation.
+     * @param fmtp Value passed to the method.
+     * @return The requested strip Fmtp Payload Prefix.
+     */
+    static std::string stripFmtpPayloadPrefix(const std::string& fmtp) {
+        auto pos = fmtp.find(' ');
+        if (pos == std::string::npos) {
+            return fmtp;
+        }
+        return fmtp.substr(pos + 1);
+    }
+
+    /**
+     * @brief Performs the `parseH264Fmtp` operation.
+     * @param fmtp Value passed to the method.
+     */
+    void parseH264Fmtp(const std::string& fmtp) {
+        m_h264Sps.clear();
+        m_h264Pps.clear();
+        m_h264Depacketizer.setFmtp(SwString(fmtp));
+        if (fmtp.empty()) {
+            return;
+        }
+        auto parts = split(stripFmtpPayloadPrefix(fmtp), ';');
+        for (auto& raw : parts) {
+            std::string trimmed = raw;
+            trim(trimmed);
+            std::string entry = toLower(trimmed);
+            if (entry.rfind("sprop-parameter-sets=", 0) != 0) {
+                continue;
+            }
+            auto value = trimmed.substr(trimmed.find('=') + 1);
+            auto sets = split(value, ',');
+            if (!sets.empty()) {
+                m_h264Sps = base64Decode(sets[0]);
+            }
+            if (sets.size() > 1) {
+                m_h264Pps = base64Decode(sets[1]);
+            }
+        }
+        if (!m_loggedH264Fmtp.exchange(true)) {
+            swCWarning(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Parsed H264 fmtp"
+                        << " sps=" << m_h264Sps.size()
+                        << " pps=" << m_h264Pps.size();
+        }
+    }
+
+    /**
      * @brief Performs the `parseH265Fmtp` operation.
      * @param fmtp Value passed to the method.
      */
     void parseH265Fmtp(const std::string& fmtp) {
+        m_hevcVps.clear();
+        m_hevcSps.clear();
+        m_hevcPps.clear();
+        m_hevcProfileLevelId.clear();
+        m_h265Depacketizer.setFmtp(SwString(fmtp));
         if (fmtp.empty()) {
             return;
         }
-        auto parts = split(fmtp, ';');
+        auto parts = split(stripFmtpPayloadPrefix(fmtp), ';');
         for (auto& raw : parts) {
             std::string trimmed = raw;
             trim(trimmed);
@@ -219,6 +297,13 @@ public:
                 }
             }
         }
+        if ((!m_hevcVps.empty() || !m_hevcSps.empty() || !m_hevcPps.empty()) &&
+            !m_loggedH265Fmtp.exchange(true)) {
+            swCWarning(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Parsed H265 fmtp"
+                        << " vps=" << m_hevcVps.size()
+                        << " sps=" << m_hevcSps.size()
+                        << " pps=" << m_hevcPps.size();
+        }
     }
 
     /**
@@ -227,7 +312,10 @@ public:
      * @details Use this hook to release any resources that remain associated with the instance.
      */
     ~SwRtspUdpSource() override {
+        delete m_callbackContext;
+        m_callbackContext = nullptr;
         stop();
+        delete m_monitorTimer;
         delete m_keepAliveTimer;
         delete m_reconnectTimer;
         delete m_rtspSocket;
@@ -285,8 +373,13 @@ public:
      */
     void start() override {
         m_autoReconnect.store(true);
+        m_triedTcpFallback = m_useTcpTransport;
+        m_autoTcpFallbackActive = false;
         if (!isRunning()) {
             setRunning(true);
+        }
+        if (m_monitorTimer && !m_monitorTimer->isActive()) {
+            m_monitorTimer->start();
         }
         initiateConnection();
     }
@@ -299,12 +392,16 @@ public:
     void stop() override {
         m_autoReconnect.store(false);
         cancelReconnect();
-        setPlaceholderActive(false);
+        if (m_monitorTimer) {
+            m_monitorTimer->stop();
+        }
         if (!isRunning()) {
             stopStreaming(true);
+            emitStatus(SwVideoSource::StreamState::Stopped, "Stream stopped");
             return;
         }
         stopStreaming(true);
+        emitStatus(SwVideoSource::StreamState::Stopped, "Stream stopped");
     }
 
 private:
@@ -316,79 +413,31 @@ private:
         int retries{0};
     };
 
+    struct RtspTrack {
+        std::string mediaType;
+        std::string control;
+        int payloadType{96};
+        int clockRate{90000};
+        std::string codecName;
+        std::string fmtpLine;
+
+        bool isVideo() const { return mediaType == "video"; }
+    };
+
     enum class RtspStep { None, Options, Describe, Setup, Play, Playing };
 
-    class PollWorkerThread : public SwThread {
-    public:
-        /**
-         * @brief Constructs a `PollWorkerThread` instance.
-         * @param owner Value passed to the method.
-         *
-         * @details The instance is initialized and prepared for immediate use.
-         */
-        PollWorkerThread(SwRtspUdpSource* owner, int intervalMs)
-            : SwThread("SwRtspWorker", nullptr),
-              m_owner(owner),
-              m_intervalMs(intervalMs > 0 ? intervalMs : 1) {
-        }
-
-        /**
-         * @brief Performs the `requestStop` operation.
-         * @param false Value passed to the method.
-         */
-        void requestStop() { m_active.store(false); }
-        /**
-         * @brief Sets the interval.
-         * @param intervalMs Value passed to the method.
-         *
-         * @details Call this method to replace the currently stored value with the caller-provided one.
-         */
-        void setInterval(int intervalMs) {
-            if (intervalMs <= 0) {
-                intervalMs = 1;
-            }
-            m_intervalMs.store(intervalMs);
-        }
-
-    protected:
-        /**
-         * @brief Performs the `run` operation.
-         */
-        void run() override {
-            while (m_active.load()) {
-                if (!m_owner) {
-                    break;
-                }
-                m_owner->poll();
-                auto sleepMs = m_intervalMs.load();
-                if (sleepMs > 0) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
-                }
-            }
-        }
-
-    private:
-        SwRtspUdpSource* m_owner{nullptr};
-        std::atomic<bool> m_active{true};
-        std::atomic<int> m_intervalMs{1};
+    struct BufferedRtpPacket {
+        SwByteArray datagram;
+        std::chrono::steady_clock::time_point arrivalTime{};
     };
 
     void parseUrl() {
-        std::string s = m_url.toStdString();
-        const std::string prefix = "rtsp://";
-        if (s.compare(0, prefix.size(), prefix) == 0) {
-            s = s.substr(prefix.size());
-        }
-        auto slash = s.find('/');
-        std::string hostPort = (slash == std::string::npos) ? s : s.substr(0, slash);
-        m_path = (slash == std::string::npos) ? "/" : s.substr(slash);
-        auto colon = hostPort.find(':');
-        if (colon != std::string::npos) {
-            m_host = SwString(hostPort.substr(0, colon));
-            m_port = std::stoi(hostPort.substr(colon + 1));
-        } else {
-            m_host = SwString(hostPort);
-            m_port = 554;
+        const SwMediaUrl parsed = SwMediaUrl::parse(m_url);
+        m_host = parsed.host();
+        m_port = parsed.port() > 0 ? parsed.port() : 554;
+        m_path = parsed.pathWithQuery();
+        if (m_path.isEmpty()) {
+            m_path = "/";
         }
         m_baseUrl = "rtsp://" + m_host.toStdString();
         if (m_port != 554) {
@@ -397,9 +446,10 @@ private:
     }
 
     void resetStreamState() {
-        stopPollWorker();
         m_ctrlBuffer.clear();
         m_sdp.clear();
+        m_tracks.clear();
+        m_selectedTrackIndex = -1;
         m_trackControl.clear();
         m_sessionControl.clear();
         m_sessionId.clear();
@@ -413,17 +463,45 @@ private:
         m_triedAggregatePlay.store(false);
         m_haveTimestamp = false;
         m_haveFirstTimestamp = false;
+        m_haveSequence = false;
         m_firstTimestamp = 0;
         m_currentKeyFrame = false;
         m_framesDropped.store(0);
+        m_loggedFirstCompressedFrame.store(false);
         m_currentCodec = SwVideoPacket::Codec::H264;
         m_nalBuffer.clear();
+        m_h264Sps.clear();
+        m_h264Pps.clear();
+        m_h264HeadersInserted = false;
+        m_currentAccessUnitHasH264Headers = false;
+        m_currentAccessUnitInjectedH264Headers = false;
+        m_currentAccessUnitHasHevcHeaders = false;
+        m_currentAccessUnitInjectedHevcHeaders = false;
+        m_dropCurrentAccessUnit = false;
+        m_emitDecoderDiscontinuityOnNextFrame = true;
+        m_loggedH264Fmtp.store(false);
+        m_loggedH264ParameterSetInjection.store(false);
+        m_loggedMissingH264ParameterSets.store(false);
+        m_loggedInBandH264ParameterSets.store(false);
+        m_loggedH265Fmtp.store(false);
+        m_loggedH265ParameterSetInjection.store(false);
+        m_loggedMissingH265ParameterSets.store(false);
+        m_loggedInBandH265ParameterSets.store(false);
+        m_waitingForKeyFrame = true;
+        m_loggedWaitingForKeyFrame.store(false);
+        m_h264Depacketizer.reset();
+        m_h265Depacketizer.reset();
+        m_sharedTsDemux.reset();
         m_tsDemux.reset();
         m_hevcVps.clear();
         m_hevcSps.clear();
         m_hevcPps.clear();
         m_hevcHeadersInserted = false;
         m_hevcProfileLevelId.clear();
+        if (m_udpSession) {
+            m_udpSession->stop();
+            m_udpSession.reset();
+        }
         if (m_rtpSocket) {
             m_rtpSocket->close();
         }
@@ -438,12 +516,24 @@ private:
         m_remoteSsrc = 0;
         m_detectedRtpPort = 0;
         m_detectedRtcpPort = 0;
+        m_interleavedRtpChannel = 0;
+        m_interleavedRtcpChannel = 1;
+        m_lastRtpTime = std::chrono::steady_clock::time_point{};
+        m_lastPlaceholderTime = std::chrono::steady_clock::time_point{};
+        m_lastPliTime = std::chrono::steady_clock::time_point{};
+        m_lastRtcpKeepAliveTime = std::chrono::steady_clock::time_point{};
+        m_lastLoggedRtpTimeoutSec.store(-1);
+        m_rtpReorderBuffer.clear();
+        m_rtpReorderExpectedValid = false;
     }
 
     void stopStreaming(bool hardStop) {
-        stopPollWorker();
         if (m_keepAliveTimer) {
             m_keepAliveTimer->stop();
+        }
+        if (m_udpSession) {
+            m_udpSession->stop();
+            m_udpSession.reset();
         }
         closeRtspSocket();
         if (m_rtpSocket) {
@@ -455,22 +545,24 @@ private:
         m_state = RtspStep::None;
         m_haveTimestamp = false;
         m_nalBuffer.clear();
+        m_currentKeyFrame = false;
+        m_currentAccessUnitHasH264Headers = false;
+        m_currentAccessUnitInjectedH264Headers = false;
+        m_currentAccessUnitHasHevcHeaders = false;
+        m_currentAccessUnitInjectedHevcHeaders = false;
+        m_dropCurrentAccessUnit = false;
+        m_emitDecoderDiscontinuityOnNextFrame = true;
+        m_waitingForKeyFrame = true;
+        m_loggedWaitingForKeyFrame.store(false);
+        m_h264Depacketizer.reset();
+        m_h265Depacketizer.reset();
+        m_sharedTsDemux.reset();
         m_tsDemux.reset();
+        m_rtpReorderBuffer.clear();
+        m_rtpReorderExpectedValid = false;
         if (hardStop) {
             setRunning(false);
         }
-    }
-
-    void poll() {
-        if (!isRunning()) {
-            return;
-        }
-        readControlSocket();
-        handleControlBuffer();
-        handleRtpPackets();
-        handleRtcpPackets();
-        checkRtpTimeout();
-        maybeEmitPlaceholder();
     }
 
     void readControlSocket() {
@@ -501,8 +593,12 @@ private:
                 if (m_ctrlAccum.size() < 4 + len) {
                     return;
                 }
-                if (channel == 0) {
-                    handleRtpPacket(reinterpret_cast<const uint8_t*>(m_ctrlAccum.data() + 4), len);
+                if (channel == m_interleavedRtpChannel) {
+                    if (handleRtpPacket(reinterpret_cast<const uint8_t*>(m_ctrlAccum.data() + 4), len)) {
+                        m_lastRtpTime = std::chrono::steady_clock::now();
+                    }
+                } else if (channel == m_interleavedRtcpChannel) {
+                    handleRtcpPacket(reinterpret_cast<const uint8_t*>(m_ctrlAccum.data() + 4), len);
                 }
                 m_ctrlAccum.erase(0, 4 + len);
                 continue;
@@ -550,6 +646,10 @@ private:
                 sendPlay(true);
                 return;
             }
+            if (status == 461 && method == "SETUP" && m_useTcpTransport && m_autoTcpFallbackActive) {
+                revertAutoTcpFallback("TCP SETUP rejected by server");
+                return;
+            }
             swCError(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] RTSP error status: " << status;
             return;
         }
@@ -579,7 +679,7 @@ private:
         if (m_state == RtspStep::Setup) {
             parseSession(header);
             parseTransport(header);
-            if (m_sessionId.empty() || m_serverRtpPort == 0) {
+            if (m_sessionId.empty() || (!m_useTcpTransport && m_serverRtpPort == 0)) {
                 swCError(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Missing session or server port after SETUP";
                 return;
             }
@@ -594,6 +694,7 @@ private:
         }
         if (m_state == RtspStep::Play) {
             m_state = RtspStep::Playing;
+            m_autoTcpFallbackActive = false;
             if (m_keepAliveTimer && !m_keepAliveTimer->isActive()) {
                 m_keepAliveTimer->start();
             }
@@ -708,6 +809,18 @@ private:
                     m_serverRtpPort = static_cast<uint16_t>(rtp);
                     m_serverRtcpPort = static_cast<uint16_t>(rtcp);
                 }
+                pos = lower.find("interleaved=");
+                if (pos != std::string::npos) {
+                    int rtp = 0;
+                    int rtcp = 1;
+#if defined(_MSC_VER)
+                    ::sscanf_s(lower.c_str() + pos, "interleaved=%d-%d", &rtp, &rtcp);
+#else
+                    std::sscanf(lower.c_str() + pos, "interleaved=%d-%d", &rtp, &rtcp);
+#endif
+                    m_interleavedRtpChannel = static_cast<uint8_t>(rtp);
+                    m_interleavedRtcpChannel = static_cast<uint8_t>(rtcp);
+                }
                 break;
             }
         }
@@ -716,75 +829,152 @@ private:
     bool parseSdp(const std::string& body) {
         std::istringstream iss(body);
         std::string line;
-        bool inVideo = false;
-        std::string control;
         std::string sessionControl;
-        int payload = m_payloadType;
-        int clock = m_clockRate;
-        std::string codecName = "H264";
-        std::string fmtpLine;
+        RtspTrack currentTrack;
+        bool haveTrack = false;
+        m_tracks.clear();
+
+        auto finalizeTrack = [this, &currentTrack, &haveTrack]() {
+            if (!haveTrack) {
+                return;
+            }
+            currentTrack.mediaType = toLower(currentTrack.mediaType);
+            currentTrack.codecName = toLower(currentTrack.codecName);
+            if (currentTrack.codecName.empty() && currentTrack.payloadType == 33) {
+                currentTrack.codecName = "mp2t";
+                currentTrack.clockRate = 90000;
+            }
+            m_tracks.push_back(currentTrack);
+            currentTrack = RtspTrack{};
+            haveTrack = false;
+        };
+
         while (std::getline(iss, line)) {
             if (!line.empty() && line.back() == '\r') {
                 line.pop_back();
             }
-            if (!inVideo && line.rfind("a=control:", 0) == 0) {
+            if (!haveTrack && line.rfind("a=control:", 0) == 0) {
                 sessionControl = line.substr(std::strlen("a=control:"));
                 continue;
             }
-            if (line.rfind("m=video", 0) == 0) {
-                inVideo = true;
+            if (line.rfind("m=", 0) == 0) {
+                finalizeTrack();
+                haveTrack = true;
                 auto parts = split(line, ' ');
+                if (!parts.empty() && parts[0].size() > 2) {
+                    currentTrack.mediaType = parts[0].substr(2);
+                }
                 if (parts.size() >= 4) {
-                    payload = std::atoi(parts[3].c_str());
+                    currentTrack.payloadType = std::atoi(parts[3].c_str());
+                }
+                if (currentTrack.payloadType == 33) {
+                    currentTrack.clockRate = 90000;
                 }
                 continue;
             }
-            if (!inVideo) {
+            if (!haveTrack) {
                 continue;
             }
             if (line.rfind("a=control:", 0) == 0) {
-                control = line.substr(std::strlen("a=control:"));
+                currentTrack.control = line.substr(std::strlen("a=control:"));
                 continue;
             }
             if (line.rfind("a=rtpmap:", 0) == 0) {
                 auto pos = line.find(' ');
                 if (pos != std::string::npos) {
-                    payload = std::atoi(line.substr(std::strlen("a=rtpmap:"), pos - std::strlen("a=rtpmap:")).c_str());
+                    int payload = std::atoi(line.substr(std::strlen("a=rtpmap:"), pos - std::strlen("a=rtpmap:")).c_str());
                     auto codecPart = line.substr(pos + 1);
                     auto slash = codecPart.find('/');
                     if (slash != std::string::npos) {
-                        codecName = codecPart.substr(0, slash);
-                        clock = std::atoi(codecPart.substr(slash + 1).c_str());
+                        if (payload == currentTrack.payloadType || currentTrack.codecName.empty()) {
+                            currentTrack.payloadType = payload;
+                            currentTrack.codecName = codecPart.substr(0, slash);
+                            currentTrack.clockRate = std::atoi(codecPart.substr(slash + 1).c_str());
+                        }
                     }
                 }
                 continue;
             }
             if (line.rfind("a=fmtp:", 0) == 0) {
-                fmtpLine = line.substr(std::strlen("a=fmtp:"));
+                std::string raw = line.substr(std::strlen("a=fmtp:"));
+                auto pos = raw.find(' ');
+                int payload = currentTrack.payloadType;
+                std::string fmtpBody = raw;
+                if (pos != std::string::npos) {
+                    payload = std::atoi(raw.substr(0, pos).c_str());
+                    fmtpBody = raw.substr(pos + 1);
+                }
+                if (payload == currentTrack.payloadType) {
+                    currentTrack.fmtpLine = fmtpBody;
+                }
                 continue;
             }
         }
-        if (control.empty()) {
+        finalizeTrack();
+        if (m_tracks.empty()) {
             return false;
         }
-        m_trackControl = control;
+
+        auto trackScore = [this](const RtspTrack& track) -> int {
+            if (!track.isVideo()) {
+                return -1;
+            }
+            std::string codec = toLower(track.codecName);
+            if (codec == "h264") {
+                return 300;
+            }
+            if (isHevcCodecName(codec)) {
+                return 250;
+            }
+            if (codec == "mp2t" || codec == "mpegts" || track.payloadType == 33) {
+                return 200;
+            }
+            return -1;
+        };
+
+        m_selectedTrackIndex = -1;
+        int bestScore = -1;
+        for (std::size_t i = 0; i < m_tracks.size(); ++i) {
+            int score = trackScore(m_tracks[i]);
+            if (score > bestScore) {
+                bestScore = score;
+                m_selectedTrackIndex = static_cast<int>(i);
+            }
+        }
+        if (m_selectedTrackIndex < 0) {
+            return false;
+        }
+
+        const RtspTrack& selectedTrack = m_tracks[static_cast<std::size_t>(m_selectedTrackIndex)];
+        m_trackControl = selectedTrack.control;
         if (!sessionControl.empty()) {
             m_sessionControl = sessionControl;
         }
-        m_payloadType = payload;
-        m_clockRate = (clock > 0) ? clock : 90000;
-        m_codecName = toLower(codecName);
+        m_payloadType = selectedTrack.payloadType;
+        m_clockRate = (selectedTrack.clockRate > 0) ? selectedTrack.clockRate : 90000;
+        m_codecName = toLower(selectedTrack.codecName.empty()
+                                  ? (selectedTrack.payloadType == 33 ? std::string("mp2t") : std::string())
+                                  : selectedTrack.codecName);
+        if (m_codecName.empty()) {
+            return false;
+        }
         if (isHevcCodecName(m_codecName)) {
             m_currentCodec = SwVideoPacket::Codec::H265;
         } else {
             m_currentCodec = SwVideoPacket::Codec::H264;
         }
-        if (isHevcCodec()) {
-            parseH265Fmtp(fmtpLine);
+        if (m_codecName == "h264") {
+            parseH264Fmtp(selectedTrack.fmtpLine);
+        } else if (isHevcCodec()) {
+            parseH265Fmtp(selectedTrack.fmtpLine);
         }
-        swCDebug(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] SDP video codec=" << m_codecName
-                  << " payload=" << m_payloadType << " clock=" << m_clockRate
-                  << " fmtp=" << fmtpLine;
+        swCWarning(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Selected SDP video track index="
+                    << m_selectedTrackIndex
+                    << " codec=" << m_codecName
+                    << " payload=" << m_payloadType << " clock=" << m_clockRate
+                    << " control=" << m_trackControl
+                    << " tracks=" << m_tracks.size()
+                    << " transport=" << (m_useTcpTransport ? "tcp" : "udp");
         return true;
     }
 
@@ -800,9 +990,16 @@ private:
     void sendSetup() {
         std::ostringstream transport;
         std::vector<std::pair<std::string, std::string>> headers;
-        transport << "RTP/AVP;unicast;client_port="
-                  << m_clientRtpPort << "-" << m_clientRtcpPort
-                  << ";mode=\"PLAY\"";
+        if (m_useTcpTransport) {
+            transport << "RTP/AVP/TCP;unicast;interleaved="
+                      << static_cast<int>(m_interleavedRtpChannel) << "-"
+                      << static_cast<int>(m_interleavedRtcpChannel)
+                      << ";mode=\"PLAY\"";
+        } else {
+            transport << "RTP/AVP;unicast;client_port="
+                      << m_clientRtpPort << "-" << m_clientRtcpPort
+                      << ";mode=\"PLAY\"";
+        }
         headers.emplace_back("Transport", transport.str());
         sendRtsp("SETUP", trackUrl(), headers);
     }
@@ -826,6 +1023,13 @@ private:
     }
 
     void configureUdpSockets() {
+        if (m_useTcpTransport) {
+            return;
+        }
+        if (m_udpSession && m_udpSession->isRunning()) {
+            m_udpSession->sendUdpPunch(m_host, m_serverRtpPort, m_serverRtcpPort);
+            return;
+        }
         if (m_rtpSocket && m_serverRtpPort != 0) {
             sendUdpPunch(m_rtpSocket, m_serverRtpPort, "RTP");
         }
@@ -888,15 +1092,44 @@ private:
             return;
         }
         cancelReconnect();
-        setPlaceholderActive(true);
+        emitStatus(m_framesEmitted.load() > 0 ? SwVideoSource::StreamState::Recovering
+                                              : SwVideoSource::StreamState::Connecting,
+                   m_framesEmitted.load() > 0 ? SwString("Reconnecting RTSP session...")
+                                              : SwString("Connecting RTSP session..."));
         resetStreamState();
-        startPollWorker();
         if (!m_rtspSocket->connectToHost(m_host, static_cast<uint16_t>(m_port))) {
             swCError(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Failed to connect to " << m_host.toStdString()
                       << ":" << m_port;
             scheduleReconnect("connectToHost failed");
             return;
         }
+    }
+
+    void triggerTcpFallback(const char* reason) {
+        if (m_useTcpTransport || m_triedTcpFallback || !isRunning()) {
+            return;
+        }
+        m_triedTcpFallback = true;
+        m_autoTcpFallbackActive = true;
+        emitStatus(SwVideoSource::StreamState::Recovering, "Switching RTSP transport to TCP...");
+        swCWarning(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Falling back to RTSP/TCP"
+                    << (reason ? SwString(" (") + SwString(reason) + SwString(")") : SwString());
+        m_useTcpTransport = true;
+        stopStreaming(false);
+        initiateConnection();
+    }
+
+    void revertAutoTcpFallback(const char* reason) {
+        if (!m_autoTcpFallbackActive) {
+            return;
+        }
+        emitStatus(SwVideoSource::StreamState::Recovering, "Returning RTSP transport to UDP...");
+        swCWarning(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Returning to RTSP/UDP"
+                    << (reason ? SwString(" (") + SwString(reason) + SwString(")") : SwString());
+        m_useTcpTransport = false;
+        m_autoTcpFallbackActive = false;
+        stopStreaming(false);
+        initiateConnection();
     }
 
     void scheduleReconnect(const char* reason) {
@@ -906,7 +1139,8 @@ private:
         if (reason) {
             swCWarning(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Scheduling reconnect: " << reason;
         }
-        setPlaceholderActive(true);
+        emitStatus(SwVideoSource::StreamState::Recovering,
+                   reason ? SwString(reason) : SwString("Scheduling RTSP reconnect..."));
         if (!m_reconnectTimer) {
             return;
         }
@@ -1018,30 +1252,6 @@ private:
         emitPlaceholderFrame();
     }
 
-    void startPollWorker() {
-        if (m_pollWorker) {
-            m_pollWorker->setInterval(m_workerIntervalMs);
-            return;
-        }
-        m_pollWorker = new PollWorkerThread(this, m_workerIntervalMs);
-        if (!m_pollWorker->start()) {
-            swCError(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Failed to start worker thread";
-            delete m_pollWorker;
-            m_pollWorker = nullptr;
-        }
-    }
-
-    void stopPollWorker() {
-        if (!m_pollWorker) {
-            return;
-        }
-        m_pollWorker->requestStop();
-        m_pollWorker->quit();
-        m_pollWorker->wait();
-        delete m_pollWorker;
-        m_pollWorker = nullptr;
-    }
-
     void sendUdpPunch(SwUdpSocket* socket, uint16_t remotePort, const char* label) {
         if (!socket || remotePort == 0) {
             return;
@@ -1146,43 +1356,32 @@ private:
         if (m_useTcpTransport) {
             return true; // no UDP ports needed
         }
-        if (!m_rtpSocket || !m_rtcpSocket) {
-            return false;
-        }
         SwString bindAddr = m_bindAddress.isEmpty() ? SwString("0.0.0.0") : m_bindAddress;
-        if (m_forcedClientRtpPort != 0 && m_forcedClientRtcpPort != 0) {
-            bool okRtp = m_rtpSocket->bind(bindAddr, m_forcedClientRtpPort);
-            bool okRtcp = m_rtcpSocket->bind(bindAddr, m_forcedClientRtcpPort);
-            if (okRtp && okRtcp) {
-                m_clientRtpPort = m_forcedClientRtpPort;
-                m_clientRtcpPort = m_forcedClientRtcpPort;
-                swCDebug(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Forced bind " << bindAddr.toStdString()
-                          << ":" << m_clientRtpPort << "/" << m_clientRtcpPort;
-                selfProbeUdp(bindAddr, m_clientRtpPort);
-                return true;
-            }
-            swCError(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Forced bind FAILED on " << bindAddr.toStdString()
-                      << ":" << m_forcedClientRtpPort << "/" << m_forcedClientRtcpPort;
-            return false;
-        }
-        auto tryBindPair = [&](uint16_t base) -> bool {
+        auto tryBindPair = [this, &bindAddr](uint16_t base) -> bool {
             if (base == 0) {
                 return false;
             }
-            bool okRtp = m_rtpSocket->bind(bindAddr, base);
-            bool okRtcp = m_rtcpSocket->bind(bindAddr, static_cast<uint16_t>(base + 1));
-            if (okRtp && okRtcp) {
+            if (startUdpSession_(bindAddr, base, static_cast<uint16_t>(base + 1))) {
                 m_clientRtpPort = base;
                 m_clientRtcpPort = static_cast<uint16_t>(base + 1);
-                swCDebug(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Local bind " << bindAddr.toStdString()
-                          << ":" << m_clientRtpPort << "/" << m_clientRtcpPort;
-                selfProbeUdp(bindAddr, m_clientRtpPort);
+                swCDebug(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Local RTP session "
+                          << bindAddr.toStdString() << ":" << m_clientRtpPort << "/" << m_clientRtcpPort;
                 return true;
             }
-            m_rtpSocket->close();
-            m_rtcpSocket->close();
             return false;
         };
+        if (m_forcedClientRtpPort != 0 && m_forcedClientRtcpPort != 0) {
+            if (startUdpSession_(bindAddr, m_forcedClientRtpPort, m_forcedClientRtcpPort)) {
+                m_clientRtpPort = m_forcedClientRtpPort;
+                m_clientRtcpPort = m_forcedClientRtcpPort;
+                swCDebug(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Forced RTP session "
+                          << bindAddr.toStdString() << ":" << m_clientRtpPort << "/" << m_clientRtcpPort;
+                return true;
+            }
+            swCError(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Forced RTP session FAILED on "
+                      << bindAddr.toStdString() << ":" << m_forcedClientRtpPort << "/" << m_forcedClientRtcpPort;
+            return false;
+        }
         // Prefer the range around 37700 if it is free.
         if (tryBindPair(37700)) {
             return true;
@@ -1198,7 +1397,287 @@ private:
         return false;
     }
 
+    bool startUdpSession_(const SwString& bindAddr, uint16_t rtpPort, uint16_t rtcpPort) {
+        if (m_udpSession) {
+            m_udpSession->stop();
+            m_udpSession.reset();
+        }
+        SwRtpSessionDescriptor descriptor;
+        descriptor.bindAddress = bindAddr;
+        descriptor.localRtpPort = rtpPort;
+        descriptor.localRtcpPort = rtcpPort;
+        descriptor.codec = isHevcCodec()
+                               ? SwVideoPacket::Codec::H265
+                               : (isTransportStreamCodec() ? SwVideoPacket::Codec::H264
+                                                           : SwVideoPacket::Codec::H264);
+        descriptor.payloadType = m_payloadType;
+        descriptor.clockRate = m_clockRate;
+        descriptor.format = isTransportStreamCodec()
+                                ? SwMediaOpenOptions::UdpPayloadFormat::MpegTs
+                                : SwMediaOpenOptions::UdpPayloadFormat::Rtp;
+        if (m_selectedTrackIndex >= 0 &&
+            static_cast<std::size_t>(m_selectedTrackIndex) < m_tracks.size()) {
+            descriptor.fmtp = SwString(m_tracks[static_cast<std::size_t>(m_selectedTrackIndex)].fmtpLine);
+        }
+        descriptor.lowLatency = m_lowLatencyDrop;
+        m_udpSession = std::make_unique<SwRtpSession>(descriptor);
+        m_udpSession->setPacketCallback([this](const SwRtpSession::Packet& packet) {
+            handleUdpSessionPacket_(packet);
+        });
+        m_udpSession->setGapCallback([this](uint16_t expected, uint16_t actual) {
+            handleUdpSessionGap_(expected, actual);
+        });
+        m_udpSession->setTimeoutCallback([this](int secondsWithoutData) {
+            handleUdpSessionTimeout_(secondsWithoutData);
+        });
+        if (!m_udpSession->start()) {
+            m_udpSession.reset();
+            return false;
+        }
+        return true;
+    }
+
+    void handleUdpSessionPacket_(const SwRtpSession::Packet& packet) {
+        if (packet.senderPort != 0) {
+            if (m_detectedRtpPort == 0) {
+                swCDebug(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Detected RTP source port "
+                          << packet.senderAddress.toStdString() << ":" << packet.senderPort;
+            } else if (m_detectedRtpPort != packet.senderPort) {
+                swCWarning(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] RTP source port changed from "
+                            << m_detectedRtpPort << " to " << packet.senderPort;
+            }
+            m_detectedRtpPort = packet.senderPort;
+        }
+        if (m_remoteSsrc == 0 && packet.ssrc != 0) {
+            m_remoteSsrc = packet.ssrc;
+        }
+        m_lastRtpTime = std::chrono::steady_clock::now();
+        const uint8_t* payload = reinterpret_cast<const uint8_t*>(packet.payload.constData());
+        const size_t payloadLen = packet.payload.size();
+        if (!payload || payloadLen == 0) {
+            return;
+        }
+        processTransportPacket_(packet);
+    }
+
+    void handleUdpSessionGap_(uint16_t expected, uint16_t actual) {
+        ++m_sequenceDiscontinuities;
+        const int lostPackets = static_cast<int>(static_cast<uint16_t>(actual - expected));
+        const bool forceKeyFrameRecovery =
+            isTransportStreamCodec() || (isHevcCodec() ? (lostPackets > 2) : (lostPackets > 4));
+        if (isTransportStreamCodec()) {
+            m_sharedTsDemux.reset();
+        } else if (isHevcCodec()) {
+            m_h265Depacketizer.onSequenceGap(forceKeyFrameRecovery);
+        } else {
+            m_h264Depacketizer.onSequenceGap(forceKeyFrameRecovery);
+        }
+        if (forceKeyFrameRecovery || lostPackets > 1 || m_framesEmitted.load() == 0 || isTransportStreamCodec()) {
+            requestKeyFrame("rtp loss");
+        }
+    }
+
+    void handleUdpSessionTimeout_(int secondsWithoutData) {
+        if (!isRunning() || m_state != RtspStep::Playing) {
+            return;
+        }
+        if (!m_useTcpTransport && !m_triedTcpFallback) {
+            triggerTcpFallback("UDP stalled");
+            return;
+        }
+        auto previousElapsed = m_lastLoggedRtpTimeoutSec.exchange(secondsWithoutData);
+        if (previousElapsed != secondsWithoutData) {
+            uint16_t portHint = m_detectedRtpPort ? m_detectedRtpPort : m_serverRtpPort;
+            swCWarning(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] No RTP received for " << secondsWithoutData
+                        << " s (local=" << m_clientRtpPort
+                        << ", expected remote=" << portHint << ")";
+        }
+        emitStatus(SwVideoSource::StreamState::Recovering, "Video stream stalled...");
+    }
+
+    void processTransportPacket_(const SwRtpSession::Packet& packet) {
+        const uint8_t* payload = reinterpret_cast<const uint8_t*>(packet.payload.constData());
+        const size_t payloadLen = packet.payload.size();
+        if (!payload || payloadLen == 0) {
+            return;
+        }
+        if (isTransportStreamCodec()) {
+            m_sharedTsDemux.feed(payload, payloadLen, packet.timestamp);
+            return;
+        }
+        if (isHevcCodec()) {
+            m_h265Depacketizer.push(packet);
+            maybeRequestKeyFrameWhileWaiting_();
+            return;
+        }
+        m_h264Depacketizer.push(packet);
+        maybeRequestKeyFrameWhileWaiting_();
+    }
+
+    void maybeRequestKeyFrameWhileWaiting_() {
+        if (isTransportStreamCodec()) {
+            m_lastWaitingKeyFrameRequestTime = {};
+            return;
+        }
+        const bool waitingForKeyFrame = isHevcCodec() ? m_h265Depacketizer.isWaitingForKeyFrame()
+                                                      : m_h264Depacketizer.isWaitingForKeyFrame();
+        if (!waitingForKeyFrame) {
+            m_lastWaitingKeyFrameRequestTime = {};
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (m_lastWaitingKeyFrameRequestTime.time_since_epoch().count() != 0) {
+            const auto elapsed =
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - m_lastWaitingKeyFrameRequestTime).count();
+            if (elapsed < 1000) {
+                return;
+            }
+        }
+        m_lastWaitingKeyFrameRequestTime = now;
+        requestKeyFrame("waiting keyframe");
+    }
+
+    void emitRecoveredPacket_(const SwVideoPacket& packet) {
+        SwVideoPacket outputPacket = packet;
+        m_currentCodec = outputPacket.codec();
+        const uint32_t timestamp = static_cast<uint32_t>(outputPacket.pts() >= 0 ? outputPacket.pts() : 0);
+        if (!m_haveFirstTimestamp) {
+            m_firstTimestamp = timestamp;
+            m_haveFirstTimestamp = true;
+        }
+        if (shouldDropFrame(timestamp, outputPacket.isKeyFrame())) {
+            auto dropped = ++m_framesDropped;
+            if (dropped <= 3 || (dropped % 25) == 0) {
+                swCWarning(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Dropping frame #" << dropped
+                            << " to reduce latency (ts=" << timestamp << ")";
+            }
+            return;
+        }
+        emitStatus(SwVideoSource::StreamState::Streaming, "Streaming");
+        emitPacket(outputPacket);
+        auto emitted = ++m_framesEmitted;
+        if (!m_loggedFirstCompressedFrame.exchange(true)) {
+            swCWarning(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] First compressed frame emitted "
+                        << " codec=" << static_cast<int>(outputPacket.codec())
+                        << " bytes=" << outputPacket.payload().size()
+                        << " key=" << (outputPacket.isKeyFrame() ? 1 : 0)
+                        << " ts=" << timestamp;
+        }
+        if (emitted <= 3 || (emitted % 100) == 0) {
+            swCDebug(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Emitted frame #" << emitted
+                      << " bytes=" << outputPacket.payload().size()
+                      << " key=" << (outputPacket.isKeyFrame() ? 1 : 0);
+        }
+    }
+
+    static bool parseRtpSequenceNumber(const SwByteArray& datagram, uint16_t& sequenceNumber) {
+        if (datagram.size() < 12) {
+            return false;
+        }
+        const uint8_t* data = reinterpret_cast<const uint8_t*>(datagram.constData());
+        if (!data || (data[0] >> 6) != 2) {
+            return false;
+        }
+        sequenceNumber = static_cast<uint16_t>((static_cast<uint16_t>(data[2]) << 8) |
+                                               static_cast<uint16_t>(data[3]));
+        return true;
+    }
+
+    static int16_t compareRtpSequence(uint16_t sequenceNumber, uint16_t reference) {
+        return static_cast<int16_t>(sequenceNumber - reference);
+    }
+
+    std::map<uint16_t, BufferedRtpPacket>::iterator findNextBufferedRtpPacket(uint16_t expectedSequence) {
+        auto bestIt = m_rtpReorderBuffer.end();
+        int bestDelta = std::numeric_limits<int>::max();
+        for (auto it = m_rtpReorderBuffer.begin(); it != m_rtpReorderBuffer.end(); ++it) {
+            int delta = static_cast<int>(compareRtpSequence(it->first, expectedSequence));
+            if (delta < 0) {
+                continue;
+            }
+            if (delta < bestDelta) {
+                bestDelta = delta;
+                bestIt = it;
+            }
+        }
+        return bestIt;
+    }
+
+    void queueRtpDatagram(const SwByteArray& datagram,
+                          const std::chrono::steady_clock::time_point& arrivalTime) {
+        uint16_t sequenceNumber = 0;
+        if (!parseRtpSequenceNumber(datagram, sequenceNumber)) {
+            return;
+        }
+
+        if (!m_rtpReorderExpectedValid) {
+            m_rtpReorderExpectedSequence = m_haveSequence
+                                               ? static_cast<uint16_t>(m_lastSequence + 1)
+                                               : sequenceNumber;
+            m_rtpReorderExpectedValid = true;
+        }
+
+        if (compareRtpSequence(sequenceNumber, m_rtpReorderExpectedSequence) < 0) {
+            return;
+        }
+
+        auto inserted = m_rtpReorderBuffer.emplace(sequenceNumber, BufferedRtpPacket{datagram, arrivalTime});
+        if (!inserted.second) {
+            inserted.first->second.arrivalTime = arrivalTime;
+        }
+    }
+
+    void drainBufferedRtpPackets(bool allowGapAdvance) {
+        auto now = std::chrono::steady_clock::now();
+        while (!m_rtpReorderBuffer.empty()) {
+            if (!m_rtpReorderExpectedValid) {
+                m_rtpReorderExpectedSequence = m_haveSequence
+                                                   ? static_cast<uint16_t>(m_lastSequence + 1)
+                                                   : m_rtpReorderBuffer.begin()->first;
+                m_rtpReorderExpectedValid = true;
+            }
+
+            auto exactIt = m_rtpReorderBuffer.find(m_rtpReorderExpectedSequence);
+            if (exactIt != m_rtpReorderBuffer.end()) {
+                SwByteArray datagram = exactIt->second.datagram;
+                m_rtpReorderBuffer.erase(exactIt);
+                if (handleRtpPacket(reinterpret_cast<const uint8_t*>(datagram.constData()),
+                                    static_cast<size_t>(datagram.size()))) {
+                    m_lastRtpTime = now;
+                }
+                m_rtpReorderExpectedSequence = static_cast<uint16_t>(m_rtpReorderExpectedSequence + 1);
+                continue;
+            }
+
+            auto nextIt = findNextBufferedRtpPacket(m_rtpReorderExpectedSequence);
+            if (nextIt == m_rtpReorderBuffer.end()) {
+                auto staleIt = m_rtpReorderBuffer.begin();
+                while (staleIt != m_rtpReorderBuffer.end()) {
+                    if (compareRtpSequence(staleIt->first, m_rtpReorderExpectedSequence) >= 0) {
+                        break;
+                    }
+                    staleIt = m_rtpReorderBuffer.erase(staleIt);
+                }
+                break;
+            }
+
+            const auto ageMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   now - nextIt->second.arrivalTime)
+                                   .count();
+            if (!allowGapAdvance &&
+                m_rtpReorderBuffer.size() < m_rtpReorderMaxPackets &&
+                ageMs < m_rtpReorderMaxDelayMs) {
+                break;
+            }
+
+            m_rtpReorderExpectedSequence = nextIt->first;
+        }
+    }
+
     void handleRtpPackets() {
+        if (m_udpSession && m_udpSession->isRunning()) {
+            return;
+        }
         if (!m_rtpSocket || !m_rtpSocket->isOpen()) {
             return;
         }
@@ -1225,33 +1704,60 @@ private:
                           << " bytes=" << datagram.size()
                           << " from " << sender.toStdString() << ":" << senderPort;
             }
-            m_lastRtpTime = std::chrono::steady_clock::now();
-            handleRtpPacket(reinterpret_cast<const uint8_t*>(datagram.constData()),
-                            static_cast<size_t>(datagram.size()));
+            queueRtpDatagram(datagram, std::chrono::steady_clock::now());
+            drainBufferedRtpPackets(false);
         }
     }
 
-    void handleRtpPacket(const uint8_t* data, size_t len) {
+    bool handleRtpPacket(const uint8_t* data, size_t len) {
         if (!data || len < 12) {
-            return;
+            return false;
         }
         uint8_t version = data[0] >> 6;
         if (version != 2) {
-            return;
+            return false;
         }
         bool padding = (data[0] & 0x20) != 0;
         bool extension = (data[0] & 0x10) != 0;
         uint8_t csrcCount = data[0] & 0x0F;
         bool marker = (data[1] & 0x80) != 0;
         uint8_t payloadType = data[1] & 0x7F;
-            if (payloadType != static_cast<uint8_t>(m_payloadType)) {
+        if (payloadType != static_cast<uint8_t>(m_payloadType)) {
             auto dropped = ++m_payloadMismatch;
             if (dropped <= 3 || (dropped % 50) == 0) {
                 swCWarning(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Dropping RTP (PT=" << static_cast<int>(payloadType)
                             << " expected " << m_payloadType << ")";
             }
-            return;
+            return false;
         }
+        uint16_t sequenceNumber = static_cast<uint16_t>((static_cast<uint16_t>(data[2]) << 8) |
+                                                        static_cast<uint16_t>(data[3]));
+        uint32_t senderSsrc = (static_cast<uint32_t>(data[8]) << 24) |
+                              (static_cast<uint32_t>(data[9]) << 16) |
+                              (static_cast<uint32_t>(data[10]) << 8) |
+                              static_cast<uint32_t>(data[11]);
+        if (m_remoteSsrc == 0 && senderSsrc != 0) {
+            m_remoteSsrc = senderSsrc;
+            requestKeyFrame("startup");
+        }
+        if (m_haveSequence) {
+            uint16_t expected = static_cast<uint16_t>(m_lastSequence + 1);
+            int16_t delta = static_cast<int16_t>(sequenceNumber - expected);
+            if (delta != 0) {
+                auto gapCount = ++m_sequenceDiscontinuities;
+                if (delta > 1 && (gapCount <= 3 || (gapCount % 25) == 0)) {
+                    swCWarning(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] RTP sequence discontinuity expected="
+                                << expected << " got=" << sequenceNumber;
+                }
+                if (delta < 0) {
+                    // Late / reordered packet: ignore it but keep the stream alive.
+                    return true;
+                }
+                handleUdpSessionGap_(expected, sequenceNumber);
+            }
+        }
+        m_lastSequence = sequenceNumber;
+        m_haveSequence = true;
         uint32_t timestamp = (static_cast<uint32_t>(data[4]) << 24) |
                              (static_cast<uint32_t>(data[5]) << 16) |
                              (static_cast<uint32_t>(data[6]) << 8) |
@@ -1259,17 +1765,17 @@ private:
 
         size_t offset = 12 + static_cast<size_t>(csrcCount) * 4;
         if (offset > len) {
-            return;
+            return false;
         }
         if (extension) {
             if (offset + 4 > len) {
-                return;
+                return false;
             }
             uint16_t extLen = (static_cast<uint16_t>(data[offset + 2]) << 8) | static_cast<uint16_t>(data[offset + 3]);
             offset += 4 + static_cast<size_t>(extLen) * 4;
         }
         if (offset >= len) {
-            return;
+            return false;
         }
         size_t payloadLen = len - offset;
         if (padding && payloadLen > 0) {
@@ -1278,17 +1784,21 @@ private:
                 payloadLen -= padCount;
             }
         }
-        const uint8_t* payload = data + offset;
-        if (isTransportStreamCodec()) {
-            handleTsPayload(timestamp, payload, payloadLen);
-        } else if (isHevcCodec()) {
-            depayH265(marker, timestamp, payload, payloadLen);
-        } else {
-            depayH264(marker, timestamp, payload, payloadLen);
-        }
+        SwRtpSession::Packet packet;
+        packet.payload = SwByteArray(reinterpret_cast<const char*>(data + offset), static_cast<int>(payloadLen));
+        packet.payloadType = payloadType;
+        packet.sequenceNumber = sequenceNumber;
+        packet.timestamp = timestamp;
+        packet.ssrc = senderSsrc;
+        packet.marker = marker;
+        processTransportPacket_(packet);
+        return true;
     }
 
     void handleRtcpPackets() {
+        if (m_udpSession && m_udpSession->isRunning()) {
+            return;
+        }
         if (!m_rtcpSocket || !m_rtcpSocket->isOpen()) {
             return;
         }
@@ -1367,6 +1877,7 @@ private:
         int64_t sent = m_rtcpSocket->writeDatagram(reinterpret_cast<const char*>(packet), 8,
                                                    m_host, targetPort);
         if (sent > 0) {
+            m_lastRtcpKeepAliveTime = std::chrono::steady_clock::now();
             swCDebug(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Sent RTCP RR (local SSRC=0x"
                       << std::hex << mySsrc << std::dec
                       << ", remote SSRC=0x" << std::hex << senderSsrc << std::dec
@@ -1376,222 +1887,83 @@ private:
         }
     }
 
-    void depayH264(bool marker, uint32_t timestamp, const uint8_t* payload, size_t size) {
-        if (!payload || size == 0) {
+    void maybeSendRtcpKeepAlive() {
+        if (m_udpSession && m_udpSession->isRunning()) {
             return;
         }
-        m_currentCodec = SwVideoPacket::Codec::H264;
-        if (m_codecName != "h264") {
-            if (!m_loggedUnsupportedCodec.exchange(true)) {
-                swCError(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Unsupported codec in SDP: " << m_codecName << " (expected h264)";
-            }
+        if (!isRunning() || m_state != RtspStep::Playing || m_useTcpTransport) {
             return;
         }
-        m_hevcHeadersInserted = false;
-        auto pktCount = ++m_rtpPackets;
-        if (pktCount <= 3 || (pktCount % 200) == 0) {
-            swCDebug(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] RTP packet #" << pktCount
-                      << " size=" << size << " ts=" << timestamp
-                      << " marker=" << (marker ? 1 : 0);
+        if (m_remoteSsrc == 0) {
+            return;
         }
-
-        if (!m_haveTimestamp) {
-            m_currentTimestamp = timestamp;
-            m_haveTimestamp = true;
-        }
-        if (!m_haveFirstTimestamp) {
-            m_firstTimestamp = timestamp;
-            m_haveFirstTimestamp = true;
-        }
-
-        if (timestamp != m_currentTimestamp) {
-            flushFrame(m_currentTimestamp);
-            m_currentTimestamp = timestamp;
-        }
-
-        uint8_t nalType = payload[0] & 0x1F;
-        if (nalType >= 1 && nalType <= 23) {
-            appendStartCode();
-            m_nalBuffer.insert(m_nalBuffer.end(), payload, payload + size);
-            if (nalType == 5) {
-                m_currentKeyFrame = true;
-            }
-        } else if (nalType == 24) { // STAP-A
-            size_t offset = 1;
-            while (offset + 2 <= size) {
-                uint16_t nalSize = (static_cast<uint16_t>(payload[offset]) << 8) |
-                                   static_cast<uint16_t>(payload[offset + 1]);
-                offset += 2;
-                if (offset + nalSize > size) {
-                    break;
-                }
-                appendStartCode();
-                m_nalBuffer.insert(m_nalBuffer.end(), payload + offset, payload + offset + nalSize);
-                uint8_t innerType = payload[offset] & 0x1F;
-                if (innerType == 5) {
-                    m_currentKeyFrame = true;
-                }
-                offset += nalSize;
-            }
-        } else if (nalType == 28) { // FU-A
-            if (size < 2) {
+        auto now = std::chrono::steady_clock::now();
+        if (m_lastRtcpKeepAliveTime.time_since_epoch().count() != 0) {
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_lastRtcpKeepAliveTime).count();
+            if (elapsed < 1000) {
                 return;
             }
-            uint8_t fuHeader = payload[1];
-            bool start = (fuHeader & 0x80) != 0;
-            bool end = (fuHeader & 0x40) != 0;
-            uint8_t reconstructed = (payload[0] & 0xE0) | (fuHeader & 0x1F);
-            if (start) {
-                appendStartCode();
-                m_nalBuffer.push_back(reconstructed);
-            }
-            if (size > 2) {
-                m_nalBuffer.insert(m_nalBuffer.end(), payload + 2, payload + size);
-            }
-            if ((fuHeader & 0x1F) == 5) {
-                m_currentKeyFrame = true;
-            }
-            if (end && marker) {
-                flushFrame(timestamp);
+        }
+        sendRtcpReceiverReport(m_remoteSsrc);
+    }
+
+    void requestKeyFrame(const char* reason) {
+        if (m_udpSession && m_udpSession->isRunning() && !m_useTcpTransport) {
+            m_udpSession->requestKeyFrame(reason ? SwString(reason) : SwString());
+            return;
+        }
+        auto now = std::chrono::steady_clock::now();
+        if (m_remoteSsrc == 0) {
+            return;
+        }
+        if (m_lastPliTime.time_since_epoch().count() != 0) {
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_lastPliTime).count();
+            if (elapsed < 1000) {
                 return;
             }
+        }
+        m_lastPliTime = now;
+        sendRtcpPli(m_remoteSsrc, reason);
+    }
+
+    void sendRtcpPli(uint32_t mediaSsrc, const char* reason) {
+        if (!m_rtcpSocket || !m_rtcpSocket->isOpen()) {
+            return;
+        }
+        uint16_t targetPort = m_detectedRtcpPort ? m_detectedRtcpPort : m_serverRtcpPort;
+        if (targetPort == 0) {
+            return;
+        }
+        uint8_t packet[12] = {0};
+        packet[0] = 0x81; // V=2, FMT=1 (PLI)
+        packet[1] = 206;  // PSFB
+        packet[2] = 0x00;
+        packet[3] = 0x02; // 12 bytes => 3 words, minus one => 2
+        uint32_t mySsrc = m_localSsrc ? m_localSsrc : generateSsrc();
+        packet[4] = static_cast<uint8_t>((mySsrc >> 24) & 0xFF);
+        packet[5] = static_cast<uint8_t>((mySsrc >> 16) & 0xFF);
+        packet[6] = static_cast<uint8_t>((mySsrc >> 8) & 0xFF);
+        packet[7] = static_cast<uint8_t>(mySsrc & 0xFF);
+        packet[8] = static_cast<uint8_t>((mediaSsrc >> 24) & 0xFF);
+        packet[9] = static_cast<uint8_t>((mediaSsrc >> 16) & 0xFF);
+        packet[10] = static_cast<uint8_t>((mediaSsrc >> 8) & 0xFF);
+        packet[11] = static_cast<uint8_t>(mediaSsrc & 0xFF);
+        int64_t sent = m_rtcpSocket->writeDatagram(reinterpret_cast<const char*>(packet), 12, m_host, targetPort);
+        if (sent > 0) {
+            swCWarning(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Sent RTCP PLI"
+                        << (reason ? SwString(" (") + SwString(reason) + SwString(")") : SwString())
+                        << " remote SSRC=0x" << std::hex << mediaSsrc << std::dec
+                        << " port=" << targetPort;
         } else {
-            return; // unsupported aggregation
+            swCWarning(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Failed to send RTCP PLI";
         }
-
-        if (marker) {
-            flushFrame(timestamp);
-        }
-    }
-
-    void depayH265(bool marker, uint32_t timestamp, const uint8_t* payload, size_t size) {
-        if (!payload || size < 3) {
-            return;
-        }
-        m_currentCodec = SwVideoPacket::Codec::H265;
-        auto pktCount = ++m_rtpPackets;
-        if (pktCount <= 3 || (pktCount % 200) == 0) {
-            swCDebug(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] RTP (H265) packet #" << pktCount
-                      << " size=" << size << " ts=" << timestamp
-                      << " marker=" << (marker ? 1 : 0);
-        }
-        uint8_t nalType = static_cast<uint8_t>((payload[0] >> 1) & 0x3F);
-        if (!m_haveTimestamp) {
-            m_currentTimestamp = timestamp;
-            m_haveTimestamp = true;
-        }
-        if (!m_haveFirstTimestamp) {
-            m_firstTimestamp = timestamp;
-            m_haveFirstTimestamp = true;
-        }
-        if (timestamp != m_currentTimestamp) {
-            flushFrame(m_currentTimestamp);
-            m_currentTimestamp = timestamp;
-        }
-        if (!m_hevcHeadersInserted) {
-            appendHevcParameterSets();
-            m_hevcHeadersInserted = true;
-        }
-        if (nalType <= 47) {
-            appendStartCode();
-            m_nalBuffer.insert(m_nalBuffer.end(), payload, payload + size);
-            if (isHevcKeyNal(nalType)) {
-                m_currentKeyFrame = true;
-            }
-        } else if (nalType == 48) { // Aggregation Packet (AP)
-            size_t offset = 2;
-            while (offset + 2 <= size) {
-                uint16_t nalSize = static_cast<uint16_t>((payload[offset] << 8) | payload[offset + 1]);
-                offset += 2;
-                if (offset + nalSize > size) {
-                    break;
-                }
-                appendStartCode();
-                m_nalBuffer.insert(m_nalBuffer.end(), payload + offset, payload + offset + nalSize);
-                uint8_t innerType = static_cast<uint8_t>((payload[offset] >> 1) & 0x3F);
-                if (isHevcKeyNal(innerType)) {
-                    m_currentKeyFrame = true;
-                }
-                offset += nalSize;
-            }
-        } else if (nalType == 49) { // Fragmentation Unit (FU)
-            if (size < 4) {
-                return;
-            }
-            uint8_t fuHeader = payload[2];
-            bool start = (fuHeader & 0x80) != 0;
-            bool end = (fuHeader & 0x40) != 0;
-            uint8_t fuNalType = fuHeader & 0x3F;
-            uint8_t reconstructed0 = static_cast<uint8_t>((payload[0] & 0x81) | (fuNalType << 1));
-            uint8_t reconstructed1 = payload[1];
-            if (start) {
-                appendStartCode();
-                m_nalBuffer.push_back(reconstructed0);
-                m_nalBuffer.push_back(reconstructed1);
-                if (isHevcKeyNal(fuNalType)) {
-                    m_currentKeyFrame = true;
-                }
-            }
-            if (size > 3) {
-                m_nalBuffer.insert(m_nalBuffer.end(), payload + 3, payload + size);
-            }
-            if (end && marker) {
-                flushFrame(timestamp);
-                return;
-            }
-        } else {
-            return;
-        }
-        if (marker) {
-            flushFrame(timestamp);
-        }
-    }
-
-    void handleTsPayload(uint32_t rtpTimestamp, const uint8_t* data, size_t size) {
-        m_tsDemux.feed(data, size, rtpTimestamp, [this](const std::vector<uint8_t>& es, bool key, uint32_t ts) {
-            SwVideoPacket::Codec codec = m_tsDemux.isHevc() ? SwVideoPacket::Codec::H265
-                                                            : SwVideoPacket::Codec::H264;
-            SwByteArray payload(reinterpret_cast<const char*>(es.data()), static_cast<int>(es.size()));
-            SwVideoPacket packet(codec,
-                                 payload,
-                                 static_cast<std::int64_t>(ts),
-                                 static_cast<std::int64_t>(ts),
-                                 key);
-            emitPacket(packet);
-            setPlaceholderActive(false);
-            auto emitted = ++m_framesEmitted;
-            if (emitted <= 3 || (emitted % 100) == 0) {
-                swCDebug(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource][TS] Emitted frame #" << emitted
-                          << " bytes=" << payload.size()
-                          << " key=" << (key ? 1 : 0);
-            }
-        });
-    }
-
-    void appendStartCode() {
-        static const uint8_t startCode[] = {0x00, 0x00, 0x00, 0x01};
-        m_nalBuffer.insert(m_nalBuffer.end(), std::begin(startCode), std::end(startCode));
-    }
-
-    void appendHevcParameterSets() {
-        auto append = [this](const std::vector<uint8_t>& nal) {
-            if (nal.empty()) {
-                return;
-            }
-            appendStartCode();
-            m_nalBuffer.insert(m_nalBuffer.end(), nal.begin(), nal.end());
-        };
-        append(m_hevcVps);
-        append(m_hevcSps);
-        append(m_hevcPps);
-    }
-
-    static bool isHevcKeyNal(uint8_t nalType) {
-        return (nalType >= 16 && nalType <= 21);
     }
 
     void checkRtpTimeout() {
-        if (!isRunning()) {
+        if (m_udpSession && m_udpSession->isRunning() && !m_useTcpTransport) {
+            return;
+        }
+        if (!isRunning() || m_state != RtspStep::Playing) {
             return;
         }
         auto now = std::chrono::steady_clock::now();
@@ -1603,12 +1975,21 @@ private:
         }
         auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - m_lastRtpTime).count();
         if (elapsed > 3) {
-            uint16_t portHint = m_detectedRtpPort ? m_detectedRtpPort : m_serverRtpPort;
-            swCWarning(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] No RTP received for " << elapsed
-                        << " s (local=" << m_clientRtpPort
-                        << ", expected remote=" << portHint << ")";
-            setPlaceholderActive(true);
+            if (!m_useTcpTransport && !m_triedTcpFallback) {
+                triggerTcpFallback("UDP stalled");
+                return;
+            }
+            auto previousElapsed = m_lastLoggedRtpTimeoutSec.exchange(elapsed);
+            if (previousElapsed != elapsed) {
+                uint16_t portHint = m_detectedRtpPort ? m_detectedRtpPort : m_serverRtpPort;
+                swCWarning(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] No RTP received for " << elapsed
+                            << " s (local=" << m_clientRtpPort
+                            << ", expected remote=" << portHint << ")";
+            }
+            emitStatus(SwVideoSource::StreamState::Recovering, "Video stream stalled...");
+            return;
         }
+        m_lastLoggedRtpTimeoutSec.store(-1);
     }
 
     uint64_t rtpDelta(uint32_t newer, uint32_t older) const {
@@ -1644,6 +2025,27 @@ private:
         if (m_nalBuffer.empty()) {
             return;
         }
+        bool carriesH264Headers = (m_currentCodec == SwVideoPacket::Codec::H264) &&
+                                  (m_currentAccessUnitHasH264Headers || m_currentAccessUnitInjectedH264Headers);
+        bool carriesHevcHeaders = (m_currentCodec == SwVideoPacket::Codec::H265) &&
+                                  (m_currentAccessUnitHasHevcHeaders || m_currentAccessUnitInjectedHevcHeaders);
+        bool carriesCodecHeaders = carriesH264Headers || carriesHevcHeaders;
+        if (m_waitingForKeyFrame && !m_currentKeyFrame && !carriesCodecHeaders) {
+            auto dropped = ++m_framesDropped;
+            if (!m_loggedWaitingForKeyFrame.exchange(true)) {
+                swCWarning(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Dropping non-key frame while waiting for a decodable keyframe";
+            } else if (dropped <= 3 || (dropped % 25) == 0) {
+                swCDebug(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Still waiting for keyframe, dropped frame #"
+                          << dropped << " ts=" << timestamp;
+            }
+            m_nalBuffer.clear();
+            m_currentKeyFrame = false;
+            m_currentAccessUnitHasH264Headers = false;
+            m_currentAccessUnitInjectedH264Headers = false;
+            m_currentAccessUnitHasHevcHeaders = false;
+            m_currentAccessUnitInjectedHevcHeaders = false;
+            return;
+        }
         if (shouldDropFrame(timestamp, m_currentKeyFrame)) {
             auto dropped = ++m_framesDropped;
             if (dropped <= 3 || (dropped % 25) == 0) {
@@ -1652,9 +2054,18 @@ private:
             }
             m_nalBuffer.clear();
             m_currentKeyFrame = false;
+            m_currentAccessUnitHasH264Headers = false;
+            m_currentAccessUnitInjectedH264Headers = false;
+            m_currentAccessUnitHasHevcHeaders = false;
+            m_currentAccessUnitInjectedHevcHeaders = false;
             return;
         }
-        setPlaceholderActive(false);
+        if (m_currentKeyFrame && m_waitingForKeyFrame) {
+            m_waitingForKeyFrame = false;
+            m_loggedWaitingForKeyFrame.store(false);
+            swCWarning(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Received decodable keyframe";
+        }
+        emitStatus(SwVideoSource::StreamState::Streaming, "Streaming");
         SwByteArray payload(reinterpret_cast<const char*>(m_nalBuffer.data()),
                             static_cast<int>(m_nalBuffer.size()));
         SwVideoPacket packet(m_currentCodec,
@@ -1662,15 +2073,36 @@ private:
                              static_cast<std::int64_t>(timestamp),
                              static_cast<std::int64_t>(timestamp),
                              m_currentKeyFrame);
+        if (m_emitDecoderDiscontinuityOnNextFrame) {
+            packet.setDiscontinuity(true);
+            m_emitDecoderDiscontinuityOnNextFrame = false;
+        }
         emitPacket(packet);
         auto emitted = ++m_framesEmitted;
+        if (!m_loggedFirstCompressedFrame.exchange(true)) {
+            swCWarning(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] First compressed frame emitted "
+                        << " codec=" << static_cast<int>(packet.codec())
+                        << " bytes=" << payload.size()
+                        << " key=" << (m_currentKeyFrame ? 1 : 0)
+                        << " ts=" << timestamp;
+        }
         if (emitted <= 3 || (emitted % 100) == 0) {
             swCDebug(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Emitted frame #" << emitted
                       << " bytes=" << payload.size()
                       << " key=" << (m_currentKeyFrame ? 1 : 0);
         }
+        if (m_currentCodec == SwVideoPacket::Codec::H264 && carriesH264Headers) {
+            m_h264HeadersInserted = true;
+        }
+        if (m_currentCodec == SwVideoPacket::Codec::H265 && carriesHevcHeaders) {
+            m_hevcHeadersInserted = true;
+        }
         m_nalBuffer.clear();
         m_currentKeyFrame = false;
+        m_currentAccessUnitHasH264Headers = false;
+        m_currentAccessUnitInjectedH264Headers = false;
+        m_currentAccessUnitHasHevcHeaders = false;
+        m_currentAccessUnitInjectedHevcHeaders = false;
     }
 
     static std::string toLower(std::string s) {
@@ -1713,7 +2145,6 @@ private:
         return out;
     }
 
-    SwObject* m_parent{nullptr};
     SwString m_url;
     SwString m_host;
     int m_port{554};
@@ -1723,15 +2154,20 @@ private:
     std::map<int, RtspRequest> m_pendingRequests;
     int m_maxRequestRetries{1};
 
+    SwObject* m_callbackContext{nullptr};
     SwTcpSocket* m_rtspSocket{nullptr};
     SwUdpSocket* m_rtpSocket{nullptr};
     SwUdpSocket* m_rtcpSocket{nullptr};
-    PollWorkerThread* m_pollWorker{nullptr};
+    std::unique_ptr<SwRtpSession> m_udpSession{};
+    std::chrono::steady_clock::time_point m_lastWaitingKeyFrameRequestTime{};
+    SwTimer* m_monitorTimer{nullptr};
     SwTimer* m_keepAliveTimer{nullptr};
     SwTimer* m_reconnectTimer{nullptr};
 
     std::string m_ctrlBuffer;
     std::string m_sdp;
+    std::vector<RtspTrack> m_tracks;
+    int m_selectedTrackIndex{-1};
     std::string m_trackControl;
     std::string m_sessionControl;
     std::string m_sessionId;
@@ -1744,6 +2180,7 @@ private:
     std::atomic<bool> m_loggedUnsupportedCodec{false};
     bool m_useTcpTransport{false};
     bool m_triedTcpFallback{false};
+    bool m_autoTcpFallbackActive{false};
     std::atomic<bool> m_autoReconnect{false};
 
     uint16_t m_clientRtpPort{0};
@@ -1752,18 +2189,24 @@ private:
     uint16_t m_serverRtcpPort{0};
     uint16_t m_forcedClientRtpPort{0};
     uint16_t m_forcedClientRtcpPort{0};
+    uint8_t m_interleavedRtpChannel{0};
+    uint8_t m_interleavedRtcpChannel{1};
 
     uint32_t m_currentTimestamp{0};
     bool m_haveTimestamp{false};
     bool m_haveFirstTimestamp{false};
+    bool m_haveSequence{false};
     uint32_t m_firstTimestamp{0};
     bool m_currentKeyFrame{false};
+    uint16_t m_lastSequence{0};
     std::atomic<uint64_t> m_rtpPackets{0};
     std::atomic<uint64_t> m_framesEmitted{0};
     std::atomic<uint64_t> m_framesDropped{0};
     std::atomic<uint64_t> m_payloadMismatch{0};
+    std::atomic<uint64_t> m_sequenceDiscontinuities{0};
+    std::atomic<bool> m_loggedFirstCompressedFrame{false};
     std::vector<uint8_t> m_nalBuffer;
-    bool m_lowLatencyDrop{true};
+    bool m_lowLatencyDrop{false};
     int m_latencyTargetMs{150};
     SwVideoPacket::Codec m_currentCodec{SwVideoPacket::Codec::H264};
     std::atomic<bool> m_placeholderActive{false};
@@ -1774,21 +2217,51 @@ private:
     std::atomic<uint64_t> m_placeholderFramesEmitted{0};
     std::atomic<int> m_rtspDisconnectSuppress{0};
     std::chrono::steady_clock::time_point m_lastRtpTime{};
+    std::atomic<long long> m_lastLoggedRtpTimeoutSec{-1};
     std::chrono::steady_clock::time_point m_playStart{};
+    std::chrono::steady_clock::time_point m_lastPliTime{};
+    std::chrono::steady_clock::time_point m_lastRtcpKeepAliveTime{};
     std::string m_ctrlAccum;
     std::string m_ctrlTextBuffer;
     uint32_t m_localSsrc{0};
     uint32_t m_remoteSsrc{0};
     uint16_t m_detectedRtpPort{0};
     uint16_t m_detectedRtcpPort{0};
-    int m_workerIntervalMs{2};
+    std::map<uint16_t, BufferedRtpPacket> m_rtpReorderBuffer;
+    bool m_rtpReorderExpectedValid{false};
+    uint16_t m_rtpReorderExpectedSequence{0};
+    std::size_t m_rtpReorderMaxPackets{24};
+    int m_rtpReorderMaxDelayMs{12};
     int m_reconnectDelayMs{2000};
     std::atomic<bool> m_reconnectPending{false};
+    std::vector<uint8_t> m_h264Sps;
+    std::vector<uint8_t> m_h264Pps;
+    bool m_h264HeadersInserted{false};
+    bool m_currentAccessUnitHasH264Headers{false};
+    bool m_currentAccessUnitInjectedH264Headers{false};
+    bool m_currentAccessUnitHasHevcHeaders{false};
+    bool m_currentAccessUnitInjectedHevcHeaders{false};
+    bool m_dropCurrentAccessUnit{false};
+    bool m_emitDecoderDiscontinuityOnNextFrame{true};
+    int m_rtpResyncGapThreshold{32};
+    std::atomic<bool> m_loggedH264Fmtp{false};
+    std::atomic<bool> m_loggedH264ParameterSetInjection{false};
+    std::atomic<bool> m_loggedMissingH264ParameterSets{false};
+    std::atomic<bool> m_loggedInBandH264ParameterSets{false};
+    std::atomic<bool> m_loggedH265Fmtp{false};
+    std::atomic<bool> m_loggedH265ParameterSetInjection{false};
+    std::atomic<bool> m_loggedMissingH265ParameterSets{false};
+    std::atomic<bool> m_loggedInBandH265ParameterSets{false};
+    bool m_waitingForKeyFrame{true};
+    std::atomic<bool> m_loggedWaitingForKeyFrame{false};
     std::vector<uint8_t> m_hevcVps;
     std::vector<uint8_t> m_hevcSps;
     std::vector<uint8_t> m_hevcPps;
     bool m_hevcHeadersInserted{false};
     std::string m_hevcProfileLevelId;
+    SwRtpDepacketizerH264 m_h264Depacketizer{};
+    SwRtpDepacketizerH265 m_h265Depacketizer{};
+    SwMpegTsDemux m_sharedTsDemux{};
     struct TsDemux {
         bool patParsed{false};
         bool pmtParsed{false};

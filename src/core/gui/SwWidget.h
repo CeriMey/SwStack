@@ -484,6 +484,7 @@ public:
         if (m_layout) {
             m_layout->setParentWidget(this);
             m_layout->setParent(this);
+            adoptLayoutWidgets_(m_layout);
             m_layout->updateGeometry();
         }
     }
@@ -491,6 +492,61 @@ public:
     SwAbstractLayout* layout() const {
         return m_layout;
     }
+
+private:
+    struct SavedLocalGeometry_ {
+        SwWidget* widget{nullptr};
+        SwRect geometry{0, 0, 0, 0};
+    };
+
+    static void collectDescendantLocalGeometry_(SwWidget* root, std::vector<SavedLocalGeometry_>& out) {
+        if (!root) {
+            return;
+        }
+        for (SwObject* objChild : root->children()) {
+            auto* child = dynamic_cast<SwWidget*>(objChild);
+            if (!child) {
+                continue;
+            }
+            out.push_back(SavedLocalGeometry_{child, child->geometry()});
+            collectDescendantLocalGeometry_(child, out);
+        }
+    }
+
+    static void restoreSavedLocalGeometry_(const std::vector<SavedLocalGeometry_>& saved) {
+        for (const SavedLocalGeometry_& entry : saved) {
+            if (!entry.widget) {
+                continue;
+            }
+            entry.widget->move(entry.geometry.x, entry.geometry.y);
+            entry.widget->resize(entry.geometry.width, entry.geometry.height);
+        }
+    }
+
+    void adoptLayoutWidgets_(const SwAbstractLayout* layout) {
+        if (!layout) {
+            return;
+        }
+        layout->forEachManagedWidget([this](SwWidgetInterface* itemWidget) {
+            auto* widget = dynamic_cast<SwWidget*>(itemWidget);
+            if (!widget) {
+                return;
+            }
+            if (widget == this) {
+                return;
+            }
+            if (widget->parent() == this) {
+                return;
+            }
+
+            std::vector<SavedLocalGeometry_> savedDescendants;
+            collectDescendantLocalGeometry_(widget, savedDescendants);
+            widget->setParent(this);
+            restoreSavedLocalGeometry_(savedDescendants);
+        });
+    }
+
+public:
 
     /**
      * @brief Displays the SwWidget by setting its visibility to true.

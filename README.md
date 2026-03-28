@@ -221,6 +221,10 @@
 - `LoadAttempt` - Load Attempt; methodes: none
 - `SymbolLookup` - Symbol Lookup; methodes: none
 
+### `src/core/runtime/SwPluginLoader.h` - Plugin Loader
+- `SwPluginLoader` - Plugin Loader; methodes: `SwPluginLoader(...)`, `~SwPluginLoader(...)`, `fileName(...)`, `setFileName(...)`, `loadHints(...)`, `setLoadHints(...)`, `load(...)`, `unload(...)`, `isLoaded(...)`, `instance(...)`, `errorString(...)`, `metaData(...)`, `resolve(...)`, `introspectionJson(...)`, `staticInstances(...)`, `staticPlugins(...)`
+- `SwStaticPlugin` - Static Plugin; methodes: `SwStaticPlugin(...)`, `metaData(...)`, `instance(...)`, `isValid(...)`
+
 ### `src/core/SwLineEdit.h` - Line Edit
 - `SwLineEdit` - Line Edit; methodes: `SwLineEdit(...)`, `~SwLineEdit(...)`, `paintEvent(...)`, `keyPressEvent(...)`, `mousePressEvent(...)`, `mouseDoubleClickEvent(...)`, `mouseMoveEvent(...)`, `mouseReleaseEvent(...)`
 - `Padding` - Padding; methodes: none

@@ -721,7 +721,7 @@ private:
         if (auto* app = SwCoreApplication::instance(false)) {
             const SwPointer<SwDialog> self(this);
             std::function<void(SwDialog*)> fnCopy = fn;
-            app->postEvent([self, fnCopy]() mutable {
+            app->postEventOnLane([self, fnCopy]() mutable {
                 if (!self) {
                     return;
                 }
@@ -730,7 +730,7 @@ private:
                     return;
                 }
                 fnCopy(liveSelf);
-            });
+            }, SwFiberLane::Input);
             return;
         }
         fn(this);
@@ -1057,7 +1057,7 @@ private:
         if (auto* app = SwCoreApplication::instance(false)) {
             const SwPointer<SwDialog> self(this);
             std::function<void(SwDialog*)> fnCopy = fn;
-            app->postEvent([self, fnCopy]() mutable {
+            app->postEventOnLane([self, fnCopy]() mutable {
                 if (!self) {
                     return;
                 }
@@ -1066,7 +1066,7 @@ private:
                     return;
                 }
                 fnCopy(liveSelf);
-            });
+            }, SwFiberLane::Input);
             return;
         }
         fn(this);

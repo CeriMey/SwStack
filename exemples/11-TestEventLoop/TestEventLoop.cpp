@@ -417,7 +417,7 @@ int main(int argc, char *argv[])
             auto s = now();
             SwEventLoop::swsleep(5);
             auto e = std::chrono::duration_cast<std::chrono::milliseconds>(now() - s).count();
-            addTimingResult("swsleep(5ms)", e, 2, 8);
+            addTimingResult("swsleep(5ms)", e, 5, 5);
         }
         {
             auto s = now();
@@ -637,15 +637,15 @@ int main(int argc, char *argv[])
             "chain:C:resumed",
             "chain:B:resumed",
             "chain:A:resumed",
-            // 5. ping-pong (mix:X sneaks in between rounds — see test 6 comment)
+            // 5. ping-pong
             "pp:P:start",
             "pp:Q:start",
             "pp:P:r1",
             "pp:Q:r1",
-            "mix:X:start",          // X yields(30), inserted here by event queue
             "pp:P:r2",
             "pp:Q:r2",
             // 6. yield+release interleave
+            "mix:X:start",
             "mix:Y:start",
             "mix:Y:afterRelease",
             "mix:X:resumed",
@@ -662,15 +662,14 @@ int main(int argc, char *argv[])
             "cascade:W1:resumed",
             "cascade:W2:resumed",
             "cascade:W3:resumed",
-            // 9. triple release — each release() re-queues the fiber,
-            // so other pending events interleave between resumes
+            // 9. triple release: ready fibers resume before freshly queued work
             "3rel:start",
             "3rel:after1",
-            "reyield:start",       // reyield was next in event queue
             "3rel:after2",
-            "reyield:wake60",      // next event runs before 3rel resumes
             "3rel:after3",
             // 10. re-yield
+            "reyield:start",
+            "reyield:wake60",
             "reyield:phase1",
             "reyield:wake61",
             "reyield:phase2",
@@ -696,9 +695,9 @@ int main(int argc, char *argv[])
             "watchdog:activate",
             "prievt:normal",
             "watchdog:deactivate",
+            "swsleep:end",
             "swloop:timer",
             "swloop:end:timer-triggered",
-            "swsleep:end",
             "coreTimer:callback",
             "singleShot:200ms",
             "tests:completed"

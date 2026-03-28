@@ -57,6 +57,7 @@
 #if defined(_WIN32)
 
 #include "core/runtime/SwCoreApplication.h"
+#include "core/gui/SwWidgetPlatformAdapter.h"
 #include "platform/win/SwWin32Painter.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -635,6 +636,14 @@ public:
             int height = HIWORD(lParam);
             if (callbacks.resizeHandler) {
                 runResizeHandler(callbacks.resizeHandler, width, height);
+                // During the native Win32 interactive sizing loop, control may not
+                // return to SwGuiApplication::exec() until the mouse is released.
+                // Flush batched widget invalidations here so live resize repaints
+                // are not deferred until the end of the drag.
+                SwWidgetPlatformAdapter::flushDamage();
+                if (!IsIconic(hwnd)) {
+                    UpdateWindow(hwnd);
+                }
             }
             return 0;
         }
@@ -972,8 +981,8 @@ private:
     // SwGuiApplication::exec() ensures these are dequeued immediately
     // after processPlatformEvents() returns, keeping latency minimal.
     //
-    // Mouse-move and mouse-leave are high-frequency and never need fiber
-    // context, so they are dispatched synchronously for throughput.
+    // All native input/delete callbacks now flow through the Input lane so
+    // handlers keep a resumable fiber context across platforms.
 
     static void runMousePressHandler(const std::function<void(int, int, SwMouseButton, bool, bool, bool)>& handler,
                                      int x,
@@ -982,9 +991,9 @@ private:
                                      bool ctrlPressed,
                                      bool shiftPressed,
                                      bool altPressed) {
-        SwCoreApplication::instance()->postEvent([handler, x, y, button, ctrlPressed, shiftPressed, altPressed]() {
+        SwCoreApplication::instance()->postEventOnLane([handler, x, y, button, ctrlPressed, shiftPressed, altPressed]() {
             handler(x, y, button, ctrlPressed, shiftPressed, altPressed);
-        });
+        }, SwFiberLane::Input);
     }
 
     static void runMouseDoubleClickHandler(const std::function<void(int, int, SwMouseButton, bool, bool, bool)>& handler,
@@ -994,9 +1003,9 @@ private:
                                            bool ctrlPressed,
                                            bool shiftPressed,
                                            bool altPressed) {
-        SwCoreApplication::instance()->postEvent([handler, x, y, button, ctrlPressed, shiftPressed, altPressed]() {
+        SwCoreApplication::instance()->postEventOnLane([handler, x, y, button, ctrlPressed, shiftPressed, altPressed]() {
             handler(x, y, button, ctrlPressed, shiftPressed, altPressed);
-        });
+        }, SwFiberLane::Input);
     }
 
     static void runMouseReleaseHandler(const std::function<void(int, int, SwMouseButton, bool, bool, bool)>& handler,
@@ -1006,9 +1015,9 @@ private:
                                        bool ctrlPressed,
                                        bool shiftPressed,
                                        bool altPressed) {
-        SwCoreApplication::instance()->postEvent([handler, x, y, button, ctrlPressed, shiftPressed, altPressed]() {
+        SwCoreApplication::instance()->postEventOnLane([handler, x, y, button, ctrlPressed, shiftPressed, altPressed]() {
             handler(x, y, button, ctrlPressed, shiftPressed, altPressed);
-        });
+        }, SwFiberLane::Input);
     }
 
     static void runMouseMoveHandler(const std::function<void(int, int, bool, bool, bool)>& handler,
@@ -1017,15 +1026,15 @@ private:
                                     bool ctrlPressed,
                                     bool shiftPressed,
                                     bool altPressed) {
-        SwCoreApplication::instance()->postEvent([handler, x, y, ctrlPressed, shiftPressed, altPressed]() {
+        SwCoreApplication::instance()->postEventOnLane([handler, x, y, ctrlPressed, shiftPressed, altPressed]() {
             handler(x, y, ctrlPressed, shiftPressed, altPressed);
-        });
+        }, SwFiberLane::Input);
     }
 
     static void runMouseLeaveHandler(const std::function<void()>& handler) {
-        SwCoreApplication::instance()->postEvent([handler]() {
+        SwCoreApplication::instance()->postEventOnLane([handler]() {
             handler();
-        });
+        }, SwFiberLane::Input);
     }
 
     static void runMouseWheelHandler(const std::function<void(int, int, int, bool, bool, bool)>& handler,
@@ -1044,9 +1053,9 @@ private:
                               shiftPressed,
                               altPressed,
                               "");
-        SwCoreApplication::instance()->postEvent([handler, x, y, delta, ctrlPressed, shiftPressed, altPressed]() {
+        SwCoreApplication::instance()->postEventOnLane([handler, x, y, delta, ctrlPressed, shiftPressed, altPressed]() {
             handler(x, y, delta, ctrlPressed, shiftPressed, altPressed);
-        });
+        }, SwFiberLane::Input);
     }
 
     static void runKeyPressHandler(const std::function<void(int, bool, bool, bool, wchar_t, bool)>& handler,
@@ -1056,9 +1065,9 @@ private:
                                    bool altPressed,
                                    wchar_t textChar,
                                    bool textProvided) {
-        SwCoreApplication::instance()->postEvent([handler, keyCode, ctrlPressed, shiftPressed, altPressed, textChar, textProvided]() {
+        SwCoreApplication::instance()->postEventOnLane([handler, keyCode, ctrlPressed, shiftPressed, altPressed, textChar, textProvided]() {
             handler(keyCode, ctrlPressed, shiftPressed, altPressed, textChar, textProvided);
-        });
+        }, SwFiberLane::Input);
     }
 
     static void runKeyReleaseHandler(const std::function<void(int, bool, bool, bool, wchar_t, bool)>& handler,
@@ -1068,15 +1077,15 @@ private:
                                      bool altPressed,
                                      wchar_t textChar,
                                      bool textProvided) {
-        SwCoreApplication::instance()->postEvent([handler, keyCode, ctrlPressed, shiftPressed, altPressed, textChar, textProvided]() {
+        SwCoreApplication::instance()->postEventOnLane([handler, keyCode, ctrlPressed, shiftPressed, altPressed, textChar, textProvided]() {
             handler(keyCode, ctrlPressed, shiftPressed, altPressed, textChar, textProvided);
-        });
+        }, SwFiberLane::Input);
     }
 
     static void runDeleteHandler(const std::function<void()>& handler) {
-        SwCoreApplication::instance()->postEvent([handler]() {
+        SwCoreApplication::instance()->postEventOnLane([handler]() {
             handler();
-        });
+        }, SwFiberLane::Input);
     }
 
     static void unregisterAllWindows() {

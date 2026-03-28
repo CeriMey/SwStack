@@ -131,6 +131,7 @@ public:
         m_vScrollBar = new SwScrollBar(SwScrollBar::Orientation::Vertical, this);
         m_vScrollBar->hide();
         m_vScrollBar->setSingleStep(1);
+        applyThemeStyle_();
         SwObject::connect(m_vScrollBar, &SwScrollBar::valueChanged, this, [this](int val) {
             if (!m_syncingScrollBar) {
                 m_firstVisibleLine = val;
@@ -224,6 +225,10 @@ public:
 
     SwTextDocument* document() const {
         return m_document;
+    }
+
+    int firstVisibleLine() const {
+        return m_firstVisibleLine;
     }
 
     void setDocument(SwTextDocument* doc) {
@@ -2843,6 +2848,53 @@ private:
         css += ";";
         css += "}";
         setStyleSheet(css);
+
+        if (m_vScrollBar) {
+            SwString scrollCss("SwScrollBar {");
+            scrollCss += " background-color: ";
+            scrollCss += cssColor_(m_theme.scrollBarTrackColor);
+            scrollCss += ";";
+            scrollCss += " border-color: ";
+            scrollCss += cssColor_(m_theme.scrollBarTrackColor);
+            scrollCss += ";";
+            scrollCss += " background-color-disabled: ";
+            scrollCss += cssColor_(m_theme.scrollBarTrackColor);
+            scrollCss += ";";
+            scrollCss += " border-color-disabled: ";
+            scrollCss += cssColor_(m_theme.scrollBarTrackColor);
+            scrollCss += ";";
+            scrollCss += " border-width: 0px;";
+            scrollCss += " border-radius: 6px;";
+            scrollCss += " padding: 3px;";
+            scrollCss += " thumb-color: ";
+            scrollCss += cssColor_(m_theme.scrollBarThumbColor);
+            scrollCss += ";";
+            scrollCss += " thumb-border-color: ";
+            scrollCss += cssColor_(m_theme.scrollBarThumbColor);
+            scrollCss += ";";
+            scrollCss += " thumb-color-hover: ";
+            scrollCss += cssColor_(m_theme.scrollBarThumbHoverColor);
+            scrollCss += ";";
+            scrollCss += " thumb-border-color-hover: ";
+            scrollCss += cssColor_(m_theme.scrollBarThumbHoverColor);
+            scrollCss += ";";
+            scrollCss += " thumb-color-pressed: ";
+            scrollCss += cssColor_(m_theme.scrollBarThumbHoverColor);
+            scrollCss += ";";
+            scrollCss += " thumb-border-color-pressed: ";
+            scrollCss += cssColor_(m_theme.scrollBarThumbHoverColor);
+            scrollCss += ";";
+            scrollCss += " thumb-color-disabled: ";
+            scrollCss += cssColor_(m_theme.scrollBarTrackColor);
+            scrollCss += ";";
+            scrollCss += " thumb-border-color-disabled: ";
+            scrollCss += cssColor_(m_theme.scrollBarTrackColor);
+            scrollCss += ";";
+            scrollCss += " thumb-radius: 5px;";
+            scrollCss += " thumb-min-length: 30px;";
+            scrollCss += "}";
+            m_vScrollBar->setStyleSheet(scrollCss);
+        }
     }
 
     SwTextDocument* m_document{nullptr};

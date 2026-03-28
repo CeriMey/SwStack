@@ -262,6 +262,7 @@ protected:
             return;
         }
 
+        const HandleStyle_ style = resolveHandleStyle_();
         const int handleCount = std::max(0, count() - 1);
         for (int i = 0; i < handleCount; ++i) {
             const SwRect h = handleRect(i);
@@ -269,37 +270,64 @@ protected:
                 continue;
             }
 
-            const bool hot = (i == m_hoverHandle) || (i == m_dragHandle);
-            if (m_handleWidth <= 5) {
-                // Thin-line style: just draw a single separator line
-                SwColor lineColor = hot ? SwColor{140, 150, 170} : SwColor{200, 205, 215};
+            const bool hovered = (i == m_hoverHandle);
+            const bool pressed = (i == m_dragHandle);
+            SwColor handleColor = style.handleColor;
+            SwColor borderColor = style.handleBorderColor;
+            SwColor gripColor = style.gripColor;
+            if (pressed) {
+                handleColor = style.handleColorPressed;
+                borderColor = style.handleBorderColorPressed;
+                gripColor = style.gripColorPressed;
+            } else if (hovered) {
+                handleColor = style.handleColorHover;
+                borderColor = style.handleBorderColorHover;
+                gripColor = style.gripColorHover;
+            }
+
+            SwRect visualRect = h;
+            if (m_orientation == Orientation::Horizontal) {
+                const int visualWidth = clampInt(style.visualWidth, 1, std::max(1, h.width));
+                const int x = h.x + (h.width - visualWidth) / 2;
+                visualRect = SwRect{x, h.y, visualWidth, h.height};
+            } else {
+                const int visualHeight = clampInt(style.visualWidth, 1, std::max(1, h.height));
+                const int y = h.y + (h.height - visualHeight) / 2;
+                visualRect = SwRect{h.x, y, h.width, visualHeight};
+            }
+
+            const int primaryThickness = (m_orientation == Orientation::Horizontal) ? visualRect.width : visualRect.height;
+            if (primaryThickness <= 2) {
                 if (m_orientation == Orientation::Horizontal) {
-                    const int cx = h.x + h.width / 2;
-                    painter->drawLine(cx, h.y, cx, h.y + h.height, lineColor, 1);
+                    const int cx = visualRect.x + visualRect.width / 2;
+                    painter->drawLine(cx, visualRect.y, cx, visualRect.y + visualRect.height, handleColor, std::max(1, primaryThickness));
                 } else {
-                    const int cy = h.y + h.height / 2;
-                    painter->drawLine(h.x, cy, h.x + h.width, cy, lineColor, 1);
+                    const int cy = visualRect.y + visualRect.height / 2;
+                    painter->drawLine(visualRect.x, cy, visualRect.x + visualRect.width, cy, handleColor, std::max(1, primaryThickness));
                 }
             } else {
-                SwColor fill = hot ? SwColor{220, 224, 232} : SwColor{236, 236, 236};
-                SwColor border = hot ? SwColor{180, 186, 198} : SwColor{210, 210, 210};
-                const int radius = clampInt(std::min(h.width, h.height) / 4, 2, 8);
-                painter->fillRoundedRect(h, radius, fill, border, 1);
+                painter->fillRoundedRect(visualRect,
+                                         radiusFor_(visualRect, style.radius),
+                                         handleColor,
+                                         borderColor,
+                                         style.borderWidth);
 
-                // Grip (3 small lines)
-                const int cx = h.x + h.width / 2;
-                const int cy = h.y + h.height / 2;
-                const int len = (m_orientation == Orientation::Horizontal) ? clampInt(h.height / 4, 6, 18)
-                                                                           : clampInt(h.width / 4, 6, 18);
-                SwColor grip{150, 150, 150};
-                if (m_orientation == Orientation::Horizontal) {
-                    painter->drawLine(cx - 4, cy - len / 2, cx - 4, cy + len / 2, grip, 1);
-                    painter->drawLine(cx, cy - len / 2, cx, cy + len / 2, grip, 1);
-                    painter->drawLine(cx + 4, cy - len / 2, cx + 4, cy + len / 2, grip, 1);
-                } else {
-                    painter->drawLine(cx - len / 2, cy - 4, cx + len / 2, cy - 4, grip, 1);
-                    painter->drawLine(cx - len / 2, cy, cx + len / 2, cy, grip, 1);
-                    painter->drawLine(cx - len / 2, cy + 4, cx + len / 2, cy + 4, grip, 1);
+                if ((m_orientation == Orientation::Horizontal && visualRect.width >= 6 && visualRect.height >= 18) ||
+                    (m_orientation == Orientation::Vertical && visualRect.height >= 6 && visualRect.width >= 18)) {
+                    const int cx = visualRect.x + visualRect.width / 2;
+                    const int cy = visualRect.y + visualRect.height / 2;
+                    const int len = (m_orientation == Orientation::Horizontal)
+                                        ? clampInt(visualRect.height / 4, 6, 18)
+                                        : clampInt(visualRect.width / 4, 6, 18);
+                    if (m_orientation == Orientation::Horizontal) {
+                        painter->drawLine(cx - 4, cy - len / 2, cx - 4, cy + len / 2, gripColor, 1);
+                        painter->drawLine(cx, cy - len / 2, cx, cy + len / 2, gripColor, 1);
+                        painter->drawLine(cx + 4, cy - len / 2, cx + 4, cy + len / 2, gripColor, 1);
+                    } else {
+                        painter->drawLine(cx - len / 2, cy - 4, cx + len / 2, cy - 4, gripColor, 1);
+                        painter->drawLine(cx - len / 2, cy, cx + len / 2, cy, gripColor, 1);
+                        painter->drawLine(cx - len / 2, cy + 4, cx + len / 2, cy + 4, gripColor, 1);
+                    }
                 }
             }
         }
@@ -413,6 +441,21 @@ private:
     static bool containsPoint(const SwRect& r, int px, int py) {
         return px >= r.x && px <= (r.x + r.width) && py >= r.y && py <= (r.y + r.height);
     }
+
+    struct HandleStyle_ {
+        SwColor handleColor{236, 236, 236};
+        SwColor handleColorHover{220, 224, 232};
+        SwColor handleColorPressed{210, 216, 228};
+        SwColor handleBorderColor{210, 210, 210};
+        SwColor handleBorderColorHover{180, 186, 198};
+        SwColor handleBorderColorPressed{160, 168, 182};
+        SwColor gripColor{150, 150, 150};
+        SwColor gripColorHover{138, 144, 154};
+        SwColor gripColorPressed{125, 132, 144};
+        int visualWidth{-1};
+        int borderWidth{-1};
+        int radius{-1};
+    };
 
     int primaryLength(const SwRect& r) const {
         return (m_orientation == Orientation::Horizontal) ? r.width : r.height;
@@ -585,6 +628,67 @@ private:
         return -1;
     }
 
+    int radiusFor_(const SwRect& r, int explicitRadius) const {
+        if (explicitRadius >= 0) {
+            return explicitRadius;
+        }
+        const int radius = std::min(r.width, r.height) / 2;
+        return std::max(1, std::min(8, radius));
+    }
+
+    HandleStyle_ resolveHandleStyle_() const {
+        HandleStyle_ style;
+        const bool thinDefault = m_handleWidth <= 5;
+        if (thinDefault) {
+            style.handleColor = SwColor{200, 205, 215};
+            style.handleColorHover = SwColor{140, 150, 170};
+            style.handleColorPressed = SwColor{120, 132, 154};
+            style.handleBorderColor = style.handleColor;
+            style.handleBorderColorHover = style.handleColorHover;
+            style.handleBorderColorPressed = style.handleColorPressed;
+            style.gripColor = style.handleColor;
+            style.gripColorHover = style.handleColorHover;
+            style.gripColorPressed = style.handleColorPressed;
+            style.visualWidth = 1;
+            style.borderWidth = 0;
+            style.radius = 0;
+        } else {
+            style.visualWidth = m_handleWidth;
+            style.borderWidth = 1;
+        }
+
+        const StyleSheet* sheet = const_cast<SwSplitter*>(this)->getToolSheet();
+        const auto hierarchy = classHierarchy();
+
+        (void)tryParseColor_(sheet, styleValue_(sheet, hierarchy, "handle-color"), style.handleColor);
+        (void)tryParseColor_(sheet, styleValue_(sheet, hierarchy, "handle-color-hover"), style.handleColorHover);
+        (void)tryParseColor_(sheet, styleValue_(sheet, hierarchy, "handle-color-pressed"), style.handleColorPressed);
+        (void)tryParseColor_(sheet, styleValue_(sheet, hierarchy, "handle-border-color"), style.handleBorderColor);
+        (void)tryParseColor_(sheet, styleValue_(sheet, hierarchy, "handle-border-color-hover"), style.handleBorderColorHover);
+        (void)tryParseColor_(sheet, styleValue_(sheet, hierarchy, "handle-border-color-pressed"), style.handleBorderColorPressed);
+        (void)tryParseColor_(sheet, styleValue_(sheet, hierarchy, "grip-color"), style.gripColor);
+        (void)tryParseColor_(sheet, styleValue_(sheet, hierarchy, "grip-color-hover"), style.gripColorHover);
+        (void)tryParseColor_(sheet, styleValue_(sheet, hierarchy, "grip-color-pressed"), style.gripColorPressed);
+
+        SwString value = styleValue_(sheet, hierarchy, "handle-visual-width");
+        if (!value.isEmpty()) {
+            style.visualWidth = clampInt(parsePixelValue(value, style.visualWidth), 1, 24);
+        }
+        value = styleValue_(sheet, hierarchy, "handle-border-width");
+        if (!value.isEmpty()) {
+            style.borderWidth = clampInt(parsePixelValue(value, style.borderWidth), 0, 8);
+        }
+        value = styleValue_(sheet, hierarchy, "handle-radius");
+        if (!value.isEmpty()) {
+            style.radius = clampInt(parsePixelValue(value, style.radius), 0, 32);
+        }
+
+        if (style.visualWidth <= 2) {
+            style.borderWidth = 0;
+        }
+        return style;
+    }
+
     int prefixSize(int widgetIndex) const {
         int sum = 0;
         for (int i = 0; i < widgetIndex && i < m_sizes.size(); ++i) {
@@ -697,6 +801,39 @@ private:
         setFocusPolicy(FocusPolicyEnum::NoFocus);
         m_handleWidth = 10;
         resize(520, 280);
+    }
+
+    static SwString styleValue_(const StyleSheet* sheet,
+                                const SwList<SwString>& hierarchy,
+                                const char* propertyName) {
+        if (!sheet || !propertyName) {
+            return SwString();
+        }
+
+        SwString out;
+        for (int i = static_cast<int>(hierarchy.size()) - 1; i >= 0; --i) {
+            const SwString& selector = hierarchy[static_cast<size_t>(i)];
+            if (selector.isEmpty()) {
+                continue;
+            }
+            SwString value = sheet->getStyleProperty(selector, propertyName);
+            if (!value.isEmpty()) {
+                out = value;
+            }
+        }
+        return out;
+    }
+
+    static bool tryParseColor_(const StyleSheet* sheet, const SwString& value, SwColor& out) {
+        if (!sheet || value.isEmpty()) {
+            return false;
+        }
+        try {
+            out = clampColor(const_cast<StyleSheet*>(sheet)->parseColor(value, nullptr));
+            return true;
+        } catch (...) {
+            return false;
+        }
     }
 
     SwVector<SwWidget*> m_widgets;

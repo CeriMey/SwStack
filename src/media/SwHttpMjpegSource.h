@@ -51,6 +51,7 @@
  * Windows-only: uses GDI+ to decode JPEG frames to BGRA and emits RawBGRA SwVideoPackets.
  **************************************************************************************************/
 
+#include "media/SwMediaUrl.h"
 #include "media/SwVideoSource.h"
 #include "media/SwVideoPacket.h"
 #include "media/SwVideoDecoder.h"
@@ -197,29 +198,10 @@ public:
 
 private:
     void parseUrl() {
-        // Very small parser: expects http://host[:port]/path
-        std::string s = m_url.toStdString();
-        const std::string prefix = "http://";
-        if (s.compare(0, prefix.size(), prefix) == 0) {
-            s = s.substr(prefix.size());
-        }
-        std::string hostPort;
-        auto slash = s.find('/');
-        if (slash == std::string::npos) {
-            hostPort = s;
-            m_path = "/";
-        } else {
-            hostPort = s.substr(0, slash);
-            m_path = s.substr(slash);
-        }
-        auto colon = hostPort.find(':');
-        if (colon != std::string::npos) {
-            m_host = SwString(hostPort.substr(0, colon));
-            m_port = std::stoi(hostPort.substr(colon + 1));
-        } else {
-            m_host = SwString(hostPort);
-            m_port = 80;
-        }
+        const SwMediaUrl parsed = SwMediaUrl::parse(m_url);
+        m_host = parsed.host();
+        m_port = parsed.port() > 0 ? parsed.port() : 80;
+        m_path = parsed.pathWithQuery();
         if (m_path.isEmpty()) {
             m_path = "/";
         }

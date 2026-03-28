@@ -199,6 +199,10 @@ public:
      */
     void setKeyFrame(bool keyFrame) { m_isKeyFrame = keyFrame; }
 
+    bool isDiscontinuity() const { return m_isDiscontinuity; }
+
+    void setDiscontinuity(bool discontinuity) { m_isDiscontinuity = discontinuity; }
+
     /**
      * @brief Sets the raw Format.
      * @param info Value passed to the method.
@@ -225,5 +229,6 @@ private:
     std::int64_t m_pts{-1};
     std::int64_t m_dts{-1};
     bool m_isKeyFrame{false};
+    bool m_isDiscontinuity{false};
     SwVideoFormatInfo m_rawFormat{};
 };

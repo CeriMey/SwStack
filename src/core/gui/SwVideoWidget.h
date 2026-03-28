@@ -53,11 +53,12 @@
 #include "media/SwVideoFrame.h"
 #include "media/SwVideoSource.h"
 #if defined(_WIN32)
-#include "media/SwMediaFoundationH264Decoder.h"
+#include "media/SwMediaFoundationVideoDecoder.h"
 #endif
 #include "SwGuiApplication.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <functional>
@@ -65,6 +66,7 @@
 #include <mutex>
 #include <string>
 #include <utility>
+static constexpr const char* kSwLogCategory_SwVideoWidget = "sw.core.gui.swvideowidget";
 
 #if defined(_WIN32)
 #include "platform/win/SwWindows.h"
@@ -143,6 +145,7 @@ public:
             return false;
         }
         HDC hdc = reinterpret_cast<HDC>(native);
+        const SwRect deviceRect = painter->mapToDevice(targetRect);
         BITMAPINFO bmi{};
         bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
         bmi.bmiHeader.biWidth = frame.width();
@@ -160,10 +163,10 @@ public:
         SetBrushOrgEx(hdc, 0, 0, &prevOrg);
 
         int result = StretchDIBits(hdc,
-                                   targetRect.x,
-                                   targetRect.y,
-                                   targetRect.width,
-                                   targetRect.height,
+                                   deviceRect.x,
+                                   deviceRect.y,
+                                   deviceRect.width,
+                                   deviceRect.height,
                                    0,
                                    0,
                                    frame.width(),
@@ -178,10 +181,10 @@ public:
         SetBrushOrgEx(hdc, prevOrg.x, prevOrg.y, nullptr);
         if (result == 0 || result == GDI_ERROR) {
             int setResult = SetDIBitsToDevice(hdc,
-                                              targetRect.x,
-                                              targetRect.y,
-                                              targetRect.width,
-                                              targetRect.height,
+                                              deviceRect.x,
+                                              deviceRect.y,
+                                              deviceRect.width,
+                                              deviceRect.height,
                                               0,
                                               0,
                                               0,
@@ -236,13 +239,14 @@ public:
             return false;
         }
         HDC hdc = reinterpret_cast<HDC>(native);
+        const SwRect deviceRect = painter->mapToDevice(targetRect);
         if (!ensureRenderTarget()) {
             return false;
         }
-        RECT rc{targetRect.x,
-                targetRect.y,
-                targetRect.x + targetRect.width,
-                targetRect.y + targetRect.height};
+        RECT rc{deviceRect.x,
+                deviceRect.y,
+                deviceRect.x + deviceRect.width,
+                deviceRect.y + deviceRect.height};
         HRESULT hr = m_renderTarget->BindDC(hdc, &rc);
         if (FAILED(hr)) {
             return false;
@@ -253,10 +257,10 @@ public:
         }
 
         m_renderTarget->BeginDraw();
-        D2D1_RECT_F dest = D2D1::RectF(static_cast<FLOAT>(targetRect.x),
-                                       static_cast<FLOAT>(targetRect.y),
-                                       static_cast<FLOAT>(targetRect.x + targetRect.width),
-                                       static_cast<FLOAT>(targetRect.y + targetRect.height));
+        D2D1_RECT_F dest = D2D1::RectF(static_cast<FLOAT>(deviceRect.x),
+                                       static_cast<FLOAT>(deviceRect.y),
+                                       static_cast<FLOAT>(deviceRect.x + deviceRect.width),
+                                       static_cast<FLOAT>(deviceRect.y + deviceRect.height));
         D2D1_RECT_F src = D2D1::RectF(0.0f,
                                       0.0f,
                                       static_cast<FLOAT>(frame.width()),
@@ -368,7 +372,7 @@ private:
  * @code
  * auto widget = new SwVideoWidget(parent);
  * widget->setVideoSource(mySource);
- * widget->setVideoDecoder(myDecoder); // optional, defaults to passthrough
+ * widget->setVideoDecoder(myDecoder); // optional, defaults to the decoder factory
  * widget->start();
  * @endcode
  */
@@ -394,14 +398,13 @@ public:
 #if defined(_WIN32)
         boostGuiThreadPriority();
 #endif
-        m_pipeline->setFrameCallback([this](const SwVideoFrame& frame) {
-            handleIncomingFrame(frame);
-        });
+        // Keep decoder lifecycle off the socket/fiber path. Media Foundation H.26x
+        // decoders, especially HEVC, are more stable when they live on a dedicated
+        // worker thread instead of the GUI/runtime fiber that drives I/O callbacks.
+        m_pipeline->setAsyncDecode(true);
+        m_pipeline->setQueueLimits(12, 2 * 1024 * 1024);
+        installPipelineFrameCallback();
         m_pipeline->useDecoderFactory(true);
-#if defined(_WIN32)
-        m_pipeline->setDecoderHint(SwVideoPacket::Codec::H264,
-                                   std::make_shared<SwMediaFoundationH264Decoder>());
-#endif
     }
 
     /**
@@ -410,6 +413,8 @@ public:
      * @details Use this hook to release any resources that remain associated with the instance.
      */
     ~SwVideoWidget() override {
+        m_callbackGuard.reset();
+        detachSourceStatusCallback(m_source);
         stop();
     }
 
@@ -420,10 +425,13 @@ public:
      * @details Call this method to replace the currently stored value with the caller-provided one.
      */
     void setVideoSource(const std::shared_ptr<SwVideoSource>& source) {
+        auto previousSource = m_source;
         m_source = source;
         if (m_pipeline) {
             m_pipeline->setSource(source);
         }
+        detachSourceStatusCallback(previousSource);
+        attachSourceStatusCallback(source);
     }
 
     /**
@@ -447,10 +455,57 @@ public:
         m_decoder = decoder;
         if (m_pipeline) {
             m_pipeline->setDecoder(decoder);
-            m_pipeline->setFrameCallback([this](const SwVideoFrame& frame) {
-                handleIncomingFrame(frame);
-            });
+            installPipelineFrameCallback();
         }
+    }
+
+    /**
+     * @brief Returns the registered decoder backends for the given codec.
+     * @param codec Value passed to the method.
+     * @return The registered backends ordered by priority.
+     */
+    static SwList<SwVideoDecoderDescriptor> availableVideoDecoders(SwVideoPacket::Codec codec) {
+        return SwVideoDecoderFactory::instance().list(codec);
+    }
+
+    /**
+     * @brief Selects a registered decoder backend for the given codec.
+     * @param codec Value passed to the method.
+     * @param decoderId Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
+    bool setPreferredVideoDecoder(SwVideoPacket::Codec codec, const SwString& decoderId) {
+        if (!m_pipeline) {
+            return false;
+        }
+        bool ok = m_pipeline->setDecoderSelection(codec, decoderId);
+        if (ok) {
+            m_decoder.reset();
+        }
+        return ok;
+    }
+
+    /**
+     * @brief Clears the codec-specific decoder backend preference.
+     * @param codec Value passed to the method.
+     */
+    void clearPreferredVideoDecoder(SwVideoPacket::Codec codec) {
+        if (!m_pipeline) {
+            return;
+        }
+        m_pipeline->clearDecoderSelection(codec);
+    }
+
+    /**
+     * @brief Returns the preferred decoder backend id for the given codec.
+     * @param codec Value passed to the method.
+     * @return The preferred backend id, if any.
+     */
+    SwString preferredVideoDecoder(SwVideoPacket::Codec codec) const {
+        if (!m_pipeline) {
+            return SwString();
+        }
+        return m_pipeline->decoderSelection(codec);
     }
 
     /**
@@ -589,6 +644,7 @@ public:
         if (!painter) {
             return;
         }
+        m_repaintPending.store(false);
 
         const SwRect rect = this->rect();
         painter->fillRect(rect, m_backgroundColor, m_backgroundColor, 0);
@@ -618,6 +674,12 @@ public:
 
         if (!rendered) {
             drawPlaceholder(painter, rect);
+            return;
+        }
+
+        const auto status = currentStreamStatus();
+        if (status.state != SwVideoSource::StreamState::Streaming) {
+            drawStatusOverlay(painter, rect, status);
         }
     }
 
@@ -632,6 +694,92 @@ public:
     }
 
 private:
+    void installPipelineFrameCallback() {
+        if (!m_pipeline) {
+            return;
+        }
+        std::weak_ptr<int> weakGuard = m_callbackGuard;
+        m_pipeline->setFrameCallback([this, weakGuard](const SwVideoFrame& frame) {
+            if (weakGuard.expired()) {
+                return;
+            }
+            handleIncomingFrame(frame);
+        });
+    }
+
+    void attachSourceStatusCallback(const std::shared_ptr<SwVideoSource>& source) {
+        if (!source) {
+            setStreamStatus({});
+            return;
+        }
+        std::weak_ptr<int> weakGuard = m_callbackGuard;
+        source->setStatusCallback([this, weakGuard](const SwVideoSource::StreamStatus& status) {
+            if (weakGuard.expired()) {
+                return;
+            }
+            setStreamStatus(status);
+        });
+    }
+
+    void detachSourceStatusCallback(const std::shared_ptr<SwVideoSource>& source) {
+        if (!source) {
+            return;
+        }
+        source->setStatusCallback(SwVideoSource::StatusCallback());
+    }
+
+    void setStreamStatus(const SwVideoSource::StreamStatus& status) {
+        {
+            std::lock_guard<std::mutex> lock(m_streamStatusMutex);
+            m_streamStatus = status;
+        }
+        if (!m_repaintPending.exchange(true)) {
+            update();
+        }
+    }
+
+    SwVideoSource::StreamStatus currentStreamStatus() const {
+        std::lock_guard<std::mutex> lock(m_streamStatusMutex);
+        return m_streamStatus;
+    }
+
+    SwString statusTextForDisplay(const SwVideoSource::StreamStatus& status) const {
+        if (!status.reason.isEmpty()) {
+            return status.reason;
+        }
+        switch (status.state) {
+        case SwVideoSource::StreamState::Connecting:
+            return "Connecting stream...";
+        case SwVideoSource::StreamState::Recovering:
+            return "Recovering stream...";
+        case SwVideoSource::StreamState::Streaming:
+            return "Streaming";
+        case SwVideoSource::StreamState::Stopped:
+        default:
+            break;
+        }
+        return m_source ? SwString("Waiting stream...") : SwString("No source");
+    }
+
+    void drawStatusOverlay(SwPainter* painter,
+                           const SwRect& rect,
+                           const SwVideoSource::StreamStatus& status) {
+        if (!painter) {
+            return;
+        }
+        const SwString text = statusTextForDisplay(status);
+        if (text.isEmpty()) {
+            return;
+        }
+        SwRect banner{rect.x + 12, rect.y + 12, std::max(160, rect.width / 3), 32};
+        painter->fillRect(banner, SwColor{0, 0, 0}, SwColor{0, 0, 0}, 0);
+        painter->drawText(banner,
+                          text,
+                          DrawTextFormat::VCenter,
+                          {235, 235, 235},
+                          SwFont());
+    }
+
     static std::shared_ptr<SwVideoRenderer> createDefaultRenderer() {
 #if defined(_WIN32)
         auto d2dRenderer = std::make_shared<SwD2DVideoRenderer>();
@@ -645,45 +793,17 @@ private:
     }
 
     void handleIncomingFrame(const SwVideoFrame& frame) {
-        SwVideoFrame converted = frame;
-        if (!ensureBGRA(converted)) {
+        if (frame.isValid() &&
+            frame.pixelFormat() == SwVideoPixelFormat::BGRA32 &&
+            frame.planeData(0) &&
+            frame.planeStride(0) == frame.width() * 4) {
+            presentFrame(frame);
             return;
         }
-        SwVideoFrame readyFrame = SwVideoFrame::allocate(converted.width(),
-                                                         converted.height(),
-                                                         SwVideoPixelFormat::BGRA32);
+        SwVideoFrame readyFrame = convertToBGRA(frame);
         if (!readyFrame.isValid()) {
             return;
         }
-
-        const uint8_t* src = converted.planeData(0);
-        uint8_t* dst = readyFrame.planeData(0);
-        if (!src || !dst) {
-            return;
-        }
-        const int srcStride = converted.planeStride(0);
-        const int dstStride = readyFrame.planeStride(0);
-        const int rowBytes = converted.width() * 4;
-        const int absSrcStride = srcStride >= 0 ? srcStride : -srcStride;
-        if (srcStride == dstStride && srcStride == rowBytes) {
-            std::memcpy(dst,
-                        src,
-                        static_cast<std::size_t>(rowBytes) * converted.height());
-        } else {
-            for (int y = 0; y < converted.height(); ++y) {
-                const uint8_t* srcRow =
-                    (srcStride >= 0)
-                        ? src + static_cast<std::size_t>(y) * absSrcStride
-                        : src + static_cast<std::size_t>(converted.height() - 1 - y) * absSrcStride;
-                uint8_t* dstRow = dst + static_cast<std::size_t>(y) * dstStride;
-                std::memcpy(dstRow, srcRow, rowBytes);
-            }
-        }
-
-        readyFrame.setTimestamp(converted.timestamp());
-        readyFrame.setAspectRatio(converted.aspectRatio());
-        readyFrame.setColorSpace(converted.colorSpace());
-        readyFrame.setRotation(converted.rotation());
         presentFrame(readyFrame);
     }
 
@@ -692,7 +812,7 @@ private:
             return;
         }
         painter->fillRect(rect, m_backgroundColor, {80, 80, 80}, 1);
-        SwString text = m_source ? SwString("Waiting stream...") : SwString("No source");
+        SwString text = statusTextForDisplay(currentStreamStatus());
         painter->drawText(rect,
                           text,
                           DrawTextFormat::Center | DrawTextFormat::VCenter,
@@ -727,18 +847,17 @@ private:
         return target;
     }
 
-    bool ensureBGRA(SwVideoFrame& frame) {
+    SwVideoFrame convertToBGRA(const SwVideoFrame& frame) {
         if (!frame.isValid()) {
-            return false;
-        }
-        if (frame.pixelFormat() == SwVideoPixelFormat::BGRA32) {
-            return true;
+            return {};
         }
 
-        SwVideoFrame& buffer = conversionBufferFor(frame.width(), frame.height());
+        SwVideoFrame buffer = SwVideoFrame::allocate(frame.width(),
+                                                     frame.height(),
+                                                     SwVideoPixelFormat::BGRA32);
         uint8_t* dst = buffer.planeData(0);
         if (!dst) {
-            return false;
+            return {};
         }
 
         const int dstStride = buffer.planeStride(0);
@@ -874,20 +993,10 @@ private:
             break;
         }
         default:
-            return false;
+            return {};
         }
 
-        frame = buffer;
-        return true;
-    }
-
-    SwVideoFrame& conversionBufferFor(int width, int height) {
-        if (!m_conversionFrame.isValid() ||
-            m_conversionFrame.width() != width ||
-            m_conversionFrame.height() != height) {
-            m_conversionFrame = SwVideoFrame::allocate(width, height, SwVideoPixelFormat::BGRA32);
-        }
-        return m_conversionFrame;
+        return buffer;
     }
 
 private:
@@ -902,8 +1011,12 @@ private:
     SwVideoFrame m_currentFrame;
     std::chrono::steady_clock::time_point m_lastFrameTime{};
     std::function<void(const SwVideoFrame&)> m_frameArrived;
-
-    SwVideoFrame m_conversionFrame;
+    mutable std::mutex m_streamStatusMutex;
+    SwVideoSource::StreamStatus m_streamStatus{};
+    std::shared_ptr<int> m_callbackGuard{std::make_shared<int>(0)};
+    std::atomic<bool> m_repaintPending{false};
+    std::atomic<bool> m_loggedFirstPresentedFrame{false};
+    std::atomic<uint64_t> m_presentedFrameCount{0};
 #if defined(_WIN32)
     void boostGuiThreadPriority() {
         static bool boosted = false;
@@ -917,19 +1030,28 @@ private:
 #endif
 
     void presentFrame(const SwVideoFrame& frame) {
+        auto presented = ++m_presentedFrameCount;
         {
             std::lock_guard<std::mutex> lock(m_frameMutex);
             m_currentFrame = frame;
             m_lastFrameTime = std::chrono::steady_clock::now();
         }
+        if (!m_loggedFirstPresentedFrame.exchange(true)) {
+            swCWarning(kSwLogCategory_SwVideoWidget) << "[SwVideoWidget] First frame presented "
+                        << frame.width() << "x" << frame.height()
+                        << " ts=" << frame.timestamp()
+                        << " fmt=" << static_cast<int>(frame.pixelFormat());
+        } else if ((presented % 25) == 0) {
+            swCWarning(kSwLogCategory_SwVideoWidget) << "[SwVideoWidget] Presented frame count="
+                        << presented
+                        << " ts=" << frame.timestamp()
+                        << " fmt=" << static_cast<int>(frame.pixelFormat());
+        }
         if (m_frameArrived) {
             m_frameArrived(frame);
         }
-        update();
-        if (auto* app = SwGuiApplication::instance(false)) {
-            if (auto* integration = app->platformIntegration()) {
-                integration->wakeUpGuiThread();
-            }
+        if (!m_repaintPending.exchange(true)) {
+            update();
         }
     }
 

@@ -828,7 +828,14 @@ inline void SwX11PlatformIntegration::handleMouseEvent(const XEvent& event, bool
             if (window->callbacks().mouseWheelHandler) {
                 SwMouseEvent mouseEvent = toMouseEvent(event.xbutton, SwMouseButton::NoButton, 0);
                 mouseEvent.wheelDelta = (event.xbutton.button == Button4) ? 120 : -120;
-                window->callbacks().mouseWheelHandler(mouseEvent);
+                if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
+                    const std::function<void(const SwMouseEvent&)> handler = window->callbacks().mouseWheelHandler;
+                    app->postEventOnLane([handler, mouseEvent]() {
+                        handler(mouseEvent);
+                    }, SwFiberLane::Input);
+                } else {
+                    window->callbacks().mouseWheelHandler(mouseEvent);
+                }
             }
             return;
         }
@@ -840,16 +847,37 @@ inline void SwX11PlatformIntegration::handleMouseEvent(const XEvent& event, bool
     SwMouseEvent mouseEvent = toMouseEvent(event.xbutton, button, doubleClick ? 2 : 1);
 
     if (doubleClick && window->callbacks().mouseDoubleClickHandler) {
-        window->callbacks().mouseDoubleClickHandler(mouseEvent);
+        if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
+            const std::function<void(const SwMouseEvent&)> handler = window->callbacks().mouseDoubleClickHandler;
+            app->postEventOnLane([handler, mouseEvent]() {
+                handler(mouseEvent);
+            }, SwFiberLane::Input);
+        } else {
+            window->callbacks().mouseDoubleClickHandler(mouseEvent);
+        }
     }
 
     if (pressed) {
         if (window->callbacks().mousePressHandler) {
-            window->callbacks().mousePressHandler(mouseEvent);
+            if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
+                const std::function<void(const SwMouseEvent&)> handler = window->callbacks().mousePressHandler;
+                app->postEventOnLane([handler, mouseEvent]() {
+                    handler(mouseEvent);
+                }, SwFiberLane::Input);
+            } else {
+                window->callbacks().mousePressHandler(mouseEvent);
+            }
         }
     } else {
         if (window->callbacks().mouseReleaseHandler) {
-            window->callbacks().mouseReleaseHandler(mouseEvent);
+            if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
+                const std::function<void(const SwMouseEvent&)> handler = window->callbacks().mouseReleaseHandler;
+                app->postEventOnLane([handler, mouseEvent]() {
+                    handler(mouseEvent);
+                }, SwFiberLane::Input);
+            } else {
+                window->callbacks().mouseReleaseHandler(mouseEvent);
+            }
         }
     }
 }
@@ -859,7 +887,15 @@ inline void SwX11PlatformIntegration::handleMotionEvent(const XEvent& event) {
     if (!window || !window->callbacks().mouseMoveHandler) {
         return;
     }
-    window->callbacks().mouseMoveHandler(toMouseMoveEvent(event.xmotion));
+    const SwMouseEvent mouseEvent = toMouseMoveEvent(event.xmotion);
+    if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
+        const std::function<void(const SwMouseEvent&)> handler = window->callbacks().mouseMoveHandler;
+        app->postEventOnLane([handler, mouseEvent]() {
+            handler(mouseEvent);
+        }, SwFiberLane::Input);
+        return;
+    }
+    window->callbacks().mouseMoveHandler(mouseEvent);
 }
 
 inline void SwX11PlatformIntegration::handleLeaveEvent(const XEvent& event) {
@@ -871,6 +907,13 @@ inline void SwX11PlatformIntegration::handleLeaveEvent(const XEvent& event) {
     }
     auto* window = findWindow(event.xcrossing.window);
     if (!window || !window->callbacks().mouseLeaveHandler) {
+        return;
+    }
+    if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
+        const std::function<void()> handler = window->callbacks().mouseLeaveHandler;
+        app->postEventOnLane([handler]() {
+            handler();
+        }, SwFiberLane::Input);
         return;
     }
     window->callbacks().mouseLeaveHandler();
@@ -885,13 +928,27 @@ inline void SwX11PlatformIntegration::handleKeyEvent(const XEvent& event, bool p
     SwKeyEvent keyEvent = toKeyEvent(event.xkey);
     if (pressed) {
         if (window->callbacks().keyPressHandler) {
-            window->callbacks().keyPressHandler(keyEvent);
+            if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
+                const std::function<void(const SwKeyEvent&)> handler = window->callbacks().keyPressHandler;
+                app->postEventOnLane([handler, keyEvent]() {
+                    handler(keyEvent);
+                }, SwFiberLane::Input);
+            } else {
+                window->callbacks().keyPressHandler(keyEvent);
+            }
         }
         return;
     }
 
     if (window->callbacks().keyReleaseHandler) {
-        window->callbacks().keyReleaseHandler(keyEvent);
+        if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
+            const std::function<void(const SwKeyEvent&)> handler = window->callbacks().keyReleaseHandler;
+            app->postEventOnLane([handler, keyEvent]() {
+                handler(keyEvent);
+            }, SwFiberLane::Input);
+        } else {
+            window->callbacks().keyReleaseHandler(keyEvent);
+        }
     }
 }
 
@@ -923,6 +980,13 @@ inline void SwX11PlatformIntegration::handleClientMessage(const XClientMessageEv
 
     auto* window = findWindow(event.window);
     if (!window || !window->callbacks().deleteHandler) {
+        return;
+    }
+    if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
+        const std::function<void()> handler = window->callbacks().deleteHandler;
+        app->postEventOnLane([handler]() {
+            handler();
+        }, SwFiberLane::Input);
         return;
     }
     window->callbacks().deleteHandler();

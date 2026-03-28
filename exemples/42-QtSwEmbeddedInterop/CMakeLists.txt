@@ -1,0 +1,35 @@
+cmake_minimum_required(VERSION 3.10)
+project(QtSwEmbeddedInterop)
+
+set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+if(NOT WIN32)
+    message(WARNING "QtSwEmbeddedInterop is Windows-only and will be skipped.")
+    return()
+endif()
+
+find_package(QT NAMES Qt6 Qt5 COMPONENTS Widgets QUIET)
+if(NOT QT_FOUND)
+    message(WARNING "Qt Widgets not found, skipping QtSwEmbeddedInterop target.")
+    return()
+endif()
+
+find_package(Qt${QT_VERSION_MAJOR} COMPONENTS Widgets QUIET)
+if(NOT TARGET Qt${QT_VERSION_MAJOR}::Widgets)
+    message(WARNING "Qt Widgets target not available, skipping QtSwEmbeddedInterop target.")
+    return()
+endif()
+
+add_executable(QtSwEmbeddedInterop QtSwEmbeddedInterop.cpp)
+target_include_directories(QtSwEmbeddedInterop PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/core
+)
+
+target_link_libraries(QtSwEmbeddedInterop PRIVATE
+    Qt${QT_VERSION_MAJOR}::Widgets
+    ws2_32
+    user32
+    gdi32
+)

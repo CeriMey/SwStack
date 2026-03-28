@@ -81,7 +81,6 @@
 #include <cstdio>
 #include <cstdint>
 #include <deque>
-#include <unordered_set>
 #include <vector>
 static constexpr const char* kSwLogCategory_SwCoreApplication = "sw.core.runtime.swcoreapplication";
 
@@ -93,6 +92,9 @@ static constexpr const char* kSwLogCategory_SwCoreApplication = "sw.core.runtime
 
 #include <winsock2.h>
 #include "platform/win/SwWindows.h"
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
 #include <mmsystem.h>
 #pragma comment(lib, "winmm.lib")
 #else
@@ -114,6 +116,8 @@ static constexpr const char* kSwLogCategory_SwCoreApplication = "sw.core.runtime
 #include "SwMutex.h"
 #include "SwEvent.h"
 #include "SwEventDispatchSupport.h"
+#include "SwFiberPool.h"
+#include "SwRuntimeProfiler.h"
 #include <thread>
 
 
@@ -167,10 +171,16 @@ public:
      * @param interval The interval in microseconds between executions.
      * @param singleShot If `true`, the timer fires only once and must be manually removed after execution.
      */
-    _T(std::function<void()> callback, int interval, bool singleShot = false)
+    _T(std::function<void()> callback,
+       int interval,
+       bool singleShot = false,
+       SwFiberLane lane = SwFiberLane::Normal)
         : callback(callback),
         interval(interval),
         singleShot(singleShot),
+        lane(lane),
+        dispatchPending(false),
+        cancelled(false),
         lastExecutionTime(std::chrono::steady_clock::now())
     {}
 
@@ -205,6 +215,9 @@ private:
     std::function<void()> callback; ///< The function to execute when the timer fires.
     int interval; ///< Interval in microseconds between timer executions.
     bool singleShot; ///< Indicates if the timer is single-shot (`true`) or recurring (`false`).
+    SwFiberLane lane; ///< Scheduling lane used when the timer callback is dispatched.
+    bool dispatchPending; ///< Prevents a ready timer from being enqueued multiple times before execution.
+    bool cancelled; ///< Marks a timer removed while a dispatch is still pending.
     std::chrono::steady_clock::time_point lastExecutionTime; ///< The last time the timer was executed.
 };
 
@@ -392,6 +405,9 @@ public:
         bindInstanceToCurrentThread(this);
         enableHighPrecisionTimers();
         initFibers();
+        refreshFiberPoolConfig_();
+        fiberPool_.bindMainFiber(mainFiber);
+        fiberPool_.bindRuntimeState(&m_runningFiber, &fiberStartTimeNs_, &fireWatchDog);
         initWakeup_();
 #if defined(_WIN32)
         SetConsoleCtrlHandler(ConsoleHandler, TRUE);
@@ -418,6 +434,9 @@ public:
         enableHighPrecisionTimers();
         parseArguments(argc, argv);
         initFibers();
+        refreshFiberPoolConfig_();
+        fiberPool_.bindMainFiber(mainFiber);
+        fiberPool_.bindRuntimeState(&m_runningFiber, &fiberStartTimeNs_, &fireWatchDog);
         initWakeup_();
 #if defined(_WIN32)
         SetConsoleCtrlHandler(ConsoleHandler, TRUE);
@@ -436,8 +455,9 @@ public:
      * Disables high-precision timers and performs necessary cleanup.
      */
     virtual ~SwCoreApplication() {
+        uninstallProfiler();
         desactiveWatchDog();
-        cleanupAllFibers_();
+        fiberPool_.shutdown();
         shutdownWakeup_();
         disableHighPrecisionTimers();
         unbindInstanceFromCurrentThread(this);
@@ -556,6 +576,12 @@ public:
      */
     void setEventFiberStackSize(unsigned int stackSizeBytes) {
         eventFiberStackSize_.store(stackSizeBytes, std::memory_order_relaxed);
+        if (fiberPool_.isWarmInitialized()) {
+            swCWarning(kSwLogCategory_SwCoreApplication)
+                << "setEventFiberStackSize() called after fiber pool warm-up; "
+                << "existing warm fibers keep their original stack size and only future spillover fibers may use the new value.";
+        }
+        refreshFiberPoolConfig_();
     }
 
     /**
@@ -568,18 +594,89 @@ public:
         return eventFiberStackSize_.load(std::memory_order_relaxed);
     }
 
+    bool installProfiler(SwRuntimeProfileSink* sink,
+                         const SwRuntimeProfileConfig& config = SwRuntimeProfileConfig()) {
+        if (!sink) {
+            return false;
+        }
+
+        uninstallProfiler();
+        profilerSession_.reset(new SwRuntimeProfilerSession(sink, config));
+        fiberPool_.bindObserver(profilerSession_.get());
+        if (SwCoreApplication::instance(false) == this) {
+            profilerSession_->bindToCurrentThread();
+        }
+        SwRuntimeProfilerService::registerSession(profilerSession_);
+        return true;
+    }
+
+    void uninstallProfiler() {
+        if (!profilerSession_) {
+            fiberPool_.bindObserver(nullptr);
+            return;
+        }
+
+        std::shared_ptr<SwRuntimeProfilerSession> oldSession = profilerSession_;
+        profilerSession_.reset();
+        fiberPool_.bindObserver(nullptr);
+        SwRuntimeProfilerService::unregisterSession(oldSession.get());
+        oldSession->clearThreadCurrent();
+    }
+
+    bool profilerEnabled() const {
+        return static_cast<bool>(profilerSession_);
+    }
+
+    void setProfilerStallThresholdUs(long long thresholdUs) {
+        if (!profilerSession_) {
+            return;
+        }
+        profilerSession_->setStallThresholdUs(thresholdUs);
+    }
+
     /**
      * @brief Posts an event (a function) to the event queue.
      * @param event Function to execute during event processing.
      */
     void postEvent(std::function<void()> event) {
-        {
-            std::lock_guard<std::mutex> lock(eventQueueMutex);
-            eventQueue.push(event);
+        postEventOnLane(std::move(event), SwFiberLane::Normal);
+    }
+
+    void postEventOnLane(std::function<void()> event, SwFiberLane lane) {
+        postEventOnLaneImpl_(std::move(event), lane, true);
+    }
+
+private:
+    void postEventOnLaneImpl_(std::function<void()> event,
+                              SwFiberLane lane,
+                              bool emitPostedTiming) {
+        std::function<void()> dispatchedEvent = std::move(event);
+        if (emitPostedTiming && profilerSession_ && profilerSession_->autoRuntimeScopesEnabled()) {
+            std::shared_ptr<SwRuntimeProfilerSession> session = profilerSession_;
+            std::function<void()> inner = std::move(dispatchedEvent);
+            dispatchedEvent = [session, inner, lane]() mutable {
+                session->bindToCurrentThread();
+                SwRuntimeScopedSpan scope(session.get(),
+                                          SwRuntimeTimingKind::PostedEvent,
+                                          "posted_event",
+                                          lane,
+                                          true);
+                inner();
+            };
+        }
+
+        bool rejectedByBackpressure = false;
+        const bool accepted = fiberPool_.enqueueTask(std::move(dispatchedEvent), lane, &rejectedByBackpressure);
+        if (!accepted && rejectedByBackpressure) {
+            swCWarning(kSwLogCategory_SwCoreApplication)
+                << "SwFiberPool saturated; rejecting posted event on lane=" << static_cast<int>(lane);
+            return;
         }
         cv.notify_one();
         signalWakeup_();
     }
+
+public:
 
     /**
      * @brief Posts an event object to a specific receiver, close to `QCoreApplication::postEvent`.
@@ -620,12 +717,7 @@ public:
      * Useful for latency-sensitive wakeups (ex: RPC completions) when the normal event queue is busy.
      */
     void postEventPriority(std::function<void()> event) {
-        {
-            std::lock_guard<std::mutex> lock(eventQueueMutex);
-            priorityEventQueue.push(event);
-        }
-        cv.notify_one();
-        signalWakeup_();
+        postEventOnLane(std::move(event), SwFiberLane::Control);
     }
 
     /**
@@ -642,6 +734,18 @@ public:
         if (tls == this) {
             SwCoreApplication::release();
         }
+    }
+
+    SwFiberPool& fiberPool() {
+        return fiberPool_;
+    }
+
+    const SwFiberPool& fiberPool() const {
+        return fiberPool_;
+    }
+
+    SwFiberPoolStats fiberPoolStats() const {
+        return fiberPool_.stats();
     }
 
     /**
@@ -678,6 +782,15 @@ public:
         if (!receiver || !event || !swIsObjectLive(receiver)) {
             return false;
         }
+
+        SwRuntimeProfilerSession* profilerSession = profilerSessionForCurrentThread_();
+        SwRuntimeScopedSpan profileScope(profilerSession && profilerSession->autoRuntimeScopesEnabled()
+                                             ? profilerSession
+                                             : nullptr,
+                                         SwRuntimeTimingKind::ObjectEvent,
+                                         "object_event",
+                                         SwFiberLane::Normal,
+                                         true);
 
         const bool previousKernelDispatch = event->isKernelDispatched();
         event->setKernelDispatched(true);
@@ -730,12 +843,15 @@ public:
      * @param interval Interval in microseconds between two executions of the callback.
      * @return The identifier of the created timer.
      */
-    int addTimer(std::function<void()> callback, int interval, bool singleShot = false) {
+    int addTimer(std::function<void()> callback,
+                 int interval,
+                 bool singleShot = false,
+                 SwFiberLane lane = SwFiberLane::Normal) {
         int timerId;
         {
             std::lock_guard<std::mutex> lock(eventQueueMutex);
             timerId = nextTimerId++;
-            timers.insert(timerId, new _T(callback, interval, singleShot));
+            timers.insert(timerId, new _T(callback, interval, singleShot, lane));
         }
         signalWakeup_();
         return timerId;
@@ -752,7 +868,8 @@ public:
             if (it != timers.end()) {
                 _T* toDelete = it->second;
                 timers.erase(it);
-                if (processingTimersDepth_ > 0) {
+                toDelete->cancelled = true;
+                if (processingTimersDepth_ > 0 || toDelete->dispatchPending) {
                     pendingTimerDeletes_.push_back(toDelete);
                 } else {
                     delete toDelete;
@@ -762,7 +879,8 @@ public:
             if (itOld != timers.end()) {
                 _T* toDelete = itOld->second;
                 timers.erase(itOld);
-                if (processingTimersDepth_ > 0) {
+                toDelete->cancelled = true;
+                if (processingTimersDepth_ > 0 || toDelete->dispatchPending) {
                     pendingTimerDeletes_.push_back(toDelete);
                 } else {
                     delete toDelete;
@@ -804,6 +922,7 @@ public:
      */
     virtual int exec(int maxDurationMicroseconds = 0) {
         setHighThreadPriority();
+        (void)profilerSessionForCurrentThread_();
         auto startTime = std::chrono::steady_clock::now();
         auto lastTime = startTime;
 
@@ -837,6 +956,8 @@ public:
                     measurements.pop_front();
                 }
             }
+
+            profilerUpdateIterationSnapshot_();
 
             auto totalElapsed = std::chrono::duration_cast<std::chrono::microseconds>(currentTime - startTime).count();
             if (maxDurationMicroseconds != 0 && totalElapsed >= maxDurationMicroseconds) {
@@ -904,75 +1025,70 @@ public:
          std::unique_lock<std::mutex> lock(eventQueueMutex);
 
         // Wait for an event if the queue is empty and waiting is allowed
-        if (priorityEventQueue.empty() &&
-            priorityPostedEventQueue_.empty() &&
-            eventQueue.empty() &&
+        if (priorityPostedEventQueue_.empty() &&
             postedEventQueue_.empty() &&
             timers.empty() &&
+            !fiberPool_.hasWork() &&
             waitForEvent) {
-            cv.wait(lock);
+            cv.wait(lock, [this]() {
+                return !priorityPostedEventQueue_.empty() ||
+                       !postedEventQueue_.empty() ||
+                       !timers.empty() ||
+                       fiberPool_.hasWork();
+            });
         }
 
-        // Process the next event if available
-        if (!priorityEventQueue.empty() ||
-            !priorityPostedEventQueue_.empty() ||
-            !eventQueue.empty() ||
-            !postedEventQueue_.empty()) {
-            std::function<void()> event;
-            PostedObjectEvent_ postedEvent;
-            bool hasPostedEvent = false;
-
-            if (!priorityEventQueue.empty()) {
-                event = priorityEventQueue.front();
-                priorityEventQueue.pop();
-            } else if (!priorityPostedEventQueue_.empty()) {
-                postedEvent = std::move(priorityPostedEventQueue_.front());
-                priorityPostedEventQueue_.pop_front();
-                hasPostedEvent = true;
-            } else {
-                if (!eventQueue.empty()) {
-                    event = eventQueue.front();
-                    eventQueue.pop();
-                } else {
-                    postedEvent = std::move(postedEventQueue_.front());
-                    postedEventQueue_.pop_front();
-                    hasPostedEvent = true;
-                }
-            }
-            lock.unlock(); // Unlock before running the event in a fiber
-            if (hasPostedEvent) {
-                dispatchPostedEvent_(std::move(postedEvent));
-            } else {
-                runEventInFiber(event);
-            }
-             // Run any ready fibers immediately (avoids extra loop latency after wakeups).
-             resumeReadyFibers();
-             return 0; // An event was processed, so no delay is required
-         }
-        lock.unlock();
-
-        // Process timer and get ne next Rendez-vous
-        int minTimeUntilNext = processTimers();
-
-         // Resume fibers that are ready to run
-         resumeReadyFibers();
-
-        // If fibers are still queued, don't sleep.
-        {
-            SwMutexLocker lk(getReadyMutex());
-            if (!getReadyFibersHi().empty() || !getReadyFibers().empty()) {
+        if (fiberPool_.hasControlWork()) {
+            lock.unlock();
+            if (runFiberPoolWork_()) {
                 return 0;
             }
+            lock.lock();
         }
+
+        if (!priorityPostedEventQueue_.empty()) {
+            PostedObjectEvent_ postedEvent = std::move(priorityPostedEventQueue_.front());
+            priorityPostedEventQueue_.pop_front();
+            lock.unlock();
+            dispatchPostedEvent_(std::move(postedEvent));
+            return 0;
+        }
+
+        lock.unlock();
+
+        int minTimeUntilNext = processTimers();
+        if (runFiberPoolWork_()) {
+            return 0;
+        }
+
+        lock.lock();
+
+        if (fiberPool_.hasNonControlWork()) {
+            lock.unlock();
+            if (runFiberPoolWork_()) {
+                return 0;
+            }
+            lock.lock();
+        }
+
+        if (!postedEventQueue_.empty()) {
+            PostedObjectEvent_ postedEvent = std::move(postedEventQueue_.front());
+            postedEventQueue_.pop_front();
+            lock.unlock();
+            dispatchPostedEvent_(std::move(postedEvent));
+            return 0;
+        }
+        lock.unlock();
 
         {
             std::lock_guard<std::mutex> lock(eventQueueMutex);
-            if (!priorityEventQueue.empty() ||
-                !priorityPostedEventQueue_.empty() ||
-                !eventQueue.empty() ||
+            if (!priorityPostedEventQueue_.empty() ||
                 !postedEventQueue_.empty()) {
                 return 0;
             }
+        }
+        if (fiberPool_.hasWork()) {
+            return 0;
         }
         // No pending work: wait indefinitely unless a timer is scheduled.
         return minTimeUntilNext != (std::numeric_limits<int>::max)() ? minTimeUntilNext : -1;
@@ -984,14 +1100,113 @@ public:
      */
     bool hasPendingEvents() {
         std::lock_guard<std::mutex> lock(eventQueueMutex);
-        return !priorityEventQueue.empty() ||
-               !priorityPostedEventQueue_.empty() ||
-               !eventQueue.empty() ||
+        return !priorityPostedEventQueue_.empty() ||
                !postedEventQueue_.empty() ||
-               !timers.empty();
+               !timers.empty() ||
+               fiberPool_.hasWork();
+    }
+
+protected:
+    void refreshFiberPoolConfig_() {
+        SwFiberPoolConfig config;
+        const unsigned int configuredStackSize = eventFiberStackSize_.load(std::memory_order_relaxed);
+        if (configuredStackSize != 0) {
+            config.stackSizeBytes = configuredStackSize;
+        }
+        fiberPool_.setConfig(config);
+    }
+
+    SwRuntimeProfilerSession* profilerSessionForCurrentThread_() {
+        if (!profilerSession_) {
+            return nullptr;
+        }
+        profilerSession_->bindToCurrentThread();
+        return profilerSession_.get();
+    }
+
+    double profilerLastSecondLoadPercentage_() const {
+        const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+        const std::chrono::steady_clock::time_point oneSecondAgo = now - std::chrono::seconds(1);
+
+        uint64_t sumBusy = 0;
+        uint64_t sumTotal = 0;
+        for (std::deque<IterationMeasurement>::const_iterator it = measurements.begin();
+             it != measurements.end();
+             ++it) {
+            if (it->timestamp < oneSecondAgo) {
+                continue;
+            }
+            sumBusy += it->busyMicroseconds;
+            sumTotal += it->totalMicroseconds;
+        }
+        if (sumTotal == 0) {
+            return 0.0;
+        }
+        return 100.0 * static_cast<double>(sumBusy) / static_cast<double>(sumTotal);
+    }
+
+    void profilerUpdateIterationSnapshot_() {
+        if (!profilerSession_) {
+            return;
+        }
+
+        SwRuntimeCountersSnapshot snapshot;
+        snapshot.busyMicroseconds = busyElapsedIteration;
+        if (!measurements.empty()) {
+            snapshot.totalMicroseconds = measurements.back().totalMicroseconds;
+        }
+        if (totalTimeMicroseconds != 0) {
+            snapshot.loadPercentage =
+                100.0 * static_cast<double>(totalBusyTimeMicroseconds) / static_cast<double>(totalTimeMicroseconds);
+        }
+        snapshot.lastSecondLoadPercentage = profilerLastSecondLoadPercentage_();
+        snapshot.fiberPoolStats = fiberPool_.stats();
+        snapshot.droppedRecords = 0;
+
+        {
+            std::lock_guard<std::mutex> lock(eventQueueMutex);
+            snapshot.postedEventCount = static_cast<int>(postedEventQueue_.size());
+            snapshot.priorityPostedEventCount = static_cast<int>(priorityPostedEventQueue_.size());
+            snapshot.timerCount = static_cast<int>(timers.size());
+        }
+
+        profilerSession_->updateCounters(snapshot);
     }
 
 private:
+    bool runFiberPoolWork_() {
+        (void)profilerSessionForCurrentThread_();
+        auto startBusy = std::chrono::steady_clock::now();
+        const bool ranWork = fiberPool_.runNextWorkItem();
+        if (ranWork) {
+            auto endBusy = std::chrono::steady_clock::now();
+            busyElapsedIteration += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(endBusy - startBusy).count());
+        }
+        return ranWork;
+    }
+
+    static bool routeYieldWakeAcrossInstances_(int id, SwFiberLane lane) {
+        SwCoreApplication* tlsInstance = SwCoreApplication::instance(false);
+        if (tlsInstance && tlsInstance->fiberPool_.unYield(id, lane)) {
+            tlsInstance->signalWakeup_();
+            return true;
+        }
+
+        std::lock_guard<std::mutex> registryLock(instanceRegistryMutex());
+        for (auto& kv : instanceRegistry()) {
+            SwCoreApplication* app = kv.second;
+            if (!app || app == tlsInstance) {
+                continue;
+            }
+            if (app->fiberPool_.unYield(id, lane)) {
+                app->signalWakeup_();
+                return true;
+            }
+        }
+        return false;
+    }
+
     void dispatchPostedEvent_(PostedObjectEvent_ postedEvent) {
         if (!postedEvent.event || !postedEvent.receiver || !swIsObjectLive(postedEvent.receiver)) {
             return;
@@ -1101,9 +1316,32 @@ protected:
             }
         }
 
+        HANDLE timeoutTimer = NULL;
         DWORD timeoutMs = INFINITE;
         if (timeoutUs >= 0) {
             timeoutMs = static_cast<DWORD>((timeoutUs + 999) / 1000);
+
+            timeoutTimer = ::CreateWaitableTimerExW(NULL,
+                                                    NULL,
+                                                    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                                    TIMER_ALL_ACCESS);
+            if (!timeoutTimer) {
+                timeoutTimer = ::CreateWaitableTimerW(NULL, TRUE, NULL);
+            }
+
+            if (timeoutTimer) {
+                LARGE_INTEGER dueTime;
+                const LONGLONG clampedTimeoutUs = timeoutUs > 0 ? static_cast<LONGLONG>(timeoutUs) : 1LL;
+                dueTime.QuadPart = -(clampedTimeoutUs * 10LL);
+                if (::SetWaitableTimer(timeoutTimer, &dueTime, 0, NULL, NULL, FALSE)) {
+                    handles.push_back(timeoutTimer);
+                    callbacks.push_back(std::function<void()>{});
+                    timeoutMs = INFINITE;
+                } else {
+                    ::CloseHandle(timeoutTimer);
+                    timeoutTimer = NULL;
+                }
+            }
         }
 
         if (handles.empty()) return;
@@ -1121,8 +1359,8 @@ protected:
         if (r >= WAIT_OBJECT_0 && r < WAIT_OBJECT_0 + handles.size()) {
             const size_t idx = static_cast<size_t>(r - WAIT_OBJECT_0);
             if (idx > 0 && idx < callbacks.size() && callbacks[idx]) {
-                runEventInFiber(callbacks[idx]);
-                resumeReadyFibers();
+                postEventOnLane(callbacks[idx], SwFiberLane::Control);
+                (void)runFiberPoolWork_();
             }
             return;
         }
@@ -1209,20 +1447,11 @@ public:
      */
     static void release() {
         SwCoreApplication* app = instance(false);
-        LPVOID current = GetCurrentFiber();
-        if (current == app->mainFiber) {
-            // Not in the event loop; ignore yielding
+        if (!app) {
             return;
         }
-        {
-            SwMutexLocker lock(getReadyMutex());
-            getReadyFibers().push(current);
-        }
-
+        app->fiberPool_.releaseCurrent();
         // Retour à la fibre principale
-        // The fiber is no longer executing once we switch back to the main fiber.
-        app->m_runningFiber = nullptr;
-        SwitchToFiber(app->mainFiber);
     }
 
     /**
@@ -1266,21 +1495,10 @@ public:
      */
     static void yieldFiber(int id) {
         SwCoreApplication* app = instance(false);
-        LPVOID current = GetCurrentFiber();
-        if (current == app->mainFiber) {
-            // Not in the event loop; ignore yielding
+        if (!app) {
             return;
         }
-        // Store the current fiber in the yielded fibers map
-        {
-            SwMutexLocker lock(getYieldMutex());
-            getYieldedFibers()[id] = current;
-        }
-
-        // Switch execution back to the main fiber
-        // The fiber is no longer executing once we switch back to the main fiber.
-        app->m_runningFiber = nullptr;
-        SwitchToFiber(app->mainFiber);
+        app->fiberPool_.yieldCurrent(id);
     }
 
     /**
@@ -1314,20 +1532,7 @@ public:
      *          when an external event signals that the fiber should continue its execution.
      */
     static void unYieldFiber(int id) {
-        LPVOID fiber = nullptr;
-        {
-            SwMutexLocker lock(getYieldMutex());
-            auto it = getYieldedFibers().find(id);
-            if (it != getYieldedFibers().end()) {
-                fiber = it->second;
-                getYieldedFibers().erase(it);
-            }
-        }
-
-        if (fiber) {
-            SwMutexLocker lock(getReadyMutex());
-            getReadyFibers().push(fiber);
-        }
+        routeYieldWakeAcrossInstances_(id, SwFiberLane::Normal);
     }
 
     /**
@@ -1336,20 +1541,7 @@ public:
      * This reduces wakeup latency for fibers waiting on critical events (ex: RPC replies).
      */
     static void unYieldFiberHighPriority(int id) {
-        LPVOID fiber = nullptr;
-        {
-            SwMutexLocker lock(getYieldMutex());
-            auto it = getYieldedFibers().find(id);
-            if (it != getYieldedFibers().end()) {
-                fiber = it->second;
-                getYieldedFibers().erase(it);
-            }
-        }
-
-        if (fiber) {
-            SwMutexLocker lock(getReadyMutex());
-            getReadyFibersHi().push(fiber);
-        }
+        routeYieldWakeAcrossInstances_(id, SwFiberLane::Control);
     }
 
     /**
@@ -1499,62 +1691,8 @@ private:
 
 protected:
 
-    // Fibers are thread-affine on Windows: a fiber created on one OS thread must only be resumed on that same thread.
-    // These queues/maps are therefore per-thread (thread_local). This also avoids cross-thread contention.
-    /**
-     * @brief Returns the current yield Mutex.
-     * @return The current yield Mutex.
-     *
-     * @details The returned value reflects the state currently stored by the instance.
-     */
-    static SwMutex& getYieldMutex() {
-         static thread_local SwMutex s_yieldMutex;
-         return s_yieldMutex;
-     }
-
-     /**
-      * @brief Returns the current yielded Fibers.
-      * @return The current yielded Fibers.
-      *
-      * @details The returned value reflects the state currently stored by the instance.
-      */
-     static std::map<int, LPVOID>& getYieldedFibers() {
-         static thread_local std::map<int, LPVOID> s_yieldedFibers;
-         return s_yieldedFibers;
-     }
-
-     /**
-      * @brief Returns the current ready Mutex.
-      * @return The current ready Mutex.
-      *
-      * @details The returned value reflects the state currently stored by the instance.
-      */
-     static SwMutex& getReadyMutex() {
-         static thread_local SwMutex s_readyMutex;
-         return s_readyMutex;
-     }
-
-     /**
-      * @brief Returns the current ready Fibers.
-      * @return The current ready Fibers.
-      *
-      * @details The returned value reflects the state currently stored by the instance.
-      */
-     static std::queue<LPVOID>& getReadyFibers() {
-         static thread_local std::queue<LPVOID> s_readyFibers;
-         return s_readyFibers;
-     }
-
-     /**
-      * @brief Returns the current ready Fibers Hi.
-      * @return The current ready Fibers Hi.
-      *
-      * @details The returned value reflects the state currently stored by the instance.
-      */
-     static std::queue<LPVOID>& getReadyFibersHi() {
-         static thread_local std::queue<LPVOID> s_readyFibersHi;
-         return s_readyFibersHi;
-     }
+    // Fiber scheduling is delegated to SwFiberPool, while watchdog preemption still needs
+    // a trampoline on Windows to force execution back to the main fiber context.
 
     #if defined(_WIN32)
     /**
@@ -1807,256 +1945,6 @@ protected:
         }
     }
 
-    static VOID WINAPI FiberProc(LPVOID lpParameter) {
-        std::function<void()>* callback = reinterpret_cast<std::function<void()>*>(lpParameter);
-
-        // Execute the callback function. Once we return from this function call,
-        // we know that the callback has fully completed its execution, including
-        // any yields that might have occurred during its lifetime.
-        executeCallbackSafely_(*callback);
-
-        // At this point, the callback is guaranteed to have finished, so we can
-        // safely delete the allocated std::function. By managing the lifetime
-        // here, we ensure that the callback's memory is only freed after it
-        // truly completes, preventing the risk of double deletes or accessing
-        // deallocated memory if it had simply yielded instead of fully returning.
-        delete callback;
-        instance()->m_runningFiber = nullptr;
-        // Finally, return control to the main fiber.
-        SwitchToFiber(instance()->mainFiber);
-    }
-
-
-    /**
-     * @brief Executes a given event (function) within a fiber and manages its lifecycle.
-     *
-     * This function creates a new fiber to execute the provided event (function), switches
-     * to the fiber to run it, and ensures proper cleanup of the fiber after execution.
-     *
-     * Steps:
-     * 1. Allocates a new fiber with `CreateFiber` and passes the event function as a parameter.
-     * 2. Switches to the newly created fiber using `SwitchToFiber` to execute the event.
-     * 3. After execution or yielding, the function ensures the fiber is properly deleted
-     *    using `deleteFiberIfNeeded`.
-     *
-     * @param event The function to execute within the fiber.
-     *
-     * @note If fiber creation fails, the event is executed synchronously in the current thread,
-     *       and the function logs an error message.
-     *
-     * @warning The caller must ensure that the event does not hold any references to objects
-     *          that may become invalid during fiber execution.
-     *
-     * @exception None. Errors during fiber creation are logged but do not throw exceptions.
-     *
-     * @remarks Fibers are a cooperative multitasking construct, so the event is expected to
-     *          yield or complete its execution without blocking other operations indefinitely.
-     */
-    void runEventInFiber(const std::function<void()>& event) {
-        auto startBusy = std::chrono::steady_clock::now();
-        std::function<void()>* cbPtr = new std::function<void()>(event);
-        const SIZE_T configuredStackSize = static_cast<SIZE_T>(eventFiberStackSize_.load(std::memory_order_relaxed));
-        LPVOID newFiber = CreateFiber(configuredStackSize, FiberProc, cbPtr);
-        if (!newFiber) {
-#if defined(_WIN32)
-            swCError(kSwLogCategory_SwCoreApplication) << "Failed to create fiber. Error: " << GetLastError();
-#else
-            swCError(kSwLogCategory_SwCoreApplication) << "Failed to create fiber.";
-#endif
-            executeCallbackSafely_(*cbPtr);
-            delete cbPtr;
-            return;
-        }
-        
-        safeRunningFiber(newFiber);
-
-        // Calcul du temps occupé dans cette opération
-        auto endBusy = std::chrono::steady_clock::now();
-        auto busyElapsed = std::chrono::duration_cast<std::chrono::microseconds>(endBusy - startBusy).count();
-        busyElapsedIteration += (uint64_t)busyElapsed;
-    }
-
-    /**
-     * @brief Resumes fibers that are ready to run.
-     *
-     * This function processes the queue of ready fibers (`s_readyFibers`) and resumes their execution
-     * one by one using `SwitchToFiber`. Each fiber is executed until it either completes or yields
-     * again. The function ensures that no fiber is resumed more than once during the same cycle.
-     *
-     * The function follows these steps:
-     * 1. Retrieves a fiber from the `s_readyFibers` queue.
-     * 2. Checks if the fiber has already been resumed during the current cycle using `resumedThisCycle`.
-     *    - If it has, the fiber is requeued, and the function exits to avoid infinite loops.
-     * 3. If the fiber has not been resumed, it is marked as resumed and executed using `SwitchToFiber`.
-     * 4. After execution, checks if the fiber needs to be deleted using `deleteFiberIfNeeded`.
-     *
-     * @note This function uses thread safety mechanisms (mutex locks) to ensure consistent access
-     *       to the `s_readyFibers` queue.
-     *
-     * @note A fiber that has already been resumed in the current cycle is requeued for execution
-     *       in subsequent cycles of the event loop.
-     */
-     void resumeReadyFibers() {
-         if (!running.load(std::memory_order_relaxed)) {
-             return;
-         }
-         std::unordered_set<LPVOID> resumedThisCycle;
-         auto startBusy = std::chrono::steady_clock::now();
-         while (true) {
-             if (!running.load(std::memory_order_relaxed)) {
-                 break;
-             }
-             LPVOID fiber = nullptr;
-             bool fromHi = false;
-            {
-                SwMutexLocker lock(getReadyMutex());
-                if (!getReadyFibersHi().empty()) {
-                    fiber = getReadyFibersHi().front();
-                    getReadyFibersHi().pop();
-                    fromHi = true;
-                } else if (!getReadyFibers().empty()) {
-                    fiber = getReadyFibers().front();
-                    getReadyFibers().pop();
-                } else {
-                    break; // No more fibers to resume
-                }
-            }
-
-            // Check if the fiber has already been resumed during this cycle
-            if (resumedThisCycle.find(fiber) != resumedThisCycle.end()) {
-                // Fiber has already been executed this cycle, requeue it for later
-                {
-                    SwMutexLocker lock(getReadyMutex());
-                    if (fromHi) getReadyFibersHi().push(fiber);
-                    else getReadyFibers().push(fiber);
-                }
-                // Exit this cycle; the fiber will be retried in the next processEvent() call.
-                break;
-            }
-            resumedThisCycle.insert(fiber);
-            safeRunningFiber(fiber);
-        }
-        // Calcul du temps occupé dans cette opération
-        auto endBusy = std::chrono::steady_clock::now();
-        auto busyElapsed = std::chrono::duration_cast<std::chrono::microseconds>(endBusy - startBusy).count();
-        busyElapsedIteration += (uint64_t)busyElapsed;
-    }
-
-    /**
-     * @brief Performs the `safeRunningFiber` operation.
-     * @param _fiber Value passed to the method.
-     */
-    void safeRunningFiber(LPVOID _fiber)
-    {
-        if (!_fiber) {
-            return;
-        }
-
-        m_runningFiber.store(_fiber, std::memory_order_release);
-        fiberStartTimeNs_.store(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
-                .count(),
-            std::memory_order_release);
-        SwitchToFiber(_fiber);
-        // Back in the main fiber after the target fiber finishes, yields, or gets preempted by the watchdog.
-        m_runningFiber.store(nullptr, std::memory_order_release);
-        fiberStartTimeNs_.store(0, std::memory_order_release);
-        if (fireWatchDog.exchange(false, std::memory_order_acq_rel)) {
-#if defined(_WIN32)
-            // On Windows the watchdog gets back to the main fiber by hijacking the
-            // interrupted thread context to run trampolineFunction(). That path does
-            // not preserve a resumable instruction pointer for the interrupted fiber,
-            // so re-queueing it would resume into the trampoline frame and hang or
-            // jump to garbage. Drop the fiber instead and let the event loop keep running.
-            swCWarning(kSwLogCategory_SwCoreApplication)
-                << "Watchdog preempted a blocking fiber on Windows; dropping the fiber.";
-#else
-            SwMutexLocker lock(getReadyMutex());
-            instance()->getReadyFibers().push(_fiber);
-#endif
-        }
-        // Back here after the fiber finishes or yields again
-        // Check if the fiber needs to be deleted
-        deleteFiberIfNeeded(_fiber);
-    }
-
-    /**
-     * @brief Deletes a fiber if it is no longer in use.
-     *
-     * This function checks whether a given fiber is still being used, either as a yielded fiber
-     * (waiting to be resumed) or as a ready fiber (waiting to be executed). If the fiber is neither
-     * yielded nor ready, it is safely deleted.
-     *
-     * The function performs the following steps:
-     * 1. Checks if the fiber is present in the `s_yieldedFibers` map (yielded fibers).
-     * 2. If not yielded, checks if the fiber is present in the `s_readyFibers` queue (ready fibers).
-     * 3. If the fiber is neither yielded nor ready, calls `DeleteFiber` to release its resources.
-     *
-     * @param fiber Pointer to the fiber to check and potentially delete.
-     *
-     * @note The function ensures thread safety by using mutex locks when accessing the shared
-     *       `s_yieldedFibers` and `s_readyFibers` data structures.
-     * @note If the fiber is still in use, it is not deleted.
-     */    
-    void deleteFiberIfNeeded(void* fiber) {
-        if(fiber == instance()->mainFiber){
-            return;
-        }
-
-        bool fiberYielded = isFiberYielded(fiber);
-        bool fiberReady = !fiberYielded && isFiberReady(fiber);
-
-        if (!fiberYielded && !fiberReady) {
-            DeleteFiber(fiber);
-        }
-    }
-
-
-    /**
-     * @brief Returns whether the object reports fiber Yielded.
-     * @param fiber Value passed to the method.
-     * @return `true` when the object reports fiber Yielded; otherwise `false`.
-     *
-     * @details This query does not modify the object state.
-     */
-    bool isFiberYielded(LPVOID fiber) {
-        SwMutexLocker lock(getYieldMutex());
-        for (auto &kv : getYieldedFibers()) {
-            if (kv.second == fiber) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * @brief Returns whether the object reports fiber Ready.
-     * @param fiber Value passed to the method.
-     * @return `true` when the object reports fiber Ready; otherwise `false`.
-     *
-     * @details This query does not modify the object state.
-     */
-    bool isFiberReady(LPVOID fiber) {
-        SwMutexLocker lock(getReadyMutex());
-        std::queue<LPVOID> tempHi = getReadyFibersHi();
-        while (!tempHi.empty()) {
-            LPVOID f = tempHi.front();
-            tempHi.pop();
-            if (f == fiber) {
-                return true;
-            }
-        }
-        std::queue<LPVOID> temp = getReadyFibers();
-        while (!temp.empty()) {
-            LPVOID f = temp.front();
-            temp.pop();
-            if (f == fiber) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     /**
      * @brief Processes timers, executing callbacks for ready timers, and calculates the time
      *        until the next timer is ready.
@@ -2087,6 +1975,11 @@ protected:
                     continue;
                 }
                 if (currentTimer->isReady()) {
+                    if (currentTimer->dispatchPending) {
+                        ++it;
+                        continue;
+                    }
+                    currentTimer->dispatchPending = true;
                     bool isSingleShot = currentTimer->singleShot;
                     readyTimers.push_back({currentTimer, isSingleShot});
                     if (isSingleShot) {
@@ -2100,19 +1993,49 @@ protected:
 
         // Execute callbacks outside the lock.
         for (auto& rt : readyTimers) {
+            const SwFiberLane timerLane = rt.timer->lane;
+            std::shared_ptr<SwRuntimeProfilerSession> timerProfilerSession = profilerSession_;
             if (rt.singleShot) {
                 _T* toDelete = rt.timer;
-                std::function<void()> timerEvent = [toDelete]() {
-                    toDelete->execute();
+                std::function<void()> timerEvent = [toDelete, timerProfilerSession, timerLane]() {
+                    if (timerProfilerSession) {
+                        timerProfilerSession->bindToCurrentThread();
+                    }
+                    SwRuntimeScopedSpan timerScope(timerProfilerSession &&
+                                                       timerProfilerSession->autoRuntimeScopesEnabled()
+                                                       ? timerProfilerSession.get()
+                                                       : nullptr,
+                                                   SwRuntimeTimingKind::Timer,
+                                                   "timer",
+                                                   timerLane,
+                                                   true);
+                    toDelete->dispatchPending = false;
+                    if (!toDelete->cancelled) {
+                        toDelete->execute();
+                    }
                     delete toDelete;
                 };
-                runEventInFiber(timerEvent);
+                postEventOnLaneImpl_(std::move(timerEvent), timerLane, false);
             } else {
                 _T* t = rt.timer;
-                std::function<void()> timerEvent = [t]() {
-                    t->execute();
+                std::function<void()> timerEvent = [t, timerProfilerSession, timerLane]() {
+                    if (timerProfilerSession) {
+                        timerProfilerSession->bindToCurrentThread();
+                    }
+                    SwRuntimeScopedSpan timerScope(timerProfilerSession &&
+                                                       timerProfilerSession->autoRuntimeScopesEnabled()
+                                                       ? timerProfilerSession.get()
+                                                       : nullptr,
+                                                   SwRuntimeTimingKind::Timer,
+                                                   "timer",
+                                                   timerLane,
+                                                   true);
+                    t->dispatchPending = false;
+                    if (!t->cancelled) {
+                        t->execute();
+                    }
                 };
-                runEventInFiber(timerEvent);
+                postEventOnLaneImpl_(std::move(timerEvent), timerLane, false);
             }
         }
 
@@ -2131,10 +2054,19 @@ protected:
             }
 
             if (--processingTimersDepth_ == 0 && !pendingTimerDeletes_.isEmpty()) {
+                SwList<_T*> stillPendingDeletes;
                 for (size_t i = 0; i < pendingTimerDeletes_.size(); ++i) {
-                    delete pendingTimerDeletes_[i];
+                    _T* pendingDelete = pendingTimerDeletes_[i];
+                    if (!pendingDelete) {
+                        continue;
+                    }
+                    if (pendingDelete->dispatchPending) {
+                        stillPendingDeletes.push_back(pendingDelete);
+                    } else {
+                        delete pendingDelete;
+                    }
                 }
-                pendingTimerDeletes_.clear();
+                pendingTimerDeletes_ = stillPendingDeletes;
             }
         }
 
@@ -2167,6 +2099,7 @@ protected:
     std::atomic<bool> watchdogRunning{ false };
     std::atomic<bool> fireWatchDog{ false };
     std::atomic<int64_t> fiberStartTimeNs_{0};
+    SwFiberPool fiberPool_;
 
     /**
      * @brief Returns the current function<void.
@@ -2211,42 +2144,12 @@ protected:
     int processingTimersDepth_ = 0;
     SwList<_T*> pendingTimerDeletes_;
     SwMap<SwString, SwString> parsedArguments; ///< Parsed command-line arguments.
+    std::shared_ptr<SwRuntimeProfilerSession> profilerSession_;
 
     std::atomic<LPVOID> m_runningFiber{nullptr}; ///< Pointer to the currently running fiber.
     LPVOID mainFiber = nullptr; ///< Pointer to the main fiber.
 
 private:
-    void cleanupAllFibers_() {
-        // Best-effort cleanup for any remaining fibers (yielded or ready) before shutdown.
-        // Without this, long-lived runtimes can leave fibers allocated until process exit.
-        // Works on both Windows (native fibers) and Linux (linux_fiber.h emulation).
-        std::vector<LPVOID> toDelete;
-        {
-            SwMutexLocker lk(getYieldMutex());
-            for (auto& kv : getYieldedFibers()) {
-                if (kv.second && kv.second != mainFiber) toDelete.push_back(kv.second);
-            }
-            getYieldedFibers().clear();
-        }
-        {
-            SwMutexLocker lk(getReadyMutex());
-            while (!getReadyFibersHi().empty()) {
-                LPVOID f = getReadyFibersHi().front();
-                getReadyFibersHi().pop();
-                if (f && f != mainFiber) toDelete.push_back(f);
-            }
-            while (!getReadyFibers().empty()) {
-                LPVOID f = getReadyFibers().front();
-                getReadyFibers().pop();
-                if (f && f != mainFiber) toDelete.push_back(f);
-            }
-        }
-        for (size_t i = 0; i < toDelete.size(); ++i) {
-            // DeleteFiber is safe only when the fiber is not executing.
-            DeleteFiber(toDelete[i]);
-        }
-    }
-
     void initWakeup_() {
 #if defined(_WIN32)
         wakeEvent_ = ::CreateEventA(NULL, FALSE, FALSE, NULL);
@@ -2301,9 +2204,32 @@ private:
             }
         }
 
+        HANDLE timeoutTimer = NULL;
         DWORD timeoutMs = INFINITE;
         if (timeoutUs >= 0) {
             timeoutMs = static_cast<DWORD>((timeoutUs + 999) / 1000);
+
+            timeoutTimer = ::CreateWaitableTimerExW(NULL,
+                                                    NULL,
+                                                    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                                    TIMER_ALL_ACCESS);
+            if (!timeoutTimer) {
+                timeoutTimer = ::CreateWaitableTimerW(NULL, TRUE, NULL);
+            }
+
+            if (timeoutTimer) {
+                LARGE_INTEGER dueTime;
+                const LONGLONG clampedTimeoutUs = timeoutUs > 0 ? static_cast<LONGLONG>(timeoutUs) : 1LL;
+                dueTime.QuadPart = -(clampedTimeoutUs * 10LL);
+                if (::SetWaitableTimer(timeoutTimer, &dueTime, 0, NULL, NULL, FALSE)) {
+                    handles.push_back(timeoutTimer);
+                    callbacks.push_back(std::function<void()>{});
+                    timeoutMs = INFINITE;
+                } else {
+                    ::CloseHandle(timeoutTimer);
+                    timeoutTimer = NULL;
+                }
+            }
         }
 
         // Limit: WaitForMultipleObjects supports up to MAXIMUM_WAIT_OBJECTS (typically 64).
@@ -2318,12 +2244,15 @@ private:
                                                  handles.data(),
                                                  FALSE,
                                                  timeoutMs);
+        if (timeoutTimer) {
+            ::CancelWaitableTimer(timeoutTimer);
+            ::CloseHandle(timeoutTimer);
+        }
         if (r >= WAIT_OBJECT_0 && r < WAIT_OBJECT_0 + handles.size()) {
             const size_t idx = static_cast<size_t>(r - WAIT_OBJECT_0);
             if (idx > 0 && idx < callbacks.size() && callbacks[idx]) {
-                runEventInFiber(callbacks[idx]);
-                // If the waitable callback un-yielded fibers, run them now (reduces latency).
-                resumeReadyFibers();
+                postEventOnLane(callbacks[idx], SwFiberLane::Control);
+                (void)runFiberPoolWork_();
             }
             return;
         }
@@ -2427,8 +2356,8 @@ private:
         for (size_t i = base; i < fds.size(); ++i) {
             if (fds[i].revents & POLLIN) {
                 if (callbacks[i]) {
-                    runEventInFiber(callbacks[i]);
-                    resumeReadyFibers();
+                    postEventOnLane(callbacks[i], SwFiberLane::Control);
+                    (void)runFiberPoolWork_();
                 }
             }
         }

@@ -287,6 +287,18 @@ public:
      */
     virtual void finalize() {}
     /**
+     * @brief Maps a widget-local rectangle to native/device coordinates.
+     * @param rect Rectangle used by the operation.
+     * @return The mapped rectangle.
+     */
+    virtual SwRect mapToDevice(const SwRect& rect) const { return rect; }
+    /**
+     * @brief Maps a widget-local point to native/device coordinates.
+     * @param point Value passed to the method.
+     * @return The mapped point.
+     */
+    virtual SwPoint mapToDevice(const SwPoint& point) const { return point; }
+    /**
      * @brief Returns the current native Handle.
      * @return The current native Handle.
      *
@@ -458,6 +470,20 @@ public:
         if (m_base) {
             m_base->finalize();
         }
+    }
+
+    SwRect mapToDevice(const SwRect& rect) const override {
+        SwRect r = rect;
+        r.x += m_dx;
+        r.y += m_dy;
+        return m_base ? m_base->mapToDevice(r) : r;
+    }
+
+    SwPoint mapToDevice(const SwPoint& point) const override {
+        SwPoint p = point;
+        p.x += m_dx;
+        p.y += m_dy;
+        return m_base ? m_base->mapToDevice(p) : p;
     }
 
     void* nativeHandle() override {

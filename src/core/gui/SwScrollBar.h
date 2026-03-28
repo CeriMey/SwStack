@@ -239,26 +239,75 @@ protected:
         const SwRect groove = grooveRect(bounds);
         const SwRect thumb = thumbRect(bounds);
 
+        const StyleSheet* sheet = const_cast<SwScrollBar*>(this)->getToolSheet();
+        const auto hierarchy = classHierarchy();
+
         SwColor grooveFill{236, 236, 236};
         SwColor grooveBorder{210, 210, 210};
         SwColor thumbFill{200, 200, 200};
         SwColor thumbBorder{170, 170, 170};
+        SwColor hoverThumbFill{186, 186, 186};
+        SwColor hoverThumbBorder{160, 160, 160};
+        SwColor pressedThumbFill{160, 160, 160};
+        SwColor pressedThumbBorder{140, 140, 140};
+        SwColor disabledGrooveFill{245, 245, 245};
+        SwColor disabledGrooveBorder{230, 230, 230};
+        SwColor disabledThumbFill{230, 230, 230};
+        SwColor disabledThumbBorder{210, 210, 210};
 
-        if (!getEnable()) {
-            grooveFill = SwColor{245, 245, 245};
-            grooveBorder = SwColor{230, 230, 230};
-            thumbFill = SwColor{230, 230, 230};
-            thumbBorder = SwColor{210, 210, 210};
-        } else if (m_dragging) {
-            thumbFill = SwColor{160, 160, 160};
-            thumbBorder = SwColor{140, 140, 140};
-        } else if (getHover()) {
-            thumbFill = SwColor{186, 186, 186};
-            thumbBorder = SwColor{160, 160, 160};
+        int grooveRadius = -1;
+        int thumbRadius = -1;
+        int borderWidth = 1;
+
+        (void)tryParseColor_(sheet, styleValue_(sheet, hierarchy, "background-color"), grooveFill);
+        (void)tryParseColor_(sheet, styleValue_(sheet, hierarchy, "border-color"), grooveBorder);
+        (void)tryParseColor_(sheet, styleValue_(sheet, hierarchy, "thumb-color"), thumbFill);
+        (void)tryParseColor_(sheet, styleValue_(sheet, hierarchy, "thumb-border-color"), thumbBorder);
+        (void)tryParseColor_(sheet, styleValue_(sheet, hierarchy, "thumb-color-hover"), hoverThumbFill);
+        (void)tryParseColor_(sheet, styleValue_(sheet, hierarchy, "thumb-border-color-hover"), hoverThumbBorder);
+        (void)tryParseColor_(sheet, styleValue_(sheet, hierarchy, "thumb-color-pressed"), pressedThumbFill);
+        (void)tryParseColor_(sheet, styleValue_(sheet, hierarchy, "thumb-border-color-pressed"), pressedThumbBorder);
+        (void)tryParseColor_(sheet, styleValue_(sheet, hierarchy, "background-color-disabled"), disabledGrooveFill);
+        (void)tryParseColor_(sheet, styleValue_(sheet, hierarchy, "border-color-disabled"), disabledGrooveBorder);
+        (void)tryParseColor_(sheet, styleValue_(sheet, hierarchy, "thumb-color-disabled"), disabledThumbFill);
+        (void)tryParseColor_(sheet, styleValue_(sheet, hierarchy, "thumb-border-color-disabled"), disabledThumbBorder);
+
+        SwString value = styleValue_(sheet, hierarchy, "border-width");
+        if (!value.isEmpty()) {
+            borderWidth = clampInt(parsePixelValue(value, borderWidth), 0, 8);
+        }
+        value = styleValue_(sheet, hierarchy, "border-radius");
+        if (!value.isEmpty()) {
+            grooveRadius = clampInt(parsePixelValue(value, 0), 0, 32);
+        }
+        value = styleValue_(sheet, hierarchy, "thumb-radius");
+        if (!value.isEmpty()) {
+            thumbRadius = clampInt(parsePixelValue(value, 0), 0, 32);
         }
 
-        painter->fillRoundedRect(groove, radiusFor(groove), grooveFill, grooveBorder, 1);
-        painter->fillRoundedRect(thumb, radiusFor(thumb), thumbFill, thumbBorder, 1);
+        if (!getEnable()) {
+            grooveFill = disabledGrooveFill;
+            grooveBorder = disabledGrooveBorder;
+            thumbFill = disabledThumbFill;
+            thumbBorder = disabledThumbBorder;
+        } else if (m_dragging) {
+            thumbFill = pressedThumbFill;
+            thumbBorder = pressedThumbBorder;
+        } else if (getHover()) {
+            thumbFill = hoverThumbFill;
+            thumbBorder = hoverThumbBorder;
+        }
+
+        painter->fillRoundedRect(groove,
+                                 radiusFor_(groove, grooveRadius),
+                                 grooveFill,
+                                 grooveBorder,
+                                 borderWidth);
+        painter->fillRoundedRect(thumb,
+                                 radiusFor_(thumb, thumbRadius),
+                                 thumbFill,
+                                 thumbBorder,
+                                 borderWidth);
     }
 
     /**
@@ -402,7 +451,10 @@ private:
         return px >= r.x && px <= (r.x + r.width) && py >= r.y && py <= (r.y + r.height);
     }
 
-    static int radiusFor(const SwRect& r) {
+    int radiusFor_(const SwRect& r, int explicitRadius) const {
+        if (explicitRadius >= 0) {
+            return explicitRadius;
+        }
         const int radius = std::min(r.width, r.height) / 2;
         return std::max(2, std::min(10, radius));
     }
@@ -412,7 +464,13 @@ private:
     }
 
     SwRect grooveRect(const SwRect& bounds) const {
-        const int padding = 2;
+        int padding = 2;
+        const StyleSheet* sheet = const_cast<SwScrollBar*>(this)->getToolSheet();
+        const auto hierarchy = classHierarchy();
+        const SwString value = styleValue_(sheet, hierarchy, "padding");
+        if (!value.isEmpty()) {
+            padding = clampInt(parsePixelValue(value, padding), 0, 16);
+        }
         if (m_orientation == Orientation::Horizontal) {
             const int h = std::max(8, bounds.height - padding * 2);
             const int y = bounds.y + (bounds.height - h) / 2;
@@ -426,7 +484,14 @@ private:
 
     int thumbLength(const SwRect& groove) const {
         const int trackLen = (m_orientation == Orientation::Horizontal) ? groove.width : groove.height;
-        const int minLen = std::max(16, trackLen / 8);
+        int minThumbLength = 16;
+        const StyleSheet* sheet = const_cast<SwScrollBar*>(this)->getToolSheet();
+        const auto hierarchy = classHierarchy();
+        const SwString value = styleValue_(sheet, hierarchy, "thumb-min-length");
+        if (!value.isEmpty()) {
+            minThumbLength = clampInt(parsePixelValue(value, minThumbLength), 8, 256);
+        }
+        const int minLen = std::max(minThumbLength, trackLen / 8);
         if (trackLen <= 0) {
             return minLen;
         }
@@ -507,5 +572,38 @@ private:
     int m_singleStep{1};
     bool m_dragging{false};
     int m_dragOffset{0};
+
+    static SwString styleValue_(const StyleSheet* sheet,
+                                const SwList<SwString>& hierarchy,
+                                const char* propertyName) {
+        if (!sheet || !propertyName) {
+            return SwString();
+        }
+
+        SwString out;
+        for (int i = static_cast<int>(hierarchy.size()) - 1; i >= 0; --i) {
+            const SwString& selector = hierarchy[static_cast<size_t>(i)];
+            if (selector.isEmpty()) {
+                continue;
+            }
+            SwString value = sheet->getStyleProperty(selector, propertyName);
+            if (!value.isEmpty()) {
+                out = value;
+            }
+        }
+        return out;
+    }
+
+    static bool tryParseColor_(const StyleSheet* sheet, const SwString& value, SwColor& out) {
+        if (!sheet || value.isEmpty()) {
+            return false;
+        }
+        try {
+            out = clampColor(const_cast<StyleSheet*>(sheet)->parseColor(value, nullptr));
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
 };
 

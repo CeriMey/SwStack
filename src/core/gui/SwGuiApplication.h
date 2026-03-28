@@ -124,6 +124,7 @@ public:
      */
     int exec(int maxDurationMicroseconds = 0) override {
         setHighThreadPriority();
+        (void)profilerSessionForCurrentThread_();
         auto startTime = std::chrono::steady_clock::now();
         auto lastTime = startTime;
 
@@ -131,6 +132,14 @@ public:
             busyElapsedIteration = 0;
 
             if (m_platformIntegration) {
+                SwRuntimeProfilerSession* profilerSession = profilerSessionForCurrentThread_();
+                SwRuntimeScopedSpan platformScope(profilerSession && profilerSession->autoRuntimeScopesEnabled()
+                                                      ? profilerSession
+                                                      : nullptr,
+                                                  SwRuntimeTimingKind::PlatformPump,
+                                                  "platform_pump",
+                                                  SwFiberLane::Control,
+                                                  true);
                 m_platformIntegration->processPlatformEvents();
             }
 
@@ -152,6 +161,14 @@ public:
 
             // Process freshly posted paint/input messages that may have been queued by processEvent().
             if (m_platformIntegration) {
+                SwRuntimeProfilerSession* profilerSession = profilerSessionForCurrentThread_();
+                SwRuntimeScopedSpan platformScope(profilerSession && profilerSession->autoRuntimeScopesEnabled()
+                                                      ? profilerSession
+                                                      : nullptr,
+                                                  SwRuntimeTimingKind::PlatformPump,
+                                                  "platform_pump",
+                                                  SwFiberLane::Control,
+                                                  true);
                 m_platformIntegration->processPlatformEvents();
             }
 
@@ -172,6 +189,8 @@ public:
             while (!measurements.empty() && measurements.front().timestamp < oneSecondAgo) {
                 measurements.pop_front();
             }
+
+            profilerUpdateIterationSnapshot_();
 
             auto totalElapsed =
                 std::chrono::duration_cast<std::chrono::microseconds>(currentTime - startTime).count();

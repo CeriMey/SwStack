@@ -134,6 +134,9 @@ else()
 sw_add_example_subdirectory(exemples/37-HttpAppQuickstart OFF)
 sw_add_example_subdirectory(exemples/38-DocumentEditor OFF)
 sw_add_example_subdirectory(exemples/39-CodeEditorPerf OFF)
+sw_add_example_subdirectory(exemples/40-FiberPoolSelfTest OFF)
+sw_add_example_subdirectory(exemples/41-RuntimeProfilerSelfTest OFF)
+sw_add_example_subdirectory(exemples/42-QtSwEmbeddedInterop OFF)
 endif()
 
 # Sw "nodes"/tools

@@ -1281,7 +1281,14 @@ private:
                 mouseEvent.shift = event.shift;
                 mouseEvent.alt = event.alt;
                 mouseEvent.clickCount = 1;
-                window->callbacks().mousePressHandler(mouseEvent);
+                if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
+                    const std::function<void(const SwMouseEvent&)> handler = window->callbacks().mousePressHandler;
+                    app->postEventOnLane([handler, mouseEvent]() {
+                        handler(mouseEvent);
+                    }, SwFiberLane::Input);
+                } else {
+                    window->callbacks().mousePressHandler(mouseEvent);
+                }
             }
             break;
         case swandroid::QueuedEventType::TouchMove:
@@ -1292,7 +1299,14 @@ private:
                 mouseEvent.ctrl = event.ctrl;
                 mouseEvent.shift = event.shift;
                 mouseEvent.alt = event.alt;
-                window->callbacks().mouseMoveHandler(mouseEvent);
+                if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
+                    const std::function<void(const SwMouseEvent&)> handler = window->callbacks().mouseMoveHandler;
+                    app->postEventOnLane([handler, mouseEvent]() {
+                        handler(mouseEvent);
+                    }, SwFiberLane::Input);
+                } else {
+                    window->callbacks().mouseMoveHandler(mouseEvent);
+                }
             }
             break;
         case swandroid::QueuedEventType::TouchUp:
@@ -1303,7 +1317,14 @@ private:
                 mouseEvent.ctrl = event.ctrl;
                 mouseEvent.shift = event.shift;
                 mouseEvent.alt = event.alt;
-                window->callbacks().mouseReleaseHandler(mouseEvent);
+                if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
+                    const std::function<void(const SwMouseEvent&)> handler = window->callbacks().mouseReleaseHandler;
+                    app->postEventOnLane([handler, mouseEvent]() {
+                        handler(mouseEvent);
+                    }, SwFiberLane::Input);
+                } else {
+                    window->callbacks().mouseReleaseHandler(mouseEvent);
+                }
             }
             break;
         case swandroid::QueuedEventType::KeyDown:
@@ -1313,7 +1334,14 @@ private:
                 keyEvent.ctrl = event.ctrl;
                 keyEvent.shift = event.shift;
                 keyEvent.alt = event.alt;
-                window->callbacks().keyPressHandler(keyEvent);
+                if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
+                    const std::function<void(const SwKeyEvent&)> handler = window->callbacks().keyPressHandler;
+                    app->postEventOnLane([handler, keyEvent]() {
+                        handler(keyEvent);
+                    }, SwFiberLane::Input);
+                } else {
+                    window->callbacks().keyPressHandler(keyEvent);
+                }
             }
             break;
         case swandroid::QueuedEventType::KeyUp:
@@ -1323,13 +1351,27 @@ private:
                 keyEvent.ctrl = event.ctrl;
                 keyEvent.shift = event.shift;
                 keyEvent.alt = event.alt;
-                window->callbacks().keyReleaseHandler(keyEvent);
+                if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
+                    const std::function<void(const SwKeyEvent&)> handler = window->callbacks().keyReleaseHandler;
+                    app->postEventOnLane([handler, keyEvent]() {
+                        handler(keyEvent);
+                    }, SwFiberLane::Input);
+                } else {
+                    window->callbacks().keyReleaseHandler(keyEvent);
+                }
             }
             break;
         case swandroid::QueuedEventType::DeleteRequest:
             if (!window->deleteAlreadyDispatched() && window->callbacks().deleteHandler) {
                 window->markDeleteDispatched();
-                window->callbacks().deleteHandler();
+                if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
+                    const std::function<void()> handler = window->callbacks().deleteHandler;
+                    app->postEventOnLane([handler]() {
+                        handler();
+                    }, SwFiberLane::Input);
+                } else {
+                    window->callbacks().deleteHandler();
+                }
             }
             break;
         }

@@ -227,7 +227,11 @@ public:
      */
     int exec(int delay = 0) {
         if(running_) return -1; // return if already runing
-        if(delay) SwTimer::singleShot(delay, this, &SwEventLoop::quit); // auto wake up if delay
+        if (delay) {
+            SwCoreApplication::instance()->addTimer([this]() {
+                quit();
+            }, delay * 1000, /*singleShot=*/true, SwFiberLane::Control);
+        }
         exitCode = 0;
         running_ = true;
         id_ = SwCoreApplication::generateYieldId();
@@ -291,8 +295,8 @@ public:
             // Schedule a one-shot timer (microseconds) to wake up the fiber after the specified duration
             int intervalUs = milliseconds <= 0 ? 0 : (milliseconds * 1000);
             app->addTimer([myId]() {
-                SwCoreApplication::unYieldFiber(myId);
-            }, intervalUs, /*singleShot=*/true);
+                SwCoreApplication::unYieldFiberHighPriority(myId);
+            }, intervalUs, /*singleShot=*/true, SwFiberLane::Control);
 
             // Yield the current fiber, pausing its execution
             SwCoreApplication::yieldFiber(myId);
@@ -372,7 +376,7 @@ public:
 
         // Use postEvent to start the runtime before any later user postEvent calls.
         // This avoids missing events in systems that subscribe then immediately publish.
-        if (app) app->postEvent(starter);
+        if (app) app->postEventOnLane(starter, SwFiberLane::Background);
         else SwTimer::singleShot(0, starter);
         return handle;
     }
@@ -427,7 +431,7 @@ public:
 
         // Use postEvent to start the runtime before any later user postEvent calls.
         // This avoids missing events in systems that subscribe then immediately publish.
-        if (app) app->postEvent(starter);
+        if (app) app->postEventOnLane(starter, SwFiberLane::Background);
         else SwTimer::singleShot(0, starter);
         return handle;
     }

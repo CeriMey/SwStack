@@ -47,7 +47,7 @@ Dans `SwNode/SwLaunch/SwLaunch.cpp`:
   - puis converti en chemin absolu (plateforme).
 - si `workingDirectory` est absent: fallback sur le dossier de l'exe.
 
-Attention: **les plugins** du container sont resolus par `SwLibrary` **dans le process container** (depuis son CWD). Donc, pour des paths de plugin simples (ex: `"PingPongPlugin"`), mets un `workingDirectory` coherent (souvent le dossier de l'exe qui contient aussi les `.dll`).
+Attention: **les plugins** du container sont resolus par `SwPluginLoader` **dans le process container** (via le backend `SwLibrary`, donc depuis son CWD). Donc, pour des paths de plugin simples (ex: `"PingPongPlugin"`), mets un `workingDirectory` coherent (souvent le dossier de l'exe qui contient aussi les `.dll`).
 
 ## Schema JSON (launch)
 
