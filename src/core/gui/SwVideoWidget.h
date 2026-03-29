@@ -53,6 +53,7 @@
 #include "media/SwVideoSink.h"
 #if defined(_WIN32)
 #include "media/SwMediaFoundationVideoDecoder.h"
+#include "platform/win/SwD3D11VideoInterop.h"
 #endif
 #include "SwGuiApplication.h"
 
@@ -70,8 +71,10 @@ static constexpr const char* kSwLogCategory_SwVideoWidget = "sw.core.gui.swvideo
 #if defined(_WIN32)
 #include "platform/win/SwWindows.h"
 #include <wrl/client.h>
+#include <d3d11.h>
 #include <d2d1.h>
 #include <d2d1helper.h>
+#pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "d2d1.lib")
 #endif
 
@@ -124,6 +127,248 @@ public:
 };
 
 #if defined(_WIN32)
+class SwD3D11VideoRenderer : public SwVideoRenderer {
+public:
+    SwD3D11VideoRenderer() {
+        m_supported = SwD3D11VideoInterop::instance().ensure();
+    }
+
+    bool isSupported() const {
+        return m_supported && SwD3D11VideoInterop::instance().isReady();
+    }
+
+    bool render(SwPainter* painter,
+                const SwVideoFrame& frame,
+                const SwRect& targetRect) override {
+        if (!painter || !frame.isNativeD3D11() || !isSupported()) {
+            return false;
+        }
+        void* native = painter->nativeHandle();
+        HDC hdc = native ? reinterpret_cast<HDC>(native) : nullptr;
+        if (!hdc || !frame.d3d11Texture()) {
+            return false;
+        }
+        SwD3D11VideoInterop& interop = SwD3D11VideoInterop::instance();
+        if (!interop.device() || !interop.context() || !interop.videoDevice() || !interop.videoContext()) {
+            return false;
+        }
+        if (frame.d3d11Device() && frame.d3d11Device() != interop.device()) {
+            return false;
+        }
+
+        const SwRect deviceRect = painter->mapToDevice(targetRect);
+        if (deviceRect.width <= 0 || deviceRect.height <= 0) {
+            return false;
+        }
+
+        if (!ensureOutputResources(frame, deviceRect)) {
+            return false;
+        }
+        if (!ensureInputView(frame)) {
+            return false;
+        }
+        if (!ensureOutputView()) {
+            return false;
+        }
+        if (!renderToOutput(frame)) {
+            return false;
+        }
+        return blitOutput(hdc, deviceRect);
+    }
+
+private:
+    bool ensureOutputResources(const SwVideoFrame& frame, const SwRect& deviceRect) {
+        const UINT width = static_cast<UINT>(deviceRect.width);
+        const UINT height = static_cast<UINT>(deviceRect.height);
+        const bool sizeChanged = (m_outputWidth != width || m_outputHeight != height);
+        const bool formatChanged =
+            (m_inputWidth != static_cast<UINT>(frame.width()) ||
+             m_inputHeight != static_cast<UINT>(frame.height()) ||
+             m_inputFormat != frame.nativeDxgiFormat());
+        if (!sizeChanged && !formatChanged && m_outputTexture && m_enumerator && m_videoProcessor) {
+            return true;
+        }
+
+        m_outputView.Reset();
+        m_outputSurface.Reset();
+        m_outputTexture.Reset();
+        m_enumerator.Reset();
+        m_videoProcessor.Reset();
+        m_inputWidth = static_cast<UINT>(frame.width());
+        m_inputHeight = static_cast<UINT>(frame.height());
+        m_inputFormat = frame.nativeDxgiFormat();
+        m_outputWidth = width;
+        m_outputHeight = height;
+
+        SwD3D11VideoInterop& interop = SwD3D11VideoInterop::instance();
+
+        D3D11_TEXTURE2D_DESC outputDesc{};
+        outputDesc.Width = width;
+        outputDesc.Height = height;
+        outputDesc.MipLevels = 1;
+        outputDesc.ArraySize = 1;
+        outputDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        outputDesc.SampleDesc.Count = 1;
+        outputDesc.Usage = D3D11_USAGE_DEFAULT;
+        outputDesc.BindFlags = D3D11_BIND_RENDER_TARGET;
+        outputDesc.MiscFlags = D3D11_RESOURCE_MISC_GDI_COMPATIBLE;
+        HRESULT hr = interop.device()->CreateTexture2D(&outputDesc, nullptr, m_outputTexture.GetAddressOf());
+        if (FAILED(hr) || !m_outputTexture) {
+            return false;
+        }
+        if (FAILED(m_outputTexture.As(&m_outputSurface)) || !m_outputSurface) {
+            m_outputTexture.Reset();
+            return false;
+        }
+
+        D3D11_VIDEO_PROCESSOR_CONTENT_DESC contentDesc{};
+        contentDesc.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+        contentDesc.InputWidth = m_inputWidth;
+        contentDesc.InputHeight = m_inputHeight;
+        contentDesc.OutputWidth = width;
+        contentDesc.OutputHeight = height;
+        contentDesc.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
+        hr = interop.videoDevice()->CreateVideoProcessorEnumerator(&contentDesc, m_enumerator.GetAddressOf());
+        if (FAILED(hr) || !m_enumerator) {
+            m_outputSurface.Reset();
+            m_outputTexture.Reset();
+            return false;
+        }
+        hr = interop.videoDevice()->CreateVideoProcessor(m_enumerator.Get(), 0, m_videoProcessor.GetAddressOf());
+        if (FAILED(hr) || !m_videoProcessor) {
+            m_enumerator.Reset();
+            m_outputSurface.Reset();
+            m_outputTexture.Reset();
+            return false;
+        }
+        return true;
+    }
+
+    bool ensureInputView(const SwVideoFrame& frame) {
+        if (!frame.d3d11Texture()) {
+            return false;
+        }
+        if (m_inputView && m_boundTexture.Get() == frame.d3d11Texture() &&
+            m_boundSubresourceIndex == frame.nativeSubresourceIndex()) {
+            return true;
+        }
+        m_inputView.Reset();
+        m_boundTexture = frame.d3d11Texture();
+        m_boundSubresourceIndex = frame.nativeSubresourceIndex();
+
+        D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inputDesc{};
+        inputDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+        inputDesc.Texture2D.ArraySlice = m_boundSubresourceIndex;
+        HRESULT hr = SwD3D11VideoInterop::instance().videoDevice()->CreateVideoProcessorInputView(
+            frame.d3d11Texture(),
+            m_enumerator.Get(),
+            &inputDesc,
+            m_inputView.GetAddressOf());
+        if (FAILED(hr)) {
+            m_inputView.Reset();
+            return false;
+        }
+        return true;
+    }
+
+    bool ensureOutputView() {
+        if (m_outputView) {
+            return true;
+        }
+        D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outputDesc{};
+        outputDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+        HRESULT hr = SwD3D11VideoInterop::instance().videoDevice()->CreateVideoProcessorOutputView(
+            m_outputTexture.Get(),
+            m_enumerator.Get(),
+            &outputDesc,
+            m_outputView.GetAddressOf());
+        if (FAILED(hr)) {
+            m_outputView.Reset();
+            return false;
+        }
+        return true;
+    }
+
+    bool renderToOutput(const SwVideoFrame& frame) {
+        SwD3D11VideoInterop& interop = SwD3D11VideoInterop::instance();
+        if (frame.nativeDxgiFormat() == DXGI_FORMAT_B8G8R8A8_UNORM &&
+            frame.width() == static_cast<int>(m_outputWidth) &&
+            frame.height() == static_cast<int>(m_outputHeight)) {
+            interop.context()->CopySubresourceRegion(m_outputTexture.Get(),
+                                                     0,
+                                                     0,
+                                                     0,
+                                                     0,
+                                                     frame.d3d11Texture(),
+                                                     frame.nativeSubresourceIndex(),
+                                                     nullptr);
+            interop.flush();
+            return true;
+        }
+
+        RECT srcRect{0, 0, frame.width(), frame.height()};
+        RECT dstRect{0, 0, static_cast<LONG>(m_outputWidth), static_cast<LONG>(m_outputHeight)};
+        interop.videoContext()->VideoProcessorSetOutputTargetRect(m_videoProcessor.Get(), TRUE, &dstRect);
+        interop.videoContext()->VideoProcessorSetStreamSourceRect(m_videoProcessor.Get(), 0, TRUE, &srcRect);
+        interop.videoContext()->VideoProcessorSetStreamDestRect(m_videoProcessor.Get(), 0, TRUE, &dstRect);
+        interop.videoContext()->VideoProcessorSetStreamFrameFormat(m_videoProcessor.Get(),
+                                                                   0,
+                                                                   D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+
+        D3D11_VIDEO_PROCESSOR_STREAM stream{};
+        stream.Enable = TRUE;
+        stream.pInputSurface = m_inputView.Get();
+        HRESULT hr = interop.videoContext()->VideoProcessorBlt(m_videoProcessor.Get(),
+                                                               m_outputView.Get(),
+                                                               0,
+                                                               1,
+                                                               &stream);
+        interop.flush();
+        return SUCCEEDED(hr);
+    }
+
+    bool blitOutput(HDC targetHdc, const SwRect& deviceRect) {
+        if (!m_outputSurface || !targetHdc) {
+            return false;
+        }
+        HDC surfaceDc = nullptr;
+        HRESULT hr = m_outputSurface->GetDC(FALSE, &surfaceDc);
+        if (FAILED(hr) || !surfaceDc) {
+            return false;
+        }
+        int previousMode = SetStretchBltMode(targetHdc, COLORONCOLOR);
+        BOOL copied = BitBlt(targetHdc,
+                             deviceRect.x,
+                             deviceRect.y,
+                             deviceRect.width,
+                             deviceRect.height,
+                             surfaceDc,
+                             0,
+                             0,
+                             SRCCOPY);
+        if (previousMode != 0) {
+            SetStretchBltMode(targetHdc, previousMode);
+        }
+        m_outputSurface->ReleaseDC(nullptr);
+        return copied == TRUE;
+    }
+
+    bool m_supported{false};
+    UINT m_inputWidth{0};
+    UINT m_inputHeight{0};
+    UINT m_outputWidth{0};
+    UINT m_outputHeight{0};
+    UINT m_boundSubresourceIndex{0};
+    DXGI_FORMAT m_inputFormat{DXGI_FORMAT_UNKNOWN};
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> m_boundTexture;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> m_outputTexture;
+    Microsoft::WRL::ComPtr<IDXGISurface1> m_outputSurface;
+    Microsoft::WRL::ComPtr<ID3D11VideoProcessorEnumerator> m_enumerator;
+    Microsoft::WRL::ComPtr<ID3D11VideoProcessor> m_videoProcessor;
+    Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView> m_inputView;
+    Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView> m_outputView;
+};
+
 class SwWin32VideoRenderer : public SwVideoRenderer {
 public:
     /**
@@ -157,7 +402,7 @@ public:
         if (!data) {
             return false;
         }
-        int previousMode = SetStretchBltMode(hdc, HALFTONE);
+        int previousMode = SetStretchBltMode(hdc, COLORONCOLOR);
         POINT prevOrg{};
         SetBrushOrgEx(hdc, 0, 0, &prevOrg);
 
@@ -386,6 +631,14 @@ public:
         Center
     };
 
+    enum class RenderPath {
+        None,
+        GPUZeroCopy,
+        CpuD2DUpload,
+        CpuGdiFallback,
+        Placeholder
+    };
+
     /**
      * @brief Constructs a `SwVideoWidget` instance.
      * @param parent Optional parent object that owns this instance.
@@ -529,6 +782,7 @@ public:
      */
     void setRenderer(const std::shared_ptr<SwVideoRenderer>& renderer) {
         m_renderer = renderer ? renderer : createDefaultRenderer();
+        m_useAutomaticRenderer = !renderer;
     }
 
     /**
@@ -653,28 +907,69 @@ public:
 
         SwVideoFrame frame = currentFrame();
         bool rendered = false;
-        if (frame.isValid() && m_renderer) {
+        if (frame.isValid()) {
             const SwRect target = computeTargetRect(rect, frame);
-            rendered = m_renderer->render(painter, frame, target);
+            if (!m_useAutomaticRenderer && m_renderer) {
+                rendered = m_renderer->render(painter, frame, target);
+            }
 #if defined(_WIN32)
-            if (!rendered && !std::dynamic_pointer_cast<SwWin32VideoRenderer>(m_renderer)) {
-                auto gdiRenderer = std::make_shared<SwWin32VideoRenderer>();
-                rendered = gdiRenderer->render(painter, frame, target);
-                if (rendered) {
-                    m_renderer = gdiRenderer;
+            if (!rendered && frame.isNativeD3D11()) {
+                auto gpuRenderer = ensureGpuRenderer_();
+                if (gpuRenderer) {
+                    rendered = gpuRenderer->render(painter, frame, target);
+                    if (rendered) {
+                        if (m_useAutomaticRenderer) {
+                            m_renderer = gpuRenderer;
+                        }
+                        recordRenderPath_(RenderPath::GPUZeroCopy);
+                    }
                 }
             }
 #endif
-            if (!rendered && !std::dynamic_pointer_cast<SwFallbackVideoRenderer>(m_renderer)) {
-                auto fallbackRenderer = std::make_shared<SwFallbackVideoRenderer>();
-                rendered = fallbackRenderer->render(painter, frame, target);
-                if (rendered) {
-                    m_renderer = fallbackRenderer;
+            if (!rendered && isTightBGRAFrame_(frame)) {
+#if defined(_WIN32)
+                auto d2dRenderer = ensureD2DRenderer_();
+                if (d2dRenderer) {
+                    rendered = d2dRenderer->render(painter, frame, target);
+                    if (rendered) {
+                        if (m_useAutomaticRenderer) {
+                            m_renderer = d2dRenderer;
+                        }
+                        recordRenderPath_(RenderPath::CpuD2DUpload);
+                    }
+                }
+#endif
+            }
+#if defined(_WIN32)
+            if (!rendered) {
+                auto gdiRenderer = ensureGdiRenderer_();
+                if (gdiRenderer) {
+                    rendered = gdiRenderer->render(painter, frame, target);
+                    if (rendered) {
+                        if (m_useAutomaticRenderer) {
+                            m_renderer = gdiRenderer;
+                        }
+                        recordRenderPath_(RenderPath::CpuGdiFallback);
+                    }
+                }
+            }
+#endif
+            if (!rendered) {
+                auto fallbackRenderer = ensureFallbackRenderer_();
+                if (fallbackRenderer) {
+                    rendered = fallbackRenderer->render(painter, frame, target);
+                    if (rendered) {
+                        if (m_useAutomaticRenderer) {
+                            m_renderer = fallbackRenderer;
+                        }
+                        recordRenderPath_(RenderPath::Placeholder);
+                    }
                 }
             }
         }
 
         if (!rendered) {
+            recordRenderPath_(RenderPath::Placeholder);
             drawPlaceholder(painter, rect);
             return;
         }
@@ -778,18 +1073,14 @@ private:
     }
 
     static std::shared_ptr<SwVideoRenderer> createDefaultRenderer() {
-#if defined(_WIN32)
-        auto d2dRenderer = std::make_shared<SwD2DVideoRenderer>();
-        if (d2dRenderer->isSupported()) {
-            return d2dRenderer;
-        }
-        return std::make_shared<SwWin32VideoRenderer>();
-#else
         return std::make_shared<SwFallbackVideoRenderer>();
-#endif
     }
 
     void handleIncomingFrame(const SwVideoFrame& frame) {
+        if (frame.isNative()) {
+            presentFrame(frame);
+            return;
+        }
         if (frame.isValid() &&
             frame.pixelFormat() == SwVideoPixelFormat::BGRA32 &&
             frame.planeData(0) &&
@@ -842,6 +1133,75 @@ private:
         target.x = bounds.x + (bounds.width - target.width) / 2;
         target.y = bounds.y + (bounds.height - target.height) / 2;
         return target;
+    }
+
+    static bool isTightBGRAFrame_(const SwVideoFrame& frame) {
+        return frame.isValid() &&
+               frame.pixelFormat() == SwVideoPixelFormat::BGRA32 &&
+               frame.planeData(0) &&
+               frame.planeStride(0) == frame.width() * 4;
+    }
+
+    std::shared_ptr<SwVideoRenderer> ensureFallbackRenderer_() {
+        if (!m_fallbackRenderer) {
+            m_fallbackRenderer = std::make_shared<SwFallbackVideoRenderer>();
+        }
+        return m_fallbackRenderer;
+    }
+
+#if defined(_WIN32)
+    std::shared_ptr<SwVideoRenderer> ensureGpuRenderer_() {
+        if (!m_gpuRenderer) {
+            auto renderer = std::make_shared<SwD3D11VideoRenderer>();
+            if (renderer->isSupported()) {
+                m_gpuRenderer = renderer;
+            }
+        }
+        return m_gpuRenderer;
+    }
+
+    std::shared_ptr<SwVideoRenderer> ensureD2DRenderer_() {
+        if (!m_d2dRenderer) {
+            auto renderer = std::make_shared<SwD2DVideoRenderer>();
+            if (renderer->isSupported()) {
+                m_d2dRenderer = renderer;
+            }
+        }
+        return m_d2dRenderer;
+    }
+
+    std::shared_ptr<SwVideoRenderer> ensureGdiRenderer_() {
+        if (!m_gdiRenderer) {
+            m_gdiRenderer = std::make_shared<SwWin32VideoRenderer>();
+        }
+        return m_gdiRenderer;
+    }
+#endif
+
+    static const char* renderPathName_(RenderPath path) {
+        switch (path) {
+        case RenderPath::GPUZeroCopy:
+            return "GPU zero-copy";
+        case RenderPath::CpuD2DUpload:
+            return "CPU D2D upload";
+        case RenderPath::CpuGdiFallback:
+            return "CPU GDI fallback";
+        case RenderPath::Placeholder:
+            return "placeholder";
+        case RenderPath::None:
+        default:
+            return "none";
+        }
+    }
+
+    void recordRenderPath_(RenderPath path) {
+        RenderPath previous = m_renderPath.load();
+        if (previous == path) {
+            return;
+        }
+        m_renderPath.store(path);
+        swCWarning(kSwLogCategory_SwVideoWidget)
+            << "[SwVideoWidget] Render path=" << renderPathName_(path);
     }
 
     SwVideoFrame convertToBGRA(const SwVideoFrame& frame) {
@@ -958,6 +1318,66 @@ private:
             copyMetadata();
             break;
         }
+        case SwVideoPixelFormat::P010:
+        case SwVideoPixelFormat::P016: {
+            const uint16_t* yPlane = reinterpret_cast<const uint16_t*>(frame.planeData(0));
+            const uint16_t* uvPlane = reinterpret_cast<const uint16_t*>(frame.planeData(1));
+            const int yStride = frame.planeStride(0) / static_cast<int>(sizeof(uint16_t));
+            const int uvStride = frame.planeStride(1) / static_cast<int>(sizeof(uint16_t));
+            for (int y = 0; y < frame.height(); ++y) {
+                const uint16_t* yRow = yPlane + static_cast<std::size_t>(y) * yStride;
+                const uint16_t* uvRow = uvPlane + static_cast<std::size_t>(y / 2) * uvStride;
+                uint8_t* dstRow = dst + y * dstStride;
+                for (int x = 0; x < frame.width(); ++x) {
+                    const uint8_t Y = static_cast<uint8_t>(yRow[x] >> 8);
+                    const int chromaIndex = (x / 2) * 2;
+                    const int U = static_cast<int>(static_cast<uint8_t>(uvRow[chromaIndex] >> 8)) - 128;
+                    const int V = static_cast<int>(static_cast<uint8_t>(uvRow[chromaIndex + 1] >> 8)) - 128;
+                    const int C = std::max(0, static_cast<int>(Y) - 16);
+                    int r = (298 * C + 409 * V + 128) >> 8;
+                    int g = (298 * C - 100 * U - 208 * V + 128) >> 8;
+                    int b = (298 * C + 516 * U + 128) >> 8;
+                    dstRow[x * 4 + 0] = clamp(b);
+                    dstRow[x * 4 + 1] = clamp(g);
+                    dstRow[x * 4 + 2] = clamp(r);
+                    dstRow[x * 4 + 3] = 255;
+                }
+            }
+            copyMetadata();
+            break;
+        }
+        case SwVideoPixelFormat::YUY2: {
+            const uint8_t* src = frame.planeData(0);
+            const int srcStride = frame.planeStride(0);
+            for (int y = 0; y < frame.height(); ++y) {
+                const uint8_t* srcRow = src + static_cast<std::size_t>(y) * srcStride;
+                uint8_t* dstRow = dst + static_cast<std::size_t>(y) * dstStride;
+                for (int x = 0; x < frame.width(); x += 2) {
+                    const int idx = x * 2;
+                    const int y0 = srcRow[idx + 0];
+                    const int u = srcRow[idx + 1] - 128;
+                    const int y1 = srcRow[idx + 2];
+                    const int v = srcRow[idx + 3] - 128;
+                    const int c0 = std::max(0, y0 - 16);
+                    const int c1 = std::max(0, y1 - 16);
+                    auto convertPixel = [&](int C, uint8_t* dstPixel) {
+                        int r = (298 * C + 409 * v + 128) >> 8;
+                        int g = (298 * C - 100 * u - 208 * v + 128) >> 8;
+                        int b = (298 * C + 516 * u + 128) >> 8;
+                        dstPixel[0] = clamp(b);
+                        dstPixel[1] = clamp(g);
+                        dstPixel[2] = clamp(r);
+                        dstPixel[3] = 255;
+                    };
+                    convertPixel(c0, dstRow + x * 4);
+                    if (x + 1 < frame.width()) {
+                        convertPixel(c1, dstRow + (x + 1) * 4);
+                    }
+                }
+            }
+            copyMetadata();
+            break;
+        }
         case SwVideoPixelFormat::YUV420P: {
             const uint8_t* yPlane = frame.planeData(0);
             const uint8_t* uPlane = frame.planeData(1);
@@ -1000,8 +1420,16 @@ private:
     std::shared_ptr<SwVideoSink> m_videoSink;
     std::shared_ptr<SwVideoDecoder> m_decoder;
     std::shared_ptr<SwVideoRenderer> m_renderer;
+#if defined(_WIN32)
+    std::shared_ptr<SwVideoRenderer> m_gpuRenderer;
+    std::shared_ptr<SwVideoRenderer> m_d2dRenderer;
+    std::shared_ptr<SwVideoRenderer> m_gdiRenderer;
+#endif
+    std::shared_ptr<SwVideoRenderer> m_fallbackRenderer;
     ScalingMode m_scalingMode{ScalingMode::Fit};
     SwColor m_backgroundColor{0, 0, 0};
+    std::atomic<RenderPath> m_renderPath{RenderPath::None};
+    bool m_useAutomaticRenderer{true};
 
     mutable std::mutex m_frameMutex;
     SwVideoFrame m_currentFrame;

@@ -79,6 +79,7 @@ static constexpr const char* kSwLogCategory_SwMediaFoundationH264Decoder = "sw.m
 
 
 #if defined(_WIN32)
+#include "platform/win/SwD3D11VideoInterop.h"
 #include <codecapi.h>
 #include <mfapi.h>
 #include <mferror.h>
@@ -626,6 +627,24 @@ private:
     }
 
     virtual int outputSubtypeRank(const GUID& subtype) const {
+        if (m_hardwareInteropActive) {
+            if (subtype == MFVideoFormat_NV12) {
+                return 0;
+            }
+            if (subtype == MFVideoFormat_P010) {
+                return 1;
+            }
+            if (subtype == MFVideoFormat_P016) {
+                return 2;
+            }
+            if (subtype == MFVideoFormat_RGB32) {
+                return 3;
+            }
+            if (subtype == MFVideoFormat_YUY2) {
+                return 4;
+            }
+            return -1;
+        }
         if (subtype == MFVideoFormat_RGB32) {
             return 0;
         }
@@ -696,6 +715,7 @@ private:
         }
         m_decoder = decoder;
         configureLowLatencyMode();
+        configureHardwareInterop();
 
         if (!setInputType()) {
             return false;
@@ -853,6 +873,31 @@ private:
         }
     }
 
+    void configureHardwareInterop() {
+        m_hardwareInteropActive = false;
+        m_dxgiDeviceManager.Reset();
+        if (!m_decoder || m_decoderMode == DecoderMode::SoftwareOnly) {
+            return;
+        }
+        SwD3D11VideoInterop& interop = SwD3D11VideoInterop::instance();
+        if (!interop.ensure() || !interop.deviceManager()) {
+            return;
+        }
+        HRESULT hr =
+            m_decoder->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER,
+                                      reinterpret_cast<ULONG_PTR>(interop.deviceManager()));
+        if (FAILED(hr)) {
+            swCDebug(kSwLogCategory_SwMediaFoundationH264Decoder)
+                << "[" << m_name << "] D3D manager rejected hr=0x"
+                << std::hex << hr << std::dec;
+            return;
+        }
+        m_dxgiDeviceManager = interop.deviceManager();
+        m_hardwareInteropActive = true;
+        swCWarning(kSwLogCategory_SwMediaFoundationH264Decoder)
+            << "[" << m_name << "] D3D11 video interop enabled";
+    }
+
     bool pushInput(const SwVideoPacket& packet) {
         Microsoft::WRL::ComPtr<IMFSample> sample;
         HRESULT hr = MFCreateSample(&sample);
@@ -914,29 +959,23 @@ private:
             return m_outputTypeReady;
         }
 
+        MFT_OUTPUT_STREAM_INFO info{};
+        if (FAILED(m_decoder->GetOutputStreamInfo(0, &info))) {
+            return false;
+        }
         MFT_OUTPUT_DATA_BUFFER output{};
+        Microsoft::WRL::ComPtr<IMFSample> probeSample;
+        prepareOutputBuffer(info, output, probeSample);
         DWORD status = 0;
         HRESULT hr = m_decoder->ProcessOutput(0, 1, &output, &status);
-        Microsoft::WRL::ComPtr<IMFSample> probeSample;
         if (FAILED(hr) &&
             hr != MF_E_TRANSFORM_STREAM_CHANGE &&
             hr != MF_E_TRANSFORM_TYPE_NOT_SET &&
             hr != MF_E_TRANSFORM_NEED_MORE_INPUT) {
-            MFT_OUTPUT_STREAM_INFO info{};
-            if (SUCCEEDED(m_decoder->GetOutputStreamInfo(0, &info))) {
-                if ((info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) == 0 && info.cbSize > 0) {
-                    if (SUCCEEDED(MFCreateSample(&probeSample))) {
-                        Microsoft::WRL::ComPtr<IMFMediaBuffer> probeBuffer;
-                        if (SUCCEEDED(MFCreateMemoryBuffer(info.cbSize, &probeBuffer))) {
-                            probeSample->AddBuffer(probeBuffer.Get());
-                            output = {};
-                            output.pSample = probeSample.Get();
-                            status = 0;
-                            hr = m_decoder->ProcessOutput(0, 1, &output, &status);
-                        }
-                    }
-                }
-            }
+            output = {};
+            probeSample.Reset();
+            prepareOutputBuffer(info, output, probeSample, true);
+            hr = m_decoder->ProcessOutput(0, 1, &output, &status);
         }
         if (output.pEvents) {
             output.pEvents->Release();
@@ -982,6 +1021,35 @@ private:
         return m_outputTypeReady;
     }
 
+    void prepareOutputBuffer(const MFT_OUTPUT_STREAM_INFO& info,
+                             MFT_OUTPUT_DATA_BUFFER& output,
+                             Microsoft::WRL::ComPtr<IMFSample>& sample,
+                             bool forceCpuSample = false) {
+        output = {};
+        sample.Reset();
+        const bool transformProvidesSample =
+            (info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) != 0;
+        const bool transformCanProvideSample =
+            (info.dwFlags & MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES) != 0;
+        if (!forceCpuSample &&
+            (transformProvidesSample || (m_hardwareInteropActive && transformCanProvideSample))) {
+            return;
+        }
+        if (info.cbSize == 0) {
+            return;
+        }
+        if (FAILED(MFCreateSample(&sample))) {
+            return;
+        }
+        Microsoft::WRL::ComPtr<IMFMediaBuffer> buffer;
+        if (FAILED(MFCreateMemoryBuffer(info.cbSize, &buffer))) {
+            sample.Reset();
+            return;
+        }
+        sample->AddBuffer(buffer.Get());
+        output.pSample = sample.Get();
+    }
+
     void drainOutput() {
         if (!m_outputTypeReady) {
             if (!setOutputType(false) && !probeOutputType(false)) {
@@ -1000,22 +1068,18 @@ private:
             }
 
             Microsoft::WRL::ComPtr<IMFSample> sample;
-            hr = MFCreateSample(&sample);
-            if (FAILED(hr)) {
-                return;
-            }
-            Microsoft::WRL::ComPtr<IMFMediaBuffer> buffer;
-            hr = MFCreateMemoryBuffer(info.cbSize, &buffer);
-            if (FAILED(hr)) {
-                return;
-            }
-            sample->AddBuffer(buffer.Get());
-
             MFT_OUTPUT_DATA_BUFFER output{};
-            output.pSample = sample.Get();
+            prepareOutputBuffer(info, output, sample);
             DWORD status = 0;
             hr = m_decoder->ProcessOutput(0, 1, &output, &status);
             if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
+                if (output.pEvents) {
+                    output.pEvents->Release();
+                    output.pEvents = nullptr;
+                }
+                if (output.pSample && output.pSample != sample.Get()) {
+                    output.pSample->Release();
+                }
                 auto needMore = ++m_needMoreInputCount;
                 if (needMore <= 3 || (needMore % 50) == 0) {
                     swCDebug(kSwLogCategory_SwMediaFoundationH264Decoder) << "[" << m_name << "] ProcessOutput needs more input count="
@@ -1024,12 +1088,26 @@ private:
                 return;
             }
             if (hr == MF_E_TRANSFORM_STREAM_CHANGE) {
+                if (output.pEvents) {
+                    output.pEvents->Release();
+                    output.pEvents = nullptr;
+                }
+                if (output.pSample && output.pSample != sample.Get()) {
+                    output.pSample->Release();
+                }
                 m_outputTypeReady = false;
                 m_outputSubtype = GUID_NULL;
                 setOutputType();
                 continue;
             }
             if (hr == MF_E_TRANSFORM_TYPE_NOT_SET) {
+                if (output.pEvents) {
+                    output.pEvents->Release();
+                    output.pEvents = nullptr;
+                }
+                if (output.pSample && output.pSample != sample.Get()) {
+                    output.pSample->Release();
+                }
                 m_outputTypeReady = false;
                 m_outputSubtype = GUID_NULL;
                 if (!setOutputType(false)) {
@@ -1038,12 +1116,27 @@ private:
                 continue;
             }
             if (FAILED(hr)) {
+                if (output.pEvents) {
+                    output.pEvents->Release();
+                    output.pEvents = nullptr;
+                }
+                if (output.pSample && output.pSample != sample.Get()) {
+                    output.pSample->Release();
+                }
                 swCWarning(kSwLogCategory_SwMediaFoundationH264Decoder) << "[" << m_name << "] ProcessOutput failed hr=0x"
                             << std::hex << hr << std::dec;
                 return;
             }
             m_needMoreInputCount.store(0);
-            emitFrameFromSample(sample.Get());
+            IMFSample* decodedSample = output.pSample ? output.pSample : sample.Get();
+            emitFrameFromSample(decodedSample);
+            if (output.pEvents) {
+                output.pEvents->Release();
+                output.pEvents = nullptr;
+            }
+            if (output.pSample && output.pSample != sample.Get()) {
+                output.pSample->Release();
+            }
         }
     }
 
@@ -1051,19 +1144,24 @@ private:
         if (!sample) {
             return;
         }
-        Microsoft::WRL::ComPtr<IMFMediaBuffer> buffer;
-        if (FAILED(sample->GetBufferByIndex(0, &buffer))) {
-            return;
-        }
         SwVideoFrame frame;
-        if (m_outputSubtype == MFVideoFormat_NV12) {
-            frame = convertNV12(buffer.Get());
-        } else if (m_outputSubtype == MFVideoFormat_P010 || m_outputSubtype == MFVideoFormat_P016) {
-            frame = convertP010(buffer.Get());
-        } else if (m_outputSubtype == MFVideoFormat_YUY2) {
-            frame = convertYUY2(buffer.Get());
-        } else if (m_outputSubtype == MFVideoFormat_RGB32) {
-            frame = copyBGRA(buffer.Get());
+        if (m_hardwareInteropActive) {
+            frame = wrapNativeFrame(sample);
+        }
+        if (!frame.isValid()) {
+            Microsoft::WRL::ComPtr<IMFMediaBuffer> buffer;
+            if (FAILED(sample->GetBufferByIndex(0, &buffer))) {
+                return;
+            }
+            if (m_outputSubtype == MFVideoFormat_NV12) {
+                frame = convertNV12(buffer.Get());
+            } else if (m_outputSubtype == MFVideoFormat_P010 || m_outputSubtype == MFVideoFormat_P016) {
+                frame = convertP010(buffer.Get());
+            } else if (m_outputSubtype == MFVideoFormat_YUY2) {
+                frame = convertYUY2(buffer.Get());
+            } else if (m_outputSubtype == MFVideoFormat_RGB32) {
+                frame = copyBGRA(buffer.Get());
+            }
         }
         if (!frame.isValid()) {
             return;
@@ -1084,6 +1182,69 @@ private:
                         << " ts=" << frame.timestamp();
         }
         emitFrame(frame);
+    }
+
+    SwVideoPixelFormat outputPixelFormatForSubtype(const GUID& subtype) const {
+        if (subtype == MFVideoFormat_NV12) {
+            return SwVideoPixelFormat::NV12;
+        }
+        if (subtype == MFVideoFormat_P010) {
+            return SwVideoPixelFormat::P010;
+        }
+        if (subtype == MFVideoFormat_P016) {
+            return SwVideoPixelFormat::P016;
+        }
+        if (subtype == MFVideoFormat_YUY2) {
+            return SwVideoPixelFormat::YUY2;
+        }
+        if (subtype == MFVideoFormat_RGB32) {
+            return SwVideoPixelFormat::BGRA32;
+        }
+        return SwVideoPixelFormat::Unknown;
+    }
+
+    SwVideoFrame wrapNativeFrame(IMFSample* sample) {
+        if (!sample || !m_hardwareInteropActive) {
+            return {};
+        }
+        Microsoft::WRL::ComPtr<IMFMediaBuffer> buffer;
+        if (FAILED(sample->GetBufferByIndex(0, &buffer))) {
+            return {};
+        }
+        Microsoft::WRL::ComPtr<IMFDXGIBuffer> dxgiBuffer;
+        if (FAILED(buffer.As(&dxgiBuffer)) || !dxgiBuffer) {
+            return {};
+        }
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+        if (FAILED(dxgiBuffer->GetResource(IID_PPV_ARGS(texture.GetAddressOf()))) || !texture) {
+            return {};
+        }
+        UINT subresourceIndex = 0;
+        if (FAILED(dxgiBuffer->GetSubresourceIndex(&subresourceIndex))) {
+            subresourceIndex = 0;
+        }
+        D3D11_TEXTURE2D_DESC desc{};
+        texture->GetDesc(&desc);
+        SwVideoPixelFormat pixelFormat = outputPixelFormatForSubtype(m_outputSubtype);
+        if (pixelFormat == SwVideoPixelFormat::Unknown) {
+            return {};
+        }
+        SwVideoFormatInfo info =
+            SwDescribeVideoFormat(pixelFormat, m_width > 0 ? m_width : static_cast<int>(desc.Width),
+                                  m_height > 0 ? m_height : static_cast<int>(desc.Height));
+        if (!info.isValid()) {
+            return {};
+        }
+        Microsoft::WRL::ComPtr<ID3D11Device> device;
+        texture->GetDevice(&device);
+        SwVideoFrame frame =
+            SwVideoFrame::wrapNativeD3D11(info,
+                                          device.Get(),
+                                          texture.Get(),
+                                          desc.Format,
+                                          subresourceIndex);
+        frame.setAspectRatio(1.0);
+        return frame;
     }
 
     SwVideoFrame copyBGRA(IMFMediaBuffer* buffer) {
@@ -1376,6 +1537,7 @@ private:
     }
 
     void shutdown() {
+        m_dxgiDeviceManager.Reset();
         m_decoder.Reset();
         if (m_mfStarted) {
             MFShutdown();
@@ -1389,6 +1551,7 @@ private:
         m_outputTypeReady = false;
         m_outputSubtype = GUID_NULL;
         m_streamingStarted = false;
+        m_hardwareInteropActive = false;
     }
 
     SwVideoPacket::Codec m_targetCodec;
@@ -1410,9 +1573,11 @@ private:
     std::atomic<uint64_t> m_decodedFrameCount{0};
     bool m_outputTypeReady{false};
     bool m_streamingStarted{false};
+    bool m_hardwareInteropActive{false};
     SwByteArray m_sequenceHeader;
     int m_inputWidth{0};
     int m_inputHeight{0};
+    Microsoft::WRL::ComPtr<IMFDXGIDeviceManager> m_dxgiDeviceManager;
 };
 
 class SwMediaFoundationH264Decoder : public SwMediaFoundationDecoderBase {
@@ -1464,6 +1629,15 @@ protected:
         }
         if (subtype == MFVideoFormat_P010) {
             return 1;
+        }
+        if (subtype == MFVideoFormat_P016) {
+            return 2;
+        }
+        if (subtype == MFVideoFormat_RGB32) {
+            return 3;
+        }
+        if (subtype == MFVideoFormat_YUY2) {
+            return 4;
         }
         return -1;
     }

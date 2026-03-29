@@ -8,7 +8,7 @@
 
 #include "media/SwMediaOpenOptions.h"
 #include "media/SwVideoSource.h"
-#include "media/rtp/SwMpegTsDemux.h"
+#include "media/rtp/SwTsProgramDemux.h"
 #include "core/io/SwUdpSocket.h"
 #include "core/runtime/SwTimer.h"
 #include "SwDebug.h"
@@ -29,9 +29,8 @@ public:
         m_socket->setReceiveBufferSize(4 * 1024 * 1024);
         m_socket->setMaxDatagramSize(64 * 1024);
         m_socket->setMaxPendingDatagrams(256);
-        m_tsDemux.setPacketCallback([this](const SwVideoPacket& packet) {
-            emitStatus(StreamState::Streaming, "Streaming");
-            emitPacket(packet);
+        m_tsDemux.setPacketCallback([this](const SwMediaPacket& packet) {
+            emitProgramVideoPacket_(packet);
         });
         SwObject::connect(m_socket, &SwUdpSocket::readyRead, m_callbackContext, [this]() {
             readPendingDatagrams_();
@@ -94,12 +93,33 @@ public:
 private:
     static bool hasStartCodeH264Idr_(const SwByteArray& payload) {
         std::vector<uint8_t> bytes(payload.begin(), payload.end());
-        return SwMpegTsDemux::hasStartCodeH264Idr(bytes);
+        return SwTsProgramDemux::hasStartCodeH264Idr(bytes);
     }
 
     static bool hasStartCodeHevcIdr_(const SwByteArray& payload) {
         std::vector<uint8_t> bytes(payload.begin(), payload.end());
-        return SwMpegTsDemux::hasStartCodeHevcIdr(bytes);
+        return SwTsProgramDemux::hasStartCodeHevcIdr(bytes);
+    }
+
+    static SwVideoPacket::Codec videoCodecFromName_(const SwString& codec) {
+        if (codec == "h265" || codec == "hevc") {
+            return SwVideoPacket::Codec::H265;
+        }
+        return SwVideoPacket::Codec::H264;
+    }
+
+    void emitProgramVideoPacket_(const SwMediaPacket& packet) {
+        if (packet.type() != SwMediaPacket::Type::Video) {
+            return;
+        }
+        emitStatus(StreamState::Streaming, "Streaming");
+        SwVideoPacket videoPacket(videoCodecFromName_(packet.codec()),
+                                  packet.payload(),
+                                  packet.pts(),
+                                  packet.dts(),
+                                  packet.isKeyFrame());
+        videoPacket.setDiscontinuity(packet.isDiscontinuity());
+        emitPacket(videoPacket);
     }
 
     void readPendingDatagrams_() {
@@ -162,7 +182,7 @@ private:
     SwObject* m_callbackContext{nullptr};
     SwUdpSocket* m_socket{nullptr};
     SwTimer* m_monitorTimer{nullptr};
-    SwMpegTsDemux m_tsDemux{};
+    SwTsProgramDemux m_tsDemux{};
     std::chrono::steady_clock::time_point m_lastPacketTime{};
     uint32_t m_timestampCounter{0};
 };

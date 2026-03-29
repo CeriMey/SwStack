@@ -58,6 +58,9 @@ enum class SwVideoPixelFormat {
     RGBA32,
     BGRA32,
     NV12,
+    P010,
+    P016,
+    YUY2,
     YUV420P
 };
 
@@ -166,6 +169,20 @@ inline SwVideoFormatInfo SwDescribeVideoFormat(SwVideoPixelFormat format, int wi
         }
     };
 
+    auto setPlanar420_16 = [&]() {
+        info.planeCount = 2;
+        const int chromaWidth = (width + 1) / 2;
+        const int chromaHeight = (height + 1) / 2;
+        info.stride[0] = width * 2;
+        info.planeHeights[0] = height;
+        info.planeOffsets[0] = 0;
+        info.stride[1] = chromaWidth * 4;
+        info.planeHeights[1] = chromaHeight;
+        info.planeOffsets[1] = static_cast<std::size_t>(info.stride[0]) * info.planeHeights[0];
+        info.dataSize =
+            info.planeOffsets[1] + static_cast<std::size_t>(info.stride[1]) * info.planeHeights[1];
+    };
+
     switch (format) {
     case SwVideoPixelFormat::Gray8:
         setPacked(1);
@@ -181,6 +198,13 @@ inline SwVideoFormatInfo SwDescribeVideoFormat(SwVideoPixelFormat format, int wi
     case SwVideoPixelFormat::NV12:
         setPlanar420(true);
         break;
+    case SwVideoPixelFormat::P010:
+    case SwVideoPixelFormat::P016:
+        setPlanar420_16();
+        break;
+    case SwVideoPixelFormat::YUY2:
+        setPacked(2);
+        break;
     case SwVideoPixelFormat::YUV420P:
         setPlanar420(false);
         break;
@@ -195,6 +219,8 @@ inline SwVideoFormatInfo SwDescribeVideoFormat(SwVideoPixelFormat format, int wi
 inline int SwVideoPlaneCount(SwVideoPixelFormat format) {
     switch (format) {
     case SwVideoPixelFormat::NV12: return 2;
+    case SwVideoPixelFormat::P010: return 2;
+    case SwVideoPixelFormat::P016: return 2;
     case SwVideoPixelFormat::YUV420P: return 3;
     case SwVideoPixelFormat::Unknown: return 0;
     default: return 1;

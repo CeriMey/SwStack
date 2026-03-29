@@ -222,11 +222,7 @@ public:
             return false;
         }
         m_tlsMode = TlsState::Negotiating;
-        setState(ConnectingState);
-        if (!driveOpenSslHandshake()) {
-            return false;
-        }
-        return true;
+        return driveOpenSslHandshake();
     }
 
     /**
@@ -1067,6 +1063,55 @@ private:
         return false;
     }
 
+    bool performOpenSslBlockingHandshake() {
+        if (!m_sslBackend) {
+            return false;
+        }
+        u_long blocking = 0;
+        ioctlsocket(m_socket, FIONBIO, &blocking);
+
+        bool ok = false;
+        for (int i = 0; i < 40; ++i) {
+            auto res = m_sslBackend->handshake();
+            if (res == SwBackendSsl::IoResult::Ok) {
+                ok = true;
+                break;
+            }
+            if (res == SwBackendSsl::IoResult::Closed || res == SwBackendSsl::IoResult::Error) {
+                swCError(kSwLogCategory_SwTcpSocket) << "[SwTcpSocket] OpenSSL handshake error: " << m_sslBackend->lastError();
+                break;
+            }
+            fd_set rfds, wfds;
+            FD_ZERO(&rfds);
+            FD_ZERO(&wfds);
+            if (res == SwBackendSsl::IoResult::WantRead) {
+                FD_SET(m_socket, &rfds);
+            }
+            if (res == SwBackendSsl::IoResult::WantWrite) {
+                FD_SET(m_socket, &wfds);
+            }
+            timeval tv;
+            tv.tv_sec = 0;
+            tv.tv_usec = 500 * 1000;
+            int sel = select(0, &rfds, &wfds, nullptr, &tv);
+            if (sel < 0) {
+                break;
+            }
+        }
+
+        u_long nonBlocking = 1;
+        ioctlsocket(m_socket, FIONBIO, &nonBlocking);
+
+        if (ok) {
+            m_tlsMode = TlsState::Established;
+            setState(ConnectedState);
+            emit connected();
+            return true;
+        }
+        emit errorOccurred(-2146893048);
+        return false;
+    }
+
     bool pumpOpenSslRead() {
         if (!m_sslBackend) {
             return false;
@@ -1117,7 +1162,8 @@ private:
             }
             while (!m_writeBuffer.isEmpty()) {
                 int written = 0;
-                auto res = m_sslBackend->write(m_writeBuffer.data(), (int)m_writeBuffer.size(), written);
+                int toWrite = (int)std::min<size_t>(m_writeBuffer.size(), 16384);
+                auto res = m_sslBackend->write(m_writeBuffer.data(), toWrite, written);
                 if (res == SwBackendSsl::IoResult::Ok && written > 0) {
                     m_writeBuffer.remove(0, (int)written);
                     continue;

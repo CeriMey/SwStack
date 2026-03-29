@@ -66,6 +66,13 @@
 #include <functional>
 #include <memory>
 
+#if defined(_WIN32)
+#include "platform/win/SwWindows.h"
+#include <d3d11.h>
+#include <dxgi.h>
+#include <wrl/client.h>
+#endif
+
 /**
  * @brief Stores a video frame plus the metadata needed to interpret its planes.
  *
@@ -75,6 +82,23 @@
  */
 class SwVideoFrame {
 public:
+    enum class StorageKind {
+        Cpu,
+#if defined(_WIN32)
+        NativeD3D11
+#endif
+    };
+
+#if defined(_WIN32)
+    struct NativeD3D11Storage {
+        Microsoft::WRL::ComPtr<ID3D11Device> device;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+        Microsoft::WRL::ComPtr<IDXGISurface> surface;
+        DXGI_FORMAT dxgiFormat{DXGI_FORMAT_UNKNOWN};
+        UINT subresourceIndex{0};
+    };
+#endif
+
     /**
      * @brief Constructs a `SwVideoFrame` instance.
      *
@@ -149,6 +173,29 @@ public:
         return frame;
     }
 
+#if defined(_WIN32)
+    static SwVideoFrame wrapNativeD3D11(const SwVideoFormatInfo& info,
+                                        ID3D11Device* device,
+                                        ID3D11Texture2D* texture,
+                                        DXGI_FORMAT dxgiFormat,
+                                        UINT subresourceIndex = 0) {
+        SwVideoFrame frame;
+        if (!info.isValid() || !texture) {
+            return frame;
+        }
+        auto storage = std::make_shared<NativeD3D11Storage>();
+        storage->device = device;
+        storage->texture = texture;
+        storage->dxgiFormat = dxgiFormat;
+        storage->subresourceIndex = subresourceIndex;
+        (void)storage->texture.As(&storage->surface);
+        frame.m_info = info;
+        frame.m_storageKind = StorageKind::NativeD3D11;
+        frame.m_nativeD3D11 = std::move(storage);
+        return frame;
+    }
+#endif
+
     /**
      * @brief Returns whether the object reports valid.
      * @return `true` when the object reports valid; otherwise `false`.
@@ -156,7 +203,19 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     bool isValid() const {
-        return m_info.isValid() && m_bytes != nullptr;
+        return m_info.isValid() && (m_bytes != nullptr || hasNativeStorage());
+    }
+
+    StorageKind storageKind() const {
+        return m_storageKind;
+    }
+
+    bool isCpuBacked() const {
+        return m_storageKind == StorageKind::Cpu;
+    }
+
+    bool isNative() const {
+        return hasNativeStorage();
     }
 
     /**
@@ -195,7 +254,7 @@ public:
      * @return The requested plane Data.
      */
     uint8_t* planeData(std::size_t planeIndex) {
-        if (!isValid() || planeIndex >= static_cast<std::size_t>(planeCount())) {
+        if (!isCpuBacked() || !isValid() || planeIndex >= static_cast<std::size_t>(planeCount())) {
             return nullptr;
         }
         return m_bytes + m_info.planeOffsets[planeIndex];
@@ -207,7 +266,7 @@ public:
      * @return The requested plane Data.
      */
     const uint8_t* planeData(std::size_t planeIndex) const {
-        if (!isValid() || planeIndex >= static_cast<std::size_t>(planeCount())) {
+        if (!isCpuBacked() || !isValid() || planeIndex >= static_cast<std::size_t>(planeCount())) {
             return nullptr;
         }
         return m_bytes + m_info.planeOffsets[planeIndex];
@@ -310,9 +369,17 @@ public:
      */
     void clear() {
         m_buffer.reset();
+#if defined(_WIN32)
+        m_nativeD3D11.reset();
+#endif
         m_bytes = nullptr;
         m_bufferSize = 0;
         m_info = {};
+        m_storageKind = StorageKind::Cpu;
+        m_pts = 0;
+        m_colorSpace = SwVideoColorSpace::Undefined;
+        m_rotation = SwVideoRotation::Identity;
+        m_aspectRatio = 0.0;
     }
 
     /**
@@ -320,7 +387,7 @@ public:
      * @param value Value passed to the method.
      */
     void fill(uint8_t value) {
-        if (!isValid()) {
+        if (!isCpuBacked() || !isValid()) {
             return;
         }
         std::memset(m_bytes, value, m_info.dataSize);
@@ -341,7 +408,41 @@ public:
      */
     std::size_t bufferSize() const { return m_bufferSize; }
 
+#if defined(_WIN32)
+    bool isNativeD3D11() const {
+        return m_storageKind == StorageKind::NativeD3D11 && m_nativeD3D11 && m_nativeD3D11->texture;
+    }
+
+    ID3D11Device* d3d11Device() const {
+        return m_nativeD3D11 ? m_nativeD3D11->device.Get() : nullptr;
+    }
+
+    ID3D11Texture2D* d3d11Texture() const {
+        return m_nativeD3D11 ? m_nativeD3D11->texture.Get() : nullptr;
+    }
+
+    IDXGISurface* dxgiSurface() const {
+        return m_nativeD3D11 ? m_nativeD3D11->surface.Get() : nullptr;
+    }
+
+    DXGI_FORMAT nativeDxgiFormat() const {
+        return m_nativeD3D11 ? m_nativeD3D11->dxgiFormat : DXGI_FORMAT_UNKNOWN;
+    }
+
+    UINT nativeSubresourceIndex() const {
+        return m_nativeD3D11 ? m_nativeD3D11->subresourceIndex : 0;
+    }
+#endif
+
 private:
+    bool hasNativeStorage() const {
+#if defined(_WIN32)
+        return m_nativeD3D11 && m_nativeD3D11->texture;
+#else
+        return false;
+#endif
+    }
+
     void allocateStorage(std::size_t bytes) {
         if (bytes == 0) {
             return;
@@ -352,10 +453,18 @@ private:
         m_buffer = std::shared_ptr<void>(static_cast<void*>(new uint8_t[bytes]), deleter);
         m_bytes = static_cast<uint8_t*>(m_buffer.get());
         m_bufferSize = bytes;
+        m_storageKind = StorageKind::Cpu;
+#if defined(_WIN32)
+        m_nativeD3D11.reset();
+#endif
     }
 
     SwVideoFormatInfo m_info{};
+    StorageKind m_storageKind{StorageKind::Cpu};
     std::shared_ptr<void> m_buffer;
+#if defined(_WIN32)
+    std::shared_ptr<NativeD3D11Storage> m_nativeD3D11;
+#endif
     uint8_t* m_bytes{nullptr};
     std::size_t m_bufferSize{0};
     std::int64_t m_pts{0};

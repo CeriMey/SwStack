@@ -153,6 +153,12 @@ public:
             loader->SSL_CTX_free(ctx);
             return nullptr;
         }
+        // Enable partial writes so SSL_write on a non-blocking socket does not
+        // fail fatally when the underlying send() returns EWOULDBLOCK.
+        // SSL_CTRL_MODE=33, SSL_MODE_ENABLE_PARTIAL_WRITE=0x01, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER=0x02
+        if (loader->SSL_CTX_ctrl) {
+            loader->SSL_CTX_ctrl(ctx, 33, 0x01 | 0x02, nullptr);
+        }
         return ctx;
     }
 
@@ -234,6 +240,11 @@ public:
         // For now disable verification to unblock connectivity; add CA paths later if needed.
         m_loader->SSL_CTX_set_verify(m_ctx, 0 /*SSL_VERIFY_NONE*/, nullptr);
         m_loader->SSL_CTX_set_default_verify_paths(m_ctx);
+
+        // Enable partial writes for non-blocking sockets.
+        if (m_loader->SSL_CTX_ctrl) {
+            m_loader->SSL_CTX_ctrl(m_ctx, 33 /*SSL_CTRL_MODE*/, 0x01 | 0x02, nullptr);
+        }
 
         m_ssl = m_loader->SSL_new(m_ctx);
         if (!m_ssl) {
@@ -394,6 +405,8 @@ private:
         FnCTXUseCertFile SSL_CTX_use_certificate_file = nullptr;
         FnCTXUseKeyFile SSL_CTX_use_PrivateKey_file = nullptr;
         FnCTXCheckPrivateKey SSL_CTX_check_private_key = nullptr;
+        using FnCTXCtrl = long (*)(void*, int, long, void*);
+        FnCTXCtrl SSL_CTX_ctrl = nullptr;
 
         /**
          * @brief Performs the `load` operation on the associated resource.
@@ -452,6 +465,7 @@ private:
             SSL_CTX_use_certificate_file = (FnCTXUseCertFile)sym(ssl, "SSL_CTX_use_certificate_file");
             SSL_CTX_use_PrivateKey_file = (FnCTXUseKeyFile)sym(ssl, "SSL_CTX_use_PrivateKey_file");
             SSL_CTX_check_private_key = (FnCTXCheckPrivateKey)sym(ssl, "SSL_CTX_check_private_key");
+            SSL_CTX_ctrl = (FnCTXCtrl)sym(ssl, "SSL_CTX_ctrl");
 
             if (!TLS_client_method || !SSL_CTX_new || !SSL_new || !SSL_set_fd || !SSL_do_handshake ||
                 !SSL_get_error || !SSL_read || !SSL_write || !SSL_shutdown) {

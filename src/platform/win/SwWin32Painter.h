@@ -127,23 +127,23 @@ public:
             return;
         }
 
-        HDC memDc = CreateCompatibleDC(paintDevice);
-        if (!memDc) {
-            m_hdc = paintDevice;
-            return;
-        }
-
-        HBITMAP bitmap = CreateCompatibleBitmap(paintDevice, m_surfaceSize.width, m_surfaceSize.height);
-        if (!bitmap) {
-            DeleteDC(memDc);
+        HWND windowHandle = static_cast<HWND>(event.nativeWindowHandle);
+        SharedBackbuffer* sharedBackbuffer = windowHandle
+                                                 ? acquireSharedBackbuffer_(windowHandle,
+                                                                            paintDevice,
+                                                                            m_surfaceSize)
+                                                 : nullptr;
+        if (!sharedBackbuffer || !sharedBackbuffer->dc || !sharedBackbuffer->bitmap) {
             m_hdc = paintDevice;
             return;
         }
 
         m_targetHdc = paintDevice;
-        m_backBitmap = bitmap;
-        m_oldBitmap = static_cast<HBITMAP>(SelectObject(memDc, bitmap));
-        m_hdc = memDc;
+        m_sharedBackbuffer = sharedBackbuffer;
+        m_backbufferWindow = windowHandle;
+        m_backBitmap = sharedBackbuffer->bitmap;
+        m_oldBitmap = sharedBackbuffer->oldBitmap;
+        m_hdc = sharedBackbuffer->dc;
         m_ownsBuffer = true;
 
         if (m_dirtyRect.right <= m_dirtyRect.left || m_dirtyRect.bottom <= m_dirtyRect.top) {
@@ -2163,6 +2163,56 @@ private:
         return static_cast<UINT>(formats.raw()) | DT_NOPREFIX;
     }
 
+    struct SharedBackbuffer {
+        HDC dc{nullptr};
+        HBITMAP bitmap{nullptr};
+        HBITMAP oldBitmap{nullptr};
+        SwPlatformSize size{};
+    };
+
+    static SharedBackbuffer* acquireSharedBackbuffer_(HWND hwnd,
+                                                      HDC referenceDevice,
+                                                      const SwPlatformSize& size) {
+        if (!hwnd || !referenceDevice || size.width <= 0 || size.height <= 0) {
+            return nullptr;
+        }
+        std::lock_guard<std::mutex> lock(sharedBackbufferMutex_());
+        SharedBackbuffer& backbuffer = sharedBackbuffers_()[hwnd];
+        if (!backbuffer.dc) {
+            backbuffer.dc = CreateCompatibleDC(referenceDevice);
+            if (!backbuffer.dc) {
+                return nullptr;
+            }
+        }
+        if (!backbuffer.bitmap ||
+            backbuffer.size.width != size.width ||
+            backbuffer.size.height != size.height) {
+            if (backbuffer.bitmap && backbuffer.oldBitmap) {
+                SelectObject(backbuffer.dc, backbuffer.oldBitmap);
+                DeleteObject(backbuffer.bitmap);
+                backbuffer.bitmap = nullptr;
+                backbuffer.oldBitmap = nullptr;
+            }
+            backbuffer.bitmap = CreateCompatibleBitmap(referenceDevice, size.width, size.height);
+            if (!backbuffer.bitmap) {
+                return nullptr;
+            }
+            backbuffer.oldBitmap = static_cast<HBITMAP>(SelectObject(backbuffer.dc, backbuffer.bitmap));
+            backbuffer.size = size;
+        }
+        return &backbuffer;
+    }
+
+    static std::mutex& sharedBackbufferMutex_() {
+        static std::mutex mutex;
+        return mutex;
+    }
+
+    static std::unordered_map<HWND, SharedBackbuffer>& sharedBackbuffers_() {
+        static std::unordered_map<HWND, SharedBackbuffer> backbuffers;
+        return backbuffers;
+    }
+
     void presentIfNeeded_() {
         if (!m_finalizeRequested || m_presented || !m_ownsBuffer || !m_targetHdc || !m_hdc) {
             return;
@@ -2205,19 +2255,25 @@ private:
         m_bitmapTargetHeight = 0;
 
         if (m_ownsBuffer && m_hdc) {
-            if (m_oldBitmap) {
-                SelectObject(m_hdc, m_oldBitmap);
-                m_oldBitmap = nullptr;
+            if (!m_sharedBackbuffer) {
+                if (m_oldBitmap) {
+                    SelectObject(m_hdc, m_oldBitmap);
+                    m_oldBitmap = nullptr;
+                }
+                if (m_backBitmap) {
+                    DeleteObject(m_backBitmap);
+                    m_backBitmap = nullptr;
+                }
+                DeleteDC(m_hdc);
             }
-            if (m_backBitmap) {
-                DeleteObject(m_backBitmap);
-                m_backBitmap = nullptr;
-            }
-            DeleteDC(m_hdc);
         }
 
         m_hdc = nullptr;
         m_targetHdc = nullptr;
+        m_backBitmap = nullptr;
+        m_oldBitmap = nullptr;
+        m_sharedBackbuffer = nullptr;
+        m_backbufferWindow = nullptr;
         m_ownsBuffer = false;
         m_finalizeRequested = false;
         m_presented = false;
@@ -2229,6 +2285,8 @@ private:
     HDC m_targetHdc{nullptr};
     HBITMAP m_backBitmap{nullptr};
     HBITMAP m_oldBitmap{nullptr};
+    SharedBackbuffer* m_sharedBackbuffer{nullptr};
+    HWND m_backbufferWindow{nullptr};
     int m_clipDepth{0};
     bool m_ownsBuffer{false};
     bool m_finalizeRequested{false};

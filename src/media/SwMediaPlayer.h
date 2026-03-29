@@ -6,14 +6,18 @@
  * @brief Declares the Qt-like media player facade that orchestrates source, video sink, and audio output.
  */
 
-#include "media/SwAudioPipeline.h"
+#include "core/runtime/SwCoreApplication.h"
+#include "core/runtime/SwThread.h"
+#include "media/SwAudioTrackPipeline.h"
 #include "media/SwAudioOutput.h"
 #include "media/SwMediaSource.h"
+#include "media/SwMetadataTrackPipeline.h"
 #include "media/SwVideoSink.h"
 
 #include <memory>
+#include <thread>
 
-class SwMediaPlayer {
+class SwMediaPlayer : public SwObject {
 public:
     using TracksChangedCallback = std::function<void(const SwList<SwMediaTrack>&)>;
     using MetadataPacketCallback = std::function<void(const SwMediaPacket&)>;
@@ -52,10 +56,22 @@ public:
         PausedState
     };
 
-    SwMediaPlayer()
-        : m_videoSink(std::make_shared<SwVideoSink>()),
+    explicit SwMediaPlayer(SwObject* parent = nullptr)
+        : SwObject(parent),
+          m_videoSink(std::make_shared<SwVideoSink>()),
           m_audioOutput(std::make_shared<SwAudioOutput>()) {
-        m_audioPipeline.setAudioOutput(m_audioOutput);
+        m_audioTrackPipeline.setAudioOutput(m_audioOutput);
+        m_metadataTrackPipeline.setPacketCallback([this](const SwMediaPacket& packet) {
+            dispatchMetadataPacket_(packet);
+        });
+    }
+
+    ~SwMediaPlayer() override {
+        if (m_source) {
+            m_source->setMediaPacketCallback(SwMediaSource::MediaPacketCallback());
+            m_source->setTracksChangedCallback(SwMediaSource::TracksChangedCallback());
+        }
+        stop();
     }
 
     void setSource(const std::shared_ptr<SwMediaSource>& source) {
@@ -69,16 +85,26 @@ public:
         }
         m_source = source;
         m_tracks = source ? source->tracks() : SwList<SwMediaTrack>();
+        m_activeAudioTrackId.clear();
+        m_activeVideoTrackId.clear();
+        m_activeMetadataTrackId.clear();
+        m_activeSubtitleTrackId.clear();
         if (m_source) {
+            SwMediaSource* sourcePtr = m_source.get();
             m_source->setMediaPacketCallback([this](const SwMediaPacket& packet) {
                 handleMediaPacket_(packet);
             });
-            m_source->setTracksChangedCallback([this](const SwList<SwMediaTrack>& tracks) {
-                m_tracks = tracks;
-                updateDefaultTrackSelection_();
-                if (m_tracksChangedCallback) {
-                    m_tracksChangedCallback(m_tracks);
-                }
+            m_source->setTracksChangedCallback([this, sourcePtr](const SwList<SwMediaTrack>& tracks) {
+                dispatchToAffinity_([this, sourcePtr, tracks]() {
+                    if (!m_source || m_source.get() != sourcePtr) {
+                        return;
+                    }
+                    m_tracks = tracks;
+                    updateDefaultTrackSelection_();
+                    if (m_tracksChangedCallback) {
+                        m_tracksChangedCallback(m_tracks);
+                    }
+                });
             });
         }
 
@@ -104,7 +130,7 @@ public:
 
     void setAudioOutput(const std::shared_ptr<SwAudioOutput>& output) {
         m_audioOutput = output ? output : std::make_shared<SwAudioOutput>();
-        m_audioPipeline.setAudioOutput(m_audioOutput);
+        m_audioTrackPipeline.setAudioOutput(m_audioOutput);
     }
 
     std::shared_ptr<SwAudioOutput> audioOutput() const { return m_audioOutput; }
@@ -254,11 +280,11 @@ public:
     }
 
     void setPreferredAudioDecoder(SwAudioPacket::Codec codec, const SwString& decoderId) {
-        m_audioPipeline.setDecoderSelection(codec, decoderId);
+        m_audioTrackPipeline.setDecoderSelection(codec, decoderId);
     }
 
     SwString preferredAudioDecoder(SwAudioPacket::Codec codec) const {
-        return m_audioPipeline.decoderSelection(codec);
+        return m_audioTrackPipeline.decoderSelection(codec);
     }
 
     static SwList<SwAudioDecoderDescriptor> availableAudioDecoders(SwAudioPacket::Codec codec) {
@@ -269,6 +295,8 @@ public:
         if (!m_source) {
             return;
         }
+        m_audioTrackPipeline.start();
+        m_metadataTrackPipeline.start();
         auto videoSource = std::dynamic_pointer_cast<SwVideoSource>(m_source);
         if (videoSource && m_videoSink) {
             m_videoSink->start();
@@ -289,6 +317,8 @@ public:
         } else if (m_source) {
             m_source->stop();
         }
+        m_audioTrackPipeline.stop();
+        m_metadataTrackPipeline.stop();
         if (m_audioOutput) {
             m_audioOutput->stop();
         }
@@ -299,6 +329,18 @@ public:
 
 private:
     void updateDefaultTrackSelection_() {
+        if (!m_activeVideoTrackId.isEmpty() && !trackExists_(m_activeVideoTrackId, SwMediaTrack::Type::Video)) {
+            m_activeVideoTrackId.clear();
+        }
+        if (!m_activeAudioTrackId.isEmpty() && !trackExists_(m_activeAudioTrackId, SwMediaTrack::Type::Audio)) {
+            m_activeAudioTrackId.clear();
+        }
+        if (!m_activeMetadataTrackId.isEmpty() && !trackExists_(m_activeMetadataTrackId, SwMediaTrack::Type::Metadata)) {
+            m_activeMetadataTrackId.clear();
+        }
+        if (!m_activeSubtitleTrackId.isEmpty() && !trackExists_(m_activeSubtitleTrackId, SwMediaTrack::Type::Subtitle)) {
+            m_activeSubtitleTrackId.clear();
+        }
         if (m_activeVideoTrackId.isEmpty()) {
             for (const auto& track : m_tracks) {
                 if (track.isVideo() && track.selected) {
@@ -322,6 +364,14 @@ private:
                     break;
                 }
             }
+            if (m_activeAudioTrackId.isEmpty()) {
+                for (const auto& track : m_tracks) {
+                    if (track.isAudio()) {
+                        m_activeAudioTrackId = track.id;
+                        break;
+                    }
+                }
+            }
         }
         if (m_activeMetadataTrackId.isEmpty()) {
             for (const auto& track : m_tracks) {
@@ -330,12 +380,28 @@ private:
                     break;
                 }
             }
+            if (m_activeMetadataTrackId.isEmpty()) {
+                for (const auto& track : m_tracks) {
+                    if (track.isMetadata()) {
+                        m_activeMetadataTrackId = track.id;
+                        break;
+                    }
+                }
+            }
         }
         if (m_activeSubtitleTrackId.isEmpty()) {
             for (const auto& track : m_tracks) {
                 if (track.isSubtitle() && track.selected) {
                     m_activeSubtitleTrackId = track.id;
                     break;
+                }
+            }
+            if (m_activeSubtitleTrackId.isEmpty()) {
+                for (const auto& track : m_tracks) {
+                    if (track.isSubtitle()) {
+                        m_activeSubtitleTrackId = track.id;
+                        break;
+                    }
                 }
             }
         }
@@ -349,7 +415,7 @@ private:
             if (!m_activeAudioTrackId.isEmpty() && packet.trackId() != m_activeAudioTrackId) {
                 return;
             }
-            m_audioPipeline.handleMediaPacket(packet);
+            m_audioTrackPipeline.enqueue(packet);
             return;
         }
         if (packet.type() == SwMediaPacket::Type::Metadata) {
@@ -359,10 +425,47 @@ private:
             if (!m_activeMetadataTrackId.isEmpty() && packet.trackId() != m_activeMetadataTrackId) {
                 return;
             }
+            m_metadataTrackPipeline.enqueue(packet);
+        }
+    }
+
+    bool trackExists_(const SwString& trackId, SwMediaTrack::Type type) const {
+        for (const auto& track : m_tracks) {
+            if (track.id == trackId && track.type == type) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void dispatchMetadataPacket_(const SwMediaPacket& packet) {
+        dispatchToAffinity_([this, packet]() {
             if (m_metadataPacketCallback) {
                 m_metadataPacketCallback(packet);
             }
+        });
+    }
+
+    void dispatchToAffinity_(std::function<void()> task) {
+        if (!task) {
+            return;
         }
+        ThreadHandle* affinity = threadHandle();
+        if (affinity) {
+            const std::thread::id affinityId = affinity->threadId();
+            if (affinityId != std::thread::id{} &&
+                affinityId == std::this_thread::get_id()) {
+                task();
+                return;
+            }
+            affinity->postTask(std::move(task));
+            return;
+        }
+        if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
+            app->postEvent(std::move(task));
+            return;
+        }
+        task();
     }
 
     int trackCountByType_(SwMediaTrack::Type type) const {
@@ -378,7 +481,8 @@ private:
     std::shared_ptr<SwMediaSource> m_source;
     std::shared_ptr<SwVideoSink> m_videoSink;
     std::shared_ptr<SwAudioOutput> m_audioOutput;
-    SwAudioPipeline m_audioPipeline{};
+    SwAudioTrackPipeline m_audioTrackPipeline{};
+    SwMetadataTrackPipeline m_metadataTrackPipeline{};
     SwList<SwMediaTrack> m_tracks{};
     TracksChangedCallback m_tracksChangedCallback{};
     SwString m_activeAudioTrackId{};

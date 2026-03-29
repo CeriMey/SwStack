@@ -8,11 +8,11 @@
 
 #include "media/SwMediaOpenOptions.h"
 #include "media/SwVideoSource.h"
-#include "media/rtp/SwMpegTsDemux.h"
 #include "media/rtp/SwRtpDepacketizerH264.h"
 #include "media/rtp/SwRtpDepacketizerH265.h"
 #include "media/rtp/SwRtpSession.h"
 #include "media/rtp/SwRtpSessionDescriptor.h"
+#include "media/rtp/SwTsProgramDemux.h"
 #include "SwDebug.h"
 
 #include <chrono>
@@ -60,9 +60,8 @@ public:
             emitStatus(StreamState::Streaming, "Streaming");
             emitPacket(packet);
         });
-        m_tsDemux.setPacketCallback([this](const SwVideoPacket& packet) {
-            emitStatus(StreamState::Streaming, "Streaming");
-            emitPacket(packet);
+        m_tsDemux.setPacketCallback([this](const SwMediaPacket& packet) {
+            emitProgramVideoPacket_(packet);
         });
 
         if (m_descriptor.codec == SwVideoPacket::Codec::H265) {
@@ -100,6 +99,27 @@ public:
     }
 
 private:
+    static SwVideoPacket::Codec videoCodecFromName_(const SwString& codec) {
+        if (codec == "h265" || codec == "hevc") {
+            return SwVideoPacket::Codec::H265;
+        }
+        return SwVideoPacket::Codec::H264;
+    }
+
+    void emitProgramVideoPacket_(const SwMediaPacket& packet) {
+        if (packet.type() != SwMediaPacket::Type::Video) {
+            return;
+        }
+        emitStatus(StreamState::Streaming, "Streaming");
+        SwVideoPacket videoPacket(videoCodecFromName_(packet.codec()),
+                                  packet.payload(),
+                                  packet.pts(),
+                                  packet.dts(),
+                                  packet.isKeyFrame());
+        videoPacket.setDiscontinuity(packet.isDiscontinuity());
+        emitPacket(videoPacket);
+    }
+
     void handleRtpPacket_(const SwRtpSession::Packet& packet) {
         if (m_descriptor.format == SwMediaOpenOptions::UdpPayloadFormat::MpegTs) {
             m_tsDemux.feed(reinterpret_cast<const uint8_t*>(packet.payload.constData()),
@@ -141,6 +161,6 @@ private:
     std::unique_ptr<SwRtpSession> m_session{};
     SwRtpDepacketizerH264 m_h264Depacketizer{};
     SwRtpDepacketizerH265 m_h265Depacketizer{};
-    SwMpegTsDemux m_tsDemux{};
+    SwTsProgramDemux m_tsDemux{};
     std::chrono::steady_clock::time_point m_lastWaitingKeyFrameRequestTime{};
 };

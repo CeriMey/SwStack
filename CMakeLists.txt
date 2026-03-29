@@ -138,6 +138,7 @@ sw_add_example_subdirectory(exemples/40-FiberPoolSelfTest OFF)
 sw_add_example_subdirectory(exemples/41-RuntimeProfilerSelfTest OFF)
 sw_add_example_subdirectory(exemples/42-QtSwEmbeddedInterop OFF)
 sw_add_example_subdirectory(exemples/43-TunWebSocketVpn OFF)
+sw_add_example_subdirectory(exemples/44-HttpsDownloadTest OFF)
 endif()
 
 # Sw "nodes"/tools
