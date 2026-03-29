@@ -1008,6 +1008,14 @@ signals:
         return findFocusedWidgetInHierarchy_();
     }
 
+    void bindToNativeWindowRecursive(const SwWidgetPlatformHandle& handle) {
+        setNativeWindowHandleRecursive(handle);
+    }
+
+    void unbindFromNativeWindowRecursive() {
+        setNativeWindowHandleRecursive(SwWidgetPlatformHandle{});
+    }
+
 
 protected:
 

@@ -21,6 +21,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -103,6 +104,31 @@ struct SwRuntimeCountersSnapshot {
           droppedRecords(0) {}
 };
 
+struct SwRuntimeResolvedFrame {
+    unsigned long long address;
+    unsigned long long moduleBase;
+    unsigned long long displacement;
+    SwString moduleName;
+    SwString modulePath;
+    SwString symbolName;
+    SwString sourceFile;
+    unsigned long lineNumber;
+    bool moduleResolved;
+    bool symbolResolved;
+    bool lineResolved;
+    int inlineDepth;
+
+    SwRuntimeResolvedFrame()
+        : address(0),
+          moduleBase(0),
+          displacement(0),
+          lineNumber(0),
+          moduleResolved(false),
+          symbolResolved(false),
+          lineResolved(false),
+          inlineDepth(0) {}
+};
+
 struct SwRuntimeStallReport {
     unsigned long long threadId;
     SwRuntimeTimingKind kind;
@@ -110,7 +136,10 @@ struct SwRuntimeStallReport {
     long long elapsedUs;
     SwFiberLane lane;
     SwList<unsigned long long> frames;
+    SwList<SwRuntimeResolvedFrame> resolvedFrames;
     SwList<SwString> symbols;
+    SwString symbolBackend;
+    SwString symbolSearchPath;
 
     SwRuntimeStallReport()
         : threadId(0),
@@ -163,6 +192,8 @@ public:
     const SwRuntimeProfileConfig& config() const;
     bool autoRuntimeScopesEnabled() const;
     bool manualScopesEnabled() const;
+    void setEnabled(bool enabled);
+    bool enabled() const;
     void setStallThresholdUs(long long thresholdUs);
     long long stallThresholdUs() const;
 
@@ -225,16 +256,22 @@ private:
                         const SwRuntimeCountersSnapshot& snapshot);
     void callSinkStall_(const SwRuntimeStallReport& report);
     void captureStack_(SwList<unsigned long long>& framesOut,
+                       SwList<SwRuntimeResolvedFrame>& resolvedFramesOut,
                        SwList<SwString>& symbolsOut);
 
 #if defined(_WIN32)
     void captureWindowsStack_(SwList<unsigned long long>& framesOut,
+                              SwList<SwRuntimeResolvedFrame>& resolvedFramesOut,
                               SwList<SwString>& symbolsOut);
+    void symbolizeWindowsFrames_(const SwList<unsigned long long>& framesIn,
+                                 SwList<SwRuntimeResolvedFrame>& resolvedFramesOut,
+                                 SwList<SwString>& symbolsOut);
 #elif !defined(__ANDROID__)
     static int linuxSignalNumber_();
     static void installLinuxSignalHandlerOnce_();
     static void linuxSignalHandler_(int signalNumber, siginfo_t* info, void* uctx);
     void captureLinuxStack_(SwList<unsigned long long>& framesOut,
+                            SwList<SwRuntimeResolvedFrame>& resolvedFramesOut,
                             SwList<SwString>& symbolsOut);
     static const int kLinuxMaxSampleFrames_ = 128;
 #endif
@@ -243,6 +280,7 @@ private:
 
     SwRuntimeProfileSink* sink_;
     SwRuntimeProfileConfig config_;
+    std::atomic<bool> enabledLive_;
     std::atomic<long long> stallThresholdUsLive_;
     std::vector<SwRuntimeTimingRecord> records_;
     std::atomic<std::size_t> head_;
@@ -307,6 +345,251 @@ private:
     static void threadEntry_();
 };
 
+#if defined(_WIN32)
+namespace swRuntimeProfilerDetail {
+
+class WindowsSymbolEngine {
+public:
+    static WindowsSymbolEngine& instance() {
+        static WindowsSymbolEngine s_engine;
+        return s_engine;
+    }
+
+    std::mutex& mutex() { return mutex_; }
+
+    bool ensureReadyLocked() {
+        if (initialized_) {
+            return ready_;
+        }
+
+        initialized_ = true;
+        process_ = ::GetCurrentProcess();
+        searchPath_ = buildSearchPath_();
+        searchPathStd_ = searchPath_.toStdString();
+
+        DWORD options = SYMOPT_UNDNAME | SYMOPT_LOAD_LINES | SYMOPT_DEFERRED_LOADS | SYMOPT_FAIL_CRITICAL_ERRORS;
+#ifdef SYMOPT_OMAP_FIND_NEAREST
+        options |= SYMOPT_OMAP_FIND_NEAREST;
+#endif
+#ifdef SYMOPT_AUTO_PUBLICS
+        options |= SYMOPT_AUTO_PUBLICS;
+#endif
+#ifdef SYMOPT_INCLUDE_32BIT_MODULES
+        options |= SYMOPT_INCLUDE_32BIT_MODULES;
+#endif
+        ::SymSetOptions(options);
+
+        ready_ = (::SymInitialize(process_, searchPathStd_.empty() ? nullptr : searchPathStd_.c_str(), TRUE) == TRUE);
+        if (ready_) {
+            if (!searchPathStd_.empty()) {
+                (void)::SymSetSearchPath(process_, searchPathStd_.c_str());
+            }
+            (void)::SymRefreshModuleList(process_);
+        }
+        return ready_;
+    }
+
+    void refreshModulesLocked() {
+        if (ensureReadyLocked()) {
+            (void)::SymRefreshModuleList(process_);
+        }
+    }
+
+    HANDLE process() const { return process_; }
+    bool ready() const { return ready_; }
+    const SwString& searchPath() const { return searchPath_; }
+
+    SwRuntimeResolvedFrame resolveFrameLocked(unsigned long long address) {
+        SwRuntimeResolvedFrame frame;
+        frame.address = address;
+
+        if (!ensureReadyLocked()) {
+            return frame;
+        }
+
+        IMAGEHLP_MODULE64 moduleInfo;
+        std::memset(&moduleInfo, 0, sizeof(moduleInfo));
+        moduleInfo.SizeOfStruct = sizeof(moduleInfo);
+        if (::SymGetModuleInfo64(process_, static_cast<DWORD64>(address), &moduleInfo)) {
+            frame.moduleResolved = true;
+            frame.moduleBase = static_cast<unsigned long long>(moduleInfo.BaseOfImage);
+            frame.moduleName = swStringFromC_(moduleInfo.ModuleName);
+
+            const char* modulePath = moduleInfo.LoadedImageName;
+            if (!modulePath || !*modulePath) {
+                modulePath = moduleInfo.ImageName;
+            }
+            frame.modulePath = swStringFromC_(modulePath);
+            if (frame.moduleName.isEmpty() && !frame.modulePath.isEmpty()) {
+                frame.moduleName = baseName_(frame.modulePath);
+            }
+        }
+
+        char symbolBuffer[sizeof(SYMBOL_INFO) + MAX_SYM_NAME];
+        std::memset(symbolBuffer, 0, sizeof(symbolBuffer));
+        SYMBOL_INFO* symbol = reinterpret_cast<SYMBOL_INFO*>(symbolBuffer);
+        symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+        symbol->MaxNameLen = MAX_SYM_NAME;
+
+        DWORD64 displacement = 0;
+        if (::SymFromAddr(process_, static_cast<DWORD64>(address), &displacement, symbol)) {
+            frame.symbolResolved = true;
+            frame.displacement = static_cast<unsigned long long>(displacement);
+            frame.symbolName = undecoratedSymbolName_(symbol->Name);
+        }
+
+        IMAGEHLP_LINE64 line;
+        std::memset(&line, 0, sizeof(line));
+        line.SizeOfStruct = sizeof(IMAGEHLP_LINE64);
+        DWORD lineDisp = 0;
+        if (::SymGetLineFromAddr64(process_, static_cast<DWORD64>(address), &lineDisp, &line)) {
+            frame.lineResolved = true;
+            frame.sourceFile = swStringFromC_(line.FileName);
+            frame.lineNumber = static_cast<unsigned long>(line.LineNumber);
+        }
+
+        return frame;
+    }
+
+    SwString formatFrameText(const SwRuntimeResolvedFrame& frame) const {
+        const SwString modulePrefix = !frame.moduleName.isEmpty() ? (frame.moduleName + "!") : SwString();
+        if (frame.symbolResolved && frame.lineResolved) {
+            return modulePrefix + frame.symbolName + " + 0x" + SwString::number(frame.displacement, 16) +
+                   " (" + baseName_(frame.sourceFile) + ":" + SwString::number(frame.lineNumber) + ")";
+        }
+        if (frame.symbolResolved) {
+            return modulePrefix + frame.symbolName + " + 0x" + SwString::number(frame.displacement, 16);
+        }
+        if (frame.moduleResolved && frame.moduleBase != 0 && frame.address >= frame.moduleBase) {
+            return frame.moduleName + " + 0x" + SwString::number(frame.address - frame.moduleBase, 16);
+        }
+        return "0x" + SwString::number(frame.address, 16);
+    }
+
+private:
+    WindowsSymbolEngine() = default;
+
+    static SwString swStringFromC_(const char* value) {
+        return (value && *value) ? SwString::fromUtf8(value) : SwString();
+    }
+
+    static SwString baseName_(const SwString& path) {
+        if (path.isEmpty()) {
+            return SwString();
+        }
+        const std::string value = path.toStdString();
+        const size_t pos = value.find_last_of("\\/");
+        if (pos == std::string::npos) {
+            return path;
+        }
+        return SwString::fromUtf8(value.c_str() + pos + 1);
+    }
+
+    static SwString directoryName_(const SwString& path) {
+        if (path.isEmpty()) {
+            return SwString();
+        }
+        const std::string value = path.toStdString();
+        const size_t pos = value.find_last_of("\\/");
+        if (pos == std::string::npos) {
+            return SwString();
+        }
+        return SwString::fromUtf8(value.substr(0, pos).c_str());
+    }
+
+    static SwString normalizedPath_(const SwString& path) {
+        if (path.isEmpty()) {
+            return SwString();
+        }
+        std::string value = path.toStdString();
+        while (value.size() > 3 && !value.empty() && (value.back() == '\\' || value.back() == '/')) {
+            value.pop_back();
+        }
+        return SwString::fromUtf8(value.c_str());
+    }
+
+    static void appendUniquePath_(std::vector<SwString>& paths, const SwString& candidate) {
+        const SwString normalized = normalizedPath_(candidate);
+        if (normalized.isEmpty()) {
+            return;
+        }
+        for (size_t i = 0; i < paths.size(); ++i) {
+            if (paths[i].toStdString() == normalized.toStdString()) {
+                return;
+            }
+        }
+        paths.push_back(normalized);
+    }
+
+    static SwString currentExecutablePath_() {
+        char buffer[4096];
+        const DWORD length = ::GetModuleFileNameA(nullptr, buffer, static_cast<DWORD>(sizeof(buffer)));
+        if (length == 0 || length >= sizeof(buffer)) {
+            return SwString();
+        }
+        return SwString::fromUtf8(buffer, static_cast<size_t>(length));
+    }
+
+    static SwString currentDirectoryPath_() {
+        char buffer[4096];
+        const DWORD length = ::GetCurrentDirectoryA(static_cast<DWORD>(sizeof(buffer)), buffer);
+        if (length == 0 || length >= sizeof(buffer)) {
+            return SwString();
+        }
+        return SwString::fromUtf8(buffer, static_cast<size_t>(length));
+    }
+
+    static SwString undecoratedSymbolName_(const char* value) {
+        if (!value || !*value) {
+            return SwString();
+        }
+
+        char undecorated[2048];
+        const DWORD length = ::UnDecorateSymbolName(value, undecorated, static_cast<DWORD>(sizeof(undecorated)),
+                                                    UNDNAME_COMPLETE);
+        if (length != 0) {
+            return SwString::fromUtf8(undecorated, static_cast<size_t>(length));
+        }
+        return SwString::fromUtf8(value);
+    }
+
+    static SwString buildSearchPath_() {
+        std::vector<SwString> paths;
+
+        const SwString exePath = currentExecutablePath_();
+        appendUniquePath_(paths, directoryName_(exePath));
+        appendUniquePath_(paths, currentDirectoryPath_());
+
+        const char* const envNames[] = {"SW_PDB_SYMBOL_PATH", "_NT_SYMBOL_PATH", "NT_SYMBOL_PATH"};
+        for (size_t i = 0; i < sizeof(envNames) / sizeof(envNames[0]); ++i) {
+            const char* envValue = std::getenv(envNames[i]);
+            if (!envValue || !*envValue) {
+                continue;
+            }
+            appendUniquePath_(paths, SwString::fromUtf8(envValue));
+        }
+
+        SwString searchPath;
+        for (size_t i = 0; i < paths.size(); ++i) {
+            if (!searchPath.isEmpty()) {
+                searchPath.append(';');
+            }
+            searchPath.append(paths[i]);
+        }
+        return searchPath;
+    }
+
+    std::mutex mutex_;
+    HANDLE process_{nullptr};
+    bool initialized_{false};
+    bool ready_{false};
+    SwString searchPath_;
+    std::string searchPathStd_;
+};
+
+} // namespace swRuntimeProfilerDetail
+#endif
+
 inline long long SwRuntimeProfilerSession::nowNs_() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
                std::chrono::steady_clock::now().time_since_epoch())
@@ -341,6 +624,7 @@ inline SwRuntimeProfilerSession::SwRuntimeProfilerSession(SwRuntimeProfileSink* 
                                                           const SwRuntimeProfileConfig& config)
     : sink_(sink),
       config_(config),
+      enabledLive_(true),
       stallThresholdUsLive_(config_.stallThresholdUs),
       head_(0),
       tail_(0),
@@ -384,11 +668,19 @@ inline const SwRuntimeProfileConfig& SwRuntimeProfilerSession::config() const {
 }
 
 inline bool SwRuntimeProfilerSession::autoRuntimeScopesEnabled() const {
-    return config_.enableAutoRuntimeScopes;
+    return enabled() && config_.enableAutoRuntimeScopes;
 }
 
 inline bool SwRuntimeProfilerSession::manualScopesEnabled() const {
-    return config_.enableManualScopes;
+    return enabled() && config_.enableManualScopes;
+}
+
+inline void SwRuntimeProfilerSession::setEnabled(bool enabled) {
+    enabledLive_.store(enabled, std::memory_order_release);
+}
+
+inline bool SwRuntimeProfilerSession::enabled() const {
+    return enabledLive_.load(std::memory_order_acquire);
 }
 
 inline void SwRuntimeProfilerSession::setStallThresholdUs(long long thresholdUs) {
@@ -439,6 +731,9 @@ inline void SwRuntimeProfilerSession::recordTiming(SwRuntimeTimingKind kind,
                                                    const char* label,
                                                    long long durationUs,
                                                    SwFiberLane lane) {
+    if (!enabled()) {
+        return;
+    }
     SwRuntimeTimingRecord record;
     record.kind = kind;
     record.label = label ? label : "";
@@ -629,7 +924,7 @@ inline void SwRuntimeProfilerSession::callSinkStall_(const SwRuntimeStallReport&
 }
 
 inline bool SwRuntimeProfilerSession::emitBatchIfNeeded() {
-    if (!sink_) {
+    if (!sink_ || !enabled()) {
         return false;
     }
     SwList<SwRuntimeTimingRecord> batch = drainRecords();
@@ -642,7 +937,7 @@ inline bool SwRuntimeProfilerSession::emitBatchIfNeeded() {
 }
 
 inline bool SwRuntimeProfilerSession::maybeEmitStall() {
-    if (!sink_ || !config_.enableStackCaptureOnStall) {
+    if (!sink_ || !enabled() || !config_.enableStackCaptureOnStall) {
         return false;
     }
 
@@ -678,7 +973,13 @@ inline bool SwRuntimeProfilerSession::maybeEmitStall() {
     report.label = label;
     report.elapsedUs = elapsedUs;
     report.lane = lane;
-    captureStack_(report.frames, report.symbols);
+    captureStack_(report.frames, report.resolvedFrames, report.symbols);
+#if defined(_WIN32)
+    report.symbolBackend = "dbghelp/stackwalk64/pdb";
+    report.symbolSearchPath = swRuntimeProfilerDetail::WindowsSymbolEngine::instance().searchPath();
+#elif !defined(__ANDROID__)
+    report.symbolBackend = "backtrace/dladdr";
+#endif
 
     lastReportedSpanId_.store(spanId, std::memory_order_release);
     lastReportedNs_.store(nowNs, std::memory_order_release);
@@ -687,19 +988,22 @@ inline bool SwRuntimeProfilerSession::maybeEmitStall() {
 }
 
 inline void SwRuntimeProfilerSession::captureStack_(SwList<unsigned long long>& framesOut,
+                                                    SwList<SwRuntimeResolvedFrame>& resolvedFramesOut,
                                                     SwList<SwString>& symbolsOut) {
 #if defined(_WIN32)
-    captureWindowsStack_(framesOut, symbolsOut);
+    captureWindowsStack_(framesOut, resolvedFramesOut, symbolsOut);
 #elif !defined(__ANDROID__)
-    captureLinuxStack_(framesOut, symbolsOut);
+    captureLinuxStack_(framesOut, resolvedFramesOut, symbolsOut);
 #else
     (void)framesOut;
+    (void)resolvedFramesOut;
     (void)symbolsOut;
 #endif
 }
 
 #if defined(_WIN32)
 inline void SwRuntimeProfilerSession::captureWindowsStack_(SwList<unsigned long long>& framesOut,
+                                                           SwList<SwRuntimeResolvedFrame>& resolvedFramesOut,
                                                            SwList<SwString>& symbolsOut) {
     if (!ownerBound_.load(std::memory_order_acquire) || nativeThreadId_ == 0) {
         return;
@@ -728,98 +1032,108 @@ inline void SwRuntimeProfilerSession::captureWindowsStack_(SwList<unsigned long 
         return;
     }
 
-    static std::mutex s_dbghelpMutex;
-    std::lock_guard<std::mutex> dbghelpLock(s_dbghelpMutex);
+    swRuntimeProfilerDetail::WindowsSymbolEngine& engine =
+        swRuntimeProfilerDetail::WindowsSymbolEngine::instance();
+    {
+        std::lock_guard<std::mutex> dbghelpLock(engine.mutex());
+        if (!engine.ensureReadyLocked()) {
+#if defined(_M_X64) || defined(_WIN64)
+            if (ctx.Rip != 0) {
+                framesOut.append(static_cast<unsigned long long>(ctx.Rip));
+            }
+#elif defined(_M_IX86)
+            if (ctx.Eip != 0) {
+                framesOut.append(static_cast<unsigned long long>(ctx.Eip));
+            }
+#endif
+            ::ResumeThread(threadHandle);
+            ::CloseHandle(threadHandle);
+            return;
+        }
+        engine.refreshModulesLocked();
 
-    HANDLE process = ::GetCurrentProcess();
-    ::SymSetOptions(SYMOPT_UNDNAME | SYMOPT_LOAD_LINES | SYMOPT_DEFERRED_LOADS);
-    const BOOL symReady = ::SymInitialize(process, nullptr, TRUE);
-
-    STACKFRAME64 frame;
-    std::memset(&frame, 0, sizeof(frame));
-    DWORD machine = 0;
+        STACKFRAME64 frame;
+        std::memset(&frame, 0, sizeof(frame));
+        DWORD machine = 0;
 
 #if defined(_M_X64) || defined(_WIN64)
-    machine = IMAGE_FILE_MACHINE_AMD64;
-    frame.AddrPC.Offset = ctx.Rip;
-    frame.AddrFrame.Offset = ctx.Rsp;
-    frame.AddrStack.Offset = ctx.Rsp;
+        machine = IMAGE_FILE_MACHINE_AMD64;
+        frame.AddrPC.Offset = ctx.Rip;
+        frame.AddrFrame.Offset = ctx.Rsp;
+        frame.AddrStack.Offset = ctx.Rsp;
 #elif defined(_M_IX86)
-    machine = IMAGE_FILE_MACHINE_I386;
-    frame.AddrPC.Offset = ctx.Eip;
-    frame.AddrFrame.Offset = ctx.Ebp;
-    frame.AddrStack.Offset = ctx.Esp;
+        machine = IMAGE_FILE_MACHINE_I386;
+        frame.AddrPC.Offset = ctx.Eip;
+        frame.AddrFrame.Offset = ctx.Ebp;
+        frame.AddrStack.Offset = ctx.Esp;
 #endif
 
-    frame.AddrPC.Mode = AddrModeFlat;
-    frame.AddrFrame.Mode = AddrModeFlat;
-    frame.AddrStack.Mode = AddrModeFlat;
+        frame.AddrPC.Mode = AddrModeFlat;
+        frame.AddrFrame.Mode = AddrModeFlat;
+        frame.AddrStack.Mode = AddrModeFlat;
 
-    const int maxFrames = std::max(1, config_.maxStackFrames);
-    for (int i = 0; i < maxFrames; ++i) {
-        if (!::StackWalk64(machine,
-                           process,
-                           threadHandle,
-                           &frame,
-                           &ctx,
-                           nullptr,
-                           ::SymFunctionTableAccess64,
-                           ::SymGetModuleBase64,
-                           nullptr)) {
-            break;
-        }
-        if (frame.AddrPC.Offset == 0) {
-            break;
-        }
+        const int maxFrames = std::max(1, config_.maxStackFrames);
+        for (int i = 0; i < maxFrames; ++i) {
+            if (!::StackWalk64(machine,
+                               engine.process(),
+                               threadHandle,
+                               &frame,
+                               &ctx,
+                               nullptr,
+                               ::SymFunctionTableAccess64,
+                               ::SymGetModuleBase64,
+                               nullptr)) {
+                break;
+            }
+            if (frame.AddrPC.Offset == 0) {
+                break;
+            }
 
-        const unsigned long long addr = static_cast<unsigned long long>(frame.AddrPC.Offset);
-        framesOut.append(addr);
-
-        if (!symReady) {
-            continue;
+            framesOut.append(static_cast<unsigned long long>(frame.AddrPC.Offset));
         }
 
-        char symbolBuffer[sizeof(SYMBOL_INFO) + MAX_SYM_NAME];
-        std::memset(symbolBuffer, 0, sizeof(symbolBuffer));
-        SYMBOL_INFO* symbol = reinterpret_cast<SYMBOL_INFO*>(symbolBuffer);
-        symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
-        symbol->MaxNameLen = MAX_SYM_NAME;
-
-        DWORD64 displacement = 0;
-        IMAGEHLP_LINE64 line;
-        std::memset(&line, 0, sizeof(line));
-        line.SizeOfStruct = sizeof(IMAGEHLP_LINE64);
-        DWORD lineDisp = 0;
-
-        const BOOL haveSymbol = ::SymFromAddr(process, frame.AddrPC.Offset, &displacement, symbol);
-        const BOOL haveLine = ::SymGetLineFromAddr64(process, frame.AddrPC.Offset, &lineDisp, &line);
-
-        if (haveSymbol && haveLine) {
-            char buffer[1024];
-            std::snprintf(buffer,
-                          sizeof(buffer),
-                          "%s + 0x%llx (%s:%lu)",
-                          symbol->Name,
-                          static_cast<unsigned long long>(displacement),
-                          line.FileName ? line.FileName : "?",
-                          static_cast<unsigned long>(line.LineNumber));
-            symbolsOut.append(SwString(buffer));
-        } else if (haveSymbol) {
-            char buffer[512];
-            std::snprintf(buffer,
-                          sizeof(buffer),
-                          "%s + 0x%llx",
-                          symbol->Name,
-                          static_cast<unsigned long long>(displacement));
-            symbolsOut.append(SwString(buffer));
+        if (framesOut.isEmpty()) {
+#if defined(_M_X64) || defined(_WIN64)
+            if (ctx.Rip != 0) {
+                framesOut.append(static_cast<unsigned long long>(ctx.Rip));
+            }
+#elif defined(_M_IX86)
+            if (ctx.Eip != 0) {
+                framesOut.append(static_cast<unsigned long long>(ctx.Eip));
+            }
+#endif
         }
     }
 
-    if (symReady) {
-        ::SymCleanup(process);
-    }
     ::ResumeThread(threadHandle);
     ::CloseHandle(threadHandle);
+    symbolizeWindowsFrames_(framesOut, resolvedFramesOut, symbolsOut);
+}
+
+inline void SwRuntimeProfilerSession::symbolizeWindowsFrames_(
+    const SwList<unsigned long long>& framesIn,
+    SwList<SwRuntimeResolvedFrame>& resolvedFramesOut,
+    SwList<SwString>& symbolsOut) {
+    if (framesIn.isEmpty()) {
+        return;
+    }
+
+    swRuntimeProfilerDetail::WindowsSymbolEngine& engine =
+        swRuntimeProfilerDetail::WindowsSymbolEngine::instance();
+    std::lock_guard<std::mutex> dbghelpLock(engine.mutex());
+    if (!engine.ensureReadyLocked()) {
+        for (size_t i = 0; i < framesIn.size(); ++i) {
+            symbolsOut.append("0x" + SwString::number(framesIn[i], 16));
+        }
+        return;
+    }
+
+    engine.refreshModulesLocked();
+    for (size_t i = 0; i < framesIn.size(); ++i) {
+        const SwRuntimeResolvedFrame frame = engine.resolveFrameLocked(framesIn[i]);
+        resolvedFramesOut.append(frame);
+        symbolsOut.append(engine.formatFrameText(frame));
+    }
 }
 #elif !defined(__ANDROID__)
 inline int SwRuntimeProfilerSession::linuxSignalNumber_() {
@@ -858,6 +1172,7 @@ inline void SwRuntimeProfilerSession::linuxSignalHandler_(int /*signalNumber*/,
 }
 
 inline void SwRuntimeProfilerSession::captureLinuxStack_(SwList<unsigned long long>& framesOut,
+                                                         SwList<SwRuntimeResolvedFrame>& resolvedFramesOut,
                                                          SwList<SwString>& symbolsOut) {
     if (!ownerBound_.load(std::memory_order_acquire)) {
         return;
@@ -899,6 +1214,51 @@ inline void SwRuntimeProfilerSession::captureLinuxStack_(SwList<unsigned long lo
             std::memset(&info, 0, sizeof(info));
             if (::dladdr(localFrames[static_cast<std::size_t>(i)], &info) && info.dli_sname) {
                 symbolsOut.append(SwString(info.dli_sname));
+            }
+        }
+    }
+
+    const size_t frameTotal = framesOut.size();
+    for (size_t i = 0; i < frameTotal; ++i) {
+        SwRuntimeResolvedFrame frame;
+        frame.address = framesOut[i];
+
+        Dl_info info;
+        std::memset(&info, 0, sizeof(info));
+        if (::dladdr(localFrames[i], &info)) {
+            frame.moduleResolved = (info.dli_fname != nullptr);
+            frame.modulePath = info.dli_fname ? SwString(info.dli_fname) : SwString();
+            if (!frame.modulePath.isEmpty()) {
+                const std::string modulePathStd = frame.modulePath.toStdString();
+                const size_t slash = modulePathStd.find_last_of("\\/");
+                if (slash != std::string::npos && slash + 1 < modulePathStd.size()) {
+                    frame.moduleName = SwString::fromUtf8(modulePathStd.c_str() + slash + 1);
+                } else {
+                    frame.moduleName = frame.modulePath;
+                }
+            }
+            if (info.dli_sname) {
+                frame.symbolResolved = true;
+                frame.symbolName = SwString(info.dli_sname);
+            }
+            if (info.dli_fbase) {
+                frame.moduleBase = static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(info.dli_fbase));
+            }
+            if (frame.symbolResolved) {
+                const unsigned long long symbolAddr =
+                    static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(info.dli_saddr));
+                if (frame.address >= symbolAddr) {
+                    frame.displacement = frame.address - symbolAddr;
+                }
+            }
+        }
+
+        resolvedFramesOut.append(frame);
+        if (i >= symbolsOut.size()) {
+            if (frame.symbolResolved) {
+                symbolsOut.append(frame.symbolName);
+            } else {
+                symbolsOut.append("0x" + SwString::number(frame.address, 16));
             }
         }
     }

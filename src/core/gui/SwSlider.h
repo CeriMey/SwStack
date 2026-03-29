@@ -82,11 +82,11 @@ public:
         , m_value(0)
         , m_step(1)
         , m_dragging(false)
-        , m_handleSize(26) {
+        , m_handleSize(18) {
         if (m_orientation == Orientation::Horizontal) {
-            resize(260, 48);
+            resize(260, 36);
         } else {
-            resize(60, 260);
+            resize(36, 260);
         }
         setCursor(CursorType::Hand);
     }
@@ -216,23 +216,89 @@ protected:
      * @details Override this hook when the default framework behavior needs to be extended or replaced.
      */
     void paintEvent(PaintEvent* event) override {
-        SwPainter* painter = event->painter();
+        SwPainter* painter = event ? event->painter() : nullptr;
         if (!painter) {
             return;
         }
 
-        SwRect bounds = rect();
-        SwColor background{28, 32, 48};
-        SwColor grooveColor{54, 62, 86};
-        SwColor accent{88, 140, 255};
+        const SwRect bounds = rect();
+        StyleSheet* sheet = getToolSheet();
 
-        painter->fillRoundedRect(bounds, 8, background, SwColor{18, 20, 30}, 1);
+        // --- Resolve stylesheet properties with neutral defaults ---
+        SwColor bg{0, 0, 0};
+        float bgAlpha = 0.0f;
+        bool paintBg = false;
+        resolveBackground(sheet, bg, bgAlpha, paintBg);
 
-        SwRect groove = grooveRect();
-        painter->fillRoundedRect(groove, groove.height / 2, grooveColor, SwColor{24, 28, 40}, 1);
+        SwColor borderColor{0, 0, 0};
+        int borderWidth = 0;
+        int borderRadius = 6;
+        resolveBorder(sheet, borderColor, borderWidth, borderRadius);
 
-        SwRect handle = handleRect();
-        painter->fillRoundedRect(handle, handle.width / 2, accent, SwColor{16, 18, 32}, 1);
+        // Accent color via "color" stylesheet property, fallback modern blue
+        SwColor accent{66, 133, 244};
+        accent = resolveTextColor(sheet, accent);
+
+        // --- State ---
+        const bool disabled = !getEnable();
+        const bool hovered  = getHover();
+        const bool pressed  = m_dragging;
+
+        // --- Draw widget background (only if stylesheet requests one) ---
+        if (paintBg && bgAlpha > 0.0f) {
+            painter->fillRoundedRect(bounds, borderRadius, bg, borderColor, borderWidth);
+        }
+
+        // --- Groove track ---
+        const SwRect groove = grooveRect();
+        const int grooveR = groove.height / 2;
+
+        // Unfilled portion
+        SwColor trackBg  = disabled ? SwColor{230, 230, 230} : SwColor{215, 220, 228};
+        painter->fillRoundedRect(groove, grooveR, trackBg, trackBg, 0);
+
+        // Filled portion (left-to-handle / bottom-to-handle)
+        const float ratio = (m_maximum == m_minimum)
+                                ? 0.0f
+                                : static_cast<float>(m_value - m_minimum) /
+                                  static_cast<float>(m_maximum - m_minimum);
+
+        SwColor fillColor = disabled ? SwColor{190, 200, 218} : accent;
+
+        if (ratio > 0.001f) {
+            SwRect filled = groove;
+            if (m_orientation == Orientation::Horizontal) {
+                filled.width = std::max(groove.height, static_cast<int>(ratio * groove.width));
+            } else {
+                int fillH = std::max(groove.width, static_cast<int>(ratio * groove.height));
+                filled.y = groove.y + groove.height - fillH;
+                filled.height = fillH;
+            }
+            painter->fillRoundedRect(filled, grooveR, fillColor, fillColor, 0);
+        }
+
+        // --- Handle ---
+        const SwRect handle = handleRect();
+
+        // Determine handle appearance based on state
+        SwColor hFill, hBorder;
+        int hBorderW;
+
+        if (disabled) {
+            hFill   = SwColor{240, 240, 240};
+            hBorder = SwColor{210, 210, 210};
+            hBorderW = 1;
+        } else if (hovered) {
+            hFill   = SwColor{255, 255, 255};
+            hBorder = accent;
+            hBorderW = 1;
+        } else {
+            hFill   = SwColor{255, 255, 255};
+            hBorder = SwColor{200, 204, 214};
+            hBorderW = 1;
+        }
+
+        painter->fillEllipse(handle, hFill, hBorder, hBorderW);
     }
 
     /**
@@ -320,22 +386,22 @@ private:
 
     SwRect grooveRect() const {
         SwRect bounds = rect();
-        const int padding = 18;
+        const int halfHandle = m_handleSize / 2 + 1;
         if (m_orientation == Orientation::Horizontal) {
-            int grooveHeight = std::max(6, bounds.height / 4);
+            const int grooveHeight = 4;
             int centerY = bounds.y + bounds.height / 2;
-            return SwRect{bounds.x + padding,
+            return SwRect{bounds.x + halfHandle,
                           centerY - grooveHeight / 2,
-                          bounds.width - padding * 2,
+                          bounds.width - halfHandle * 2,
                           grooveHeight};
         }
 
-        int grooveWidth = std::max(6, bounds.width / 3);
+        const int grooveWidth = 4;
         int centerX = bounds.x + bounds.width / 2;
         return SwRect{centerX - grooveWidth / 2,
-                      bounds.y + padding,
+                      bounds.y + halfHandle,
                       grooveWidth,
-                      bounds.height - padding * 2};
+                      bounds.height - halfHandle * 2};
     }
 
     SwRect handleRect() const {

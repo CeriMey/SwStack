@@ -270,7 +270,7 @@ protected:
                 continue;
             }
 
-            const bool hovered = (i == m_hoverHandle);
+            const bool hovered = getHover() && (i == m_hoverHandle);
             const bool pressed = (i == m_dragHandle);
             SwColor handleColor = style.handleColor;
             SwColor borderColor = style.handleBorderColor;
@@ -285,16 +285,8 @@ protected:
                 gripColor = style.gripColorHover;
             }
 
-            SwRect visualRect = h;
-            if (m_orientation == Orientation::Horizontal) {
-                const int visualWidth = clampInt(style.visualWidth, 1, std::max(1, h.width));
-                const int x = h.x + (h.width - visualWidth) / 2;
-                visualRect = SwRect{x, h.y, visualWidth, h.height};
-            } else {
-                const int visualHeight = clampInt(style.visualWidth, 1, std::max(1, h.height));
-                const int y = h.y + (h.height - visualHeight) / 2;
-                visualRect = SwRect{h.x, y, h.width, visualHeight};
-            }
+            const int hoverGrow = pressed ? 3 : (hovered ? 2 : 0);
+            const SwRect visualRect = visualHandleRect_(i, style, hoverGrow);
 
             const int primaryThickness = (m_orientation == Orientation::Horizontal) ? visualRect.width : visualRect.height;
             if (primaryThickness <= 2) {
@@ -344,6 +336,7 @@ protected:
             return;
         }
 
+        cancelHoverReset_();
         const int handleIdx = handleAt(event->x(), event->y());
         if (handleIdx >= 0) {
             m_dragHandle = handleIdx;
@@ -381,7 +374,11 @@ protected:
         }
 
         const int handleIdx = handleAt(event->x(), event->y());
-        if (handleIdx != m_hoverHandle) {
+        if (handleIdx >= 0) {
+            cancelHoverReset_();
+        }
+
+        if (handleIdx >= 0 && handleIdx != m_hoverHandle) {
             const int oldHover = m_hoverHandle;
             m_hoverHandle = handleIdx;
             if (oldHover >= 0) {
@@ -392,12 +389,14 @@ protected:
             }
         }
 
-        if (m_hoverHandle >= 0) {
+        if (handleIdx >= 0) {
             SwWidgetPlatformAdapter::setCursor(m_orientation == Orientation::Horizontal ? CursorType::SizeWE : CursorType::SizeNS);
             event->accept();
             return;
         }
 
+        SwWidgetPlatformAdapter::setCursor(CursorType::Arrow);
+        scheduleHoverReset_();
         SwWidget::mouseMoveEvent(event);
     }
 
@@ -414,13 +413,28 @@ protected:
 
         if (m_dragHandle >= 0) {
             const int releasedHandle = m_dragHandle;
+            const int previousHoverHandle = m_hoverHandle;
             if (!m_opaqueResize) {
                 updateLayout();
             }
             m_dragHandle = -1;
             m_dragOffset = 0;
+            const int handleUnderCursor = handleAt(event->x(), event->y());
+            m_hoverHandle = (handleUnderCursor >= 0) ? handleUnderCursor : releasedHandle;
             event->accept();
             invalidateHandle_(releasedHandle);
+            if (previousHoverHandle >= 0 && previousHoverHandle != releasedHandle) {
+                invalidateHandle_(previousHoverHandle);
+            }
+            if (m_hoverHandle >= 0 && m_hoverHandle != releasedHandle && m_hoverHandle != previousHoverHandle) {
+                invalidateHandle_(m_hoverHandle);
+            }
+            if (handleUnderCursor < 0) {
+                SwWidgetPlatformAdapter::setCursor(CursorType::Arrow);
+                scheduleHoverReset_();
+            } else {
+                cancelHoverReset_();
+            }
             return;
         }
 
@@ -619,9 +633,10 @@ private:
     }
 
     int handleAt(int px, int py) const {
+        const HandleStyle_ style = resolveHandleStyle_();
         const int hc = handleCount();
         for (int i = 0; i < hc; ++i) {
-            if (containsPoint(handleRect(i), px, py)) {
+            if (containsPoint(hoverHitRect_(i, style), px, py)) {
                 return i;
             }
         }
@@ -716,6 +731,36 @@ private:
         return SwRect{bounds.x, y, bounds.width, m_handleWidth};
     }
 
+    SwRect visualHandleRect_(int handleIndex, const HandleStyle_& style, int extraPrimaryThickness = 0) const {
+        const SwRect h = handleRect(handleIndex);
+        if (h.width <= 0 || h.height <= 0) {
+            return h;
+        }
+
+        if (m_orientation == Orientation::Horizontal) {
+            const int visualWidth = std::max(1, style.visualWidth + std::max(0, extraPrimaryThickness));
+            const int cx = h.x + (h.width / 2);
+            return SwRect{cx - (visualWidth / 2), h.y, visualWidth, h.height};
+        }
+
+        const int visualHeight = std::max(1, style.visualWidth + std::max(0, extraPrimaryThickness));
+        const int cy = h.y + (h.height / 2);
+        return SwRect{h.x, cy - (visualHeight / 2), h.width, visualHeight};
+    }
+
+    SwRect hoverHitRect_(int handleIndex, const HandleStyle_& style) const {
+        SwRect rect = visualHandleRect_(handleIndex, style, 0);
+        const int tolerance = 2;
+        if (m_orientation == Orientation::Horizontal) {
+            rect.x -= tolerance;
+            rect.width += tolerance * 2;
+        } else {
+            rect.y -= tolerance;
+            rect.height += tolerance * 2;
+        }
+        return rect;
+    }
+
     void invalidateRect_(const SwRect& r) {
         if (!isVisibleInHierarchy() || r.width <= 0 || r.height <= 0) {
             return;
@@ -727,7 +772,51 @@ private:
         if (handleIdx < 0) {
             return;
         }
-        invalidateRect_(handleRect(handleIdx));
+        const HandleStyle_ style = resolveHandleStyle_();
+        invalidateRect_(hoverHitRect_(handleIdx, style));
+        invalidateRect_(visualHandleRect_(handleIdx, style, 3));
+    }
+
+    void cancelHoverReset_() {
+        if (m_hoverResetTimerId >= 0) {
+            if (SwCoreApplication::instance(false)) {
+                SwCoreApplication::instance(false)->removeTimer(m_hoverResetTimerId);
+            }
+            m_hoverResetTimerId = -1;
+        }
+        ++m_hoverResetGeneration;
+    }
+
+    void scheduleHoverReset_() {
+        if (m_hoverHandle < 0 || m_dragHandle >= 0 || m_hoverResetTimerId >= 0) {
+            return;
+        }
+
+        SwCoreApplication* app = SwCoreApplication::instance(false);
+        if (!app) {
+            const int oldHover = m_hoverHandle;
+            m_hoverHandle = -1;
+            invalidateHandle_(oldHover);
+            return;
+        }
+
+        const unsigned long long generation = ++m_hoverResetGeneration;
+        SwSplitter* self = this;
+        m_hoverResetTimerId = app->addTimer([self, generation]() {
+            if (!SwObject::isLive(self)) {
+                return;
+            }
+            if (self->m_hoverResetGeneration != generation) {
+                return;
+            }
+            self->m_hoverResetTimerId = -1;
+            if (self->m_dragHandle >= 0 || self->m_hoverHandle < 0) {
+                return;
+            }
+            const int oldHover = self->m_hoverHandle;
+            self->m_hoverHandle = -1;
+            self->invalidateHandle_(oldHover);
+        }, 3000000, true);
     }
 
     void updateLayout() {
@@ -845,5 +934,7 @@ private:
     int m_dragHandle{-1};
     int m_dragOffset{0};
     bool m_opaqueResize{true};
+    int m_hoverResetTimerId{-1};
+    unsigned long long m_hoverResetGeneration{0};
 };
 

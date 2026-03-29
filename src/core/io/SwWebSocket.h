@@ -452,6 +452,11 @@ public:
      *
      * @details The returned value reflects the state currently stored by the instance.
      */
+    /** @brief Returns the request path (server-side: from the client's GET request). */
+    const SwString& requestPath() const {
+        return m_path;
+    }
+
     uint16_t closeCode() const {
         return m_closeCode;
     }

@@ -45,6 +45,7 @@
  */
 
 
+#include "media/SwMediaSource.h"
 #include "media/SwVideoDecoder.h"
 #include "media/SwVideoPacket.h"
 #include "SwDebug.h"
@@ -60,22 +61,13 @@
 #include "core/fs/SwMutex.h"
 static constexpr const char* kSwLogCategory_SwVideoPipeline = "sw.media.swvideopipeline";
 
-class SwVideoSource {
+class SwVideoSource : public SwMediaSource {
 public:
-    enum class StreamState {
-        Stopped,
-        Connecting,
-        Recovering,
-        Streaming
-    };
-
-    struct StreamStatus {
-        StreamState state{StreamState::Stopped};
-        SwString reason{};
-    };
+    using StreamState = SwMediaSource::StreamState;
+    using StreamStatus = SwMediaSource::StreamStatus;
 
     using PacketCallback = std::function<void(const SwVideoPacket&)>;
-    using StatusCallback = std::function<void(const StreamStatus&)>;
+    using StatusCallback = SwMediaSource::StatusCallback;
 
     /**
      * @brief Destroys the `SwVideoSource` instance.
@@ -117,28 +109,6 @@ public:
         m_packetCallback = std::move(callback);
     }
 
-    void setStatusCallback(StatusCallback callback) {
-        StreamStatus currentStatus;
-        {
-            SwMutexLocker lock(m_statusMutex);
-            m_statusCallback = std::move(callback);
-            currentStatus = m_streamStatus;
-        }
-        StatusCallback cb;
-        {
-            SwMutexLocker lock(m_statusMutex);
-            cb = m_statusCallback;
-        }
-        if (cb) {
-            cb(currentStatus);
-        }
-    }
-
-    StreamStatus streamStatus() const {
-        SwMutexLocker lock(m_statusMutex);
-        return m_streamStatus;
-    }
-
 protected:
     /**
      * @brief Performs the `emitPacket` operation.
@@ -153,45 +123,12 @@ protected:
         if (cb) {
             cb(packet);
         }
+        emitMediaPacket(SwMediaPacket::fromVideoPacket(packet));
     }
-
-    void emitStatus(StreamState state, const SwString& reason = SwString()) {
-        StatusCallback cb;
-        StreamStatus status;
-        {
-            SwMutexLocker lock(m_statusMutex);
-            m_streamStatus.state = state;
-            m_streamStatus.reason = reason;
-            status = m_streamStatus;
-            cb = m_statusCallback;
-        }
-        if (cb) {
-            cb(status);
-        }
-    }
-
-    /**
-     * @brief Returns whether the object reports running.
-     * @return `true` when the object reports running; otherwise `false`.
-     *
-     * @details This query does not modify the object state.
-     */
-    bool isRunning() const { return m_running.load(); }
-    /**
-     * @brief Sets the running.
-     * @param running Value passed to the method.
-     *
-     * @details Call this method to replace the currently stored value with the caller-provided one.
-     */
-    void setRunning(bool running) { m_running.store(running); }
 
 private:
     SwMutex m_callbackMutex;
     PacketCallback m_packetCallback;
-    mutable SwMutex m_statusMutex;
-    StatusCallback m_statusCallback;
-    StreamStatus m_streamStatus{};
-    std::atomic<bool> m_running{false};
 };
 
 class SwVideoPipeline : public std::enable_shared_from_this<SwVideoPipeline> {

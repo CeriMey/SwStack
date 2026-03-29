@@ -117,6 +117,7 @@ static constexpr const char* kSwLogCategory_SwCoreApplication = "sw.core.runtime
 #include "SwEvent.h"
 #include "SwEventDispatchSupport.h"
 #include "SwFiberPool.h"
+#include "SwIoDispatcher.h"
 #include "SwRuntimeProfiler.h"
 #include <thread>
 
@@ -625,6 +626,17 @@ public:
 
     bool profilerEnabled() const {
         return static_cast<bool>(profilerSession_);
+    }
+
+    void setProfilerCaptureEnabled(bool enabled) {
+        if (!profilerSession_) {
+            return;
+        }
+        profilerSession_->setEnabled(enabled);
+    }
+
+    bool profilerCaptureEnabled() const {
+        return profilerSession_ ? profilerSession_->enabled() : false;
     }
 
     void setProfilerStallThresholdUs(long long thresholdUs) {
@@ -1301,20 +1313,9 @@ protected:
         if (!running) return;
 
         std::vector<HANDLE> handles;
-        std::vector<std::function<void()>> callbacks;
         handles.reserve(1);
-        callbacks.reserve(1);
 
         handles.push_back(wakeEvent_);
-        callbacks.push_back(std::function<void()>{});
-
-        {
-            SwMutexLocker lk(waitablesMutex_);
-            for (auto& kv : waitHandles_) {
-                handles.push_back(kv.second.handle);
-                callbacks.push_back(kv.second.cb);
-            }
-        }
 
         HANDLE timeoutTimer = NULL;
         DWORD timeoutMs = INFINITE;
@@ -1335,7 +1336,6 @@ protected:
                 dueTime.QuadPart = -(clampedTimeoutUs * 10LL);
                 if (::SetWaitableTimer(timeoutTimer, &dueTime, 0, NULL, NULL, FALSE)) {
                     handles.push_back(timeoutTimer);
-                    callbacks.push_back(std::function<void()>{});
                     timeoutMs = INFINITE;
                 } else {
                     ::CloseHandle(timeoutTimer);
@@ -1355,24 +1355,24 @@ protected:
                                                     FALSE,
                                                     timeoutMs,
                                                     QS_ALLINPUT);
-
-        if (r >= WAIT_OBJECT_0 && r < WAIT_OBJECT_0 + handles.size()) {
-            const size_t idx = static_cast<size_t>(r - WAIT_OBJECT_0);
-            if (idx > 0 && idx < callbacks.size() && callbacks[idx]) {
-                postEventOnLane(callbacks[idx], SwFiberLane::Control);
-                (void)runFiberPoolWork_();
-            }
-            return;
-        }
         // WAIT_OBJECT_0 + handles.size() means: messages are pending; let the GUI pump them.
+        (void)r;
         return;
     }
 #endif
 
     // ---------------------------------------------------------------------
-    // OS waitables (event-driven wakeup: Windows HANDLE / Linux fd)
+    // Central native IO dispatcher
     // ---------------------------------------------------------------------
 public:
+    SwIoDispatcher& ioDispatcher() {
+        return ioDispatcher_;
+    }
+
+    const SwIoDispatcher& ioDispatcher() const {
+        return ioDispatcher_;
+    }
+
 #if defined(_WIN32)
     /**
      * @brief Adds the specified wait Handle.
@@ -1381,12 +1381,11 @@ public:
      * @return The requested wait Handle.
      */
     size_t addWaitHandle(HANDLE h, std::function<void()> onSignaled) {
-        if (!h) return 0;
-        SwMutexLocker lk(waitablesMutex_);
-        const size_t id = nextWaitableId_++;
-        waitHandles_[id] = WaitHandleEntry{h, std::move(onSignaled)};
-        signalWakeup_();
-        return id;
+        return ioDispatcher_.watchHandle(h,
+                                         SwIoDispatcher::AffinityPoster(),
+                                         [this, onSignaled]() {
+            postEventOnLane(onSignaled, SwFiberLane::Control);
+        });
     }
 #else
     /**
@@ -1396,12 +1395,12 @@ public:
      * @return The requested wait Fd.
      */
     size_t addWaitFd(int fd, std::function<void()> onReadable) {
-        if (fd < 0) return 0;
-        SwMutexLocker lk(waitablesMutex_);
-        const size_t id = nextWaitableId_++;
-        waitFds_[id] = WaitFdEntry{fd, std::move(onReadable)};
-        signalWakeup_();
-        return id;
+        return ioDispatcher_.watchFd(fd,
+                                     SwIoDispatcher::Readable,
+                                     SwIoDispatcher::AffinityPoster(),
+                                     [this, onReadable](uint32_t) {
+                                         postEventOnLane(onReadable, SwFiberLane::Control);
+                                     });
     }
 #endif
 
@@ -1410,14 +1409,7 @@ public:
      * @param id Value passed to the method.
      */
     void removeWaitable(size_t id) {
-        if (!id) return;
-        SwMutexLocker lk(waitablesMutex_);
-#if defined(_WIN32)
-        waitHandles_.remove(id);
-#else
-        waitFds_.remove(id);
-#endif
-        signalWakeup_();
+        ioDispatcher_.remove(id);
     }
 
     /**
@@ -2189,20 +2181,9 @@ private:
 
 #if defined(_WIN32)
         std::vector<HANDLE> handles;
-        std::vector<std::function<void()>> callbacks;
         handles.reserve(1);
-        callbacks.reserve(1);
 
         handles.push_back(wakeEvent_);
-        callbacks.push_back(std::function<void()>{});
-
-        {
-            SwMutexLocker lk(waitablesMutex_);
-            for (auto& kv : waitHandles_) {
-                handles.push_back(kv.second.handle);
-                callbacks.push_back(kv.second.cb);
-            }
-        }
 
         HANDLE timeoutTimer = NULL;
         DWORD timeoutMs = INFINITE;
@@ -2223,7 +2204,6 @@ private:
                 dueTime.QuadPart = -(clampedTimeoutUs * 10LL);
                 if (::SetWaitableTimer(timeoutTimer, &dueTime, 0, NULL, NULL, FALSE)) {
                     handles.push_back(timeoutTimer);
-                    callbacks.push_back(std::function<void()>{});
                     timeoutMs = INFINITE;
                 } else {
                     ::CloseHandle(timeoutTimer);
@@ -2248,27 +2228,16 @@ private:
             ::CancelWaitableTimer(timeoutTimer);
             ::CloseHandle(timeoutTimer);
         }
-        if (r >= WAIT_OBJECT_0 && r < WAIT_OBJECT_0 + handles.size()) {
-            const size_t idx = static_cast<size_t>(r - WAIT_OBJECT_0);
-            if (idx > 0 && idx < callbacks.size() && callbacks[idx]) {
-                postEventOnLane(callbacks[idx], SwFiberLane::Control);
-                (void)runFiberPoolWork_();
-            }
-            return;
-        }
         return;
 #else
         std::vector<pollfd> fds;
-        std::vector<std::function<void()>> callbacks;
         fds.reserve(2);
-        callbacks.reserve(2);
 
         pollfd wakePfd;
         wakePfd.fd = wakeEventFd_;
         wakePfd.events = POLLIN;
         wakePfd.revents = 0;
         fds.push_back(wakePfd);
-        callbacks.push_back(std::function<void()>{});
 
         const int termFd = unixTerminateEventFd_();
         const bool hasTermFd = (termFd >= 0);
@@ -2278,19 +2247,6 @@ private:
             termPfd.events = POLLIN;
             termPfd.revents = 0;
             fds.push_back(termPfd);
-            callbacks.push_back(std::function<void()>{});
-        }
-
-        {
-            SwMutexLocker lk(waitablesMutex_);
-            for (auto& kv : waitFds_) {
-                pollfd p;
-                p.fd = kv.second.fd;
-                p.events = POLLIN;
-                p.revents = 0;
-                fds.push_back(p);
-                callbacks.push_back(kv.second.cb);
-            }
         }
 
         // Use timerfd for high-resolution sleep (hrtimer, ~1ms granularity)
@@ -2310,7 +2266,6 @@ private:
                 tpfd.events = POLLIN;
                 tpfd.revents = 0;
                 fds.push_back(tpfd);
-                callbacks.push_back(std::function<void()>{});
             }
         }
 
@@ -2352,79 +2307,16 @@ private:
             }
             base = 2;
         }
-
-        for (size_t i = base; i < fds.size(); ++i) {
-            if (fds[i].revents & POLLIN) {
-                if (callbacks[i]) {
-                    postEventOnLane(callbacks[i], SwFiberLane::Control);
-                    (void)runFiberPoolWork_();
-                }
-            }
-        }
+        (void)base;
 #endif
     }
 
 #if defined(_WIN32)
-    struct WaitHandleEntry {
-        HANDLE handle{NULL};
-        /**
-         * @brief Returns the current function<void.
-         * @return The current function<void.
-         *
-         * @details The returned value reflects the state currently stored by the instance.
-         */
-        std::function<void()> cb;
-
-        /**
-         * @brief Constructs a `WaitHandleEntry` instance.
-         *
-         * @details The instance is initialized and prepared for immediate use.
-         */
-        WaitHandleEntry() = default;
-        /**
-         * @brief Constructs a `WaitHandleEntry` instance.
-         * @param h Height value.
-         *
-         * @details The instance is initialized and prepared for immediate use.
-         */
-        WaitHandleEntry(HANDLE h, std::function<void()> cb_) : handle(h), cb(std::move(cb_)) {}
-    };
-#endif
-    struct WaitFdEntry {
-        int fd{-1};
-        /**
-         * @brief Returns the current function<void.
-         * @return The current function<void.
-         *
-         * @details The returned value reflects the state currently stored by the instance.
-         */
-        std::function<void()> cb;
-
-        /**
-         * @brief Constructs a `WaitFdEntry` instance.
-         *
-         * @details The instance is initialized and prepared for immediate use.
-         */
-        WaitFdEntry() = default;
-        /**
-         * @brief Constructs a `WaitFdEntry` instance.
-         * @param fd_ Value passed to the method.
-         *
-         * @details The instance is initialized and prepared for immediate use.
-         */
-        WaitFdEntry(int fd_, std::function<void()> cb_) : fd(fd_), cb(std::move(cb_)) {}
-    };
-
-    SwMutex waitablesMutex_;
-    size_t nextWaitableId_{1};
-
-#if defined(_WIN32)
     HANDLE wakeEvent_{NULL};
-    SwMap<size_t, WaitHandleEntry> waitHandles_;
 #else
     int wakeEventFd_{-1};
-    SwMap<size_t, WaitFdEntry> waitFds_;
 #endif
+    SwIoDispatcher ioDispatcher_;
 };
 
 /**

@@ -53,6 +53,7 @@
  **************************************************************************************************/
 
 #include "media/SwMediaUrl.h"
+#include "media/SwAudioDecoder.h"
 #include "media/SwMediaOpenOptions.h"
 #include "media/SwVideoSource.h"
 #include "media/SwVideoPacket.h"
@@ -346,6 +347,8 @@ public:
      * @details Call this method to replace the currently stored value with the caller-provided one.
      */
     void setLocalAddress(const SwString& addr) { m_bindAddress = addr; }
+    void setEnableAudio(bool enable) { m_enableAudio = enable; }
+    void setEnableMetadata(bool enable) { m_enableMetadata = enable; }
     /**
      * @brief Sets the use Tcp Transport.
      * @param enable Value passed to the method.
@@ -418,13 +421,24 @@ private:
         std::string control;
         int payloadType{96};
         int clockRate{90000};
+        int channelCount{0};
         std::string codecName;
         std::string fmtpLine;
 
         bool isVideo() const { return mediaType == "video"; }
+        bool isAudio() const { return mediaType == "audio"; }
+        bool isMetadata() const { return mediaType == "application"; }
     };
 
     enum class RtspStep { None, Options, Describe, Setup, Play, Playing };
+    enum class SetupTarget { Video, Audio, Metadata };
+
+    struct TransportInfo {
+        uint16_t serverRtpPort{0};
+        uint16_t serverRtcpPort{0};
+        uint8_t interleavedRtpChannel{0};
+        uint8_t interleavedRtcpChannel{1};
+    };
 
     struct BufferedRtpPacket {
         SwByteArray datagram;
@@ -449,8 +463,13 @@ private:
         m_ctrlBuffer.clear();
         m_sdp.clear();
         m_tracks.clear();
+        setTracks(SwList<SwMediaTrack>());
         m_selectedTrackIndex = -1;
+        m_selectedAudioTrackIndex = -1;
+        m_selectedMetadataTrackIndex = -1;
         m_trackControl.clear();
+        m_audioTrackControl.clear();
+        m_metadataTrackControl.clear();
         m_sessionControl.clear();
         m_sessionId.clear();
         m_state = RtspStep::None;
@@ -458,8 +477,22 @@ private:
         m_serverRtpPort = 0;
         m_clientRtpPort = 0;
         m_clientRtcpPort = 0;
+        m_audioClientRtpPort = 0;
+        m_audioClientRtcpPort = 0;
+        m_audioServerRtpPort = 0;
+        m_audioServerRtcpPort = 0;
+        m_metadataClientRtpPort = 0;
+        m_metadataClientRtcpPort = 0;
+        m_metadataServerRtpPort = 0;
+        m_metadataServerRtcpPort = 0;
         m_payloadType = 96;
         m_clockRate = 90000;
+        m_audioPayloadType = -1;
+        m_audioClockRate = 0;
+        m_audioChannelCount = 0;
+        m_metadataPayloadType = -1;
+        m_metadataClockRate = 0;
+        m_metadataCodecName.clear();
         m_triedAggregatePlay.store(false);
         m_haveTimestamp = false;
         m_haveFirstTimestamp = false;
@@ -502,6 +535,14 @@ private:
             m_udpSession->stop();
             m_udpSession.reset();
         }
+        if (m_audioUdpSession) {
+            m_audioUdpSession->stop();
+            m_audioUdpSession.reset();
+        }
+        if (m_metadataUdpSession) {
+            m_metadataUdpSession->stop();
+            m_metadataUdpSession.reset();
+        }
         if (m_rtpSocket) {
             m_rtpSocket->close();
         }
@@ -518,6 +559,12 @@ private:
         m_detectedRtcpPort = 0;
         m_interleavedRtpChannel = 0;
         m_interleavedRtcpChannel = 1;
+        m_audioInterleavedRtpChannel = 2;
+        m_audioInterleavedRtcpChannel = 3;
+        m_metadataInterleavedRtpChannel = 4;
+        m_metadataInterleavedRtcpChannel = 5;
+        m_setupTargets.clear();
+        m_setupTargetIndex = 0;
         m_lastRtpTime = std::chrono::steady_clock::time_point{};
         m_lastPlaceholderTime = std::chrono::steady_clock::time_point{};
         m_lastPliTime = std::chrono::steady_clock::time_point{};
@@ -534,6 +581,14 @@ private:
         if (m_udpSession) {
             m_udpSession->stop();
             m_udpSession.reset();
+        }
+        if (m_audioUdpSession) {
+            m_audioUdpSession->stop();
+            m_audioUdpSession.reset();
+        }
+        if (m_metadataUdpSession) {
+            m_metadataUdpSession->stop();
+            m_metadataUdpSession.reset();
         }
         closeRtspSocket();
         if (m_rtpSocket) {
@@ -593,12 +648,24 @@ private:
                 if (m_ctrlAccum.size() < 4 + len) {
                     return;
                 }
+                const uint8_t* interleavedData =
+                    reinterpret_cast<const uint8_t*>(m_ctrlAccum.data() + 4);
                 if (channel == m_interleavedRtpChannel) {
-                    if (handleRtpPacket(reinterpret_cast<const uint8_t*>(m_ctrlAccum.data() + 4), len)) {
+                    if (handleRtpPacket(interleavedData, len)) {
                         m_lastRtpTime = std::chrono::steady_clock::now();
                     }
                 } else if (channel == m_interleavedRtcpChannel) {
-                    handleRtcpPacket(reinterpret_cast<const uint8_t*>(m_ctrlAccum.data() + 4), len);
+                    handleRtcpPacket(interleavedData, len);
+                } else if (channel == m_audioInterleavedRtpChannel) {
+                    SwRtpSession::Packet packet;
+                    if (parseAuxiliaryRtpPacket_(interleavedData, len, m_audioPayloadType, packet)) {
+                        handleAudioUdpSessionPacket_(packet);
+                    }
+                } else if (channel == m_metadataInterleavedRtpChannel) {
+                    SwRtpSession::Packet packet;
+                    if (parseAuxiliaryRtpPacket_(interleavedData, len, m_metadataPayloadType, packet)) {
+                        handleMetadataUdpSessionPacket_(packet);
+                    }
                 }
                 m_ctrlAccum.erase(0, 4 + len);
                 continue;
@@ -672,21 +739,105 @@ private:
                 swCError(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Failed to allocate RTP/RTCP ports";
                 return;
             }
+            if (m_selectedAudioTrackIndex >= 0 && !allocateAudioClientPorts()) {
+                swCWarning(kSwLogCategory_SwRtspUdpSource)
+                    << "[SwRtspUdpSource] Failed to allocate audio RTP/RTCP ports, disabling audio track";
+                m_selectedAudioTrackIndex = -1;
+                m_audioTrackControl.clear();
+                m_audioCodecName.clear();
+                m_audioPayloadType = -1;
+                m_audioClockRate = 0;
+                m_audioChannelCount = 0;
+                publishTracks_();
+            }
+            if (m_selectedMetadataTrackIndex >= 0 && !allocateMetadataClientPorts()) {
+                swCWarning(kSwLogCategory_SwRtspUdpSource)
+                    << "[SwRtspUdpSource] Failed to allocate metadata RTP/RTCP ports, disabling metadata track";
+                m_selectedMetadataTrackIndex = -1;
+                m_metadataTrackControl.clear();
+                m_metadataCodecName.clear();
+                m_metadataPayloadType = -1;
+                m_metadataClockRate = 0;
+                publishTracks_();
+            }
+            m_setupTargets.clear();
+            m_setupTargets.push_back(SetupTarget::Video);
+            if (m_selectedAudioTrackIndex >= 0 && !m_audioTrackControl.empty()) {
+                m_setupTargets.push_back(SetupTarget::Audio);
+            }
+            if (m_selectedMetadataTrackIndex >= 0 && !m_metadataTrackControl.empty()) {
+                m_setupTargets.push_back(SetupTarget::Metadata);
+            }
+            m_setupTargetIndex = 0;
             m_state = RtspStep::Setup;
             sendSetup();
             return;
         }
         if (m_state == RtspStep::Setup) {
+            TransportInfo transportInfo{};
             parseSession(header);
-            parseTransport(header);
-            if (m_sessionId.empty() || (!m_useTcpTransport && m_serverRtpPort == 0)) {
-                swCError(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Missing session or server port after SETUP";
+            parseTransportInfo(header, transportInfo);
+            const SetupTarget setupTarget = currentSetupTarget_();
+            auto setupTargetName = [setupTarget]() -> const char* {
+                switch (setupTarget) {
+                case SetupTarget::Audio:
+                    return "audio";
+                case SetupTarget::Metadata:
+                    return "metadata";
+                case SetupTarget::Video:
+                default:
+                    return "video";
+                }
+            };
+            if (m_sessionId.empty() || (!m_useTcpTransport && transportInfo.serverRtpPort == 0)) {
+                swCError(kSwLogCategory_SwRtspUdpSource)
+                    << "[SwRtspUdpSource] Missing session or server port after "
+                    << setupTargetName() << " SETUP";
                 return;
             }
-            configureUdpSockets();
-            swCDebug(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] SETUP ok client_port=" << m_clientRtpPort << "-" << m_clientRtcpPort
-                      << " server_port=" << m_serverRtpPort << "-" << m_serverRtcpPort
-                      << " payload=" << m_payloadType;
+            if (setupTarget == SetupTarget::Audio) {
+                m_audioServerRtpPort = transportInfo.serverRtpPort;
+                m_audioServerRtcpPort = transportInfo.serverRtcpPort;
+                m_audioInterleavedRtpChannel = transportInfo.interleavedRtpChannel;
+                m_audioInterleavedRtcpChannel = transportInfo.interleavedRtcpChannel;
+                configureAudioUdpSession_();
+                swCDebug(kSwLogCategory_SwRtspUdpSource)
+                    << "[SwRtspUdpSource] Audio SETUP ok client_port=" << m_audioClientRtpPort
+                    << "-" << m_audioClientRtcpPort
+                    << " server_port=" << m_audioServerRtpPort
+                    << "-" << m_audioServerRtcpPort
+                    << " payload=" << m_audioPayloadType;
+            } else if (setupTarget == SetupTarget::Metadata) {
+                m_metadataServerRtpPort = transportInfo.serverRtpPort;
+                m_metadataServerRtcpPort = transportInfo.serverRtcpPort;
+                m_metadataInterleavedRtpChannel = transportInfo.interleavedRtpChannel;
+                m_metadataInterleavedRtcpChannel = transportInfo.interleavedRtcpChannel;
+                configureMetadataUdpSession_();
+                swCDebug(kSwLogCategory_SwRtspUdpSource)
+                    << "[SwRtspUdpSource] Metadata SETUP ok client_port=" << m_metadataClientRtpPort
+                    << "-" << m_metadataClientRtcpPort
+                    << " server_port=" << m_metadataServerRtpPort
+                    << "-" << m_metadataServerRtcpPort
+                    << " payload=" << m_metadataPayloadType;
+            } else {
+                m_serverRtpPort = transportInfo.serverRtpPort;
+                m_serverRtcpPort = transportInfo.serverRtcpPort;
+                m_interleavedRtpChannel = transportInfo.interleavedRtpChannel;
+                m_interleavedRtcpChannel = transportInfo.interleavedRtcpChannel;
+                configureUdpSockets();
+                swCDebug(kSwLogCategory_SwRtspUdpSource)
+                    << "[SwRtspUdpSource] Video SETUP ok client_port=" << m_clientRtpPort
+                    << "-" << m_clientRtcpPort
+                    << " server_port=" << m_serverRtpPort
+                    << "-" << m_serverRtcpPort
+                    << " payload=" << m_payloadType;
+            }
+            ++m_setupTargetIndex;
+            if (m_setupTargetIndex < m_setupTargets.size()) {
+                sendSetup();
+                return;
+            }
+            m_setupTargetIndex = 0;
             m_state = RtspStep::Play;
             m_triedAggregatePlay.store(false);
             sendPlay(false);
@@ -787,7 +938,7 @@ private:
         }
     }
 
-    void parseTransport(const std::string& header) {
+    void parseTransportInfo(const std::string& header, TransportInfo& info) {
         std::istringstream iss(header);
         std::string line;
         while (std::getline(iss, line)) {
@@ -806,8 +957,8 @@ private:
 #else
                     std::sscanf(lower.c_str() + pos, "server_port=%d-%d", &rtp, &rtcp);
 #endif
-                    m_serverRtpPort = static_cast<uint16_t>(rtp);
-                    m_serverRtcpPort = static_cast<uint16_t>(rtcp);
+                    info.serverRtpPort = static_cast<uint16_t>(rtp);
+                    info.serverRtcpPort = static_cast<uint16_t>(rtcp);
                 }
                 pos = lower.find("interleaved=");
                 if (pos != std::string::npos) {
@@ -818,8 +969,8 @@ private:
 #else
                     std::sscanf(lower.c_str() + pos, "interleaved=%d-%d", &rtp, &rtcp);
 #endif
-                    m_interleavedRtpChannel = static_cast<uint8_t>(rtp);
-                    m_interleavedRtcpChannel = static_cast<uint8_t>(rtcp);
+                    info.interleavedRtpChannel = static_cast<uint8_t>(rtp);
+                    info.interleavedRtcpChannel = static_cast<uint8_t>(rtcp);
                 }
                 break;
             }
@@ -889,7 +1040,13 @@ private:
                         if (payload == currentTrack.payloadType || currentTrack.codecName.empty()) {
                             currentTrack.payloadType = payload;
                             currentTrack.codecName = codecPart.substr(0, slash);
-                            currentTrack.clockRate = std::atoi(codecPart.substr(slash + 1).c_str());
+                            auto remaining = codecPart.substr(slash + 1);
+                            auto nextSlash = remaining.find('/');
+                            currentTrack.clockRate = std::atoi(remaining.substr(0, nextSlash).c_str());
+                            if (nextSlash != std::string::npos) {
+                                currentTrack.channelCount =
+                                    std::atoi(remaining.substr(nextSlash + 1).c_str());
+                            }
                         }
                     }
                 }
@@ -914,6 +1071,7 @@ private:
         if (m_tracks.empty()) {
             return false;
         }
+        publishTracks_();
 
         auto trackScore = [this](const RtspTrack& track) -> int {
             if (!track.isVideo()) {
@@ -931,14 +1089,65 @@ private:
             }
             return -1;
         };
+        auto audioTrackScore = [this](const RtspTrack& track) -> int {
+            if (!track.isAudio()) {
+                return -1;
+            }
+            const std::string codec = toLower(track.codecName);
+            if (!isAudioCodecSupported_(codec)) {
+                return -1;
+            }
+            if (codec == "pcmu" || codec == "pcma") {
+                return 300;
+            }
+            if (codec == "opus") {
+                return 250;
+            }
+            if (codec == "mpeg4-generic" || codec == "mp4a-latm" || codec == "aac") {
+                return 200;
+            }
+            return 50;
+        };
+        auto metadataTrackScore = [](const RtspTrack& track) -> int {
+            if (!track.isMetadata()) {
+                return -1;
+            }
+            const std::string codec = toLower(track.codecName);
+            if (codec == "smpte336m" || codec == "klv") {
+                return 300;
+            }
+            return 100;
+        };
 
         m_selectedTrackIndex = -1;
+        m_selectedAudioTrackIndex = -1;
+        m_selectedMetadataTrackIndex = -1;
         int bestScore = -1;
         for (std::size_t i = 0; i < m_tracks.size(); ++i) {
             int score = trackScore(m_tracks[i]);
             if (score > bestScore) {
                 bestScore = score;
                 m_selectedTrackIndex = static_cast<int>(i);
+            }
+        }
+        if (m_enableAudio) {
+            bestScore = -1;
+            for (std::size_t i = 0; i < m_tracks.size(); ++i) {
+                int score = audioTrackScore(m_tracks[i]);
+                if (score > bestScore) {
+                    bestScore = score;
+                    m_selectedAudioTrackIndex = static_cast<int>(i);
+                }
+            }
+        }
+        if (m_enableMetadata) {
+            bestScore = -1;
+            for (std::size_t i = 0; i < m_tracks.size(); ++i) {
+                int score = metadataTrackScore(m_tracks[i]);
+                if (score > bestScore) {
+                    bestScore = score;
+                    m_selectedMetadataTrackIndex = static_cast<int>(i);
+                }
             }
         }
         if (m_selectedTrackIndex < 0) {
@@ -958,6 +1167,35 @@ private:
         if (m_codecName.empty()) {
             return false;
         }
+        if (m_selectedAudioTrackIndex >= 0 &&
+            static_cast<std::size_t>(m_selectedAudioTrackIndex) < m_tracks.size()) {
+            const RtspTrack& audioTrack = m_tracks[static_cast<std::size_t>(m_selectedAudioTrackIndex)];
+            m_audioTrackControl = audioTrack.control;
+            m_audioPayloadType = audioTrack.payloadType;
+            m_audioClockRate = audioTrack.clockRate;
+            m_audioCodecName = toLower(audioTrack.codecName);
+            m_audioChannelCount = audioTrack.channelCount > 0 ? audioTrack.channelCount : 1;
+        } else {
+            m_audioTrackControl.clear();
+            m_audioPayloadType = -1;
+            m_audioClockRate = 0;
+            m_audioCodecName.clear();
+            m_audioChannelCount = 0;
+        }
+        if (m_selectedMetadataTrackIndex >= 0 &&
+            static_cast<std::size_t>(m_selectedMetadataTrackIndex) < m_tracks.size()) {
+            const RtspTrack& metadataTrack =
+                m_tracks[static_cast<std::size_t>(m_selectedMetadataTrackIndex)];
+            m_metadataTrackControl = metadataTrack.control;
+            m_metadataPayloadType = metadataTrack.payloadType;
+            m_metadataClockRate = metadataTrack.clockRate;
+            m_metadataCodecName = toLower(metadataTrack.codecName);
+        } else {
+            m_metadataTrackControl.clear();
+            m_metadataPayloadType = -1;
+            m_metadataClockRate = 0;
+            m_metadataCodecName.clear();
+        }
         if (isHevcCodecName(m_codecName)) {
             m_currentCodec = SwVideoPacket::Codec::H265;
         } else {
@@ -975,7 +1213,101 @@ private:
                     << " control=" << m_trackControl
                     << " tracks=" << m_tracks.size()
                     << " transport=" << (m_useTcpTransport ? "tcp" : "udp");
+        if (!m_audioCodecName.empty()) {
+            swCWarning(kSwLogCategory_SwRtspUdpSource)
+                << "[SwRtspUdpSource] Selected SDP audio track index=" << m_selectedAudioTrackIndex
+                << " codec=" << m_audioCodecName
+                << " payload=" << m_audioPayloadType
+                << " clock=" << m_audioClockRate
+                << " control=" << m_audioTrackControl;
+        } else {
+            for (std::size_t i = 0; i < m_tracks.size(); ++i) {
+                const auto& track = m_tracks[i];
+                if (!track.isAudio()) {
+                    continue;
+                }
+                if (!m_enableAudio) {
+                    swCWarning(kSwLogCategory_SwRtspUdpSource)
+                        << "[SwRtspUdpSource] Audio track present but disabled by open options index="
+                        << static_cast<int>(i)
+                        << " codec=" << SwString(track.codecName)
+                        << " payload=" << track.payloadType;
+                } else {
+                    swCWarning(kSwLogCategory_SwRtspUdpSource)
+                        << "[SwRtspUdpSource] Audio track present but unsupported index="
+                        << static_cast<int>(i)
+                        << " codec=" << SwString(track.codecName)
+                        << " payload=" << track.payloadType;
+                }
+                break;
+            }
+        }
+        if (!m_metadataCodecName.empty()) {
+            swCWarning(kSwLogCategory_SwRtspUdpSource)
+                << "[SwRtspUdpSource] Selected SDP metadata track index=" << m_selectedMetadataTrackIndex
+                << " codec=" << m_metadataCodecName
+                << " payload=" << m_metadataPayloadType
+                << " clock=" << m_metadataClockRate
+                << " control=" << m_metadataTrackControl;
+        } else {
+            for (std::size_t i = 0; i < m_tracks.size(); ++i) {
+                const auto& track = m_tracks[i];
+                if (!track.isMetadata()) {
+                    continue;
+                }
+                if (!m_enableMetadata) {
+                    swCWarning(kSwLogCategory_SwRtspUdpSource)
+                        << "[SwRtspUdpSource] Metadata track present but disabled by open options index="
+                        << static_cast<int>(i)
+                        << " codec=" << SwString(track.codecName)
+                        << " payload=" << track.payloadType;
+                } else {
+                    swCWarning(kSwLogCategory_SwRtspUdpSource)
+                        << "[SwRtspUdpSource] Metadata track present but not selected index="
+                        << static_cast<int>(i)
+                        << " codec=" << SwString(track.codecName)
+                        << " payload=" << track.payloadType;
+                }
+                break;
+            }
+        }
+        publishTracks_();
         return true;
+    }
+
+    void publishTracks_() {
+        SwList<SwMediaTrack> publishedTracks;
+        for (std::size_t i = 0; i < m_tracks.size(); ++i) {
+            const auto& track = m_tracks[i];
+            SwMediaTrack mediaTrack;
+            mediaTrack.id = SwString("track-") + SwString(std::to_string(i));
+            if (track.isVideo()) {
+                mediaTrack.type = SwMediaTrack::Type::Video;
+            } else if (track.isAudio()) {
+                mediaTrack.type = SwMediaTrack::Type::Audio;
+            } else if (track.isMetadata()) {
+                mediaTrack.type = SwMediaTrack::Type::Metadata;
+            } else {
+                mediaTrack.type = SwMediaTrack::Type::Unknown;
+            }
+            mediaTrack.codec = SwString(track.codecName);
+            mediaTrack.payloadType = track.payloadType;
+            mediaTrack.clockRate = track.clockRate;
+            mediaTrack.sampleRate = track.isAudio() ? track.clockRate : 0;
+            mediaTrack.channelCount = track.channelCount;
+            mediaTrack.control = SwString(track.control);
+            mediaTrack.fmtp = SwString(track.fmtpLine);
+            mediaTrack.selected = (static_cast<int>(i) == m_selectedTrackIndex) ||
+                                  (static_cast<int>(i) == m_selectedAudioTrackIndex) ||
+                                  (static_cast<int>(i) == m_selectedMetadataTrackIndex);
+            if (track.isAudio() && !isAudioCodecSupported_(track.codecName)) {
+                mediaTrack.availability = SwMediaTrack::Availability::Unsupported;
+            } else {
+                mediaTrack.availability = SwMediaTrack::Availability::Available;
+            }
+            publishedTracks.append(mediaTrack);
+        }
+        setTracks(publishedTracks);
     }
 
     void sendDescribe() {
@@ -990,18 +1322,39 @@ private:
     void sendSetup() {
         std::ostringstream transport;
         std::vector<std::pair<std::string, std::string>> headers;
+        const SetupTarget setupTarget = currentSetupTarget_();
+        uint8_t interleavedRtpChannel = m_interleavedRtpChannel;
+        uint8_t interleavedRtcpChannel = m_interleavedRtcpChannel;
+        uint16_t clientRtpPort = m_clientRtpPort;
+        uint16_t clientRtcpPort = m_clientRtcpPort;
+        if (setupTarget == SetupTarget::Audio) {
+            interleavedRtpChannel = m_audioInterleavedRtpChannel;
+            interleavedRtcpChannel = m_audioInterleavedRtcpChannel;
+            clientRtpPort = m_audioClientRtpPort;
+            clientRtcpPort = m_audioClientRtcpPort;
+        } else if (setupTarget == SetupTarget::Metadata) {
+            interleavedRtpChannel = m_metadataInterleavedRtpChannel;
+            interleavedRtcpChannel = m_metadataInterleavedRtcpChannel;
+            clientRtpPort = m_metadataClientRtpPort;
+            clientRtcpPort = m_metadataClientRtcpPort;
+        }
         if (m_useTcpTransport) {
             transport << "RTP/AVP/TCP;unicast;interleaved="
-                      << static_cast<int>(m_interleavedRtpChannel) << "-"
-                      << static_cast<int>(m_interleavedRtcpChannel)
+                      << static_cast<int>(interleavedRtpChannel)
+                      << "-"
+                      << static_cast<int>(interleavedRtcpChannel)
                       << ";mode=\"PLAY\"";
         } else {
             transport << "RTP/AVP;unicast;client_port="
-                      << m_clientRtpPort << "-" << m_clientRtcpPort
+                      << clientRtpPort << "-"
+                      << clientRtcpPort
                       << ";mode=\"PLAY\"";
         }
         headers.emplace_back("Transport", transport.str());
-        sendRtsp("SETUP", trackUrl(), headers);
+        if (!m_sessionId.empty()) {
+            headers.emplace_back("Session", m_sessionId);
+        }
+        sendRtsp("SETUP", setupTrackUrl_(), headers);
     }
 
     void sendPlay(bool aggregateOnly) {
@@ -1085,6 +1438,31 @@ private:
 
     bool isHevcCodec() const {
         return isHevcCodecName(m_codecName);
+    }
+
+    SwAudioPacket::Codec audioCodecFromName_(const std::string& name) const {
+        const std::string normalized = toLower(name);
+        if (normalized == "pcmu" || normalized == "g711u" || normalized == "mulaw") {
+            return SwAudioPacket::Codec::PCMU;
+        }
+        if (normalized == "pcma" || normalized == "g711a" || normalized == "alaw") {
+            return SwAudioPacket::Codec::PCMA;
+        }
+        if (normalized == "opus") {
+            return SwAudioPacket::Codec::Opus;
+        }
+        if (normalized == "aac" || normalized == "mpeg4-generic" || normalized == "mp4a-latm") {
+            return SwAudioPacket::Codec::AAC;
+        }
+        return SwAudioPacket::Codec::Unknown;
+    }
+
+    bool isAudioCodecSupported_(const std::string& name) const {
+        const auto codec = audioCodecFromName_(name);
+        if (codec == SwAudioPacket::Codec::Unknown) {
+            return false;
+        }
+        return SwAudioDecoderFactory::instance().acquire(codec) != nullptr;
     }
 
     void initiateConnection() {
@@ -1344,12 +1722,33 @@ private:
     }
 
     std::string trackUrl() const { return resolveControlUrl(m_trackControl); }
+    std::string audioTrackUrl() const { return resolveControlUrl(m_audioTrackControl); }
+    std::string metadataTrackUrl() const { return resolveControlUrl(m_metadataTrackControl); }
     std::string aggregatePlayUrl() const { return resolveControlUrl(m_sessionControl); }
     std::string playUrl() const {
-        if (!m_sessionControl.empty()) {
+        if (!m_sessionControl.empty() || m_setupTargets.size() > 1) {
             return aggregatePlayUrl();
         }
         return trackUrl();
+    }
+
+    SetupTarget currentSetupTarget_() const {
+        if (m_setupTargets.empty() || m_setupTargetIndex >= m_setupTargets.size()) {
+            return SetupTarget::Video;
+        }
+        return m_setupTargets[m_setupTargetIndex];
+    }
+
+    std::string setupTrackUrl_() const {
+        switch (currentSetupTarget_()) {
+        case SetupTarget::Audio:
+            return audioTrackUrl();
+        case SetupTarget::Metadata:
+            return metadataTrackUrl();
+        case SetupTarget::Video:
+        default:
+            return trackUrl();
+        }
     }
 
     bool allocateClientPorts() {
@@ -1397,6 +1796,67 @@ private:
         return false;
     }
 
+    bool allocateAudioClientPorts() {
+        if (m_useTcpTransport || m_selectedAudioTrackIndex < 0 || m_audioTrackControl.empty()) {
+            return true;
+        }
+        SwString bindAddr = m_bindAddress.isEmpty() ? SwString("0.0.0.0") : m_bindAddress;
+        auto tryBindPair = [this, &bindAddr](uint16_t base) -> bool {
+            if (base == 0 || base == m_clientRtpPort) {
+                return false;
+            }
+            if (startAudioUdpSession_(bindAddr, base, static_cast<uint16_t>(base + 1))) {
+                m_audioClientRtpPort = base;
+                m_audioClientRtcpPort = static_cast<uint16_t>(base + 1);
+                swCDebug(kSwLogCategory_SwRtspUdpSource)
+                    << "[SwRtspUdpSource] Local audio RTP session "
+                    << bindAddr.toStdString() << ":" << m_audioClientRtpPort
+                    << "/" << m_audioClientRtcpPort;
+                return true;
+            }
+            return false;
+        };
+        for (uint16_t base = 52000; base < 65000; base += 2) {
+            if (tryBindPair(base)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool allocateMetadataClientPorts() {
+        if (m_useTcpTransport || m_selectedMetadataTrackIndex < 0 || m_metadataTrackControl.empty()) {
+            return true;
+        }
+        SwString bindAddr = m_bindAddress.isEmpty() ? SwString("0.0.0.0") : m_bindAddress;
+        auto tryBindPair = [this, &bindAddr](uint16_t base) -> bool {
+            const uint16_t rtcpPort = static_cast<uint16_t>(base + 1);
+            if (base == 0 ||
+                base == m_clientRtpPort ||
+                base == m_audioClientRtpPort ||
+                rtcpPort == m_clientRtcpPort ||
+                rtcpPort == m_audioClientRtcpPort) {
+                return false;
+            }
+            if (startMetadataUdpSession_(bindAddr, base, rtcpPort)) {
+                m_metadataClientRtpPort = base;
+                m_metadataClientRtcpPort = rtcpPort;
+                swCDebug(kSwLogCategory_SwRtspUdpSource)
+                    << "[SwRtspUdpSource] Local metadata RTP session "
+                    << bindAddr.toStdString() << ":" << m_metadataClientRtpPort
+                    << "/" << m_metadataClientRtcpPort;
+                return true;
+            }
+            return false;
+        };
+        for (uint16_t base = 54000; base < 65000; base += 2) {
+            if (tryBindPair(base)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     bool startUdpSession_(const SwString& bindAddr, uint16_t rtpPort, uint16_t rtcpPort) {
         if (m_udpSession) {
             m_udpSession->stop();
@@ -1437,6 +1897,82 @@ private:
         return true;
     }
 
+    bool startAudioUdpSession_(const SwString& bindAddr, uint16_t rtpPort, uint16_t rtcpPort) {
+        if (m_audioUdpSession) {
+            m_audioUdpSession->stop();
+            m_audioUdpSession.reset();
+        }
+        SwRtpSessionDescriptor descriptor;
+        descriptor.bindAddress = bindAddr;
+        descriptor.localRtpPort = rtpPort;
+        descriptor.localRtcpPort = rtcpPort;
+        descriptor.codec = SwVideoPacket::Codec::Unknown;
+        descriptor.payloadType = m_audioPayloadType >= 0 ? m_audioPayloadType : 96;
+        descriptor.clockRate = m_audioClockRate > 0 ? m_audioClockRate : 8000;
+        descriptor.format = SwMediaOpenOptions::UdpPayloadFormat::Rtp;
+        if (m_selectedAudioTrackIndex >= 0 &&
+            static_cast<std::size_t>(m_selectedAudioTrackIndex) < m_tracks.size()) {
+            descriptor.fmtp =
+                SwString(m_tracks[static_cast<std::size_t>(m_selectedAudioTrackIndex)].fmtpLine);
+        }
+        descriptor.allowKeyFrameRequests = false;
+        descriptor.lowLatency = m_lowLatencyDrop;
+        m_audioUdpSession = std::make_unique<SwRtpSession>(descriptor);
+        m_audioUdpSession->setPacketCallback([this](const SwRtpSession::Packet& packet) {
+            handleAudioUdpSessionPacket_(packet);
+        });
+        m_audioUdpSession->setTimeoutCallback([this](int secondsWithoutData) {
+            if (secondsWithoutData >= 4 && !m_audioCodecName.empty()) {
+                swCWarning(kSwLogCategory_SwRtspUdpSource)
+                    << "[SwRtspUdpSource] No audio RTP received for " << secondsWithoutData
+                    << " s (codec=" << m_audioCodecName << ")";
+            }
+        });
+        if (!m_audioUdpSession->start()) {
+            m_audioUdpSession.reset();
+            return false;
+        }
+        return true;
+    }
+
+    bool startMetadataUdpSession_(const SwString& bindAddr, uint16_t rtpPort, uint16_t rtcpPort) {
+        if (m_metadataUdpSession) {
+            m_metadataUdpSession->stop();
+            m_metadataUdpSession.reset();
+        }
+        SwRtpSessionDescriptor descriptor;
+        descriptor.bindAddress = bindAddr;
+        descriptor.localRtpPort = rtpPort;
+        descriptor.localRtcpPort = rtcpPort;
+        descriptor.codec = SwVideoPacket::Codec::Unknown;
+        descriptor.payloadType = m_metadataPayloadType >= 0 ? m_metadataPayloadType : 97;
+        descriptor.clockRate = m_metadataClockRate > 0 ? m_metadataClockRate : 90000;
+        descriptor.format = SwMediaOpenOptions::UdpPayloadFormat::Rtp;
+        descriptor.allowKeyFrameRequests = false;
+        descriptor.lowLatency = m_lowLatencyDrop;
+        if (m_selectedMetadataTrackIndex >= 0 &&
+            static_cast<std::size_t>(m_selectedMetadataTrackIndex) < m_tracks.size()) {
+            descriptor.fmtp =
+                SwString(m_tracks[static_cast<std::size_t>(m_selectedMetadataTrackIndex)].fmtpLine);
+        }
+        m_metadataUdpSession = std::make_unique<SwRtpSession>(descriptor);
+        m_metadataUdpSession->setPacketCallback([this](const SwRtpSession::Packet& packet) {
+            handleMetadataUdpSessionPacket_(packet);
+        });
+        m_metadataUdpSession->setTimeoutCallback([this](int secondsWithoutData) {
+            if (secondsWithoutData >= 4 && !m_metadataCodecName.empty()) {
+                swCWarning(kSwLogCategory_SwRtspUdpSource)
+                    << "[SwRtspUdpSource] No metadata RTP received for " << secondsWithoutData
+                    << " s (codec=" << m_metadataCodecName << ")";
+            }
+        });
+        if (!m_metadataUdpSession->start()) {
+            m_metadataUdpSession.reset();
+            return false;
+        }
+        return true;
+    }
+
     void handleUdpSessionPacket_(const SwRtpSession::Packet& packet) {
         if (packet.senderPort != 0) {
             if (m_detectedRtpPort == 0) {
@@ -1458,6 +1994,60 @@ private:
             return;
         }
         processTransportPacket_(packet);
+    }
+
+    void handleAudioUdpSessionPacket_(const SwRtpSession::Packet& packet) {
+        if (m_selectedAudioTrackIndex < 0 || m_audioCodecName.empty()) {
+            return;
+        }
+        SwMediaPacket mediaPacket;
+        mediaPacket.setType(SwMediaPacket::Type::Audio);
+        mediaPacket.setTrackId(SwString("track-") + SwString(std::to_string(m_selectedAudioTrackIndex)));
+        mediaPacket.setCodec(SwString(m_audioCodecName));
+        mediaPacket.setPayload(packet.payload);
+        mediaPacket.setPts(static_cast<std::int64_t>(packet.timestamp));
+        mediaPacket.setDts(static_cast<std::int64_t>(packet.timestamp));
+        mediaPacket.setDiscontinuity(false);
+        mediaPacket.setPayloadType(m_audioPayloadType);
+        mediaPacket.setClockRate(m_audioClockRate);
+        mediaPacket.setSampleRate(m_audioClockRate);
+        mediaPacket.setChannelCount(m_audioChannelCount > 0 ? m_audioChannelCount : 1);
+        emitMediaPacket(mediaPacket);
+    }
+
+    void handleMetadataUdpSessionPacket_(const SwRtpSession::Packet& packet) {
+        if (m_selectedMetadataTrackIndex < 0 || m_metadataCodecName.empty()) {
+            return;
+        }
+        SwMediaPacket mediaPacket;
+        mediaPacket.setType(SwMediaPacket::Type::Metadata);
+        mediaPacket.setTrackId(SwString("track-") + SwString(std::to_string(m_selectedMetadataTrackIndex)));
+        mediaPacket.setCodec(SwString(m_metadataCodecName));
+        mediaPacket.setPayload(packet.payload);
+        mediaPacket.setPts(static_cast<std::int64_t>(packet.timestamp));
+        mediaPacket.setDts(static_cast<std::int64_t>(packet.timestamp));
+        mediaPacket.setDiscontinuity(false);
+        mediaPacket.setPayloadType(m_metadataPayloadType);
+        mediaPacket.setClockRate(m_metadataClockRate);
+        emitMediaPacket(mediaPacket);
+    }
+
+    void configureAudioUdpSession_() {
+        if (m_useTcpTransport || !m_audioUdpSession || !m_audioUdpSession->isRunning()) {
+            return;
+        }
+        if (m_audioServerRtpPort != 0 || m_audioServerRtcpPort != 0) {
+            m_audioUdpSession->sendUdpPunch(m_host, m_audioServerRtpPort, m_audioServerRtcpPort);
+        }
+    }
+
+    void configureMetadataUdpSession_() {
+        if (m_useTcpTransport || !m_metadataUdpSession || !m_metadataUdpSession->isRunning()) {
+            return;
+        }
+        if (m_metadataServerRtpPort != 0 || m_metadataServerRtcpPort != 0) {
+            m_metadataUdpSession->sendUdpPunch(m_host, m_metadataServerRtpPort, m_metadataServerRtcpPort);
+        }
     }
 
     void handleUdpSessionGap_(uint16_t expected, uint16_t actual) {
@@ -1625,6 +2215,67 @@ private:
         if (!inserted.second) {
             inserted.first->second.arrivalTime = arrivalTime;
         }
+    }
+
+    bool parseAuxiliaryRtpPacket_(const uint8_t* data,
+                                  size_t len,
+                                  int expectedPayloadType,
+                                  SwRtpSession::Packet& outPacket) const {
+        if (!data || len < 12) {
+            return false;
+        }
+        const uint8_t version = data[0] >> 6;
+        if (version != 2) {
+            return false;
+        }
+        const bool padding = (data[0] & 0x20) != 0;
+        const bool extension = (data[0] & 0x10) != 0;
+        const uint8_t csrcCount = data[0] & 0x0F;
+        const bool marker = (data[1] & 0x80) != 0;
+        const uint8_t payloadType = data[1] & 0x7F;
+        if (expectedPayloadType >= 0 && payloadType != static_cast<uint8_t>(expectedPayloadType)) {
+            return false;
+        }
+        size_t offset = 12 + static_cast<size_t>(csrcCount) * 4;
+        if (offset > len) {
+            return false;
+        }
+        if (extension) {
+            if (offset + 4 > len) {
+                return false;
+            }
+            const uint16_t extLength = static_cast<uint16_t>(
+                (static_cast<uint16_t>(data[offset + 2]) << 8) |
+                static_cast<uint16_t>(data[offset + 3]));
+            offset += 4 + static_cast<size_t>(extLength) * 4;
+        }
+        if (offset >= len) {
+            return false;
+        }
+        size_t payloadSize = len - offset;
+        if (padding && payloadSize > 0) {
+            const uint8_t padCount = data[len - 1];
+            if (padCount < payloadSize) {
+                payloadSize -= padCount;
+            }
+        }
+        if (payloadSize == 0) {
+            return false;
+        }
+        outPacket.payload = SwByteArray(reinterpret_cast<const char*>(data + offset), payloadSize);
+        outPacket.payloadType = payloadType;
+        outPacket.marker = marker;
+        outPacket.sequenceNumber = static_cast<uint16_t>(
+            (static_cast<uint16_t>(data[2]) << 8) | static_cast<uint16_t>(data[3]));
+        outPacket.timestamp = (static_cast<uint32_t>(data[4]) << 24) |
+                              (static_cast<uint32_t>(data[5]) << 16) |
+                              (static_cast<uint32_t>(data[6]) << 8) |
+                              static_cast<uint32_t>(data[7]);
+        outPacket.ssrc = (static_cast<uint32_t>(data[8]) << 24) |
+                         (static_cast<uint32_t>(data[9]) << 16) |
+                         (static_cast<uint32_t>(data[10]) << 8) |
+                         static_cast<uint32_t>(data[11]);
+        return true;
     }
 
     void drainBufferedRtpPackets(bool allowGapAdvance) {
@@ -2159,6 +2810,8 @@ private:
     SwUdpSocket* m_rtpSocket{nullptr};
     SwUdpSocket* m_rtcpSocket{nullptr};
     std::unique_ptr<SwRtpSession> m_udpSession{};
+    std::unique_ptr<SwRtpSession> m_audioUdpSession{};
+    std::unique_ptr<SwRtpSession> m_metadataUdpSession{};
     std::chrono::steady_clock::time_point m_lastWaitingKeyFrameRequestTime{};
     SwTimer* m_monitorTimer{nullptr};
     SwTimer* m_keepAliveTimer{nullptr};
@@ -2168,15 +2821,28 @@ private:
     std::string m_sdp;
     std::vector<RtspTrack> m_tracks;
     int m_selectedTrackIndex{-1};
+    int m_selectedAudioTrackIndex{-1};
+    int m_selectedMetadataTrackIndex{-1};
     std::string m_trackControl;
+    std::string m_audioTrackControl;
+    std::string m_metadataTrackControl;
     std::string m_sessionControl;
     std::string m_sessionId;
     RtspStep m_state{RtspStep::None};
     int m_cseq{0};
     int m_payloadType{96};
     int m_clockRate{90000};
+    int m_audioPayloadType{-1};
+    int m_audioClockRate{0};
+    int m_audioChannelCount{0};
+    int m_metadataPayloadType{-1};
+    int m_metadataClockRate{0};
     std::atomic<bool> m_triedAggregatePlay{false};
     std::string m_codecName{"h264"};
+    std::string m_audioCodecName{};
+    std::string m_metadataCodecName{};
+    bool m_enableAudio{false};
+    bool m_enableMetadata{false};
     std::atomic<bool> m_loggedUnsupportedCodec{false};
     bool m_useTcpTransport{false};
     bool m_triedTcpFallback{false};
@@ -2187,10 +2853,24 @@ private:
     uint16_t m_clientRtcpPort{0};
     uint16_t m_serverRtpPort{0};
     uint16_t m_serverRtcpPort{0};
+    uint16_t m_audioClientRtpPort{0};
+    uint16_t m_audioClientRtcpPort{0};
+    uint16_t m_audioServerRtpPort{0};
+    uint16_t m_audioServerRtcpPort{0};
+    uint16_t m_metadataClientRtpPort{0};
+    uint16_t m_metadataClientRtcpPort{0};
+    uint16_t m_metadataServerRtpPort{0};
+    uint16_t m_metadataServerRtcpPort{0};
     uint16_t m_forcedClientRtpPort{0};
     uint16_t m_forcedClientRtcpPort{0};
     uint8_t m_interleavedRtpChannel{0};
     uint8_t m_interleavedRtcpChannel{1};
+    uint8_t m_audioInterleavedRtpChannel{2};
+    uint8_t m_audioInterleavedRtcpChannel{3};
+    uint8_t m_metadataInterleavedRtpChannel{4};
+    uint8_t m_metadataInterleavedRtcpChannel{5};
+    std::vector<SetupTarget> m_setupTargets{};
+    std::size_t m_setupTargetIndex{0};
 
     uint32_t m_currentTimestamp{0};
     bool m_haveTimestamp{false};

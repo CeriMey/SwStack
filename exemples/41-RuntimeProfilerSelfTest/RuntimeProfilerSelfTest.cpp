@@ -1108,7 +1108,10 @@ void RuntimeProfilerDashboardSink::onStall(const SwRuntimeStallReport& report) {
     entry.lane = report.lane;
     entry.threadId = report.threadId;
     entry.frames = report.frames;
+    entry.resolvedFrames = report.resolvedFrames;
     entry.symbols = report.symbols;
+    entry.symbolBackend = report.symbolBackend;
+    entry.symbolSearchPath = report.symbolSearchPath;
 
     SwMutexLocker locker(mutex_);
     pendingStalls_.append(entry);
@@ -1187,7 +1190,7 @@ SwRuntimeProfileSink* RuntimeProfilerDashboardWindow::sink() {
 void RuntimeProfilerDashboardWindow::start() {
     refreshTimerId_ = app_ ? app_->addTimer([this]() { pullProfilerState_(); }, kUiRefreshPeriodUs_) : -1;
     autoFeedTimerId_ = app_ ? app_->addTimer([this]() { scheduleNextAutoStall_(); }, kAutoFeedPeriodUs_) : -1;
-    setMonitoringEnabled_(app_ && app_->profilerEnabled());
+    setMonitoringEnabled_(app_ && app_->profilerCaptureEnabled());
     autoFeedEnabled_ = true;
     if (autoFeedButton_) {
         autoFeedButton_->setChecked(true);
@@ -1668,17 +1671,23 @@ void RuntimeProfilerDashboardWindow::setMonitoringEnabled_(bool enabled) {
         return;
     }
 
-    if (enabled) {
-        if (!app_->profilerEnabled()) {
-            app_->installProfiler(sink(), profilerConfig_);
+    if (!app_->profilerEnabled()) {
+        if (!enabled) {
+            monitoringActive_ = false;
+            if (profilingView_) {
+                profilingView_->setMonitoringActive(false);
+            }
+            updateSummary_();
+            return;
         }
-    } else {
-        if (app_->profilerEnabled()) {
-            app_->uninstallProfiler();
-        }
+        app_->installProfiler(sink(), profilerConfig_);
     }
 
-    monitoringActive_ = app_->profilerEnabled();
+    if (app_->profilerEnabled()) {
+        app_->setProfilerCaptureEnabled(enabled);
+    }
+
+    monitoringActive_ = app_->profilerCaptureEnabled();
     if (profilingView_) {
         profilingView_->setMonitoringActive(monitoringActive_);
     }
@@ -1700,7 +1709,7 @@ void RuntimeProfilerDashboardWindow::setThresholdUs_(long long thresholdUs) {
         profilingView_->setThresholdUs(profilerConfig_.stallThresholdUs);
     }
 
-    if (app_ && monitoringActive_) {
+    if (app_ && app_->profilerEnabled()) {
         app_->setProfilerStallThresholdUs(profilerConfig_.stallThresholdUs);
     }
 

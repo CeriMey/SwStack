@@ -1,5 +1,56 @@
 #include "RuntimeProfilerMonitoringBarWidget.h"
 
+namespace {
+
+class RuntimeProfilerStatusLedWidget : public SwWidget {
+    SW_OBJECT(RuntimeProfilerStatusLedWidget, SwWidget)
+
+public:
+    explicit RuntimeProfilerStatusLedWidget(SwWidget* parent = nullptr)
+        : SwWidget(parent) {
+        setStyleSheet("SwWidget { background-color: rgba(0,0,0,0); border-width: 0px; }");
+    }
+
+    void setActive(bool active) {
+        if (active_ == active) {
+            return;
+        }
+        active_ = active;
+        update();
+    }
+
+protected:
+    void paintEvent(PaintEvent* event) override {
+        SwPainter* painter = event ? event->painter() : nullptr;
+        if (!painter) {
+            return;
+        }
+
+        const SwRect bounds = rect();
+        const int diameter = std::max(8, std::min(bounds.width, bounds.height) - 2);
+        const int outer = diameter;
+        const int middle = std::max(6, diameter - 4);
+        const int inner = std::max(3, diameter - 8);
+        const int cx = bounds.x + (bounds.width / 2);
+        const int cy = bounds.y + (bounds.height / 2) - 1;
+
+        const SwColor outerFill = active_ ? SwColor{78, 51, 24} : SwColor{56, 56, 60};
+        const SwColor outerBorder = active_ ? SwColor{154, 98, 38} : SwColor{88, 88, 94};
+        const SwColor middleFill = active_ ? SwColor{255, 159, 67} : SwColor{98, 98, 104};
+        const SwColor middleBorder = active_ ? SwColor{255, 191, 120} : SwColor{112, 112, 118};
+        const SwColor innerFill = active_ ? SwColor{255, 221, 181} : SwColor{152, 152, 160};
+
+        painter->fillEllipse(SwRect{cx - outer / 2, cy - outer / 2, outer, outer}, outerFill, outerBorder, 1);
+        painter->fillEllipse(SwRect{cx - middle / 2, cy - middle / 2, middle, middle}, middleFill, middleBorder, 1);
+        painter->fillEllipse(SwRect{cx - inner / 2 - 1, cy - inner / 2 - 1, inner, inner}, innerFill, innerFill, 0);
+    }
+
+private:
+    bool active_{false};
+};
+
+} // namespace
+
 RuntimeProfilerMonitoringBarWidget::RuntimeProfilerMonitoringBarWidget(SwWidget* parent)
     : SwFrame(parent) {
     setStyleSheet(R"(
@@ -66,14 +117,13 @@ RuntimeProfilerMonitoringBarWidget::RuntimeProfilerMonitoringBarWidget(SwWidget*
     stackCaptureLabel_->resize(72, 16);
     stackCaptureLabel_->setStyleSheet("SwLabel { background-color: rgba(0,0,0,0); border-width: 0px; color: rgb(156, 156, 156); font-size: 12px; }");
 
-    countLabel_ = new SwLabel(this);
-    countLabel_->resize(34, 34);
-    countLabel_->setAlignment(DrawTextFormats(DrawTextFormat::Center | DrawTextFormat::VCenter | DrawTextFormat::SingleLine));
-    countLabel_->setStyleSheet("SwLabel { background-color: rgb(78, 201, 176); border-color: rgb(78, 201, 176); border-width: 1px; border-radius: 17px; color: rgb(17, 17, 17); font-size: 11px; }");
+    statusLed_ = new RuntimeProfilerStatusLedWidget(this);
+    statusLed_->resize(14, 14);
 
-    countCaptionLabel_ = new SwLabel("stalls", this);
-    countCaptionLabel_->resize(42, 16);
-    countCaptionLabel_->setStyleSheet("SwLabel { background-color: rgba(0,0,0,0); border-width: 0px; color: rgb(156, 156, 156); font-size: 12px; }");
+    stallLabel_ = new SwLabel("0 stalls", this);
+    stallLabel_->resize(72, 16);
+    stallLabel_->setAlignment(DrawTextFormats(DrawTextFormat::Left | DrawTextFormat::VCenter | DrawTextFormat::SingleLine));
+    stallLabel_->setStyleSheet("SwLabel { background-color: rgba(0,0,0,0); border-width: 0px; color: rgb(156, 156, 156); font-size: 12px; }");
 
     SwHorizontalLayout* layout = new SwHorizontalLayout();
     layout->setMargin(6);
@@ -84,8 +134,8 @@ RuntimeProfilerMonitoringBarWidget::RuntimeProfilerMonitoringBarWidget(SwWidget*
     layout->addWidget(thresholdUnitLabel, 0, 20);
     layout->addWidget(stackCaptureLabel_, 0, 70);
     layout->addStretch(1);
-    layout->addWidget(countLabel_, 0, 34);
-    layout->addWidget(countCaptionLabel_, 0, 44);
+    layout->addWidget(statusLed_, 0, 14);
+    layout->addWidget(stallLabel_, 0, 74);
     setLayout(layout);
 
     SwObject::connect(toggleButton_, &SwPushButton::toggled, this, [this](bool checked) {
@@ -182,16 +232,17 @@ void RuntimeProfilerMonitoringBarWidget::updateVisualState_() {
                                                    }
                                                )");
     }
-    if (countLabel_) {
-        countLabel_->setText(badgeText_(stallCount_));
-        countLabel_->setStyleSheet(monitoringEnabled_
-                                       ? "SwLabel { background-color: rgb(78, 201, 176); border-color: rgb(78, 201, 176); border-width: 1px; border-radius: 17px; color: rgb(17, 17, 17); font-size: 11px; }"
-                                       : "SwLabel { background-color: rgb(74, 74, 78); border-color: rgb(74, 74, 78); border-width: 1px; border-radius: 17px; color: rgb(220, 220, 220); font-size: 11px; }");
+    if (statusLed_) {
+        RuntimeProfilerStatusLedWidget* led = dynamic_cast<RuntimeProfilerStatusLedWidget*>(statusLed_);
+        if (led) {
+            led->setActive(monitoringEnabled_);
+        }
     }
-    if (countCaptionLabel_) {
-        countCaptionLabel_->setStyleSheet(monitoringEnabled_
-                                              ? "SwLabel { background-color: rgba(0,0,0,0); border-width: 0px; color: rgb(156, 156, 156); font-size: 12px; }"
-                                              : "SwLabel { background-color: rgba(0,0,0,0); border-width: 0px; color: rgb(110, 110, 110); font-size: 12px; }");
+    if (stallLabel_) {
+        stallLabel_->setText(stallLabelText_(stallCount_));
+        stallLabel_->setStyleSheet(monitoringEnabled_
+                                       ? "SwLabel { background-color: rgba(0,0,0,0); border-width: 0px; color: rgb(196, 196, 196); font-size: 12px; padding-top: 1px; }"
+                                       : "SwLabel { background-color: rgba(0,0,0,0); border-width: 0px; color: rgb(110, 110, 110); font-size: 12px; padding-top: 1px; }");
     }
     if (stackCaptureLabel_) {
         stackCaptureLabel_->setText("Piles: ON");
@@ -205,9 +256,9 @@ int RuntimeProfilerMonitoringBarWidget::thresholdMsFromUs_(long long durationUs)
     return std::max(1, static_cast<int>((durationUs + 500LL) / 1000LL));
 }
 
-SwString RuntimeProfilerMonitoringBarWidget::badgeText_(unsigned long long stallCount) {
+SwString RuntimeProfilerMonitoringBarWidget::stallLabelText_(unsigned long long stallCount) {
     if (stallCount > 999ULL) {
-        return "999+";
+        return "999+ stalls";
     }
-    return SwString::number(stallCount);
+    return SwString::number(stallCount) + " stalls";
 }

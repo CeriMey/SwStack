@@ -48,6 +48,7 @@
 #if defined(_WIN32)
 #include "platform/win/SwWindows.h"
 #else
+#include <sys/inotify.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <ctime>
@@ -186,7 +187,7 @@ public:
     void startMonitoring() {
         monitoring = true;
         updateLastWriteTime();
-        m_timerDercriptor->start();
+        registerFileWatcher_();
     }
 
     // Arrêter la surveillance
@@ -197,7 +198,7 @@ public:
      */
     void stopMonitoring() {
         monitoring = false;
-        m_timerDercriptor->stop();
+        unregisterFileWatcher_();
     }
 
 signals:
@@ -247,10 +248,6 @@ protected slots:
      * @details The returned value reflects the state currently stored by the instance.
      */
     virtual void onTimerDescriptor() {
-        if (monitoring) {
-            checkFileChanges();
-        }
-
         bool readyToRead = false, readyToWrite = false;
 
         for (auto descriptor : descriptors_) {
@@ -325,5 +322,164 @@ protected:
 private:
     SwList<SwIODescriptor*> descriptors_;
     bool monitoring;
+    size_t m_fileWatchToken{0};
+#if defined(_WIN32)
+    HANDLE m_fileWatchHandle{INVALID_HANDLE_VALUE};
+#else
+    int m_inotifyFd{-1};
+    int m_inotifyWatch{-1};
+#endif
+
+    SwString directoryPathForWatch_() const {
+        std::string path = filePath_.toStdString();
+        std::replace(path.begin(), path.end(), '\\', '/');
+        size_t pos = path.find_last_of('/');
+        if (pos == std::string::npos) {
+            return ".";
+        }
+        if (pos == 0) {
+            return "/";
+        }
+        return SwString(path.substr(0, pos));
+    }
+
+    SwString baseNameForWatch_() const {
+        std::string path = filePath_.toStdString();
+        std::replace(path.begin(), path.end(), '\\', '/');
+        size_t pos = path.find_last_of('/');
+        if (pos == std::string::npos) {
+            return SwString(path);
+        }
+        return SwString(path.substr(pos + 1));
+    }
+
+    void registerFileWatcher_() {
+        unregisterFileWatcher_();
+        if (!monitoring || filePath_.isEmpty()) {
+            return;
+        }
+
+        SwCoreApplication* app = SwCoreApplication::instance(false);
+        if (!app) {
+            return;
+        }
+
+        ThreadHandle* affinity = threadHandle();
+        if (!affinity) {
+            affinity = ThreadHandle::currentThread();
+        }
+
+#if defined(_WIN32)
+        const SwString directory = directoryPathForWatch_();
+        m_fileWatchHandle = FindFirstChangeNotificationW(
+            directory.toStdWString().c_str(),
+            FALSE,
+            FILE_NOTIFY_CHANGE_FILE_NAME |
+            FILE_NOTIFY_CHANGE_LAST_WRITE |
+            FILE_NOTIFY_CHANGE_SIZE |
+            FILE_NOTIFY_CHANGE_ATTRIBUTES);
+        if (m_fileWatchHandle == INVALID_HANDLE_VALUE) {
+            return;
+        }
+        m_fileWatchToken = app->ioDispatcher().watchHandle(
+            m_fileWatchHandle,
+            [affinity](std::function<void()> task) mutable {
+                if (affinity && ThreadHandle::isLive(affinity) &&
+                    ThreadHandle::currentThread() != affinity) {
+                    affinity->postTask(std::move(task));
+                    return;
+                }
+                task();
+            },
+            [this]() {
+                if (!SwObject::isLive(this) || !monitoring) {
+                    return;
+                }
+                checkFileChanges();
+                if (m_fileWatchHandle != INVALID_HANDLE_VALUE) {
+                    FindNextChangeNotification(m_fileWatchHandle);
+                }
+            });
+#else
+        m_inotifyFd = ::inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+        if (m_inotifyFd < 0) {
+            return;
+        }
+        const SwString directory = directoryPathForWatch_();
+        m_inotifyWatch = ::inotify_add_watch(
+            m_inotifyFd,
+            directory.toStdString().c_str(),
+            IN_CLOSE_WRITE | IN_ATTRIB | IN_MODIFY | IN_MOVED_TO | IN_CREATE | IN_DELETE | IN_DELETE_SELF | IN_MOVE_SELF);
+        if (m_inotifyWatch < 0) {
+            ::close(m_inotifyFd);
+            m_inotifyFd = -1;
+            return;
+        }
+        m_fileWatchToken = app->ioDispatcher().watchFd(
+            m_inotifyFd,
+            SwIoDispatcher::Readable,
+            [affinity](std::function<void()> task) mutable {
+                if (affinity && ThreadHandle::isLive(affinity) &&
+                    ThreadHandle::currentThread() != affinity) {
+                    affinity->postTask(std::move(task));
+                    return;
+                }
+                task();
+            },
+            [this](uint32_t events) {
+                if (!SwObject::isLive(this) || !monitoring) {
+                    return;
+                }
+                if (!(events & SwIoDispatcher::Readable)) {
+                    return;
+                }
+                char buffer[4096];
+                const ssize_t bytes = ::read(m_inotifyFd, buffer, sizeof(buffer));
+                if (bytes <= 0) {
+                    return;
+                }
+                const SwString fileName = baseNameForWatch_();
+                bool relevant = false;
+                ssize_t pos = 0;
+                while (pos < bytes) {
+                    const struct inotify_event* ev =
+                        reinterpret_cast<const struct inotify_event*>(buffer + pos);
+                    if ((ev->mask & (IN_DELETE_SELF | IN_MOVE_SELF)) != 0) {
+                        relevant = true;
+                    } else if (ev->len > 0 && fileName == SwString(ev->name)) {
+                        relevant = true;
+                    }
+                    pos += static_cast<ssize_t>(sizeof(struct inotify_event) + ev->len);
+                }
+                if (relevant) {
+                    checkFileChanges();
+                }
+            });
+#endif
+    }
+
+    void unregisterFileWatcher_() {
+        if (m_fileWatchToken) {
+            if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
+                app->ioDispatcher().remove(m_fileWatchToken);
+            }
+            m_fileWatchToken = 0;
+        }
+#if defined(_WIN32)
+        if (m_fileWatchHandle != INVALID_HANDLE_VALUE) {
+            FindCloseChangeNotification(m_fileWatchHandle);
+            m_fileWatchHandle = INVALID_HANDLE_VALUE;
+        }
+#else
+        if (m_inotifyWatch >= 0 && m_inotifyFd >= 0) {
+            ::inotify_rm_watch(m_inotifyFd, m_inotifyWatch);
+            m_inotifyWatch = -1;
+        }
+        if (m_inotifyFd >= 0) {
+            ::close(m_inotifyFd);
+            m_inotifyFd = -1;
+        }
+#endif
+    }
 
 };

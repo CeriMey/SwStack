@@ -47,7 +47,6 @@
 
 #include "SwIODevice.h"
 #include "SwString.h"
-#include "SwTimer.h"
 #include "SwEventLoop.h"
 
 #include <mutex>
@@ -55,6 +54,7 @@
 #include <vector>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -64,7 +64,6 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
-#include <cstring>
 #endif
 
 class SwSerial : public SwIODevice {
@@ -79,15 +78,14 @@ public:
      */
     explicit SwSerial(SwObject* parent = nullptr)
         : SwIODevice(parent)
-        , m_pollTimer(new SwTimer(10, this))
         , m_baudRate(0)
     {
 #if defined(_WIN32)
         m_handle = INVALID_HANDLE_VALUE;
+        std::memset(&m_waitOverlapped, 0, sizeof(m_waitOverlapped));
 #else
         m_fd = -1;
 #endif
-        SwObject::connect(m_pollTimer, &SwTimer::timeout, [this]() { pollPort(); });
     }
 
     /**
@@ -190,7 +188,24 @@ public:
 #endif
         m_portName = portName;
         m_baudRate = baudRate;
-        m_pollTimer->start(10);
+#if defined(_WIN32)
+        m_waitEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!m_waitEvent) {
+            emit errorOccurred(SwString("CreateEvent failed"));
+            close();
+            return false;
+        }
+        m_waitOverlapped.hEvent = m_waitEvent;
+        if (!armWindowsWait_() || !registerDispatcher_()) {
+            close();
+            return false;
+        }
+#else
+        if (!registerDispatcher_()) {
+            close();
+            return false;
+        }
+#endif
         return true;
     }
 
@@ -200,8 +215,15 @@ public:
      * @details The call affects the runtime state associated with the underlying resource or service.
      */
     void close() override {
-        m_pollTimer->stop();
+        unregisterDispatcher_();
 #if defined(_WIN32)
+        if (m_handle != INVALID_HANDLE_VALUE) {
+            CancelIoEx(m_handle, nullptr);
+        }
+        if (m_waitEvent) {
+            CloseHandle(m_waitEvent);
+            m_waitEvent = nullptr;
+        }
         if (m_handle != INVALID_HANDLE_VALUE) {
             CloseHandle(m_handle);
             m_handle = INVALID_HANDLE_VALUE;
@@ -278,7 +300,30 @@ public:
         if (!isOpen()) {
             return false;
         }
-        return waitForCondition([this]() { return hasBufferedData(); }, msecs);
+        if (hasBufferedData()) {
+            return true;
+        }
+
+        SwEventLoop loop;
+        SwTimer timeoutTimer;
+        bool success = false;
+
+        auto complete = [&]() {
+            success = hasBufferedData();
+            loop.quit();
+        };
+
+        connect(this, &SwSerial::readyRead, &loop, complete);
+        connect(this, &SwSerial::errorOccurred, &loop, [&](const SwString&) { loop.quit(); });
+
+        if (msecs >= 0) {
+            timeoutTimer.setSingleShot(true);
+            connect(&timeoutTimer, &SwTimer::timeout, &loop, [&]() { loop.quit(); });
+            timeoutTimer.start(msecs);
+        }
+
+        loop.exec();
+        return success || hasBufferedData();
     }
 
     /**
@@ -290,41 +335,193 @@ public:
         if (!isOpen()) {
             return false;
         }
-        return waitForCondition([this]() { return !hasPendingWrite(); }, msecs);
+        if (!hasPendingWrite()) {
+            return true;
+        }
+
+        SwEventLoop loop;
+        SwTimer timeoutTimer;
+        bool success = false;
+
+        auto complete = [&]() {
+            success = !hasPendingWrite();
+            loop.quit();
+        };
+
+        connect(this, &SwSerial::readyWrite, &loop, complete);
+        connect(this, &SwSerial::errorOccurred, &loop, [&](const SwString&) { loop.quit(); });
+
+        if (msecs >= 0) {
+            timeoutTimer.setSingleShot(true);
+            connect(&timeoutTimer, &SwTimer::timeout, &loop, [&]() { loop.quit(); });
+            timeoutTimer.start(msecs);
+        }
+
+        complete();
+        if (!success) {
+            loop.exec();
+        }
+        return success;
     }
 
 signals:
     DECLARE_SIGNAL(errorOccurred, SwString);
 
 private:
+    bool registerDispatcher_() {
+        SwCoreApplication* app = SwCoreApplication::instance(false);
+        if (!app) {
+            return false;
+        }
+
+        ThreadHandle* affinity = threadHandle();
+        if (!affinity) {
+            affinity = ThreadHandle::currentThread();
+        }
+
+#if defined(_WIN32)
+        if (!m_waitEvent) {
+            return false;
+        }
+        m_dispatchToken = app->ioDispatcher().watchHandle(
+            m_waitEvent,
+            [affinity](std::function<void()> task) mutable {
+                if (affinity && ThreadHandle::isLive(affinity) &&
+                    ThreadHandle::currentThread() != affinity) {
+                    affinity->postTask(std::move(task));
+                    return;
+                }
+                task();
+            },
+            [this]() {
+                if (!SwObject::isLive(this) || !isOpen()) {
+                    return;
+                }
+                handleWindowsCommEvent_();
+            });
+#else
+        m_dispatchToken = app->ioDispatcher().watchFd(
+            m_fd,
+            SwIoDispatcher::Readable | SwIoDispatcher::Writable,
+            [affinity](std::function<void()> task) mutable {
+                if (affinity && ThreadHandle::isLive(affinity) &&
+                    ThreadHandle::currentThread() != affinity) {
+                    affinity->postTask(std::move(task));
+                    return;
+                }
+                task();
+            },
+            [this](uint32_t events) {
+                if (!SwObject::isLive(this) || !isOpen()) {
+                    return;
+                }
+                if (events & (SwIoDispatcher::Error | SwIoDispatcher::Hangup)) {
+                    emit errorOccurred(SwString("Serial device closed"));
+                    close();
+                    return;
+                }
+                if (events & SwIoDispatcher::Readable) {
+                    pollPort();
+                }
+                if (events & SwIoDispatcher::Writable) {
+                    readyWrite();
+                }
+            });
+#endif
+        return m_dispatchToken != 0;
+    }
+
+    void unregisterDispatcher_() {
+        if (!m_dispatchToken) {
+            return;
+        }
+        if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
+            app->ioDispatcher().remove(m_dispatchToken);
+        }
+        m_dispatchToken = 0;
+    }
+
+#if defined(_WIN32)
+    bool armWindowsWait_() {
+        if (m_handle == INVALID_HANDLE_VALUE || !m_waitEvent) {
+            return false;
+        }
+        ResetEvent(m_waitEvent);
+        SetCommMask(m_handle, EV_RXCHAR | EV_TXEMPTY | EV_ERR);
+        DWORD mask = 0;
+        BOOL ok = WaitCommEvent(m_handle, &mask, &m_waitOverlapped);
+        if (!ok) {
+            DWORD err = GetLastError();
+            if (err != ERROR_IO_PENDING) {
+                emit errorOccurred(SwString("WaitCommEvent failed"));
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void handleWindowsCommEvent_() {
+        if (!m_waitEvent || m_handle == INVALID_HANDLE_VALUE) {
+            return;
+        }
+
+        DWORD transferred = 0;
+        if (!GetOverlappedResult(m_handle, &m_waitOverlapped, &transferred, FALSE)) {
+            DWORD err = GetLastError();
+            if (err == ERROR_OPERATION_ABORTED) {
+                return;
+            }
+            emit errorOccurred(SwString("GetOverlappedResult failed"));
+            close();
+            return;
+        }
+
+        pollPort();
+        if (!hasPendingWrite()) {
+            readyWrite();
+        }
+
+        if (!armWindowsWait_()) {
+            close();
+        }
+    }
+#endif
+
     void pollPort() {
         if (!isOpen()) {
             return;
         }
 #if defined(_WIN32)
-        DWORD errors = 0;
-        COMSTAT status{};
-        if (!ClearCommError(m_handle, &errors, &status)) {
-            emit errorOccurred(SwString("ClearCommError failed"));
-            close();
-            return;
+        while (true) {
+            DWORD errors = 0;
+            COMSTAT status{};
+            if (!ClearCommError(m_handle, &errors, &status)) {
+                emit errorOccurred(SwString("ClearCommError failed"));
+                close();
+                return;
+            }
+            if (status.cbInQue == 0) {
+                break;
+            }
+            std::vector<char> temp(status.cbInQue);
+            DWORD bytesRead = 0;
+            if (!ReadFile(m_handle, temp.data(), static_cast<DWORD>(temp.size()), &bytesRead, nullptr) || bytesRead == 0) {
+                break;
+            }
+            appendBuffer(temp.data(), bytesRead);
         }
-        if (status.cbInQue == 0) {
-            return;
-        }
-        std::vector<char> temp(status.cbInQue);
-        DWORD bytesRead = 0;
-        if (!ReadFile(m_handle, temp.data(), static_cast<DWORD>(temp.size()), &bytesRead, nullptr) || bytesRead == 0) {
-            return;
-        }
-        appendBuffer(temp.data(), bytesRead);
 #else
         char temp[512];
-        ssize_t bytes = ::read(m_fd, temp, sizeof(temp));
-        if (bytes > 0) {
-            appendBuffer(temp, static_cast<size_t>(bytes));
-        } else if (bytes < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-            emit errorOccurred(SwString("Serial read error"));
+        while (true) {
+            ssize_t bytes = ::read(m_fd, temp, sizeof(temp));
+            if (bytes > 0) {
+                appendBuffer(temp, static_cast<size_t>(bytes));
+                continue;
+            }
+            if (bytes < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                emit errorOccurred(SwString("Serial read error"));
+            }
+            break;
         }
 #endif
     }
@@ -375,15 +572,16 @@ private:
 
 #if defined(_WIN32)
     HANDLE m_handle;
+    OVERLAPPED m_waitOverlapped{};
+    HANDLE m_waitEvent{nullptr};
 #else
     int m_fd;
 #endif
-    SwTimer* m_pollTimer;
+    size_t m_dispatchToken{0};
     SwString m_portName;
     int m_baudRate;
     std::vector<char> m_buffer;
     std::mutex m_bufferMutex;
-    static constexpr int kWaitSleepMs = 2;
 
     bool hasBufferedData() {
         std::lock_guard<std::mutex> lock(m_bufferMutex);
@@ -411,25 +609,5 @@ private:
         }
         return pending > 0;
 #endif
-    }
-
-    template<typename Condition>
-    bool waitForCondition(Condition&& condition, int msecs) {
-        using namespace std::chrono;
-        const int timeout = (msecs < 0) ? -1 : msecs;
-        auto start = steady_clock::now();
-        while (!condition()) {
-            if (!isOpen()) {
-                return false;
-            }
-            if (timeout >= 0) {
-                auto elapsed = duration_cast<milliseconds>(steady_clock::now() - start).count();
-                if (elapsed >= timeout) {
-                    return false;
-                }
-            }
-            SwEventLoop::swsleep(kWaitSleepMs);
-        }
-        return true;
     }
 };

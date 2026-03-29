@@ -37,9 +37,55 @@ struct SwMediaOpenOptions {
     int clockRate{0};
     SwString fmtp{};
     SwString decoderId{};
+    SwString audioDecoderId{};
+    SwString preferredAudioTrackId{};
+    SwString preferredVideoTrackId{};
+    SwString audioDeviceId{};
     SwString sourceAddressFilter{};
     uint16_t sourceRtcpPort{0};
     bool lowLatency{true};
+    bool enableAudio{false};
+    bool enableMetadata{false};
+
+    SwString sourceUrl() const {
+        const SwString scheme = mediaUrl.scheme();
+        if (scheme.isEmpty()) {
+            return mediaUrl.toString();
+        }
+
+        SwString result = scheme + "://";
+        if (!mediaUrl.userInfo().isEmpty()) {
+            result += mediaUrl.userInfo();
+            result += "@";
+        }
+        result += mediaUrl.host();
+        if (mediaUrl.port() >= 0) {
+            result += ":";
+            result += SwString::number(mediaUrl.port());
+        }
+        result += mediaUrl.path().isEmpty() ? SwString("/") : mediaUrl.path();
+
+        SwString filteredQuery;
+        for (auto it = mediaUrl.queryItems().begin(); it != mediaUrl.queryItems().end(); ++it) {
+            const SwString key = it.key();
+            if (isLocalOptionKey_(key)) {
+                continue;
+            }
+            if (!filteredQuery.isEmpty()) {
+                filteredQuery += "&";
+            }
+            filteredQuery += key;
+            if (!it.value().isEmpty()) {
+                filteredQuery += "=";
+                filteredQuery += it.value();
+            }
+        }
+        if (!filteredQuery.isEmpty()) {
+            result += "?";
+            result += filteredQuery;
+        }
+        return result;
+    }
 
     static SwMediaOpenOptions fromUrl(const SwString& rawUrl) {
         SwMediaOpenOptions options;
@@ -64,7 +110,14 @@ struct SwMediaOpenOptions {
             queryInt_(options.mediaUrl, {"source_rtcp", "remote_rtcp", "source-rtcp"}, 0));
         options.fmtp = firstQueryValue_(options.mediaUrl, {"fmtp"});
         options.decoderId = firstQueryValue_(options.mediaUrl, {"decoder"});
+        options.audioDecoderId = firstQueryValue_(options.mediaUrl, {"audio_decoder", "audio-decoder"});
+        options.preferredAudioTrackId = firstQueryValue_(options.mediaUrl, {"audio_track", "audio-track"});
+        options.preferredVideoTrackId = firstQueryValue_(options.mediaUrl, {"video_track", "video-track"});
+        options.audioDeviceId = firstQueryValue_(options.mediaUrl, {"audio_device", "audio-device"});
         options.lowLatency = queryBool_(options.mediaUrl, {"lowlatency", "low_latency"}, true);
+        options.enableAudio = queryBool_(options.mediaUrl, {"audio", "enable_audio", "enable-audio"}, false);
+        options.enableMetadata =
+            queryBool_(options.mediaUrl, {"metadata", "enable_metadata", "enable-metadata", "klv"}, false);
 
         if ((options.mediaUrl.scheme() == "rtp") &&
             options.udpFormat == UdpPayloadFormat::Auto) {
@@ -205,5 +258,51 @@ private:
     static bool isWildcardHost_(const SwString& host) {
         const SwString normalized = host.trimmed().toLower();
         return normalized.isEmpty() || normalized == "*" || normalized == "0.0.0.0";
+    }
+
+    static bool isLocalOptionKey_(const SwString& rawKey) {
+        const SwString key = rawKey.trimmed().toLower();
+        return key == "transport" ||
+               key == "format" ||
+               key == "codec" ||
+               key == "pt" ||
+               key == "payload" ||
+               key == "payloadtype" ||
+               key == "clock" ||
+               key == "clockrate" ||
+               key == "bind" ||
+               key == "local" ||
+               key == "listen" ||
+               key == "local-address" ||
+               key == "local_rtp" ||
+               key == "rtp_port" ||
+               key == "localport" ||
+               key == "local_rtcp" ||
+               key == "rtcp_port" ||
+               key == "source" ||
+               key == "source-address" ||
+               key == "remote" ||
+               key == "source_rtcp" ||
+               key == "remote_rtcp" ||
+               key == "source-rtcp" ||
+               key == "fmtp" ||
+               key == "decoder" ||
+               key == "audio_decoder" ||
+               key == "audio-decoder" ||
+               key == "audio_track" ||
+               key == "audio-track" ||
+               key == "video_track" ||
+               key == "video-track" ||
+               key == "audio_device" ||
+               key == "audio-device" ||
+               key == "lowlatency" ||
+               key == "low_latency" ||
+               key == "audio" ||
+               key == "enable_audio" ||
+               key == "enable-audio" ||
+               key == "metadata" ||
+               key == "enable_metadata" ||
+               key == "enable-metadata" ||
+               key == "klv";
     }
 };

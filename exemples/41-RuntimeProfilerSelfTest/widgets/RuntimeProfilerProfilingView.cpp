@@ -152,11 +152,7 @@ SwFrame* RuntimeProfilerProfilingView::createPanel_(SwWidget* parent) {
 void RuntimeProfilerProfilingView::buildUi_() {
     setStyleSheet("SwWidget { background-color: rgba(0,0,0,0); border-width: 0px; }");
 
-    mainSplitter_ = new SwSplitter(SwSplitter::Orientation::Vertical, this);
-    mainSplitter_->setHandleWidth(2);
-    applyProfilerSplitterStyle_(mainSplitter_);
-
-    SwFrame* chartPanel = createPanel_(mainSplitter_);
+    SwFrame* chartPanel = createPanel_(this);
     monitorBar_ = new RuntimeProfilerMonitoringBarWidget(chartPanel);
     monitorBar_->setThresholdUs(thresholdUs_);
     timelineWidget_ = new RuntimeProfilerStallTimelineWidget(chartPanel);
@@ -165,10 +161,10 @@ void RuntimeProfilerProfilingView::buildUi_() {
     chartLayout->setMargin(2);
     chartLayout->setSpacing(2);
     chartLayout->addWidget(monitorBar_, 0, 34);
-    chartLayout->addWidget(timelineWidget_, 1, 58);
+    chartLayout->addWidget(timelineWidget_, 0, 90);
     chartPanel->setLayout(chartLayout);
 
-    detailSplitter_ = new SwSplitter(SwSplitter::Orientation::Horizontal, mainSplitter_);
+    detailSplitter_ = new SwSplitter(SwSplitter::Orientation::Horizontal, this);
     detailSplitter_->setHandleWidth(2);
     applyProfilerSplitterStyle_(detailSplitter_);
 
@@ -192,13 +188,12 @@ void RuntimeProfilerProfilingView::buildUi_() {
 
     detailSplitter_->addWidget(listPanel);
     detailSplitter_->addWidget(stackPanel);
-    mainSplitter_->addWidget(chartPanel);
-    mainSplitter_->addWidget(detailSplitter_);
 
     SwVerticalLayout* layout = new SwVerticalLayout();
     layout->setMargin(0);
-    layout->setSpacing(0);
-    layout->addWidget(mainSplitter_, 1, 540);
+    layout->setSpacing(4);
+    layout->addWidget(chartPanel, 0, 128);
+    layout->addWidget(detailSplitter_, 1, 540);
     setLayout(layout);
 
     if (tableWidget_) {
@@ -220,7 +215,7 @@ void RuntimeProfilerProfilingView::buildUi_() {
 }
 
 void RuntimeProfilerProfilingView::ensureInitialSplitterSizes_() {
-    if (splittersInitialized_ || !mainSplitter_) {
+    if (splittersInitialized_ || !detailSplitter_) {
         return;
     }
 
@@ -228,12 +223,6 @@ void RuntimeProfilerProfilingView::ensureInitialSplitterSizes_() {
     if (bounds.width <= 0 || bounds.height <= 0) {
         return;
     }
-
-    const int preferredTop = 100;
-    SwVector<int> verticalSizes;
-    verticalSizes.push_back(preferredTop);
-    verticalSizes.push_back(std::max(260, bounds.height - verticalSizes[0]));
-    mainSplitter_->setSizes(verticalSizes);
 
     SwVector<int> horizontalSizes;
     horizontalSizes.push_back(std::max(340, bounds.width / 3));
@@ -270,7 +259,10 @@ void RuntimeProfilerProfilingView::showEntryForSequence_(unsigned long long sequ
         data.lane = entry.lane;
         data.threadId = entry.threadId;
         data.frames = entry.frames;
+        data.resolvedFrames = entry.resolvedFrames;
         data.symbols = entry.symbols;
+        data.symbolBackend = entry.symbolBackend;
+        data.symbolSearchPath = entry.symbolSearchPath;
         stackWidget_->showEntry(data);
         return;
     }

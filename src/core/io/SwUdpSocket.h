@@ -132,7 +132,6 @@ public:
      */
     ~SwUdpSocket() override {
         close();
-        stopMonitoring_();
 #if defined(_WIN32)
         WSACleanup();
 #endif
@@ -554,12 +553,16 @@ public:
      * @details The call affects the runtime state associated with the underlying resource or service.
      */
     void close() override {
-        stopMonitoring_();
+        unregisterDispatcher_();
         if (!isSocketValid()) {
             m_readyReadPosted.store(false);
             return;
         }
 #if defined(_WIN32)
+        if (m_event != WSA_INVALID_EVENT) {
+            WSACloseEvent(m_event);
+            m_event = WSA_INVALID_EVENT;
+        }
         closesocket(m_socket);
         m_socket = INVALID_SOCKET;
 #else
@@ -622,7 +625,7 @@ private:
         m_totalReceivedDatagrams.store(0);
         m_totalQueueDrops.store(0);
         m_queueHighWatermark.store(0);
-        startMonitoring_();
+        registerDispatcher_();
     }
 
     bool isSocketValid() const {
@@ -694,33 +697,7 @@ private:
         if (!isSocketValid()) {
             return;
         }
-        if (timeoutMs < 0) {
-            timeoutMs = 0;
-        }
-        fd_set readSet;
-        FD_ZERO(&readSet);
-        FD_SET(m_socket, &readSet);
-        timeval tv{};
-        tv.tv_sec = timeoutMs / 1000;
-        tv.tv_usec = (timeoutMs % 1000) * 1000;
-#if defined(_WIN32)
-        int ready = select(0, &readSet, nullptr, nullptr, &tv);
-#else
-        int ready = select(m_socket + 1, &readSet, nullptr, nullptr, &tv);
-#endif
-        auto selTick = ++m_debugSelectCount;
-        if (ready <= 0) {
-            if (selTick <= 20 || (selTick % 200) == 0) {
-                swCDebug(kSwLogCategory_SwUdpSocket) << "[SwUdpSocket] select ready=" << ready
-                          << " bound=" << m_boundAddress.toStdString() << ":" << m_boundPort
-                          << (ready < 0 ? (" err=" + SwString::number(lastErrorCode())).toStdString() : std::string());
-            }
-            return;
-        }
-        if (selTick <= 20 || (selTick % 200) == 0) {
-            swCDebug(kSwLogCategory_SwUdpSocket) << "[SwUdpSocket] select ready=" << ready
-                      << " bound=" << m_boundAddress.toStdString() << ":" << m_boundPort;
-        }
+        SW_UNUSED(timeoutMs)
 
         bool receivedAny = false;
         while (true) {
@@ -778,6 +755,96 @@ private:
         }
     }
 
+    void registerDispatcher_() {
+        unregisterDispatcher_();
+        if (!isSocketValid()) {
+            return;
+        }
+
+        SwCoreApplication* app = SwCoreApplication::instance(false);
+        if (!app) {
+            return;
+        }
+
+        ThreadHandle* affinity = threadHandle();
+        if (!affinity) {
+            affinity = ThreadHandle::currentThread();
+        }
+
+#if defined(_WIN32)
+        if (m_event == WSA_INVALID_EVENT) {
+            m_event = WSACreateEvent();
+            if (m_event == WSA_INVALID_EVENT) {
+                setSocketError(SocketError::SocketAccessError, SwString("WSACreateEvent failed"));
+                return;
+            }
+        }
+        if (WSAEventSelect(m_socket, m_event, FD_READ | FD_CLOSE) == SOCKET_ERROR) {
+            setSocketError(SocketError::SocketAccessError, SwString("WSAEventSelect failed"));
+            return;
+        }
+        m_dispatchToken = app->ioDispatcher().watchHandle(m_event,
+                                                          [affinity](std::function<void()> task) mutable {
+                                                              if (affinity && ThreadHandle::isLive(affinity) &&
+                                                                  ThreadHandle::currentThread() != affinity) {
+                                                                  affinity->postTask(std::move(task));
+                                                                  return;
+                                                              }
+                                                              task();
+                                                          },
+                                                          [this]() {
+            if (!SwObject::isLive(this) || !isSocketValid()) {
+                return;
+            }
+            WSANETWORKEVENTS networkEvents{};
+            if (WSAEnumNetworkEvents(m_socket, m_event, &networkEvents) == SOCKET_ERROR) {
+                setSocketError(SocketError::OperationError, SwString("WSAEnumNetworkEvents failed"));
+                return;
+            }
+            if (networkEvents.lNetworkEvents & FD_CLOSE) {
+                close();
+                return;
+            }
+            if (networkEvents.lNetworkEvents & FD_READ) {
+                pollSocket_(0);
+            }
+        });
+#else
+        m_dispatchToken = app->ioDispatcher().watchFd(m_socket,
+                                                      SwIoDispatcher::Readable,
+                                                      [affinity](std::function<void()> task) mutable {
+                                                          if (affinity && ThreadHandle::isLive(affinity) &&
+                                                              ThreadHandle::currentThread() != affinity) {
+                                                              affinity->postTask(std::move(task));
+                                                              return;
+                                                          }
+                                                          task();
+                                                      },
+                                                      [this](uint32_t events) {
+                                                          if (!SwObject::isLive(this) || !isSocketValid()) {
+                                                              return;
+                                                          }
+                                                          if (events & (SwIoDispatcher::Error | SwIoDispatcher::Hangup)) {
+                                                              close();
+                                                              return;
+                                                          }
+                                                          if (events & SwIoDispatcher::Readable) {
+                                                              pollSocket_(0);
+                                                          }
+                                                      });
+#endif
+    }
+
+    void unregisterDispatcher_() {
+        if (!m_dispatchToken) {
+            return;
+        }
+        if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
+            app->ioDispatcher().remove(m_dispatchToken);
+        }
+        m_dispatchToken = 0;
+    }
+
     void scheduleReadyRead_() {
         if (m_readyReadPosted.exchange(true)) {
             return;
@@ -799,36 +866,6 @@ private:
             return;
         }
         notify();
-    }
-
-    void monitorLoop_() {
-#if defined(_WIN32)
-        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
-#endif
-        while (m_monitorActive.load()) {
-            if (!isSocketValid()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(20));
-                continue;
-            }
-            pollSocket_(50);
-        }
-    }
-
-    void startMonitoring_() {
-        if (m_monitorActive.exchange(true)) {
-            return;
-        }
-        m_monitorThread = std::thread([this]() {
-            monitorLoop_();
-        });
-    }
-
-    void stopMonitoring_() {
-        m_monitorActive.store(false);
-        if (m_monitorThread.joinable()) {
-            m_monitorThread.join();
-        }
-        m_readyReadPosted.store(false);
     }
 
     uint32_t inetAddr(const SwString& text) const {
@@ -884,9 +921,11 @@ private:
 #if defined(_WIN32)
     SOCKET m_socket;
     WSADATA m_wsaData{};
+    WSAEVENT m_event{WSA_INVALID_EVENT};
 #else
     int m_socket;
 #endif
+    size_t m_dispatchToken{0};
     sockaddr_in m_remoteAddr{};
     sockaddr_in m_boundAddr{};
     bool m_remoteSet{false};
@@ -902,15 +941,12 @@ private:
     SwString m_errorString;
     int m_lastSystemError{0};
     std::atomic<uint64_t> m_debugRxCount{0};
-    std::atomic<uint64_t> m_debugSelectCount{0};
     std::atomic<uint64_t> m_totalReceivedDatagrams{0};
     std::atomic<uint64_t> m_totalQueueDrops{0};
     std::atomic<uint64_t> m_queueHighWatermark{0};
-    std::atomic<bool> m_monitorActive{false};
     std::atomic<bool> m_readyReadPosted{false};
     int m_receiveBufferSize{0};
     size_t m_maxDatagramSize{2048};
     size_t m_maxPendingDatagrams{512};
     SwByteArray m_readBuffer;
-    std::thread m_monitorThread{};
 };

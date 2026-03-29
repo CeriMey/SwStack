@@ -49,9 +49,8 @@
 #include "SwWidget.h"
 #include "SwPainter.h"
 
-#include "media/SwVideoDecoder.h"
 #include "media/SwVideoFrame.h"
-#include "media/SwVideoSource.h"
+#include "media/SwVideoSink.h"
 #if defined(_WIN32)
 #include "media/SwMediaFoundationVideoDecoder.h"
 #endif
@@ -378,6 +377,8 @@ private:
  */
 class SwVideoWidget : public SwWidget {
 public:
+    using FrameCallback = std::function<void(const SwVideoFrame&)>;
+
     enum class ScalingMode {
         Fit,
         Fill,
@@ -393,18 +394,12 @@ public:
      */
     SwVideoWidget(SwWidget* parent = nullptr)
         : SwWidget(parent),
-          m_pipeline(std::make_shared<SwVideoPipeline>()),
+          m_videoSink(std::make_shared<SwVideoSink>()),
           m_renderer(createDefaultRenderer()) {
 #if defined(_WIN32)
         boostGuiThreadPriority();
 #endif
-        // Keep decoder lifecycle off the socket/fiber path. Media Foundation H.26x
-        // decoders, especially HEVC, are more stable when they live on a dedicated
-        // worker thread instead of the GUI/runtime fiber that drives I/O callbacks.
-        m_pipeline->setAsyncDecode(true);
-        m_pipeline->setQueueLimits(12, 2 * 1024 * 1024);
-        installPipelineFrameCallback();
-        m_pipeline->useDecoderFactory(true);
+        attachVideoSink(m_videoSink);
     }
 
     /**
@@ -413,10 +408,21 @@ public:
      * @details Use this hook to release any resources that remain associated with the instance.
      */
     ~SwVideoWidget() override {
-        m_callbackGuard.reset();
-        detachSourceStatusCallback(m_source);
+        detachVideoSink(m_videoSink);
+        m_videoSink.reset();
         stop();
     }
+
+    void setVideoSink(const std::shared_ptr<SwVideoSink>& sink) {
+        if (m_videoSink == sink) {
+            return;
+        }
+        detachVideoSink(m_videoSink);
+        m_videoSink = sink ? sink : std::make_shared<SwVideoSink>();
+        attachVideoSink(m_videoSink);
+    }
+
+    std::shared_ptr<SwVideoSink> videoSink() const { return m_videoSink; }
 
     /**
      * @brief Sets the video Source.
@@ -425,13 +431,11 @@ public:
      * @details Call this method to replace the currently stored value with the caller-provided one.
      */
     void setVideoSource(const std::shared_ptr<SwVideoSource>& source) {
-        auto previousSource = m_source;
-        m_source = source;
-        if (m_pipeline) {
-            m_pipeline->setSource(source);
+        if (!m_videoSink) {
+            m_videoSink = std::make_shared<SwVideoSink>();
+            attachVideoSink(m_videoSink);
         }
-        detachSourceStatusCallback(previousSource);
-        attachSourceStatusCallback(source);
+        m_videoSink->setVideoSource(source);
     }
 
     /**
@@ -440,7 +444,9 @@ public:
      *
      * @details The returned value reflects the state currently stored by the instance.
      */
-    std::shared_ptr<SwVideoSource> videoSource() const { return m_source; }
+    std::shared_ptr<SwVideoSource> videoSource() const {
+        return m_videoSink ? m_videoSink->videoSource() : std::shared_ptr<SwVideoSource>();
+    }
 
     /**
      * @brief Sets the video Decoder.
@@ -453,9 +459,8 @@ public:
             return;
         }
         m_decoder = decoder;
-        if (m_pipeline) {
-            m_pipeline->setDecoder(decoder);
-            installPipelineFrameCallback();
+        if (m_videoSink) {
+            m_videoSink->setVideoDecoder(decoder);
         }
     }
 
@@ -465,7 +470,7 @@ public:
      * @return The registered backends ordered by priority.
      */
     static SwList<SwVideoDecoderDescriptor> availableVideoDecoders(SwVideoPacket::Codec codec) {
-        return SwVideoDecoderFactory::instance().list(codec);
+        return SwVideoSink::availableVideoDecoders(codec);
     }
 
     /**
@@ -475,10 +480,10 @@ public:
      * @return `true` on success; otherwise `false`.
      */
     bool setPreferredVideoDecoder(SwVideoPacket::Codec codec, const SwString& decoderId) {
-        if (!m_pipeline) {
+        if (!m_videoSink) {
             return false;
         }
-        bool ok = m_pipeline->setDecoderSelection(codec, decoderId);
+        bool ok = m_videoSink->setPreferredVideoDecoder(codec, decoderId);
         if (ok) {
             m_decoder.reset();
         }
@@ -490,10 +495,10 @@ public:
      * @param codec Value passed to the method.
      */
     void clearPreferredVideoDecoder(SwVideoPacket::Codec codec) {
-        if (!m_pipeline) {
+        if (!m_videoSink) {
             return;
         }
-        m_pipeline->clearDecoderSelection(codec);
+        m_videoSink->clearPreferredVideoDecoder(codec);
     }
 
     /**
@@ -502,10 +507,10 @@ public:
      * @return The preferred backend id, if any.
      */
     SwString preferredVideoDecoder(SwVideoPacket::Codec codec) const {
-        if (!m_pipeline) {
+        if (!m_videoSink) {
             return SwString();
         }
-        return m_pipeline->decoderSelection(codec);
+        return m_videoSink->preferredVideoDecoder(codec);
     }
 
     /**
@@ -540,10 +545,10 @@ public:
      * @details The call affects the runtime state associated with the underlying resource or service.
      */
     void start() {
-        if (!m_pipeline || !m_source) {
+        if (!m_videoSink) {
             return;
         }
-        m_pipeline->start();
+        m_videoSink->start();
     }
 
     /**
@@ -552,8 +557,8 @@ public:
      * @details The call affects the runtime state associated with the underlying resource or service.
      */
     void stop() {
-        if (m_pipeline) {
-            m_pipeline->stop();
+        if (m_videoSink) {
+            m_videoSink->stop();
         }
     }
 
@@ -604,8 +609,7 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     bool hasFrame() const {
-        std::lock_guard<std::mutex> lock(m_frameMutex);
-        return m_currentFrame.isValid();
+        return m_videoSink ? m_videoSink->hasFrame() : false;
     }
 
     /**
@@ -615,8 +619,7 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     SwVideoFrame currentFrame() const {
-        std::lock_guard<std::mutex> lock(m_frameMutex);
-        return m_currentFrame;
+        return m_videoSink ? m_videoSink->currentFrame() : SwVideoFrame();
     }
 
     /**
@@ -626,8 +629,7 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     std::chrono::steady_clock::time_point lastFrameTime() const {
-        std::lock_guard<std::mutex> lock(m_frameMutex);
-        return m_lastFrameTime;
+        return m_videoSink ? m_videoSink->lastFrameTime() : std::chrono::steady_clock::time_point{};
     }
 
     /**
@@ -694,38 +696,32 @@ public:
     }
 
 private:
-    void installPipelineFrameCallback() {
-        if (!m_pipeline) {
+    void attachVideoSink(const std::shared_ptr<SwVideoSink>& sink) {
+        if (!sink) {
             return;
         }
         std::weak_ptr<int> weakGuard = m_callbackGuard;
-        m_pipeline->setFrameCallback([this, weakGuard](const SwVideoFrame& frame) {
+        sink->setFrameCallback([this, weakGuard](const SwVideoFrame& frame) {
             if (weakGuard.expired()) {
                 return;
             }
             handleIncomingFrame(frame);
         });
-    }
-
-    void attachSourceStatusCallback(const std::shared_ptr<SwVideoSource>& source) {
-        if (!source) {
-            setStreamStatus({});
-            return;
-        }
-        std::weak_ptr<int> weakGuard = m_callbackGuard;
-        source->setStatusCallback([this, weakGuard](const SwVideoSource::StreamStatus& status) {
+        sink->setStatusCallback([this, weakGuard](const SwVideoSource::StreamStatus& status) {
             if (weakGuard.expired()) {
                 return;
             }
             setStreamStatus(status);
         });
+        setStreamStatus(sink->streamStatus());
     }
 
-    void detachSourceStatusCallback(const std::shared_ptr<SwVideoSource>& source) {
-        if (!source) {
+    void detachVideoSink(const std::shared_ptr<SwVideoSink>& sink) {
+        if (!sink) {
             return;
         }
-        source->setStatusCallback(SwVideoSource::StatusCallback());
+        sink->setFrameCallback(FrameCallback());
+        sink->setStatusCallback(SwVideoSink::StatusCallback());
     }
 
     void setStreamStatus(const SwVideoSource::StreamStatus& status) {
@@ -758,7 +754,8 @@ private:
         default:
             break;
         }
-        return m_source ? SwString("Waiting stream...") : SwString("No source");
+        return (m_videoSink && m_videoSink->videoSource()) ? SwString("Waiting stream...")
+                                                           : SwString("No source");
     }
 
     void drawStatusOverlay(SwPainter* painter,
@@ -1000,8 +997,7 @@ private:
     }
 
 private:
-    std::shared_ptr<SwVideoPipeline> m_pipeline;
-    std::shared_ptr<SwVideoSource> m_source;
+    std::shared_ptr<SwVideoSink> m_videoSink;
     std::shared_ptr<SwVideoDecoder> m_decoder;
     std::shared_ptr<SwVideoRenderer> m_renderer;
     ScalingMode m_scalingMode{ScalingMode::Fit};

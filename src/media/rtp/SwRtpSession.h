@@ -501,6 +501,7 @@ private:
 
         swCWarning(kSwLogCategory_SwRtpSession)
             << "[SwRtpSession] Transport stats"
+            << " local=" << m_descriptor.localRtpPort
             << " rtpRx=" << rtpSocketRx
             << " (+" << (rtpSocketRx - m_lastLoggedRtpSocketRx) << ")"
             << " emitted=" << snapshot.emittedPackets

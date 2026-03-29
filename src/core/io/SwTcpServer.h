@@ -48,7 +48,6 @@
 #include "SwObject.h"
 #include "SwString.h"
 #include "SwTcpSocket.h"
-#include "SwTimer.h"
 #include "SwDebug.h"
 static constexpr const char* kSwLogCategory_SwTcpServer = "sw.core.io.swtcpserver";
 
@@ -77,9 +76,6 @@ public:
         : SwObject(parent), m_listenSocket(INVALID_SOCKET), m_listenEvent(NULL)
     {
         initializeWinsock();
-        m_timer = new SwTimer(50, this);
-        connect(m_timer, &SwTimer::timeout, this, &SwTcpServer::onCheckEvents);
-        m_timer->start();
     }
 
     /**
@@ -89,6 +85,43 @@ public:
      */
     virtual ~SwTcpServer() {
         close();
+        disableTls();
+    }
+
+    /**
+     * @brief Enables server-side TLS for all subsequently accepted connections.
+     * @param certPath Path to the PEM certificate file.
+     * @param keyPath Path to the PEM private key file.
+     * @return true on success.
+     */
+    bool enableTls(const SwString& certPath, const SwString& keyPath) {
+        disableTls();
+        std::string err;
+        m_sslCtx = SwBackendSsl::createServerContext(certPath.toStdString(), keyPath.toStdString(), err);
+        if (!m_sslCtx) {
+            swCError(kSwLogCategory_SwTcpServer) << "TLS init failed: " << err;
+            return false;
+        }
+        m_tlsEnabled = true;
+        return true;
+    }
+
+    /**
+     * @brief Disables server-side TLS.
+     */
+    void disableTls() {
+        if (m_sslCtx) {
+            SwBackendSsl::freeServerContext(m_sslCtx);
+            m_sslCtx = nullptr;
+        }
+        m_tlsEnabled = false;
+    }
+
+    /**
+     * @brief Returns whether TLS is enabled for incoming connections.
+     */
+    bool isTlsEnabled() const {
+        return m_tlsEnabled;
     }
 
     /**
@@ -139,6 +172,7 @@ public:
             close();
             return false;
         }
+        registerDispatcher_();
 
         return true;
     }
@@ -149,6 +183,7 @@ public:
      * @details The call affects the runtime state associated with the underlying resource or service.
      */
     void close() {
+        unregisterDispatcher_();
         if (m_listenSocket != INVALID_SOCKET) {
             closesocket(m_listenSocket);
             m_listenSocket = INVALID_SOCKET;
@@ -186,11 +221,6 @@ private slots:
             return;
         }
 
-        DWORD res = WSAWaitForMultipleEvents(1, &m_listenEvent, FALSE, 0, FALSE);
-        if (res == WSA_WAIT_TIMEOUT) {
-            return;
-        }
-
         WSAResetEvent(m_listenEvent);
 
         WSANETWORKEVENTS networkEvents;
@@ -205,9 +235,7 @@ private slots:
                 if (clientSocket == INVALID_SOCKET) {
                     swCError(kSwLogCategory_SwTcpServer) << "accept failed: " << WSAGetLastError();
                 } else {
-                    SwTcpSocket* client = createSocketFromHandle(clientSocket);
-                    m_pendingConnections.append(client);
-                    emit newConnection();
+                    handleAcceptedSocket_(clientSocket);
                 }
             } else {
                 swCError(kSwLogCategory_SwTcpServer) << "FD_ACCEPT error: " << networkEvents.iErrorCode[FD_ACCEPT_BIT];
@@ -223,8 +251,11 @@ private slots:
 private:
     SOCKET m_listenSocket;
     WSAEVENT m_listenEvent;
-    SwTimer* m_timer;
     SwList<SwTcpSocket*> m_pendingConnections;
+
+    bool m_tlsEnabled = false;
+    void* m_sslCtx = nullptr;
+    size_t m_dispatchToken = 0;
 
     static void initializeWinsock() {
         static bool initialized = false;
@@ -239,10 +270,79 @@ private:
         }
     }
 
-    SwTcpSocket* createSocketFromHandle(SOCKET sock) {
+    void registerDispatcher_() {
+        unregisterDispatcher_();
+        if (m_listenEvent == NULL) {
+            return;
+        }
+        SwCoreApplication* app = SwCoreApplication::instance(false);
+        if (!app) {
+            return;
+        }
+        ThreadHandle* affinity = threadHandle();
+        if (!affinity) {
+            affinity = ThreadHandle::currentThread();
+        }
+        m_dispatchToken = app->ioDispatcher().watchHandle(m_listenEvent,
+                                                          [affinity](std::function<void()> task) mutable {
+                                                              if (affinity && ThreadHandle::isLive(affinity) &&
+                                                                  ThreadHandle::currentThread() != affinity) {
+                                                                  affinity->postTask(std::move(task));
+                                                                  return;
+                                                              }
+                                                              task();
+                                                          },
+                                                          [this]() {
+            if (!SwObject::isLive(this)) {
+                return;
+            }
+            onCheckEvents();
+        });
+    }
+
+    void unregisterDispatcher_() {
+        if (!m_dispatchToken) {
+            return;
+        }
+        if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
+            app->ioDispatcher().remove(m_dispatchToken);
+        }
+        m_dispatchToken = 0;
+    }
+
+    void handleAcceptedSocket_(SOCKET sock) {
         SwTcpSocket* client = new SwTcpSocket();
-        client->adoptSocket(sock);
-        return client;
+        client->adoptSocket(sock, !m_tlsEnabled || !m_sslCtx);
+
+        if (!m_tlsEnabled || !m_sslCtx) {
+            m_pendingConnections.append(client);
+            emit newConnection();
+            return;
+        }
+
+        std::shared_ptr<bool> completed(new bool(false));
+        connect(client, &SwTcpSocket::connected, this, [this, client, completed]() {
+            if (*completed) {
+                return;
+            }
+            *completed = true;
+            m_pendingConnections.append(client);
+            emit newConnection();
+        });
+        auto failHandshake = [client, completed]() {
+            if (*completed) {
+                return;
+            }
+            *completed = true;
+            client->close();
+            client->deleteLater();
+        };
+        connect(client, &SwTcpSocket::errorOccurred, this, [failHandshake](int) { failHandshake(); });
+        connect(client, &SwTcpSocket::disconnected, this, failHandshake);
+
+        if (!client->startServerTls(m_sslCtx)) {
+            failHandshake();
+        }
     }
 };
 
@@ -269,9 +369,6 @@ public:
     SwTcpServer(SwObject* parent = nullptr)
         : SwObject(parent), m_listenSocket(-1)
     {
-        m_timer = new SwTimer(50, this);
-        connect(m_timer, &SwTimer::timeout, this, &SwTcpServer::onCheckEvents);
-        m_timer->start();
     }
 
     /**
@@ -281,6 +378,43 @@ public:
      */
     virtual ~SwTcpServer() {
         close();
+        disableTls();
+    }
+
+    /**
+     * @brief Enables server-side TLS for all subsequently accepted connections.
+     * @param certPath Path to the PEM certificate file.
+     * @param keyPath Path to the PEM private key file.
+     * @return true on success.
+     */
+    bool enableTls(const SwString& certPath, const SwString& keyPath) {
+        disableTls();
+        std::string err;
+        m_sslCtx = SwBackendSsl::createServerContext(certPath.toStdString(), keyPath.toStdString(), err);
+        if (!m_sslCtx) {
+            swCError(kSwLogCategory_SwTcpServer) << "TLS init failed: " << err;
+            return false;
+        }
+        m_tlsEnabled = true;
+        return true;
+    }
+
+    /**
+     * @brief Disables server-side TLS.
+     */
+    void disableTls() {
+        if (m_sslCtx) {
+            SwBackendSsl::freeServerContext(m_sslCtx);
+            m_sslCtx = nullptr;
+        }
+        m_tlsEnabled = false;
+    }
+
+    /**
+     * @brief Returns whether TLS is enabled for incoming connections.
+     */
+    bool isTlsEnabled() const {
+        return m_tlsEnabled;
     }
 
     /**
@@ -324,6 +458,8 @@ public:
             return false;
         }
 
+        registerDispatcher_();
+
         return true;
     }
 
@@ -333,6 +469,7 @@ public:
      * @details The call affects the runtime state associated with the underlying resource or service.
      */
     void close() {
+        unregisterDispatcher_();
         if (m_listenSocket >= 0) {
             ::close(m_listenSocket);
             m_listenSocket = -1;
@@ -366,32 +503,16 @@ private slots:
             return;
         }
 
-        struct pollfd pfd{m_listenSocket, POLLIN, 0};
-        int ret = ::poll(&pfd, 1, 0);
-        if (ret <= 0) {
-            return;
-        }
-
-        if (pfd.revents & POLLIN) {
-            while (true) {
-                int client = ::accept(m_listenSocket, nullptr, nullptr);
-                if (client < 0) {
-                    if (errno != EWOULDBLOCK && errno != EAGAIN) {
-                        swCError(kSwLogCategory_SwTcpServer) << "accept failed: " << std::strerror(errno);
-                    }
-                    break;
+        while (true) {
+            int clientFd = ::accept(m_listenSocket, nullptr, nullptr);
+            if (clientFd < 0) {
+                if (errno != EWOULDBLOCK && errno != EAGAIN) {
+                    swCError(kSwLogCategory_SwTcpServer) << "accept failed: " << std::strerror(errno);
                 }
-
-                SwTcpSocket* socket = createSocketFromHandle(client);
-                if (socket) {
-                    m_pendingConnections.append(socket);
-                    emit newConnection();
-                }
+                break;
             }
-        }
 
-        if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
-            close();
+            handleAcceptedSocket_(clientFd);
         }
     }
 
@@ -404,15 +525,88 @@ private:
         return fcntl(fd, F_SETFL, flags | O_NONBLOCK) != -1;
     }
 
-    SwTcpSocket* createSocketFromHandle(int fd) {
-        SwTcpSocket* client = new SwTcpSocket();
-        client->adoptSocket(fd);
-        return client;
+    int m_listenSocket;
+    SwList<SwTcpSocket*> m_pendingConnections;
+
+    bool m_tlsEnabled = false;
+    void* m_sslCtx = nullptr;
+    size_t m_dispatchToken = 0;
+
+    void registerDispatcher_() {
+        unregisterDispatcher_();
+        if (m_listenSocket < 0) {
+            return;
+        }
+        SwCoreApplication* app = SwCoreApplication::instance(false);
+        if (!app) {
+            return;
+        }
+        ThreadHandle* affinity = threadHandle();
+        if (!affinity) {
+            affinity = ThreadHandle::currentThread();
+        }
+        m_dispatchToken = app->ioDispatcher().watchFd(m_listenSocket,
+                                                      SwIoDispatcher::Readable,
+                                                      [affinity](std::function<void()> task) mutable {
+                                                          if (affinity && ThreadHandle::isLive(affinity) &&
+                                                              ThreadHandle::currentThread() != affinity) {
+                                                              affinity->postTask(std::move(task));
+                                                              return;
+                                                          }
+                                                          task();
+                                                      },
+                                                      [this](uint32_t) {
+                                                          if (!SwObject::isLive(this)) {
+                                                              return;
+                                                          }
+                                                          onCheckEvents();
+                                                      });
     }
 
-    int m_listenSocket;
-    SwTimer* m_timer;
-    SwList<SwTcpSocket*> m_pendingConnections;
+    void unregisterDispatcher_() {
+        if (!m_dispatchToken) {
+            return;
+        }
+        if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
+            app->ioDispatcher().remove(m_dispatchToken);
+        }
+        m_dispatchToken = 0;
+    }
+
+    void handleAcceptedSocket_(int fd) {
+        SwTcpSocket* client = new SwTcpSocket();
+        client->adoptSocket(fd, !m_tlsEnabled || !m_sslCtx);
+
+        if (!m_tlsEnabled || !m_sslCtx) {
+            m_pendingConnections.append(client);
+            emit newConnection();
+            return;
+        }
+
+        std::shared_ptr<bool> completed(new bool(false));
+        connect(client, &SwTcpSocket::connected, this, [this, client, completed]() {
+            if (*completed) {
+                return;
+            }
+            *completed = true;
+            m_pendingConnections.append(client);
+            emit newConnection();
+        });
+        auto failHandshake = [client, completed]() {
+            if (*completed) {
+                return;
+            }
+            *completed = true;
+            client->close();
+            client->deleteLater();
+        };
+        connect(client, &SwTcpSocket::errorOccurred, this, [failHandshake](int) { failHandshake(); });
+        connect(client, &SwTcpSocket::disconnected, this, failHandshake);
+
+        if (!client->startServerTls(m_sslCtx)) {
+            failHandshake();
+        }
+    }
 };
 
 #endif // _WIN32

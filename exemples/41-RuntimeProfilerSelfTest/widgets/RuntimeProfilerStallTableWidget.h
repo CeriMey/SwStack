@@ -38,4 +38,5 @@ private:
     SwTableView* tableView_{nullptr};
     SwStandardItemModel* tableModel_{nullptr};
     SwList<unsigned long long> sequences_;
+    bool suppressSelectionSignal_{false};
 };

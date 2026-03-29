@@ -111,7 +111,6 @@ public:
           m_socket(INVALID_SOCKET),
           m_event(NULL) {
         initializeWinsock();
-        startMonitoring();
     }
 
     /**
@@ -123,7 +122,6 @@ public:
      * @note This ensures proper release of Winsock resources and internal states.
      */
     virtual ~SwTcpSocket() {
-        stopMonitoring();
         close();
     }
 
@@ -194,7 +192,38 @@ public:
         if (!initOpenSslBackend()) {
             return false;
         }
-        if (!performOpenSslBlockingHandshake()) {
+        setState(ConnectingState);
+        return driveOpenSslHandshake();
+    }
+
+    /**
+     * @brief Starts a server-side TLS handshake on an already-connected (adopted) socket.
+     *
+     * @param sharedSslCtx An opaque SSL_CTX pointer created by SwBackendSsl::createServerContext().
+     * @return true if the TLS handshake completes successfully.
+     */
+    bool startServerTls(void* sharedSslCtx) {
+        if (m_socket == INVALID_SOCKET || state() != ConnectedState) {
+            return false;
+        }
+        if (!sharedSslCtx) {
+            return false;
+        }
+        m_useTls = true;
+        m_useOpenSslBackend = true;
+        m_remoteClosed = false;
+
+        if (!m_sslBackend) {
+            m_sslBackend.reset(new SwBackendSsl());
+        }
+        if (!m_sslBackend->initServer(sharedSslCtx, static_cast<intptr_t>(m_socket))) {
+            swCError(kSwLogCategory_SwTcpSocket) << "[SwTcpSocket] OpenSSL server init failed: " << m_sslBackend->lastError();
+            emit errorOccurred(-2146893048);
+            return false;
+        }
+        m_tlsMode = TlsState::Negotiating;
+        setState(ConnectingState);
+        if (!driveOpenSslHandshake()) {
             return false;
         }
         return true;
@@ -270,6 +299,7 @@ public:
             close();
             return false;
         }
+        registerDispatcher_();
 
         m_lastHost = host;
         if (m_useTls) {
@@ -317,6 +347,23 @@ public:
             swCDebug(kSwLogCategory_SwTcpSocket) << "[SwTcpSocket] Connexion établie immédiatement.";
         }
 
+        if (resultConnect != SOCKET_ERROR) {
+            if (m_useTls) {
+                if (m_useOpenSslBackend) {
+                    if (!initOpenSslBackend() || !driveOpenSslHandshake()) {
+                        close();
+                        return false;
+                    }
+                } else if (!beginTlsHandshake()) {
+                    close();
+                    return false;
+                }
+            } else {
+                setState(ConnectedState);
+                emit connected();
+            }
+        }
+
         return true;
     }
 
@@ -337,7 +384,31 @@ public:
      * @note This method is blocking and should not be used in the main GUI thread to avoid freezing the application.
      */
     bool waitForConnected(int msecs = 30000) override {
-        return waitForCondition([this]() { return state() == ConnectedState; }, msecs);
+        if (state() == ConnectedState) {
+            return true;
+        }
+
+        SwEventLoop loop;
+        SwTimer timeoutTimer;
+        bool success = false;
+
+        auto complete = [&]() {
+            success = (state() == ConnectedState);
+            loop.quit();
+        };
+
+        connect(this, &SwTcpSocket::connected, &loop, complete);
+        connect(this, &SwTcpSocket::disconnected, &loop, [&]() { loop.quit(); });
+        connect(this, &SwTcpSocket::errorOccurred, &loop, [&](int) { loop.quit(); });
+
+        if (msecs >= 0) {
+            timeoutTimer.setSingleShot(true);
+            connect(&timeoutTimer, &SwTimer::timeout, &loop, [&]() { loop.quit(); });
+            timeoutTimer.start(msecs);
+        }
+
+        loop.exec();
+        return success || state() == ConnectedState;
     }
 
     /**
@@ -357,6 +428,7 @@ public:
      * @note This method is safe to call multiple times, as it checks the socket state before attempting cleanup.
      */
     void close() override {
+        unregisterDispatcher_();
         if (m_socket != INVALID_SOCKET) {
             // Remettre linger par défaut (si pas déjà fait)
             disableLinger();
@@ -508,7 +580,7 @@ public:
      * @return `true` if all data was successfully sent within the specified time, `false` if the timeout expired or an error occurred.
      *
      * @details
-     * - Continuously monitors the socket's write events using `WSAWaitForMultipleEvents`.
+     * - Waits cooperatively until the async write queue is drained.
      * - Updates the remaining time and exits if the timeout expires.
      * - Resets the socket event and processes pending socket events via `checkSocketEvents`.
      * - Emits `errorOccurred` if an error occurs during the process.
@@ -516,6 +588,8 @@ public:
      * @note This method is blocking and should be used cautiously in the main GUI thread to avoid freezing the application.
      */
     bool waitForBytesWritten(int msecs = 30000) {
+        return waitForBytesWrittenAsync_(msecs);
+#if 0
         using namespace std::chrono;
         auto start = steady_clock::now();
         int timeout = (msecs < 0) ? -1 : msecs;
@@ -535,7 +609,7 @@ public:
             }
 
             DWORD waitTime = (remainingTime < 0) ? WSA_INFINITE : (DWORD)remainingTime;
-            DWORD result = WSAWaitForMultipleEvents(1, &m_event, FALSE, waitTime, FALSE);
+            DWORD result = WSA_WAIT_TIMEOUT;
             if (result == WSA_WAIT_FAILED) {
                 emit errorOccurred(WSAGetLastError());
                 return false;
@@ -555,6 +629,7 @@ public:
         // Yield cooperatively so other fibers/tasks can run while we finish flushing
         SwEventLoop::swsleep(1);
         return true;
+#endif
     }
 
     /**
@@ -609,20 +684,8 @@ public:
      *
      * @note The caller must ensure the validity of the socket being passed.
      */
-    void adoptSocket(SOCKET sock) {
-        close();
-        m_socket = sock;
-        if (m_socket != INVALID_SOCKET) {
-            u_long mode = 1;
-            ioctlsocket(m_socket, FIONBIO, &mode);
-
-            m_event = WSACreateEvent();
-            WSAEventSelect(m_socket, m_event, FD_READ | FD_WRITE | FD_CLOSE);
-
-            setState(ConnectedState);
-            startMonitoring();
-            emit connected();
-        }
+    void adoptSocket(SOCKET sock, bool emitConnectedSignal = true) {
+        adoptSocketAsync_(sock, emitConnectedSignal);
     }
 
 protected:
@@ -640,8 +703,6 @@ protected:
      *       socket-related updates.
      */
     void onTimerDescriptor() override {
-        SwIODevice::onTimerDescriptor();
-        checkSocketEvents();
     }
 
 private:
@@ -672,6 +733,110 @@ private:
     bool m_useOpenSslBackend = false;
     SwString m_lastHost;
     bool m_remoteClosed = false;
+    size_t m_dispatchToken = 0;
+
+    void registerDispatcher_() {
+        unregisterDispatcher_();
+        if (m_event == NULL) {
+            return;
+        }
+        SwCoreApplication* app = SwCoreApplication::instance(false);
+        if (!app) {
+            return;
+        }
+        ThreadHandle* affinity = threadHandle();
+        if (!affinity) {
+            affinity = ThreadHandle::currentThread();
+        }
+        m_dispatchToken = app->ioDispatcher().watchHandle(m_event,
+                                                          [affinity](std::function<void()> task) mutable {
+                                                              if (affinity && ThreadHandle::isLive(affinity) &&
+                                                                  ThreadHandle::currentThread() != affinity) {
+                                                                  affinity->postTask(std::move(task));
+                                                                  return;
+                                                              }
+                                                              task();
+                                                          },
+                                                          [this]() {
+            if (!SwObject::isLive(this)) {
+                return;
+            }
+            checkSocketEvents();
+        });
+    }
+
+    void unregisterDispatcher_() {
+        if (!m_dispatchToken) {
+            return;
+        }
+        if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
+            app->ioDispatcher().remove(m_dispatchToken);
+        }
+        m_dispatchToken = 0;
+    }
+
+    void adoptSocketAsync_(SOCKET sock, bool emitConnectedSignal) {
+        close();
+        m_socket = sock;
+        if (m_socket == INVALID_SOCKET) {
+            return;
+        }
+
+        u_long mode = 1;
+        ioctlsocket(m_socket, FIONBIO, &mode);
+
+        m_event = WSACreateEvent();
+        if (m_event == WSA_INVALID_EVENT) {
+            emit errorOccurred(WSAGetLastError());
+            close();
+            return;
+        }
+        if (WSAEventSelect(m_socket, m_event, FD_READ | FD_WRITE | FD_CLOSE) == SOCKET_ERROR) {
+            emit errorOccurred(WSAGetLastError());
+            close();
+            return;
+        }
+        registerDispatcher_();
+
+        setState(ConnectedState);
+        if (emitConnectedSignal) {
+            emit connected();
+        }
+    }
+
+    bool waitForBytesWrittenAsync_(int msecs) {
+        if (m_writeBuffer.isEmpty() && m_tlsEncryptedBuffer.isEmpty()) {
+            return true;
+        }
+
+        SwEventLoop loop;
+        SwTimer timeoutTimer;
+        bool success = false;
+
+        auto tryComplete = [&]() {
+            if (m_writeBuffer.isEmpty() && m_tlsEncryptedBuffer.isEmpty()) {
+                success = true;
+                loop.quit();
+            }
+        };
+
+        connect(this, &SwTcpSocket::writeFinished, &loop, tryComplete);
+        connect(this, &SwTcpSocket::disconnected, &loop, [&]() { loop.quit(); });
+        connect(this, &SwTcpSocket::errorOccurred, &loop, [&](int) { loop.quit(); });
+
+        if (msecs >= 0) {
+            timeoutTimer.setSingleShot(true);
+            connect(&timeoutTimer, &SwTimer::timeout, &loop, [&]() { loop.quit(); });
+            timeoutTimer.start(msecs);
+        }
+
+        tryFlushWriteBuffer();
+        tryComplete();
+        if (!success) {
+            loop.exec();
+        }
+        return success;
+    }
 
     /**
      * @brief Initializes the Winsock library for network operations.
@@ -743,13 +908,6 @@ private:
             return true;
         }
 
-        DWORD res = WSAWaitForMultipleEvents(1, &m_event, FALSE, 0, FALSE);
-        if (res == WSA_WAIT_TIMEOUT) {
-            return true;
-        }
-
-        WSAResetEvent(m_event);
-
         WSANETWORKEVENTS networkEvents;
         if (WSAEnumNetworkEvents(m_socket, m_event, &networkEvents) == SOCKET_ERROR) {
             emit errorOccurred(WSAGetLastError());
@@ -764,7 +922,7 @@ private:
                             close();
                             return false;
                         }
-                        if (!performOpenSslBlockingHandshake()) {
+                        if (!driveOpenSslHandshake()) {
                             close();
                             return false;
                         }
@@ -909,62 +1067,6 @@ private:
         return false;
     }
 
-    // Helper to complete the OpenSSL handshake in blocking mode using select() so we don't
-    // have to juggle WANT_READ/WANT_WRITE in the event loop during negotiation.
-    bool performOpenSslBlockingHandshake() {
-        if (!m_sslBackend) {
-            return false;
-        }
-
-        // Temporarily switch to blocking
-        u_long blocking = 0;
-        ioctlsocket(m_socket, FIONBIO, &blocking);
-
-        bool ok = false;
-        for (int i = 0; i < 40; ++i) { // up to ~20s with 500ms waits
-            auto res = m_sslBackend->handshake();
-            if (res == SwBackendSsl::IoResult::Ok) {
-                ok = true;
-                break;
-            }
-            if (res == SwBackendSsl::IoResult::Closed || res == SwBackendSsl::IoResult::Error) {
-                swCError(kSwLogCategory_SwTcpSocket) << "[SwTcpSocket] OpenSSL handshake error: " << m_sslBackend->lastError();
-                break;
-            }
-
-            fd_set rfds, wfds;
-            FD_ZERO(&rfds);
-            FD_ZERO(&wfds);
-            if (res == SwBackendSsl::IoResult::WantRead) {
-                FD_SET(m_socket, &rfds);
-            }
-            if (res == SwBackendSsl::IoResult::WantWrite) {
-                FD_SET(m_socket, &wfds);
-            }
-            timeval tv;
-            tv.tv_sec = 0;
-            tv.tv_usec = 500 * 1000; // 500ms
-            int sel = select(0, &rfds, &wfds, nullptr, &tv);
-            if (sel < 0) {
-                break;
-            }
-        }
-
-        // Restore non-blocking
-        u_long nonBlocking = 1;
-        ioctlsocket(m_socket, FIONBIO, &nonBlocking);
-
-        if (ok) {
-            m_tlsMode = TlsState::Established;
-            setState(ConnectedState);
-            emit connected();
-            return true;
-        }
-
-        emit errorOccurred(-2146893048);
-        return false;
-    }
-
     bool pumpOpenSslRead() {
         if (!m_sslBackend) {
             return false;
@@ -1101,32 +1203,6 @@ private:
      *
      * @note This method is blocking and should be used cautiously to avoid freezing the application.
      */
-    template<typename Condition>
-    bool waitForCondition(Condition condition, int msecs) {
-        using namespace std::chrono;
-        auto start = steady_clock::now();
-        int timeout = (msecs < 0) ? -1 : msecs;
-        SwCoreApplication* app = SwCoreApplication::instance(false);
-
-        while (!condition()) {
-            if (timeout >= 0) {
-                auto now = steady_clock::now();
-                auto elapsed = duration_cast<milliseconds>(now - start).count();
-                if (elapsed >= timeout) {
-                    return false;
-                }
-            }
-
-            if (app) {
-                SwCoreApplication::release();
-            } else {
-                Sleep(10);
-            }
-            checkSocketEvents();
-        }
-        return true;
-    }
-
     /**
      * @brief Enables the linger option on the socket to control its closure behavior.
      *
@@ -1218,171 +1294,6 @@ private:
         m_contextReady = false;
 
         return continueTlsHandshake(nullptr, 0);
-    }
-
-    // Perform a blocking TLS handshake using SChannel. This avoids the tricky event-driven
-    // token juggling that was causing servers (Mapbox/ArcGIS) to reject our ClientHello.
-    bool performBlockingTlsHandshake() {
-        if (!m_useTls) {
-            return false;
-        }
-        if (!ensureCredentialHandle()) {
-            return false;
-        }
-
-        // Switch to blocking for the handshake phase.
-        u_long blocking = 0;
-        ioctlsocket(m_socket, FIONBIO, &blocking);
-
-        m_tlsMode = TlsState::Negotiating;
-        m_tlsRecvBuffer.clear();
-        m_tlsDecryptedBuffer.clear();
-        m_tlsEncryptedBuffer.clear();
-        m_tlsHandshakeBuffer.clear();
-        m_contextReady = false;
-
-        DWORD contextReq = ISC_REQ_ALLOCATE_MEMORY | ISC_REQ_CONFIDENTIALITY | ISC_REQ_REPLAY_DETECT |
-                           ISC_REQ_SEQUENCE_DETECT | ISC_REQ_STREAM;
-        DWORD contextAttr = 0;
-        TimeStamp expiry{};
-
-        std::wstring targetNameW;
-        const wchar_t* targetPtr = nullptr;
-        if (!m_effectiveTlsHost.isEmpty()) {
-            targetNameW = m_effectiveTlsHost.toStdWString();
-            targetPtr = targetNameW.c_str();
-        }
-
-        SwByteArray inData;
-        auto recvMore = [&](int timeoutMs) -> bool {
-            fd_set readfds;
-            FD_ZERO(&readfds);
-            FD_SET(m_socket, &readfds);
-            timeval tv;
-            tv.tv_sec = timeoutMs / 1000;
-            tv.tv_usec = (timeoutMs % 1000) * 1000;
-            int sel = select(0, &readfds, nullptr, nullptr, &tv);
-            if (sel <= 0) {
-                return false;
-            }
-            char buf[4096];
-            int ret = ::recv(m_socket, buf, sizeof(buf), 0);
-            if (ret <= 0) {
-                return false;
-            }
-            inData.append(buf, static_cast<size_t>(ret));
-            return true;
-        };
-
-        // Loop until SEC_E_OK or a fatal error.
-        while (true) {
-            SecBuffer inBuffers[2];
-            inBuffers[0].BufferType = SECBUFFER_TOKEN;
-            inBuffers[0].pvBuffer = inData.isEmpty() ? nullptr : inData.data();
-            inBuffers[0].cbBuffer = (ULONG)inData.size();
-            inBuffers[1].BufferType = SECBUFFER_EMPTY;
-            inBuffers[1].pvBuffer = nullptr;
-            inBuffers[1].cbBuffer = 0;
-
-            SecBufferDesc inDesc{SECBUFFER_VERSION, 2, inBuffers};
-
-            SecBuffer outBuffer{};
-            outBuffer.BufferType = SECBUFFER_TOKEN;
-            outBuffer.pvBuffer = nullptr;
-            outBuffer.cbBuffer = 0;
-            SecBufferDesc outDesc{SECBUFFER_VERSION, 1, &outBuffer};
-
-            SECURITY_STATUS status = InitializeSecurityContextW(
-                &m_credHandle,
-                m_contextReady ? &m_ctxtHandle : nullptr,
-                const_cast<wchar_t*>(targetPtr),
-                contextReq,
-                0,
-                SECURITY_NATIVE_DREP,
-                inData.isEmpty() ? nullptr : &inDesc,
-                0,
-                &m_ctxtHandle,
-                &outDesc,
-                &contextAttr,
-                &expiry);
-
-            if (status == SEC_I_CONTINUE_NEEDED || status == SEC_E_OK) {
-                m_contextReady = true;
-                if (outBuffer.pvBuffer && outBuffer.cbBuffer > 0) {
-                    int sent = ::send(m_socket, static_cast<const char*>(outBuffer.pvBuffer),
-                                      (int)outBuffer.cbBuffer, 0);
-                    FreeContextBuffer(outBuffer.pvBuffer);
-                    if (sent == SOCKET_ERROR) {
-                        m_tlsMode = TlsState::Disabled;
-                        goto handshake_fail;
-                    }
-                }
-            }
-
-            if (status == SEC_E_OK) {
-                SECURITY_STATUS sizesStatus = QueryContextAttributes(&m_ctxtHandle, SECPKG_ATTR_STREAM_SIZES, &m_streamSizes);
-                if (sizesStatus != SEC_E_OK) {
-                    m_tlsMode = TlsState::Disabled;
-                    goto handshake_fail;
-                }
-                m_tlsMode = TlsState::Established;
-                m_tlsRecvBuffer = inData; // any leftover bytes
-                m_tlsDecryptedBuffer.clear();
-                setState(ConnectedState);
-                emit connected();
-                break;
-            }
-
-            if (status == SEC_E_INCOMPLETE_MESSAGE) {
-                if (!recvMore(5000)) {
-                    m_tlsMode = TlsState::Disabled;
-                    goto handshake_fail;
-                }
-            } else if (status == SEC_I_CONTINUE_NEEDED) {
-                size_t extra = 0;
-                void* extraPtr = nullptr;
-                for (auto& buf : inBuffers) {
-                    if (buf.BufferType == SECBUFFER_EXTRA && buf.cbBuffer > 0) {
-                        extra = buf.cbBuffer;
-                        extraPtr = buf.pvBuffer;
-                        break;
-                    }
-                }
-                if (extra > 0 && extraPtr) {
-                    SwByteArray rest;
-                    rest.resize(extra);
-                    memcpy(rest.data(), extraPtr, extra);
-                    inData = std::move(rest);
-                } else {
-                    inData.clear();
-                }
-                if (inData.isEmpty()) {
-                    if (!recvMore(5000)) {
-                        m_tlsMode = TlsState::Disabled;
-                        goto handshake_fail;
-                    }
-                }
-            } else {
-                swCError(kSwLogCategory_SwTcpSocket) << "[SwTcpSocket] TLS blocking handshake failed status=" << status;
-                m_tlsMode = TlsState::Disabled;
-                goto handshake_fail;
-            }
-        }
-
-        // Restore non-blocking
-        {
-            u_long nonBlocking = 1;
-            ioctlsocket(m_socket, FIONBIO, &nonBlocking);
-        }
-        return true;
-
-    handshake_fail:
-        {
-            u_long nonBlocking = 1;
-            ioctlsocket(m_socket, FIONBIO, &nonBlocking);
-        }
-        emit errorOccurred(-2146893048); // propagate as TLS failure
-        return false;
     }
 
     bool continueTlsHandshake(const char* inputData, size_t inputSize) {
@@ -1775,7 +1686,6 @@ public:
           m_socket(-1),
           m_connecting(false)
     {
-        startMonitoring();
     }
 
     /**
@@ -1785,7 +1695,6 @@ public:
      */
     ~SwTcpSocket() override
     {
-        stopMonitoring();
         close();
     }
 
@@ -1823,7 +1732,42 @@ public:
             m_effectiveTlsHost = host;
         }
 
-        if (!initOpenSslBackend() || !performOpenSslBlockingHandshake()) {
+        if (!initOpenSslBackend()) {
+            return false;
+        }
+        setState(ConnectingState);
+        if (!driveOpenSslHandshake()) {
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * @brief Starts a server-side TLS handshake on an already-connected (adopted) socket.
+     *
+     * @param sharedSslCtx An opaque SSL_CTX pointer created by SwBackendSsl::createServerContext().
+     * @return true if the TLS handshake completes successfully.
+     */
+    bool startServerTls(void* sharedSslCtx) {
+        if (m_socket < 0 || state() != ConnectedState) {
+            return false;
+        }
+        if (!sharedSslCtx) {
+            return false;
+        }
+        m_useTls = true;
+        m_remoteClosed = false;
+
+        if (!m_sslBackend) {
+            m_sslBackend.reset(new SwBackendSsl());
+        }
+        if (!m_sslBackend->initServer(sharedSslCtx, static_cast<intptr_t>(m_socket))) {
+            emit errorOccurred(errno);
+            return false;
+        }
+        m_tlsMode = TlsState::Negotiating;
+        setState(ConnectingState);
+        if (!driveOpenSslHandshake()) {
             return false;
         }
         return true;
@@ -1903,6 +1847,8 @@ public:
         }
 
         m_socket = fd;
+        registerDispatcher_();
+        updateDispatcherInterest_();
         m_effectiveTlsHost = m_tlsHost.isEmpty() ? host : m_tlsHost;
         if (!m_connecting)
         {
@@ -1911,7 +1857,8 @@ public:
                     close();
                     return false;
                 }
-                if (!performOpenSslBlockingHandshake()) {
+                setState(ConnectingState);
+                if (!driveOpenSslHandshake()) {
                     close();
                     return false;
                 }
@@ -1938,7 +1885,31 @@ public:
      */
     bool waitForConnected(int msecs = 30000) override
     {
-        return waitForCondition([this]() { return state() == ConnectedState; }, msecs);
+        if (state() == ConnectedState) {
+            return true;
+        }
+
+        SwEventLoop loop;
+        SwTimer timeoutTimer;
+        bool success = false;
+
+        auto complete = [&]() {
+            success = (state() == ConnectedState);
+            loop.quit();
+        };
+
+        connect(this, &SwTcpSocket::connected, &loop, complete);
+        connect(this, &SwTcpSocket::disconnected, &loop, [&]() { loop.quit(); });
+        connect(this, &SwTcpSocket::errorOccurred, &loop, [&](int) { loop.quit(); });
+
+        if (msecs >= 0) {
+            timeoutTimer.setSingleShot(true);
+            connect(&timeoutTimer, &SwTimer::timeout, &loop, [&]() { loop.quit(); });
+            timeoutTimer.start(msecs);
+        }
+
+        loop.exec();
+        return success || state() == ConnectedState;
     }
 
     /**
@@ -1948,7 +1919,37 @@ public:
      */
     bool waitForBytesWritten(int msecs = 30000) override
     {
-        return waitForCondition([this]() { return m_writeBuffer.isEmpty(); }, msecs);
+        if (m_writeBuffer.isEmpty()) {
+            return true;
+        }
+
+        SwEventLoop loop;
+        SwTimer timeoutTimer;
+        bool success = false;
+
+        auto tryComplete = [&]() {
+            if (m_writeBuffer.isEmpty()) {
+                success = true;
+                loop.quit();
+            }
+        };
+
+        connect(this, &SwTcpSocket::writeFinished, &loop, tryComplete);
+        connect(this, &SwTcpSocket::disconnected, &loop, [&]() { loop.quit(); });
+        connect(this, &SwTcpSocket::errorOccurred, &loop, [&](int) { loop.quit(); });
+
+        if (msecs >= 0) {
+            timeoutTimer.setSingleShot(true);
+            connect(&timeoutTimer, &SwTimer::timeout, &loop, [&]() { loop.quit(); });
+            timeoutTimer.start(msecs);
+        }
+
+        tryFlushWriteBuffer();
+        tryComplete();
+        if (!success) {
+            loop.exec();
+        }
+        return success;
     }
 
     /**
@@ -1978,6 +1979,7 @@ public:
      */
     void close() override
     {
+        unregisterDispatcher_();
         if (m_closing)
             return;
         m_closing = true;
@@ -2080,14 +2082,18 @@ public:
      * @brief Performs the `adoptSocket` operation.
      * @param fd Value passed to the method.
      */
-    void adoptSocket(int fd)
+    void adoptSocket(int fd, bool emitConnectedSignal = true)
     {
         close();
         m_socket = fd;
         setNonBlocking(m_socket);
+        registerDispatcher_();
+        updateDispatcherInterest_();
         m_connecting = false;
         setState(ConnectedState);
-        emit connected();
+        if (emitConnectedSignal) {
+            emit connected();
+        }
     }
 
 protected:
@@ -2096,11 +2102,71 @@ protected:
      */
     void onTimerDescriptor() override
     {
-        SwIODevice::onTimerDescriptor();
-        pollEvents();
     }
 
 private:
+    uint32_t desiredDispatcherEvents_() const
+    {
+        uint32_t events = SwIoDispatcher::Readable;
+        if (m_connecting || !m_writeBuffer.isEmpty() || (m_useTls && m_tlsMode == TlsState::Negotiating)) {
+            events |= SwIoDispatcher::Writable;
+        }
+        return events;
+    }
+
+    void registerDispatcher_()
+    {
+        unregisterDispatcher_();
+        if (m_socket < 0) {
+            return;
+        }
+        SwCoreApplication* app = SwCoreApplication::instance(false);
+        if (!app) {
+            return;
+        }
+        ThreadHandle* affinity = threadHandle();
+        if (!affinity) {
+            affinity = ThreadHandle::currentThread();
+        }
+        m_dispatchToken = app->ioDispatcher().watchFd(m_socket,
+                                                      desiredDispatcherEvents_(),
+                                                      [affinity](std::function<void()> task) mutable {
+                                                          if (affinity && ThreadHandle::isLive(affinity) &&
+                                                              ThreadHandle::currentThread() != affinity) {
+                                                              affinity->postTask(std::move(task));
+                                                              return;
+                                                          }
+                                                          task();
+                                                      },
+                                                      [this](uint32_t events) {
+                                                          if (!SwObject::isLive(this)) {
+                                                              return;
+                                                          }
+                                                          pollEvents(events);
+                                                          updateDispatcherInterest_();
+                                                      });
+    }
+
+    void unregisterDispatcher_()
+    {
+        if (!m_dispatchToken) {
+            return;
+        }
+        if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
+            app->ioDispatcher().remove(m_dispatchToken);
+        }
+        m_dispatchToken = 0;
+    }
+
+    void updateDispatcherInterest_()
+    {
+        if (!m_dispatchToken) {
+            return;
+        }
+        if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
+            app->ioDispatcher().updateFd(m_dispatchToken, desiredDispatcherEvents_());
+        }
+    }
     void setNonBlocking(int fd)
     {
         int flags = fcntl(fd, F_GETFL, 0);
@@ -2110,27 +2176,18 @@ private:
         }
     }
 
-    void pollEvents()
+    void pollEvents(uint32_t events)
     {
         if (m_socket < 0)
         {
             return;
         }
 
-        short events = POLLIN | POLLERR | POLLHUP;
-        if (m_connecting || !m_writeBuffer.isEmpty())
-        {
-            events |= POLLOUT;
-        }
+        const bool readable = (events & SwIoDispatcher::Readable) != 0;
+        const bool writable = (events & SwIoDispatcher::Writable) != 0;
+        const bool failed = (events & (SwIoDispatcher::Error | SwIoDispatcher::Hangup)) != 0;
 
-        struct pollfd pfd { m_socket, events, 0 };
-        int ret = ::poll(&pfd, 1, 0);
-        if (ret <= 0)
-        {
-            return;
-        }
-
-        if (m_connecting && (pfd.revents & POLLOUT))
+        if (m_connecting && (writable || failed))
         {
             int err = 0;
             socklen_t len = sizeof(err);
@@ -2139,12 +2196,12 @@ private:
                 m_connecting = false;
                 if (m_useTls)
                 {
-                    if (!initOpenSslBackend() || !performOpenSslBlockingHandshake())
+                    if (!initOpenSslBackend() || !driveOpenSslHandshake())
                     {
                         close();
                         return;
                     }
-                    swCDebug(kSwLogCategory_SwTcpSocket) << "[SwTcpSocket] TLS established after poll";
+                    swCDebug(kSwLogCategory_SwTcpSocket) << "[SwTcpSocket] TLS negotiation resumed after dispatcher wake";
                 }
                 else
                 {
@@ -2161,7 +2218,16 @@ private:
             }
         }
 
-        if (pfd.revents & POLLIN)
+        if (m_useTls && m_tlsMode == TlsState::Negotiating && (readable || writable))
+        {
+            if (!driveOpenSslHandshake())
+            {
+                close();
+                return;
+            }
+        }
+
+        if (readable)
         {
             if (m_useTls && m_tlsMode == TlsState::Established)
             {
@@ -2180,17 +2246,20 @@ private:
             }
         }
 
-        if (!m_writeBuffer.isEmpty() && (pfd.revents & POLLOUT))
+        if (!m_writeBuffer.isEmpty() && writable)
         {
             tryFlushWriteBuffer();
         }
 
-        if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))
+        if (failed && !m_connecting)
         {
             int err = 0;
             socklen_t len = sizeof(err);
             getsockopt(m_socket, SOL_SOCKET, SO_ERROR, &err, &len);
-            emit errorOccurred(err);
+            if (err != 0)
+            {
+                emit errorOccurred(err);
+            }
             close();
         }
     }
@@ -2252,38 +2321,6 @@ private:
         }
     }
 
-    template <typename Condition>
-    bool waitForCondition(Condition condition, int msecs)
-    {
-        using namespace std::chrono;
-        auto start = steady_clock::now();
-        int timeout = (msecs < 0) ? -1 : msecs;
-        SwCoreApplication* app = SwCoreApplication::instance(false);
-
-        while (!condition())
-        {
-            if (timeout >= 0)
-            {
-                auto elapsed = duration_cast<milliseconds>(steady_clock::now() - start).count();
-                if (elapsed >= timeout)
-                {
-                    return false;
-                }
-            }
-
-            if (app)
-            {
-                SwCoreApplication::release();
-            }
-            else
-            {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
-            pollEvents();
-        }
-        return true;
-    }
-
     int m_socket;
     bool m_connecting;
     SwByteArray m_writeBuffer;
@@ -2298,6 +2335,7 @@ private:
     SwByteArray m_tlsDecryptedBuffer;
     bool m_remoteClosed = false;
     bool m_closing = false;
+    size_t m_dispatchToken = 0;
 
     bool initOpenSslBackend()
     {
@@ -2314,50 +2352,26 @@ private:
         return true;
     }
 
-    bool performOpenSslBlockingHandshake()
+    bool driveOpenSslHandshake()
     {
         if (!m_sslBackend)
-            return false;
-
-        bool ok = false;
-        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
-        while (std::chrono::steady_clock::now() < deadline)
         {
-            auto res = m_sslBackend->handshake();
-            if (res == SwBackendSsl::IoResult::Ok)
-            {
-                ok = true;
-                break;
-            }
-            if (res == SwBackendSsl::IoResult::Closed || res == SwBackendSsl::IoResult::Error)
-            {
-                break;
-            }
-            // Wait for readiness
-            fd_set rfds, wfds;
-            FD_ZERO(&rfds);
-            FD_ZERO(&wfds);
-            if (res == SwBackendSsl::IoResult::WantRead)
-                FD_SET(m_socket, &rfds);
-            if (res == SwBackendSsl::IoResult::WantWrite)
-                FD_SET(m_socket, &wfds);
-            timeval tv;
-            tv.tv_sec = 0;
-            tv.tv_usec = 200 * 1000; // 200ms
-            int sel = select(m_socket + 1, &rfds, &wfds, nullptr, &tv);
-            if (sel < 0)
-            {
-                break;
-            }
+            return false;
         }
 
-        if (ok)
+        auto res = m_sslBackend->handshake();
+        if (res == SwBackendSsl::IoResult::Ok)
         {
             m_tlsMode = TlsState::Established;
             setState(ConnectedState);
             emit connected();
             return true;
         }
+        if (res == SwBackendSsl::IoResult::WantRead || res == SwBackendSsl::IoResult::WantWrite)
+        {
+            return true;
+        }
+
         emit errorOccurred(errno);
         return false;
     }

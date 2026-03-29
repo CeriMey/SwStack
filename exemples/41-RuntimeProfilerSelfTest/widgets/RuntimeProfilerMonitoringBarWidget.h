@@ -25,13 +25,13 @@ signals:
 private:
     void updateVisualState_();
     static int thresholdMsFromUs_(long long durationUs);
-    static SwString badgeText_(unsigned long long stallCount);
+    static SwString stallLabelText_(unsigned long long stallCount);
 
     SwPushButton* toggleButton_{nullptr};
     SwSpinBox* thresholdSpinBox_{nullptr};
     SwLabel* stackCaptureLabel_{nullptr};
-    SwLabel* countCaptionLabel_{nullptr};
-    SwLabel* countLabel_{nullptr};
+    SwWidget* statusLed_{nullptr};
+    SwLabel* stallLabel_{nullptr};
     long long thresholdUs_{10000};
     unsigned long long stallCount_{0};
     bool monitoringEnabled_{false};

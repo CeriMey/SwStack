@@ -1,0 +1,46 @@
+#pragma once
+
+#include <functional>
+#include <memory>
+
+#include <QtGlobal>
+#include <QString>
+#include <QWidget>
+
+#include "SwString.h"
+
+class QByteArray;
+class QMouseEvent;
+class QPaintEngine;
+class QResizeEvent;
+class QShowEvent;
+
+class QtSwHostWidget final : public QWidget {
+public:
+    using MessageSink = std::function<void(const SwString&)>;
+
+    explicit QtSwHostWidget(QWidget* parent = nullptr);
+    ~QtSwHostWidget() override;
+
+    void initializeSw(MessageSink onSendToQt, MessageSink onWorkerFiberRequested);
+    void shutdownSw();
+    void showIncomingMessage(const QString& text);
+    void setRuntimeStatusText(const QString& text);
+
+    QPaintEngine* paintEngine() const override;
+
+protected:
+    void showEvent(QShowEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
+
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    bool nativeEvent(const QByteArray& eventType, void* message, qintptr* result) override;
+#else
+    bool nativeEvent(const QByteArray& eventType, void* message, long* result) override;
+#endif
+
+private:
+    class Impl;
+    std::unique_ptr<Impl> impl_;
+};

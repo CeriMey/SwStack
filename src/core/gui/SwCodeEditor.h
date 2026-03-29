@@ -120,6 +120,7 @@ public:
                 m_lastKnownLineCount = newLineCount;
                 syncVisibleLineCacheAfterTextChange_();
             }
+            m_maxLineWidthDirty = true;
             if (!m_suppressFoldRefresh) {
                 scheduleFoldRefresh_();
             }
@@ -140,6 +141,17 @@ public:
                 update();
             }
         });
+
+        m_hScrollBar = new SwScrollBar(SwScrollBar::Orientation::Horizontal, this);
+        m_hScrollBar->hide();
+        m_hScrollBar->setSingleStep(8);
+        SwObject::connect(m_hScrollBar, &SwScrollBar::valueChanged, this, [this](int val) {
+            if (!m_syncingScrollBar) {
+                m_horizontalScrollPx = std::max(0, val);
+                update();
+            }
+        });
+        applyThemeStyle_();
 
         m_selectionScrollTimer = new SwTimer(this);
         m_selectionScrollTimer->setInterval(30);
@@ -509,7 +521,7 @@ public:
             ? static_cast<size_t>(std::max(0, ci.col))
             : lineText.size();
         const size_t clampedCol = std::min(column, lineText.size());
-        const int x = inner.x + textWidthMono_(clampedCol);
+        const int x = inner.x - m_horizontalScrollPx + textWidthMono_(clampedCol);
         const int y = inner.y + row * lineHeightPx();
         return SwRect{x, y, 1, lineHeightPx()};
     }
@@ -684,8 +696,8 @@ protected:
                 if (segStart >= segEnd) {
                     continue;
                 }
-                const int x1 = textRect.x + textWidthMono_(segStart - lineStart);
-                const int x2 = textRect.x + textWidthMono_(segEnd - lineStart);
+                const int x1 = textRect.x - m_horizontalScrollPx + textWidthMono_(segStart - lineStart);
+                const int x2 = textRect.x - m_horizontalScrollPx + textWidthMono_(segEnd - lineStart);
                 const int left = (std::min)(x1, x2);
                 const int right = (std::max)(x1, x2);
                 painter->fillRect(SwRect{left, lineRect.y, right - left, lineRect.height},
@@ -703,8 +715,8 @@ protected:
                 if (segStart < segEnd) {
                     const size_t startCol = segStart - lineStart;
                     const size_t endCol = segEnd - lineStart;
-                    const int x1 = textRect.x + textWidthMono_(startCol);
-                    const int x2 = textRect.x + textWidthMono_(endCol);
+                    const int x1 = textRect.x - m_horizontalScrollPx + textWidthMono_(startCol);
+                    const int x2 = textRect.x - m_horizontalScrollPx + textWidthMono_(endCol);
                     const int left = (std::min)(x1, x2);
                     const int right = (std::max)(x1, x2);
                     painter->fillRect(SwRect{left, lineRect.y, right - left, lineRect.height},
@@ -780,7 +792,7 @@ protected:
         row = std::max(0, row);
         const int visibleRow = clampInt(m_firstVisibleLine + row, 0, visibleLineCount_() - 1);
         const int lineIdx = documentLineForVisibleRow_(visibleRow);
-        const int relativeX = std::max(0, px - textRect.x);
+        const int relativeX = std::max(0, px - textRect.x + m_horizontalScrollPx);
         const SwString lineText = documentLineText_(lineIdx);
         const size_t col = SwWidgetPlatformAdapter::characterIndexAtPosition(nativeWindowHandle(),
                                                                              lineText,
@@ -891,6 +903,7 @@ protected:
         const size_t oldSelStart = m_selectionStart;
         const size_t oldSelEnd = m_selectionEnd;
         const int oldFirstVisibleLine = m_firstVisibleLine;
+        const int oldHorizontalScrollPx = m_horizontalScrollPx;
         if (m_completer && m_completer->popupVisible()) {
             m_completer->hidePopup();
         }
@@ -908,7 +921,7 @@ protected:
             return;
         }
         SwPlainTextEdit::mousePressEvent(event);
-        restoreViewportAfterMouseInteraction_(oldFirstVisibleLine);
+        restoreViewportAfterMouseInteraction_(oldFirstVisibleLine, oldHorizontalScrollPx);
         stopSelectionAutoScroll_();
         emitEditorSignals_(oldPos, oldSelStart, oldSelEnd);
     }
@@ -922,6 +935,7 @@ protected:
         const size_t oldSelStart = m_selectionStart;
         const size_t oldSelEnd = m_selectionEnd;
         const int oldFirstVisibleLine = m_firstVisibleLine;
+        const int oldHorizontalScrollPx = m_horizontalScrollPx;
         if (dispatchMouseMoveToScrollBar_(event)) {
             stopSelectionAutoScroll_();
             updateHoverToolTip_(event);
@@ -929,7 +943,7 @@ protected:
             return;
         }
         SwPlainTextEdit::mouseMoveEvent(event);
-        restoreViewportAfterMouseInteraction_(oldFirstVisibleLine);
+        restoreViewportAfterMouseInteraction_(oldFirstVisibleLine, oldHorizontalScrollPx);
         m_lastSelectionMousePos = SwPoint{event->x(), event->y()};
         if (m_isSelecting) {
             const bool autoScrolled = applySelectionAutoScrollForPoint_(m_lastSelectionMousePos);
@@ -953,16 +967,19 @@ protected:
         const size_t oldSelStart = m_selectionStart;
         const size_t oldSelEnd = m_selectionEnd;
         const int oldFirstVisibleLine = m_firstVisibleLine;
-        const bool scrollBarWasDragging = (m_vScrollBar && m_vScrollBar->isSliderDown());
+        const int oldHorizontalScrollPx = m_horizontalScrollPx;
+        const bool scrollBarWasDragging = (m_vScrollBar && m_vScrollBar->isSliderDown()) ||
+                                          (m_hScrollBar && m_hScrollBar->isSliderDown());
         if (dispatchMouseReleaseToScrollBar_(event)) {
             stopSelectionAutoScroll_();
-            if (scrollBarWasDragging || isPointInVerticalScrollBar_(event->x(), event->y())) {
+            if (scrollBarWasDragging || isPointInVerticalScrollBar_(event->x(), event->y()) ||
+                isPointInHorizontalScrollBar_(event->x(), event->y())) {
                 emitEditorSignals_(oldPos, oldSelStart, oldSelEnd);
                 return;
             }
         }
         SwPlainTextEdit::mouseReleaseEvent(event);
-        restoreViewportAfterMouseInteraction_(oldFirstVisibleLine);
+        restoreViewportAfterMouseInteraction_(oldFirstVisibleLine, oldHorizontalScrollPx);
         stopSelectionAutoScroll_();
         emitEditorSignals_(oldPos, oldSelStart, oldSelEnd);
     }
@@ -976,13 +993,14 @@ protected:
         const size_t oldSelStart = m_selectionStart;
         const size_t oldSelEnd = m_selectionEnd;
         const int oldFirstVisibleLine = m_firstVisibleLine;
+        const int oldHorizontalScrollPx = m_horizontalScrollPx;
         if (dispatchMouseDoubleClickToScrollBar_(event)) {
             stopSelectionAutoScroll_();
             emitEditorSignals_(oldPos, oldSelStart, oldSelEnd);
             return;
         }
         SwPlainTextEdit::mouseDoubleClickEvent(event);
-        restoreViewportAfterMouseInteraction_(oldFirstVisibleLine);
+        restoreViewportAfterMouseInteraction_(oldFirstVisibleLine, oldHorizontalScrollPx);
         stopSelectionAutoScroll_();
         emitEditorSignals_(oldPos, oldSelStart, oldSelEnd);
     }
@@ -991,8 +1009,33 @@ protected:
         if (!event) {
             return;
         }
-        if (!isPointInside(event->x(), event->y()) || event->isShiftPressed()) {
+        if (!isPointInside(event->x(), event->y())) {
             SwPlainTextEdit::wheelEvent(event);
+            return;
+        }
+
+        if (event->isShiftPressed()) {
+            const ScrollLayout_ layout = computeScrollLayout_();
+            const int maxHorizontal = std::max(0, longestLineWidthPx_() - layout.textRect.width);
+            if (maxHorizontal <= 0) {
+                SwPlainTextEdit::wheelEvent(event);
+                return;
+            }
+
+            int steps = event->delta() / 120;
+            if (steps == 0) {
+                steps = (event->delta() > 0) ? 1 : (event->delta() < 0 ? -1 : 0);
+            }
+            if (steps == 0) {
+                SwPlainTextEdit::wheelEvent(event);
+                return;
+            }
+
+            const int horizontalStep = std::max(16, m_cachedCharWidth * 3);
+            m_horizontalScrollPx = clampInt(m_horizontalScrollPx - steps * horizontalStep, 0, maxHorizontal);
+            syncScrollBar_();
+            event->accept();
+            update();
             return;
         }
 
@@ -1243,9 +1286,15 @@ private:
         m_firstVisibleLine = clampInt(m_firstVisibleLine, 0, maxFirst);
     }
 
+    void clampHorizontalScroll_() {
+        const int maxHorizontal = std::max(0, longestLineWidthPx_() - textRect_().width);
+        m_horizontalScrollPx = clampInt(m_horizontalScrollPx, 0, maxHorizontal);
+    }
+
     void ensureCursorVisibleForCode_() {
         if (documentLineCount_() <= 0) {
             m_firstVisibleLine = 0;
+            m_horizontalScrollPx = 0;
             syncScrollBar_();
             return;
         }
@@ -1260,15 +1309,30 @@ private:
         } else if (visibleRow >= m_firstVisibleLine + visibleLines) {
             m_firstVisibleLine = visibleRow - visibleLines + 1;
         }
+
+        const SwRect inner = textRect_();
+        const SwString lineText = documentLineText_(line);
+        const int cursorColumn = std::max(0, std::min(cursorInfo().col, static_cast<int>(lineText.size())));
+        const int cursorX = textWidthMono_(static_cast<size_t>(cursorColumn));
+        const int rightPadding = std::max(12, m_cachedCharWidth * 2);
+        if (cursorX < m_horizontalScrollPx) {
+            m_horizontalScrollPx = cursorX;
+        } else if (cursorX >= m_horizontalScrollPx + std::max(1, inner.width - rightPadding)) {
+            m_horizontalScrollPx = std::max(0, cursorX - std::max(1, inner.width - rightPadding));
+        }
+
         clampFirstVisibleCodeLine_(visibleLines);
+        clampHorizontalScroll_();
         syncScrollBar_();
         ensureVisibleDeferredHighlight_();
         scheduleDeferredHighlightWork_();
     }
 
-    void restoreViewportAfterMouseInteraction_(int previousFirstVisibleLine) {
+    void restoreViewportAfterMouseInteraction_(int previousFirstVisibleLine, int previousHorizontalScrollPx) {
         m_firstVisibleLine = previousFirstVisibleLine;
+        m_horizontalScrollPx = previousHorizontalScrollPx;
         clampFirstVisibleCodeLine_(visibleLinesForViewport_());
+        clampHorizontalScroll_();
         syncScrollBar_();
         update();
     }
@@ -1822,20 +1886,82 @@ private:
         };
     }
 
-    SwRect textRect_() const {
+    struct ScrollLayout_ {
+        bool showVertical{false};
+        bool showHorizontal{false};
+        SwRect textRect{};
+    };
+
+    SwRect baseContentRect_() const {
         const SwRect bounds = rect();
         StyleSheet* sheet = const_cast<SwCodeEditor*>(this)->getToolSheet();
         const Padding pad = resolvePadding(sheet);
         const int borderWidth = resolvedBorderWidth_();
         const int gutterWidth = lineNumberAreaWidth();
-        const int sbWidth = (m_vScrollBar && m_vScrollBar->getVisible()) ? m_theme.scrollBarWidth : 0;
-        SwRect inner{
+        return SwRect{
             bounds.x + borderWidth + pad.left + gutterWidth,
             bounds.y + borderWidth + pad.top,
-            std::max(0, bounds.width - 2 * borderWidth - (pad.left + pad.right) - gutterWidth - sbWidth),
+            std::max(0, bounds.width - 2 * borderWidth - (pad.left + pad.right) - gutterWidth),
             std::max(0, bounds.height - 2 * borderWidth - (pad.top + pad.bottom))
         };
-        return inner;
+    }
+
+    int visibleLinesForHeight_(int height) const {
+        const int lineHeight = lineHeightPx();
+        if (lineHeight <= 0) {
+            return 1;
+        }
+        return std::max(1, height / lineHeight);
+    }
+
+    int longestLineWidthPx_() const {
+        refreshCharWidthCache_();
+        if (!m_maxLineWidthDirty) {
+            return m_cachedMaxLineWidthPx;
+        }
+
+        int longestChars = 0;
+        const int lineCount = documentLineCount_();
+        for (int i = 0; i < lineCount; ++i) {
+            longestChars = std::max(longestChars, static_cast<int>(documentLineLength_(i)));
+        }
+
+        m_cachedMaxLineWidthPx = textWidthMono_(static_cast<size_t>(longestChars));
+        m_maxLineWidthDirty = false;
+        return m_cachedMaxLineWidthPx;
+    }
+
+    ScrollLayout_ computeScrollLayout_() const {
+        ScrollLayout_ layout;
+        const SwRect base = baseContentRect_();
+        const int sbExtent = std::max(0, m_theme.scrollBarWidth);
+        const int totalLines = visibleLineCount_();
+        const int contentWidth = wordWrapEnabled() ? 0 : longestLineWidthPx_();
+
+        for (int pass = 0; pass < 3; ++pass) {
+            const int width = std::max(0, base.width - (layout.showVertical ? sbExtent : 0));
+            const int height = std::max(0, base.height - (layout.showHorizontal ? sbExtent : 0));
+            const int visibleLines = visibleLinesForHeight_(height);
+            const bool showVertical = std::max(0, totalLines - visibleLines) > 0;
+            const bool showHorizontal = !wordWrapEnabled() && contentWidth > width;
+            if (showVertical == layout.showVertical && showHorizontal == layout.showHorizontal) {
+                break;
+            }
+            layout.showVertical = showVertical;
+            layout.showHorizontal = showHorizontal;
+        }
+
+        layout.textRect = SwRect{
+            base.x,
+            base.y,
+            std::max(0, base.width - (layout.showVertical ? sbExtent : 0)),
+            std::max(0, base.height - (layout.showHorizontal ? sbExtent : 0))
+        };
+        return layout;
+    }
+
+    SwRect textRect_() const {
+        return computeScrollLayout_().textRect;
     }
 
     int resolvedBorderWidth_() const {
@@ -1854,26 +1980,30 @@ private:
 
         const SwString lineText = documentLineText_(lineIndex);
         if (lineText.isEmpty()) {
-            return lineRect.x;
+            return lineRect.x - m_horizontalScrollPx;
         }
 
         if (!m_document || wordWrapEnabled() || lineIndex >= m_document->blockCount()) {
-            painter->drawText(lineRect,
+            SwRect shiftedLineRect = lineRect;
+            shiftedLineRect.x -= m_horizontalScrollPx;
+            painter->drawText(shiftedLineRect,
                               lineText,
                               DrawTextFormats(DrawTextFormat::Left | DrawTextFormat::VCenter | DrawTextFormat::SingleLine),
                               defaultTextColor,
                               getFont());
-            return lineRect.x + textWidthMono_(lineText.size());
+            return shiftedLineRect.x + textWidthMono_(lineText.size());
         }
 
         const SwList<SwTextLayoutFormatRange> formats = mergedFormatsForLine_(lineIndex);
         if (formats.isEmpty()) {
-            painter->drawText(lineRect,
+            SwRect shiftedLineRect = lineRect;
+            shiftedLineRect.x -= m_horizontalScrollPx;
+            painter->drawText(shiftedLineRect,
                               lineText,
                               DrawTextFormats(DrawTextFormat::Left | DrawTextFormat::VCenter | DrawTextFormat::SingleLine),
                               defaultTextColor,
                               getFont());
-            return lineRect.x + textWidthMono_(lineText.size());
+            return shiftedLineRect.x + textWidthMono_(lineText.size());
         }
 
         m_perCharFmtBuf.resize(lineText.size());
@@ -1895,7 +2025,7 @@ private:
             }
         }
 
-        int x = lineRect.x;
+        int x = lineRect.x - m_horizontalScrollPx;
         int segmentStart = 0;
         while (segmentStart < static_cast<int>(lineText.size())) {
             const char formatted = hasFormat[static_cast<size_t>(segmentStart)];
@@ -2027,7 +2157,7 @@ private:
 
         const int visibleRow = clampInt(m_firstVisibleLine + row, 0, visibleLineCount_() - 1);
         const int lineIndex = documentLineForVisibleRow_(visibleRow);
-        const int relativeX = px - textRect.x;
+        const int relativeX = px - textRect.x + m_horizontalScrollPx;
         const SwString lineText = documentLineText_(lineIndex);
         const size_t column = SwWidgetPlatformAdapter::characterIndexAtPosition(nativeWindowHandle(),
                                                                                 lineText,
@@ -2272,17 +2402,24 @@ private:
     }
 
     void layoutScrollBar_() {
-        if (!m_vScrollBar) {
+        if (!m_vScrollBar && !m_hScrollBar) {
             return;
         }
-        const SwRect bounds = rect();
-        const int bw = resolvedBorderWidth_();
-        const int sbWidth = m_theme.scrollBarWidth;
-        m_vScrollBar->setGeometry(
-            bounds.x + bounds.width - sbWidth - bw,
-            bounds.y + bw,
-            sbWidth,
-            std::max(0, bounds.height - 2 * bw));
+        const ScrollLayout_ layout = computeScrollLayout_();
+        const SwRect base = baseContentRect_();
+        const int sbExtent = std::max(0, m_theme.scrollBarWidth);
+        if (m_vScrollBar) {
+            m_vScrollBar->setGeometry(base.x + base.width - sbExtent,
+                                      base.y,
+                                      sbExtent,
+                                      std::max(0, layout.textRect.height));
+        }
+        if (m_hScrollBar) {
+            m_hScrollBar->setGeometry(base.x,
+                                      base.y + base.height - sbExtent,
+                                      std::max(0, layout.textRect.width),
+                                      sbExtent);
+        }
     }
 
     bool isPointInVerticalScrollBar_(int px, int py) const {
@@ -2293,8 +2430,20 @@ private:
         return px >= sb.x && px < (sb.x + sb.width) && py >= sb.y && py < (sb.y + sb.height);
     }
 
+    bool isPointInHorizontalScrollBar_(int px, int py) const {
+        if (!m_hScrollBar || !m_hScrollBar->getVisible()) {
+            return false;
+        }
+        const SwRect sb = m_hScrollBar->geometry();
+        return px >= sb.x && px < (sb.x + sb.width) && py >= sb.y && py < (sb.y + sb.height);
+    }
+
     bool dispatchMousePressToScrollBar_(MouseEvent* event) {
-        if (!event || !m_vScrollBar || !m_vScrollBar->getVisible() || !isPointInVerticalScrollBar_(event->x(), event->y())) {
+        if (!event) {
+            return false;
+        }
+        if (!isPointInVerticalScrollBar_(event->x(), event->y()) &&
+            !isPointInHorizontalScrollBar_(event->x(), event->y())) {
             return false;
         }
         SwWidget::mousePressEvent(event);
@@ -2302,10 +2451,14 @@ private:
     }
 
     bool dispatchMouseMoveToScrollBar_(MouseEvent* event) {
-        if (!event || !m_vScrollBar || !m_vScrollBar->getVisible()) {
+        if (!event) {
             return false;
         }
-        if (!m_vScrollBar->isSliderDown() && !isPointInVerticalScrollBar_(event->x(), event->y())) {
+        const bool verticalActive = m_vScrollBar && m_vScrollBar->getVisible() &&
+                                    (m_vScrollBar->isSliderDown() || isPointInVerticalScrollBar_(event->x(), event->y()));
+        const bool horizontalActive = m_hScrollBar && m_hScrollBar->getVisible() &&
+                                      (m_hScrollBar->isSliderDown() || isPointInHorizontalScrollBar_(event->x(), event->y()));
+        if (!verticalActive && !horizontalActive) {
             return false;
         }
         SwWidget::mouseMoveEvent(event);
@@ -2313,10 +2466,14 @@ private:
     }
 
     bool dispatchMouseReleaseToScrollBar_(MouseEvent* event) {
-        if (!event || !m_vScrollBar || !m_vScrollBar->getVisible()) {
+        if (!event) {
             return false;
         }
-        if (!m_vScrollBar->isSliderDown() && !isPointInVerticalScrollBar_(event->x(), event->y())) {
+        const bool verticalActive = m_vScrollBar && m_vScrollBar->getVisible() &&
+                                    (m_vScrollBar->isSliderDown() || isPointInVerticalScrollBar_(event->x(), event->y()));
+        const bool horizontalActive = m_hScrollBar && m_hScrollBar->getVisible() &&
+                                      (m_hScrollBar->isSliderDown() || isPointInHorizontalScrollBar_(event->x(), event->y()));
+        if (!verticalActive && !horizontalActive) {
             return false;
         }
         SwWidget::mouseReleaseEvent(event);
@@ -2324,7 +2481,11 @@ private:
     }
 
     bool dispatchMouseDoubleClickToScrollBar_(MouseEvent* event) {
-        if (!event || !m_vScrollBar || !m_vScrollBar->getVisible() || !isPointInVerticalScrollBar_(event->x(), event->y())) {
+        if (!event) {
+            return false;
+        }
+        if (!isPointInVerticalScrollBar_(event->x(), event->y()) &&
+            !isPointInHorizontalScrollBar_(event->x(), event->y())) {
             return false;
         }
         SwWidget::mouseDoubleClickEvent(event);
@@ -2403,42 +2564,57 @@ private:
     }
 
     void syncScrollBar_() {
-        if (!m_vScrollBar || m_syncingScrollBar) {
+        if ((!m_vScrollBar && !m_hScrollBar) || m_syncingScrollBar) {
             return;
         }
-        const int lineHeight = lineHeightPx();
-        const SwRect tr = textRect_();
-        const int visibleLines = (lineHeight > 0) ? std::max(1, tr.height / lineHeight) : 1;
+        const ScrollLayout_ layout = computeScrollLayout_();
+        const int visibleLines = visibleLinesForHeight_(layout.textRect.height);
         const int totalLines = visibleLineCount_();
         const int maxFirst = std::max(0, totalLines - visibleLines);
-        const bool showScrollBar = maxFirst > 0;
-        const bool visibilityChanged = m_vScrollBar->getVisible() != showScrollBar;
+        const int maxHorizontal = std::max(0, longestLineWidthPx_() - layout.textRect.width);
+        const bool verticalVisibilityChanged = m_vScrollBar && (m_vScrollBar->getVisible() != layout.showVertical);
+        const bool horizontalVisibilityChanged = m_hScrollBar && (m_hScrollBar->getVisible() != layout.showHorizontal);
         m_firstVisibleLine = clampInt(m_firstVisibleLine, 0, maxFirst);
+        m_horizontalScrollPx = clampInt(m_horizontalScrollPx, 0, maxHorizontal);
         m_syncingScrollBar = true;
-        m_vScrollBar->setVisible(showScrollBar);
-        m_vScrollBar->setRange(0, maxFirst);
-        m_vScrollBar->setPageStep(visibleLines);
-        m_vScrollBar->setValue(m_firstVisibleLine);
+        if (m_vScrollBar) {
+            m_vScrollBar->setVisible(layout.showVertical);
+            m_vScrollBar->setRange(0, maxFirst);
+            m_vScrollBar->setPageStep(visibleLines);
+            m_vScrollBar->setSingleStep(1);
+            m_vScrollBar->setValue(m_firstVisibleLine);
+        }
+        if (m_hScrollBar) {
+            m_hScrollBar->setVisible(layout.showHorizontal);
+            m_hScrollBar->setRange(0, maxHorizontal);
+            m_hScrollBar->setPageStep(std::max(1, layout.textRect.width));
+            m_hScrollBar->setSingleStep(std::max(8, m_cachedCharWidth));
+            m_hScrollBar->setValue(m_horizontalScrollPx);
+        }
         m_syncingScrollBar = false;
-        if (visibilityChanged || showScrollBar) {
+        if (verticalVisibilityChanged || horizontalVisibilityChanged || layout.showVertical || layout.showHorizontal) {
             layoutScrollBar_();
         }
         ensureVisibleDeferredHighlight_();
-        if (visibilityChanged) {
+        if (verticalVisibilityChanged || horizontalVisibilityChanged) {
             update();
         }
     }
 
-    void refreshCharWidthCache_() {
+    void refreshCharWidthCache_() const {
         const SwFont currentFont = getFont();
         if (m_cachedCharWidth > 0 && m_cachedCharWidthFont == currentFont) {
             return;
         }
+        const int previousCharWidth = m_cachedCharWidth;
         m_cachedCharWidthFont = currentFont;
         m_cachedCharWidth = SwWidgetPlatformAdapter::textWidthUntil(
             nativeWindowHandle(), SwString("M"), currentFont, 1, 8);
         if (m_cachedCharWidth <= 0) {
             m_cachedCharWidth = 8;
+        }
+        if (m_cachedCharWidth != previousCharWidth) {
+            m_maxLineWidthDirty = true;
         }
     }
 
@@ -2849,7 +3025,7 @@ private:
         css += "}";
         setStyleSheet(css);
 
-        if (m_vScrollBar) {
+        if (m_vScrollBar || m_hScrollBar) {
             SwString scrollCss("SwScrollBar {");
             scrollCss += " background-color: ";
             scrollCss += cssColor_(m_theme.scrollBarTrackColor);
@@ -2893,7 +3069,12 @@ private:
             scrollCss += " thumb-radius: 5px;";
             scrollCss += " thumb-min-length: 30px;";
             scrollCss += "}";
-            m_vScrollBar->setStyleSheet(scrollCss);
+            if (m_vScrollBar) {
+                m_vScrollBar->setStyleSheet(scrollCss);
+            }
+            if (m_hScrollBar) {
+                m_hScrollBar->setStyleSheet(scrollCss);
+            }
         }
     }
 
@@ -2906,7 +3087,9 @@ private:
     SwTimer* m_deferredHighlightTimer{nullptr};
     SwTimer* m_selectionScrollTimer{nullptr};
     SwScrollBar* m_vScrollBar{nullptr};
+    SwScrollBar* m_hScrollBar{nullptr};
     bool m_syncingScrollBar{false};
+    int m_horizontalScrollPx{0};
     SwList<SwTextDiagnostic> m_diagnostics;
     SwList<SwTextExtraSelection> m_extraSelections;
     SwVector<FoldRegion> m_foldRegions;
@@ -2924,12 +3107,14 @@ private:
     bool m_autoCompletionEnabled{true};
     bool m_foldDirty{false};
     bool m_suppressFoldRefresh{false};
+    mutable bool m_maxLineWidthDirty{true};
+    mutable int m_cachedMaxLineWidthPx{0};
     int m_autoCompletionMinPrefixLength{2};
     int m_indentSize{4};
     int m_hoveredFoldStartLine{-1};
     int m_lastKnownLineCount{0};
-    int m_cachedCharWidth{0};
-    SwFont m_cachedCharWidthFont;
+    mutable int m_cachedCharWidth{0};
+    mutable SwFont m_cachedCharWidthFont;
     SwPoint m_lastSelectionMousePos{0, 0};
     SwCodeEditorTheme m_theme{swCodeEditorDefaultTheme()};
 };

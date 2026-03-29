@@ -143,6 +143,20 @@ public:
     }
 
     /**
+     * @brief Starts listening for incoming HTTPS traffic.
+     * @param port Local port used by the operation (typically 443).
+     * @param certPath Path to the PEM certificate file.
+     * @param keyPath Path to the PEM private key file.
+     * @return `true` on success; otherwise `false`.
+     */
+    bool listen(uint16_t port, const SwString& certPath, const SwString& keyPath) {
+        if (!m_tcpServer.enableTls(certPath, keyPath)) {
+            return false;
+        }
+        return m_tcpServer.listen(port);
+    }
+
+    /**
      * @brief Closes the underlying resource and stops active work.
      *
      * @details The call affects the runtime state associated with the underlying resource or service.

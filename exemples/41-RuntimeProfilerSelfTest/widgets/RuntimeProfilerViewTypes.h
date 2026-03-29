@@ -13,7 +13,10 @@ struct RuntimeProfilerDashboardStallEntry {
     SwFiberLane lane{SwFiberLane::Normal};
     unsigned long long threadId{0};
     SwList<unsigned long long> frames;
+    SwList<SwRuntimeResolvedFrame> resolvedFrames;
     SwList<SwString> symbols;
+    SwString symbolBackend;
+    SwString symbolSearchPath;
 };
 
 struct RuntimeProfilerDashboardLoadSample {
@@ -32,5 +35,8 @@ struct RuntimeProfilerStackInspectorData {
     SwFiberLane lane{SwFiberLane::Normal};
     unsigned long long threadId{0};
     SwList<unsigned long long> frames;
+    SwList<SwRuntimeResolvedFrame> resolvedFrames;
     SwList<SwString> symbols;
+    SwString symbolBackend;
+    SwString symbolSearchPath;
 };

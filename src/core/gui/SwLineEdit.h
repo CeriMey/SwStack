@@ -247,8 +247,16 @@ public:
         resolveBorder(sheet, border, borderWidth, radius);
 
         if (!getEnable()) {
-            bg = SwColor{245, 245, 245};
-            border = SwColor{210, 210, 210};
+            // Derive disabled colors from the resolved bg (dark vs light aware)
+            bool isDark = (bg.r + bg.g + bg.b) < 384;
+            bg = isDark ? SwColor{(uint8_t)std::max(0, bg.r - 15),
+                                  (uint8_t)std::max(0, bg.g - 15),
+                                  (uint8_t)std::max(0, bg.b - 15)}
+                        : SwColor{245, 245, 245};
+            border = isDark ? SwColor{(uint8_t)std::max(0, border.r - 15),
+                                      (uint8_t)std::max(0, border.g - 15),
+                                      (uint8_t)std::max(0, border.b - 15)}
+                            : SwColor{210, 210, 210};
         } else if (getFocus()) {
             border = m_focusAccent;
         }

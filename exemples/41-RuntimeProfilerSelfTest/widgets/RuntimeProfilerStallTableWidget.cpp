@@ -301,6 +301,9 @@ RuntimeProfilerStallTableWidget::RuntimeProfilerStallTableWidget(SwWidget* paren
     if (tableView_->selectionModel()) {
         SwObject::connect(tableView_->selectionModel(), &SwItemSelectionModel::currentChanged, this,
                           [this](const SwModelIndex&, const SwModelIndex&) {
+                              if (suppressSelectionSignal_) {
+                                  return;
+                              }
                               emit currentSequenceChanged(currentSelectedSequence());
                           });
     }
@@ -338,6 +341,7 @@ void RuntimeProfilerStallTableWidget::rebuild(const SwList<RuntimeProfilerDashbo
         }
     }
 
+    suppressSelectionSignal_ = true;
     sequences_.clear();
     tableModel_->clear();
     resetModelColumns_();
@@ -380,11 +384,11 @@ void RuntimeProfilerStallTableWidget::rebuild(const SwList<RuntimeProfilerDashbo
 
     if (rowToSelect >= 0 && rowToSelect < tableModel_->rowCount()) {
         selectRow_(rowToSelect);
-    } else {
-        emit currentSequenceChanged(0);
     }
 
     restoreViewport_(anchorSequence, rowOffsetWithinAnchor, followLatest);
+    suppressSelectionSignal_ = false;
+    emit currentSequenceChanged(currentSelectedSequence());
 }
 
 void RuntimeProfilerStallTableWidget::clearEntries() {

@@ -245,12 +245,29 @@ protected:
         SwColor indicatorFill{255, 255, 255};
         SwColor textColor{30, 30, 30};
 
+        // Read colors from stylesheet if available
+        StyleSheet* sheet = getToolSheet();
+        if (sheet) {
+            auto tryParse = [&](const char* prop, SwColor& out) {
+                SwString v = sheet->getStyleProperty("SwCheckBox", prop);
+                if (v.isEmpty()) v = sheet->getStyleProperty("SwWidget", prop);
+                if (!v.isEmpty()) {
+                    try { out = sheet->parseColor(v, nullptr); } catch (...) {}
+                }
+            };
+            tryParse("background-color-unchecked", indicatorFill);
+            tryParse("border-color-unchecked", border);
+            tryParse("color", textColor);
+        }
+
         if (!getEnable()) {
-            border = SwColor{190, 190, 190};
-            indicatorFill = SwColor{245, 245, 245};
+            bool isDark = (indicatorFill.r + indicatorFill.g + indicatorFill.b) < 384;
+            indicatorFill = isDark ? SwColor{50, 50, 50} : SwColor{245, 245, 245};
+            border = isDark ? SwColor{55, 55, 55} : SwColor{190, 190, 190};
             textColor = SwColor{150, 150, 150};
         } else if (getHover()) {
-            border = SwColor{120, 120, 120};
+            bool isDark = (border.r + border.g + border.b) < 384;
+            border = isDark ? SwColor{100, 100, 100} : SwColor{120, 120, 120};
         }
 
         painter->fillRoundedRect(indicator, indicatorRadius, indicatorFill, border, 1);
@@ -288,7 +305,8 @@ protected:
 
         if (getFocus()) {
             const SwColor focusColor = m_accent;
-            SwRect focusRect{bounds.x, bounds.y, bounds.width - 1, bounds.height - 1};
+            SwRect focusRect{indicator.x - 2, indicator.y - 2,
+                             indicator.width + 4, indicator.height + 4};
             painter->drawRect(focusRect, focusColor, 1);
         }
     }

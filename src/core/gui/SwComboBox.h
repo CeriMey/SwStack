@@ -326,7 +326,13 @@ protected:
                 radius = clampInt(parsePixelValue(br, radius), 0, 32);
             }
 
-            // Optional focus customization (stylesheet-friendly).
+            { SwString v = getStyleValue_(sheet, selectors, "background-color");
+              if (!v.isEmpty()) tryParseColor_(sheet, v, bg); }
+            { SwString v = getStyleValue_(sheet, selectors, "border-color");
+              if (!v.isEmpty()) tryParseColor_(sheet, v, border); }
+            { SwString v = getStyleValue_(sheet, selectors, "color");
+              if (!v.isEmpty()) { tryParseColor_(sheet, v, textColor); arrow = textColor; } }
+
             SwString fc = getStyleValue_(sheet, selectors, "focus-border-color");
             if (fc.isEmpty()) {
                 fc = getStyleValue_(sheet, selectors, "focus-color");
@@ -336,17 +342,21 @@ protected:
             }
         }
 
+        // State overrides — derive from the base bg parsed above
+        bool isDarkTheme = (bg.r + bg.g + bg.b) < 384;
         if (!getEnable()) {
-            bg = SwColor{245, 245, 245};
-            border = SwColor{210, 210, 210};
+            bg = isDarkTheme ? SwColor{50, 50, 50} : SwColor{245, 245, 245};
+            border = isDarkTheme ? SwColor{55, 55, 55} : SwColor{210, 210, 210};
             textColor = SwColor{150, 150, 150};
             arrow = SwColor{150, 150, 150};
         } else if (getPressed() || m_popupVisible) {
-            bg = SwColor{244, 246, 250};
-            border = SwColor{140, 140, 140};
+            bg = isDarkTheme ? SwColor{(uint8_t)std::min(255,bg.r+10),(uint8_t)std::min(255,bg.g+10),(uint8_t)std::min(255,bg.b+10)}
+                             : SwColor{244, 246, 250};
+            border = isDarkTheme ? SwColor{90, 90, 90} : SwColor{140, 140, 140};
         } else if (getHover()) {
-            bg = SwColor{250, 251, 253};
-            border = SwColor{150, 150, 150};
+            bg = isDarkTheme ? SwColor{(uint8_t)std::min(255,bg.r+5),(uint8_t)std::min(255,bg.g+5),(uint8_t)std::min(255,bg.b+5)}
+                             : SwColor{250, 251, 253};
+            border = isDarkTheme ? SwColor{85, 85, 85} : SwColor{150, 150, 150};
         }
 
         // Match the usual behaviour: focus changes the border color while preserving border-radius.
@@ -751,10 +761,19 @@ private:
                 const bool selected = (index == m_owner->m_currentIndex);
 
                 if (hovered) {
-                    painter->fillRoundedRect(row, 8, SwColor{244, 246, 250}, SwColor{244, 246, 250}, 0);
+                    SwColor bg = m_owner->popupBackgroundColor_();
+                    bool dark = (bg.r + bg.g + bg.b) < 384;
+                    SwColor hBg = dark
+                        ? SwColor{(uint8_t)std::min(255, bg.r+25), (uint8_t)std::min(255, bg.g+25), (uint8_t)std::min(255, bg.b+25)}
+                        : SwColor{244, 246, 250};
+                    painter->fillRoundedRect(row, 8, hBg, hBg, 0);
                 }
 
-                SwColor textColor = selected ? SwColor{24, 28, 36} : SwColor{30, 30, 30};
+                SwColor popBg = m_owner->popupBackgroundColor_();
+                bool isDark = (popBg.r + popBg.g + popBg.b) < 384;
+                SwColor textColor = isDark
+                    ? (selected ? SwColor{255,255,255} : SwColor{204,204,204})
+                    : (selected ? SwColor{24, 28, 36} : SwColor{30, 30, 30});
                 painter->drawText(row,
                                   m_owner->itemText(index),
                                   DrawTextFormats(DrawTextFormat::Left | DrawTextFormat::VCenter | DrawTextFormat::SingleLine),
@@ -1464,12 +1483,22 @@ private:
             const bool selected = (index == m_currentIndex);
 
             if (hovered) {
-                painter->fillRoundedRect(row, 8, SwColor{244, 246, 250}, SwColor{244, 246, 250}, 0);
+                // Derive hover color from popup bg (lighten or darken)
+                bool isDark = (m_nativePopupBg.r + m_nativePopupBg.g + m_nativePopupBg.b) < 384;
+                SwColor hoverBg = isDark
+                    ? SwColor{(uint8_t)std::min(255, m_nativePopupBg.r + 25),
+                              (uint8_t)std::min(255, m_nativePopupBg.g + 25),
+                              (uint8_t)std::min(255, m_nativePopupBg.b + 25)}
+                    : SwColor{244, 246, 250};
+                painter->fillRoundedRect(row, 8, hoverBg, hoverBg, 0);
             }
 
             const bool hasSelection = (m_currentIndex >= 0);
             const int textPadL = hasSelection ? 16 : 8;
-            SwColor textColor = selected ? SwColor{24, 28, 36} : SwColor{30, 30, 30};
+            bool isDarkBg = (m_nativePopupBg.r + m_nativePopupBg.g + m_nativePopupBg.b) < 384;
+            SwColor textColor = isDarkBg
+                ? (selected ? SwColor{255, 255, 255} : SwColor{204, 204, 204})
+                : (selected ? SwColor{24, 28, 36} : SwColor{30, 30, 30});
             SwRect textRect{row.x + textPadL, row.y, std::max(0, row.width - textPadL), row.height};
             painter->drawText(textRect, itemText(index),
                               DrawTextFormats(DrawTextFormat::Left | DrawTextFormat::VCenter | DrawTextFormat::SingleLine),

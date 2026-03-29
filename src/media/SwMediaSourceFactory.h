@@ -12,12 +12,21 @@
 #include "media/SwRtpVideoSource.h"
 #include "media/SwRtspUdpSource.h"
 #include "media/SwUdpVideoSource.h"
+#include "media/SwMediaSource.h"
 #include "media/SwVideoSource.h"
 
 #include <memory>
 
 class SwMediaSourceFactory {
 public:
+    static std::shared_ptr<SwMediaSource> createMediaSource(const SwString& rawUrl) {
+        return createMediaSource(SwMediaOpenOptions::fromUrl(rawUrl));
+    }
+
+    static std::shared_ptr<SwMediaSource> createMediaSource(const SwMediaOpenOptions& options) {
+        return std::dynamic_pointer_cast<SwMediaSource>(createVideoSource(options));
+    }
+
     static std::shared_ptr<SwVideoSource> createVideoSource(const SwString& rawUrl) {
         return createVideoSource(SwMediaOpenOptions::fromUrl(rawUrl));
     }
@@ -26,7 +35,9 @@ public:
         const SwString scheme = options.mediaUrl.scheme().toLower();
 
         if (scheme == "rtsp") {
-            auto source = std::make_shared<SwRtspUdpSource>(options.mediaUrl.toString());
+            auto source = std::make_shared<SwRtspUdpSource>(options.sourceUrl());
+            source->setEnableAudio(options.enableAudio);
+            source->setEnableMetadata(options.enableMetadata);
             if (!options.bindAddress.isEmpty()) {
                 source->setLocalAddress(options.bindAddress);
             }
@@ -46,7 +57,7 @@ public:
         }
 
         if (scheme == "http") {
-            return std::make_shared<SwHttpMjpegSource>(options.mediaUrl.toString());
+            return std::make_shared<SwHttpMjpegSource>(options.sourceUrl());
         }
 
         if (scheme == "rtp") {

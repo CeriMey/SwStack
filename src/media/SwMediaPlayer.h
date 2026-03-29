@@ -1,0 +1,392 @@
+#pragma once
+
+/**
+ * @file src/media/SwMediaPlayer.h
+ * @ingroup media
+ * @brief Declares the Qt-like media player facade that orchestrates source, video sink, and audio output.
+ */
+
+#include "media/SwAudioPipeline.h"
+#include "media/SwAudioOutput.h"
+#include "media/SwMediaSource.h"
+#include "media/SwVideoSink.h"
+
+#include <memory>
+
+class SwMediaPlayer {
+public:
+    using TracksChangedCallback = std::function<void(const SwList<SwMediaTrack>&)>;
+    using MetadataPacketCallback = std::function<void(const SwMediaPacket&)>;
+
+    struct MediaInfo {
+        int trackCount{0};
+        int videoTrackCount{0};
+        int audioTrackCount{0};
+        int metadataTrackCount{0};
+        int subtitleTrackCount{0};
+        bool hasVideo{false};
+        bool hasAudio{false};
+        bool hasMetadata{false};
+        bool hasSubtitles{false};
+        SwString activeVideoTrackId{};
+        SwString activeAudioTrackId{};
+        SwString activeMetadataTrackId{};
+        SwString activeSubtitleTrackId{};
+        SwString videoCodec{};
+        SwString audioCodec{};
+        SwString metadataCodec{};
+        int videoWidth{0};
+        int videoHeight{0};
+        double videoMeasuredFps{0.0};
+        uint64_t presentedVideoFrames{0};
+        int audioSampleRate{0};
+        int audioChannelCount{0};
+        bool audioOutputActive{false};
+        SwString audioOutputName{};
+        std::int64_t audioPlayedTimestamp{-1};
+    };
+
+    enum class PlaybackState {
+        StoppedState,
+        PlayingState,
+        PausedState
+    };
+
+    SwMediaPlayer()
+        : m_videoSink(std::make_shared<SwVideoSink>()),
+          m_audioOutput(std::make_shared<SwAudioOutput>()) {
+        m_audioPipeline.setAudioOutput(m_audioOutput);
+    }
+
+    void setSource(const std::shared_ptr<SwMediaSource>& source) {
+        if (m_source == source) {
+            return;
+        }
+        stop();
+        if (m_source) {
+            m_source->setMediaPacketCallback(SwMediaSource::MediaPacketCallback());
+            m_source->setTracksChangedCallback(SwMediaSource::TracksChangedCallback());
+        }
+        m_source = source;
+        m_tracks = source ? source->tracks() : SwList<SwMediaTrack>();
+        if (m_source) {
+            m_source->setMediaPacketCallback([this](const SwMediaPacket& packet) {
+                handleMediaPacket_(packet);
+            });
+            m_source->setTracksChangedCallback([this](const SwList<SwMediaTrack>& tracks) {
+                m_tracks = tracks;
+                updateDefaultTrackSelection_();
+                if (m_tracksChangedCallback) {
+                    m_tracksChangedCallback(m_tracks);
+                }
+            });
+        }
+
+        auto videoSource = std::dynamic_pointer_cast<SwVideoSource>(source);
+        if (m_videoSink) {
+            m_videoSink->setVideoSource(videoSource);
+        }
+        updateDefaultTrackSelection_();
+        if (m_tracksChangedCallback) {
+            m_tracksChangedCallback(m_tracks);
+        }
+    }
+
+    std::shared_ptr<SwMediaSource> source() const { return m_source; }
+
+    void setVideoSink(const std::shared_ptr<SwVideoSink>& sink) {
+        m_videoSink = sink ? sink : std::make_shared<SwVideoSink>();
+        auto videoSource = std::dynamic_pointer_cast<SwVideoSource>(m_source);
+        m_videoSink->setVideoSource(videoSource);
+    }
+
+    std::shared_ptr<SwVideoSink> videoSink() const { return m_videoSink; }
+
+    void setAudioOutput(const std::shared_ptr<SwAudioOutput>& output) {
+        m_audioOutput = output ? output : std::make_shared<SwAudioOutput>();
+        m_audioPipeline.setAudioOutput(m_audioOutput);
+    }
+
+    std::shared_ptr<SwAudioOutput> audioOutput() const { return m_audioOutput; }
+
+    SwList<SwMediaTrack> tracks() const { return m_tracks; }
+    int trackCount() const { return static_cast<int>(m_tracks.size()); }
+
+    int videoTrackCount() const { return trackCountByType_(SwMediaTrack::Type::Video); }
+    int audioTrackCount() const { return trackCountByType_(SwMediaTrack::Type::Audio); }
+    int metadataTrackCount() const { return trackCountByType_(SwMediaTrack::Type::Metadata); }
+    int subtitleTrackCount() const { return trackCountByType_(SwMediaTrack::Type::Subtitle); }
+
+    bool hasVideo() const { return videoTrackCount() > 0; }
+    bool hasAudio() const { return audioTrackCount() > 0; }
+    bool hasMetadata() const { return metadataTrackCount() > 0; }
+    bool hasSubtitles() const { return subtitleTrackCount() > 0; }
+
+    SwList<SwMediaTrack> tracksByType(SwMediaTrack::Type type) const {
+        SwList<SwMediaTrack> filteredTracks;
+        for (const auto& track : m_tracks) {
+            if (track.type == type) {
+                filteredTracks.append(track);
+            }
+        }
+        return filteredTracks;
+    }
+
+    SwMediaTrack trackById(const SwString& trackId) const {
+        for (const auto& track : m_tracks) {
+            if (track.id == trackId) {
+                return track;
+            }
+        }
+        return SwMediaTrack();
+    }
+
+    SwMediaTrack activeVideoTrackInfo() const { return trackById(m_activeVideoTrackId); }
+    SwMediaTrack activeAudioTrackInfo() const { return trackById(m_activeAudioTrackId); }
+    SwMediaTrack activeMetadataTrackInfo() const { return trackById(m_activeMetadataTrackId); }
+    SwMediaTrack activeSubtitleTrackInfo() const { return trackById(m_activeSubtitleTrackId); }
+
+    SwString videoCodec() const { return activeVideoTrackInfo().codec; }
+    SwString audioCodec() const { return activeAudioTrackInfo().codec; }
+    SwString metadataCodec() const { return activeMetadataTrackInfo().codec; }
+    SwString subtitleCodec() const { return activeSubtitleTrackInfo().codec; }
+
+    int videoWidth() const { return m_videoSink ? m_videoSink->frameWidth() : 0; }
+    int videoHeight() const { return m_videoSink ? m_videoSink->frameHeight() : 0; }
+    double videoMeasuredFps() const { return m_videoSink ? m_videoSink->measuredFps() : 0.0; }
+    uint64_t presentedVideoFrameCount() const { return m_videoSink ? m_videoSink->presentedFrameCount() : 0; }
+    std::int64_t currentVideoTimestamp() const { return m_videoSink ? m_videoSink->currentFrameTimestamp() : -1; }
+
+    int audioSampleRate() const {
+        const SwMediaTrack track = activeAudioTrackInfo();
+        if (track.sampleRate > 0) {
+            return track.sampleRate;
+        }
+        return m_audioOutput ? m_audioOutput->sampleRate() : 0;
+    }
+
+    int audioChannelCount() const {
+        const SwMediaTrack track = activeAudioTrackInfo();
+        if (track.channelCount > 0) {
+            return track.channelCount;
+        }
+        return m_audioOutput ? m_audioOutput->channelCount() : 0;
+    }
+
+    bool isAudioOutputActive() const { return m_audioOutput ? m_audioOutput->isActive() : false; }
+    SwString audioOutputName() const { return m_audioOutput ? m_audioOutput->sinkName() : SwString(); }
+    std::int64_t audioPlayedTimestamp() const { return m_audioOutput ? m_audioOutput->playedTimestamp() : -1; }
+
+    MediaInfo mediaInfo() const {
+        MediaInfo info;
+        info.trackCount = trackCount();
+        info.videoTrackCount = videoTrackCount();
+        info.audioTrackCount = audioTrackCount();
+        info.metadataTrackCount = metadataTrackCount();
+        info.subtitleTrackCount = subtitleTrackCount();
+        info.hasVideo = info.videoTrackCount > 0;
+        info.hasAudio = info.audioTrackCount > 0;
+        info.hasMetadata = info.metadataTrackCount > 0;
+        info.hasSubtitles = info.subtitleTrackCount > 0;
+        info.activeVideoTrackId = m_activeVideoTrackId;
+        info.activeAudioTrackId = m_activeAudioTrackId;
+        info.activeMetadataTrackId = m_activeMetadataTrackId;
+        info.activeSubtitleTrackId = m_activeSubtitleTrackId;
+        info.videoCodec = videoCodec();
+        info.audioCodec = audioCodec();
+        info.metadataCodec = metadataCodec();
+        info.videoWidth = videoWidth();
+        info.videoHeight = videoHeight();
+        info.videoMeasuredFps = videoMeasuredFps();
+        info.presentedVideoFrames = presentedVideoFrameCount();
+        info.audioSampleRate = audioSampleRate();
+        info.audioChannelCount = audioChannelCount();
+        info.audioOutputActive = isAudioOutputActive();
+        info.audioOutputName = audioOutputName();
+        info.audioPlayedTimestamp = audioPlayedTimestamp();
+        return info;
+    }
+
+    void setTracksChangedCallback(TracksChangedCallback callback) {
+        m_tracksChangedCallback = std::move(callback);
+        if (m_tracksChangedCallback) {
+            m_tracksChangedCallback(m_tracks);
+        }
+    }
+
+    void setActiveAudioTrack(const SwString& trackId) { m_activeAudioTrackId = trackId; }
+    SwString activeAudioTrack() const { return m_activeAudioTrackId; }
+
+    void setActiveVideoTrack(const SwString& trackId) { m_activeVideoTrackId = trackId; }
+    SwString activeVideoTrack() const { return m_activeVideoTrackId; }
+
+    void setActiveMetadataTrack(const SwString& trackId) { m_activeMetadataTrackId = trackId; }
+    SwString activeMetadataTrack() const { return m_activeMetadataTrackId; }
+
+    void setAudioEnabled(bool enabled) { m_audioEnabled = enabled; }
+    bool isAudioEnabled() const { return m_audioEnabled; }
+
+    void setMetadataEnabled(bool enabled) { m_metadataEnabled = enabled; }
+    bool isMetadataEnabled() const { return m_metadataEnabled; }
+
+    void setMetadataPacketCallback(MetadataPacketCallback callback) {
+        m_metadataPacketCallback = std::move(callback);
+    }
+
+    void setMuted(bool muted) {
+        if (m_audioOutput) {
+            m_audioOutput->setMuted(muted);
+        }
+    }
+
+    bool isMuted() const {
+        return m_audioOutput ? m_audioOutput->isMuted() : false;
+    }
+
+    void setVolume(float volume) {
+        if (m_audioOutput) {
+            m_audioOutput->setVolume(volume);
+        }
+    }
+
+    float volume() const {
+        return m_audioOutput ? m_audioOutput->volume() : 0.0f;
+    }
+
+    void setPreferredAudioDecoder(SwAudioPacket::Codec codec, const SwString& decoderId) {
+        m_audioPipeline.setDecoderSelection(codec, decoderId);
+    }
+
+    SwString preferredAudioDecoder(SwAudioPacket::Codec codec) const {
+        return m_audioPipeline.decoderSelection(codec);
+    }
+
+    static SwList<SwAudioDecoderDescriptor> availableAudioDecoders(SwAudioPacket::Codec codec) {
+        return SwAudioDecoderFactory::instance().list(codec);
+    }
+
+    void play() {
+        if (!m_source) {
+            return;
+        }
+        auto videoSource = std::dynamic_pointer_cast<SwVideoSource>(m_source);
+        if (videoSource && m_videoSink) {
+            m_videoSink->start();
+        } else {
+            m_source->start();
+        }
+        m_playbackState = PlaybackState::PlayingState;
+    }
+
+    void pause() {
+        stop();
+        m_playbackState = PlaybackState::PausedState;
+    }
+
+    void stop() {
+        if (m_videoSink) {
+            m_videoSink->stop();
+        } else if (m_source) {
+            m_source->stop();
+        }
+        if (m_audioOutput) {
+            m_audioOutput->stop();
+        }
+        m_playbackState = PlaybackState::StoppedState;
+    }
+
+    PlaybackState playbackState() const { return m_playbackState; }
+
+private:
+    void updateDefaultTrackSelection_() {
+        if (m_activeVideoTrackId.isEmpty()) {
+            for (const auto& track : m_tracks) {
+                if (track.isVideo() && track.selected) {
+                    m_activeVideoTrackId = track.id;
+                    break;
+                }
+            }
+            if (m_activeVideoTrackId.isEmpty()) {
+                for (const auto& track : m_tracks) {
+                    if (track.isVideo()) {
+                        m_activeVideoTrackId = track.id;
+                        break;
+                    }
+                }
+            }
+        }
+        if (m_activeAudioTrackId.isEmpty()) {
+            for (const auto& track : m_tracks) {
+                if (track.isAudio() && track.selected) {
+                    m_activeAudioTrackId = track.id;
+                    break;
+                }
+            }
+        }
+        if (m_activeMetadataTrackId.isEmpty()) {
+            for (const auto& track : m_tracks) {
+                if (track.isMetadata() && track.selected) {
+                    m_activeMetadataTrackId = track.id;
+                    break;
+                }
+            }
+        }
+        if (m_activeSubtitleTrackId.isEmpty()) {
+            for (const auto& track : m_tracks) {
+                if (track.isSubtitle() && track.selected) {
+                    m_activeSubtitleTrackId = track.id;
+                    break;
+                }
+            }
+        }
+    }
+
+    void handleMediaPacket_(const SwMediaPacket& packet) {
+        if (packet.type() == SwMediaPacket::Type::Audio) {
+            if (!m_audioEnabled) {
+                return;
+            }
+            if (!m_activeAudioTrackId.isEmpty() && packet.trackId() != m_activeAudioTrackId) {
+                return;
+            }
+            m_audioPipeline.handleMediaPacket(packet);
+            return;
+        }
+        if (packet.type() == SwMediaPacket::Type::Metadata) {
+            if (!m_metadataEnabled) {
+                return;
+            }
+            if (!m_activeMetadataTrackId.isEmpty() && packet.trackId() != m_activeMetadataTrackId) {
+                return;
+            }
+            if (m_metadataPacketCallback) {
+                m_metadataPacketCallback(packet);
+            }
+        }
+    }
+
+    int trackCountByType_(SwMediaTrack::Type type) const {
+        int count = 0;
+        for (const auto& track : m_tracks) {
+            if (track.type == type) {
+                ++count;
+            }
+        }
+        return count;
+    }
+
+    std::shared_ptr<SwMediaSource> m_source;
+    std::shared_ptr<SwVideoSink> m_videoSink;
+    std::shared_ptr<SwAudioOutput> m_audioOutput;
+    SwAudioPipeline m_audioPipeline{};
+    SwList<SwMediaTrack> m_tracks{};
+    TracksChangedCallback m_tracksChangedCallback{};
+    SwString m_activeAudioTrackId{};
+    SwString m_activeVideoTrackId{};
+    SwString m_activeMetadataTrackId{};
+    SwString m_activeSubtitleTrackId{};
+    bool m_audioEnabled{true};
+    bool m_metadataEnabled{false};
+    PlaybackState m_playbackState{PlaybackState::StoppedState};
+    MetadataPacketCallback m_metadataPacketCallback{};
+};

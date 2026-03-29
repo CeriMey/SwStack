@@ -21,8 +21,14 @@ if(NOT TARGET Qt${QT_VERSION_MAJOR}::Widgets)
     return()
 endif()
 
-add_executable(QtSwEmbeddedInterop QtSwEmbeddedInterop.cpp)
+add_executable(QtSwEmbeddedInterop
+    QtSwEmbeddedInterop.cpp
+    ui/QtStudioPane.cpp
+    ui/QtSwHostWidget.cpp
+    demo/ExampleSwThreadFiberBridge.cpp
+)
 target_include_directories(QtSwEmbeddedInterop PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/src/core
 )

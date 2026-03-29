@@ -2,11 +2,15 @@
 #include "SwMainWindow.h"
 #include "SwLabel.h"
 #include "SwLayout.h"
+#include "SwCheckBox.h"
 #include "SwComboBox.h"
+#include "SwSlider.h"
 #include "SwVideoWidget.h"
 #include "SwObject.h"
 
+#include "media/SwAudioDecoder.h"
 #include "media/SwMediaOpenOptions.h"
+#include "media/SwMediaPlayer.h"
 #include "media/SwMediaSourceFactory.h"
 #include "core/types/SwMap.h"
 
@@ -38,9 +42,23 @@ int main(int argc, char** argv) {
                       << " shareable=" << (decoder.shareable ? 1 : 0)
                       << std::endl;
         }
+        auto printAudioCodec = [](SwAudioPacket::Codec codec, const char* codecName) {
+            auto decoders = SwMediaPlayer::availableAudioDecoders(codec);
+            for (const auto& decoder : decoders) {
+                std::cout << "  - audio codec=" << codecName
+                          << " id=" << decoder.id
+                          << " name=" << decoder.displayName
+                          << " priority=" << decoder.priority
+                          << std::endl;
+            }
+        };
+        printAudioCodec(SwAudioPacket::Codec::PCMU, "pcmu");
+        printAudioCodec(SwAudioPacket::Codec::PCMA, "pcma");
+        printAudioCodec(SwAudioPacket::Codec::Opus, "opus");
+        printAudioCodec(SwAudioPacket::Codec::AAC, "aac");
     };
 
-    std::string url = "rtsp://172.16.40.81:5004/video";
+    std::string url = "rtsp://172.16.40.80:5004/video?audio=1&metadata=1";
     std::string localBind;
     std::string decoderId;
     uint16_t rtpPort = 0;
@@ -69,6 +87,10 @@ int main(int argc, char** argv) {
     auto* info = new SwLabel(&window);
     info->setText("Opening media source...");
     info->setMinimumSize(480, 28);
+
+    auto* metadataInfo = new SwLabel(&window);
+    metadataInfo->setText("KLV: disabled");
+    metadataInfo->setMinimumSize(480, 28);
 
     auto* decoderRow = new SwWidget(&window);
     decoderRow->setMinimumSize(0, 44);
@@ -113,16 +135,55 @@ int main(int argc, char** argv) {
     decoderLayout->addWidget(decoderCombo, 0, 260);
     decoderLayout->addStretch(1);
 
+    auto* audioRow = new SwWidget(&window);
+    audioRow->setMinimumSize(0, 44);
+    auto* audioLayout = new SwHorizontalLayout(audioRow);
+    audioLayout->setMargin(0);
+    audioLayout->setSpacing(8);
+    audioRow->setLayout(audioLayout);
+
+    auto* audioLabel = new SwLabel(audioRow);
+    audioLabel->setText("Audio");
+    audioLabel->setMinimumSize(84, 32);
+
+    auto* audioCombo = new SwComboBox(audioRow);
+    audioCombo->setMinimumSize(260, 36);
+    audioCombo->addItem("Disabled");
+
+    auto* muteCheck = new SwCheckBox("Mute", audioRow);
+    muteCheck->setMinimumSize(80, 32);
+
+    auto* volumeLabel = new SwLabel(audioRow);
+    volumeLabel->setText("Volume");
+    volumeLabel->setMinimumSize(80, 32);
+
+    auto* volumeSlider = new SwSlider(SwSlider::Orientation::Horizontal, audioRow);
+    volumeSlider->setMinimumSize(180, 40);
+    volumeSlider->setRange(0, 100);
+    volumeSlider->setValue(100);
+
+    audioLayout->addWidget(audioLabel, 0, 84);
+    audioLayout->addWidget(audioCombo, 0, 260);
+    audioLayout->addWidget(muteCheck, 0, 80);
+    audioLayout->addWidget(volumeLabel, 0, 80);
+    audioLayout->addWidget(volumeSlider, 0, 180);
+    audioLayout->addStretch(1);
+
     auto* video = new SwVideoWidget(&window);
     video->setScalingMode(SwVideoWidget::ScalingMode::Fit);
     video->setBackgroundColor({8, 8, 8});
+
+    auto player = std::make_shared<SwMediaPlayer>();
+    video->setVideoSink(player->videoSink());
 
     auto* layout = new SwVerticalLayout(&window);
     layout->setMargin(20);
     layout->setSpacing(10);
     window.setLayout(layout);
     layout->addWidget(decoderRow, 0, 44);
+    layout->addWidget(audioRow, 0, 44);
     layout->addWidget(info, 0, info->minimumSizeHint().height);
+    layout->addWidget(metadataInfo, 0, metadataInfo->minimumSizeHint().height);
     layout->addWidget(video, 1);
 
     SwMediaOpenOptions openOptions = SwMediaOpenOptions::fromUrl(SwString(url.c_str()));
@@ -133,12 +194,14 @@ int main(int argc, char** argv) {
         openOptions.rtpPort = rtpPort;
         openOptions.rtcpPort = rtcpPort;
     }
-    auto source = SwMediaSourceFactory::createVideoSource(openOptions);
+    auto source = SwMediaSourceFactory::createMediaSource(openOptions);
     if (!source) {
         std::cerr << "[RtspVideoWidget] Unsupported media URL: " << url << std::endl;
         return 2;
     }
-    video->setVideoSource(source);
+    player->setSource(source);
+    player->setAudioEnabled(openOptions.enableAudio);
+    player->setMetadataEnabled(openOptions.enableMetadata);
     auto applyDecoderSelection = [video](const SwString& selectedId) -> bool {
         const SwVideoPacket::Codec codecs[] = {
             SwVideoPacket::Codec::H264,
@@ -164,6 +227,28 @@ int main(int argc, char** argv) {
         }
         return applied;
     };
+    auto audioTrackIds = std::make_shared<SwList<SwString>>();
+    auto updateAudioTracks = [player, audioCombo, audioTrackIds]() {
+        audioCombo->clear();
+        audioCombo->addItem("Disabled");
+        audioTrackIds->clear();
+        audioTrackIds->append(SwString());
+        int selectedIndex = 0;
+        const auto tracks = player->tracks();
+        for (const auto& track : tracks) {
+            if (!track.isAudio() || !track.selected) {
+                continue;
+            }
+            SwString label = track.codec.isEmpty() ? SwString("audio") : track.codec.toUpper();
+            label += SwString(" (") + track.id + SwString(")");
+            audioCombo->addItem(label);
+            audioTrackIds->append(track.id);
+            if (track.id == player->activeAudioTrack()) {
+                selectedIndex = static_cast<int>(audioTrackIds->size()) - 1;
+            }
+        }
+        audioCombo->setCurrentIndex(selectedIndex);
+    };
     if (decoderId == "auto") {
         decoderId.clear();
     }
@@ -184,14 +269,57 @@ int main(int argc, char** argv) {
     }
     decoderCombo->setCurrentIndex(selectedDecoderIndex);
 
-    auto updateInfoLabel = [info, &url](const SwString& activeDecoderId) {
+    auto updateInfoLabel = [info, &url, player](const SwString& activeDecoderId) {
         SwString infoText = SwString("Streaming from: ") + SwString(url.c_str());
         infoText += SwString(" | decoder: ");
         infoText += activeDecoderId.isEmpty() ? SwString("auto") : activeDecoderId;
+        if (!player->activeAudioTrack().isEmpty()) {
+            infoText += SwString(" | audio: ") + player->activeAudioTrack();
+        } else if (!player->isAudioEnabled()) {
+            infoText += SwString(" | audio: disabled");
+        }
+        if (!player->activeMetadataTrack().isEmpty()) {
+            infoText += SwString(" | klv: ") + player->activeMetadataTrack();
+        } else if (!player->isMetadataEnabled()) {
+            infoText += SwString(" | klv: disabled");
+        }
         info->setText(infoText);
     };
 
+    auto updateMetadataLabel = [metadataInfo, player]() {
+        if (!player->isMetadataEnabled()) {
+            metadataInfo->setText("KLV: disabled");
+            return;
+        }
+        if (player->activeMetadataTrack().isEmpty()) {
+            metadataInfo->setText("KLV: waiting track...");
+            return;
+        }
+        metadataInfo->setText(SwString("KLV: waiting packets on ") + player->activeMetadataTrack());
+    };
+
+    player->setTracksChangedCallback([updateAudioTracks, updateInfoLabel, updateMetadataLabel, decoderId](const SwList<SwMediaTrack>&) {
+        updateAudioTracks();
+        updateInfoLabel(SwString(decoderId.c_str()));
+        updateMetadataLabel();
+    });
+
+    player->setMetadataPacketCallback([metadataInfo](const SwMediaPacket& packet) {
+        SwString text = "KLV";
+        if (!packet.codec().isEmpty()) {
+            text += SwString(" ") + packet.codec().toUpper();
+        }
+        if (!packet.trackId().isEmpty()) {
+            text += SwString(" ") + packet.trackId();
+        }
+        text += SwString(" bytes=") + SwString(std::to_string(packet.payload().size()));
+        text += SwString(" pts=") + SwString(std::to_string(packet.pts()));
+        metadataInfo->setText(text);
+    });
+
     updateInfoLabel(SwString(decoderId.c_str()));
+    updateAudioTracks();
+    updateMetadataLabel();
 
     SwObject::connect(decoderCombo, &SwComboBox::currentIndexChanged, decoderRow, [video,
                                                                                    decoderCombo,
@@ -218,10 +346,31 @@ int main(int argc, char** argv) {
         updateInfoLabel(selectedId);
     });
 
-    video->start();
+    SwObject::connect(audioCombo, &SwComboBox::currentIndexChanged, audioRow, [player,
+                                                                               audioTrackIds,
+                                                                               updateInfoLabel,
+                                                                               decoderId](int index) {
+        if (index < 0 || static_cast<std::size_t>(index) >= audioTrackIds->size()) {
+            return;
+        }
+        const SwString trackId = (*audioTrackIds)[static_cast<std::size_t>(index)];
+        player->setAudioEnabled(!trackId.isEmpty());
+        player->setActiveAudioTrack(trackId);
+        updateInfoLabel(SwString(decoderId.c_str()));
+    });
+
+    SwObject::connect(muteCheck, &SwCheckBox::toggled, audioRow, [player](bool checked) {
+        player->setMuted(checked);
+    });
+
+    SwObject::connect(volumeSlider, &SwSlider::valueChanged, audioRow, [player](int value) {
+        player->setVolume(static_cast<float>(value) / 100.0f);
+    });
+
+    player->play();
     window.show();
 
     int code = app.exec();
-    video->stop();
+    player->stop();
     return code;
 }

@@ -59,7 +59,70 @@ static SwString hexAddress_(unsigned long long value) {
     return "0x" + SwString::number(value, 16);
 }
 
+static SwString baseName_(const SwString& path) {
+    if (path.isEmpty()) {
+        return SwString();
+    }
+    const std::string value = path.toStdString();
+    const size_t pos = value.find_last_of("\\/");
+    if (pos == std::string::npos || pos + 1 >= value.size()) {
+        return path;
+    }
+    return SwString::fromUtf8(value.c_str() + pos + 1);
+}
+
+static SwString sourceLocationText_(const SwRuntimeResolvedFrame& frame) {
+    if (!frame.lineResolved || frame.sourceFile.isEmpty()) {
+        return SwString();
+    }
+    return frame.sourceFile + ":" + SwString::number(frame.lineNumber);
+}
+
+static SwString frameHeadline_(const SwRuntimeResolvedFrame& frame) {
+    if (frame.address == 0 && frame.symbolName.isEmpty() && frame.moduleName.isEmpty()) {
+        return "<unresolved>";
+    }
+
+    const SwString moduleLabel = !frame.moduleName.isEmpty() ? frame.moduleName : baseName_(frame.modulePath);
+    SwString headline;
+    if (!moduleLabel.isEmpty()) {
+        headline.append(moduleLabel);
+        if (frame.symbolResolved) {
+            headline.append('!');
+        }
+    }
+
+    if (frame.symbolResolved) {
+        headline.append(frame.symbolName);
+        headline.append(" + 0x");
+        headline.append(SwString::number(frame.displacement, 16));
+    } else if (frame.moduleResolved && frame.moduleBase != 0 && frame.address >= frame.moduleBase) {
+        if (headline.isEmpty()) {
+            headline = moduleLabel;
+        }
+        headline.append(" + 0x");
+        headline.append(SwString::number(frame.address - frame.moduleBase, 16));
+    } else {
+        headline = hexAddress_(frame.address);
+    }
+
+    if (frame.lineResolved) {
+        headline.append(" (");
+        headline.append(baseName_(frame.sourceFile));
+        headline.append(":");
+        headline.append(SwString::number(frame.lineNumber));
+        headline.append(")");
+    }
+    return headline;
+}
+
 static SwString firstResolvedFrame_(const RuntimeProfilerStackInspectorData& data) {
+    for (size_t i = 0; i < data.resolvedFrames.size(); ++i) {
+        const SwRuntimeResolvedFrame& frame = data.resolvedFrames[i];
+        if (frame.symbolResolved || frame.lineResolved || frame.moduleResolved) {
+            return frameHeadline_(frame);
+        }
+    }
     for (size_t i = 0; i < data.symbols.size(); ++i) {
         if (!data.symbols[i].isEmpty()) {
             return data.symbols[i];
@@ -72,6 +135,16 @@ static SwString firstResolvedFrame_(const RuntimeProfilerStackInspectorData& dat
 }
 
 static int resolvedSymbolCount_(const RuntimeProfilerStackInspectorData& data) {
+    if (!data.resolvedFrames.isEmpty()) {
+        int count = 0;
+        for (size_t i = 0; i < data.resolvedFrames.size(); ++i) {
+            if (data.resolvedFrames[i].symbolResolved) {
+                ++count;
+            }
+        }
+        return count;
+    }
+
     int count = 0;
     for (size_t i = 0; i < data.symbols.size(); ++i) {
         if (!data.symbols[i].isEmpty()) {
@@ -81,14 +154,56 @@ static int resolvedSymbolCount_(const RuntimeProfilerStackInspectorData& data) {
     return count;
 }
 
+static int resolvedSourceCount_(const RuntimeProfilerStackInspectorData& data) {
+    int count = 0;
+    for (size_t i = 0; i < data.resolvedFrames.size(); ++i) {
+        if (data.resolvedFrames[i].lineResolved) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+static int resolvedModuleCount_(const RuntimeProfilerStackInspectorData& data) {
+    int count = 0;
+    SwList<SwString> uniqueModules;
+    for (size_t i = 0; i < data.resolvedFrames.size(); ++i) {
+        const SwString moduleName = !data.resolvedFrames[i].moduleName.isEmpty()
+                                        ? data.resolvedFrames[i].moduleName
+                                        : data.resolvedFrames[i].modulePath;
+        if (moduleName.isEmpty()) {
+            continue;
+        }
+        bool alreadySeen = false;
+        for (size_t j = 0; j < uniqueModules.size(); ++j) {
+            if (uniqueModules[j] == moduleName) {
+                alreadySeen = true;
+                break;
+            }
+        }
+        if (!alreadySeen) {
+            uniqueModules.append(moduleName);
+            ++count;
+        }
+    }
+    return count;
+}
+
 static SwString captureQuality_(const RuntimeProfilerStackInspectorData& data) {
     const int frameCount = static_cast<int>(data.frames.size());
     const int symbolCount = resolvedSymbolCount_(data);
+    const int sourceCount = resolvedSourceCount_(data);
     if (frameCount <= 0) {
         return "no frames captured";
     }
+    if (sourceCount >= frameCount && frameCount > 0) {
+        return "file + line for all frames";
+    }
+    if (sourceCount > 0) {
+        return "mixed symbols with source lines";
+    }
     if (symbolCount >= frameCount) {
-        return "fully symbolized";
+        return "symbols for all frames";
     }
     if (symbolCount > 0) {
         return "partially symbolized";
@@ -133,6 +248,29 @@ static SwString blockingHint_(const RuntimeProfilerStackInspectorData& data) {
     static const char* const kDelayTokens[] = {"sleep", "delay", "wait", "stall", "poll"};
     static const char* const kIoTokens[] = {"recv", "send", "socket", "readfile", "writefile", "epoll", "select"};
     static const char* const kLockTokens[] = {"mutex", "criticalsection", "semaphore", "conditionvariable", "lock"};
+
+    for (size_t i = 0; i < data.resolvedFrames.size(); ++i) {
+        const SwRuntimeResolvedFrame& frame = data.resolvedFrames[i];
+        const SwString candidates[] = {frame.symbolName, frame.moduleName, frame.sourceFile};
+        for (size_t j = 0; j < sizeof(candidates) / sizeof(candidates[0]); ++j) {
+            const SwString& value = candidates[j];
+            if (value.isEmpty()) {
+                continue;
+            }
+            if (containsAnyToken_(value, kDelayTokens,
+                                  static_cast<int>(sizeof(kDelayTokens) / sizeof(kDelayTokens[0])))) {
+                return "explicit delay or wait path";
+            }
+            if (containsAnyToken_(value, kIoTokens,
+                                  static_cast<int>(sizeof(kIoTokens) / sizeof(kIoTokens[0])))) {
+                return "blocking IO path";
+            }
+            if (containsAnyToken_(value, kLockTokens,
+                                  static_cast<int>(sizeof(kLockTokens) / sizeof(kLockTokens[0])))) {
+                return "contention or lock path";
+            }
+        }
+    }
 
     for (size_t i = 0; i < data.symbols.size(); ++i) {
         const SwString& symbol = data.symbols[i];
@@ -511,8 +649,23 @@ void RuntimeProfilerStackInspectorWidget::applyEditorTheme_() {
 
 SwString RuntimeProfilerStackInspectorWidget::reportTextFor_(const RuntimeProfilerStackInspectorData& data) const {
     const long long overshootUs = std::max(0LL, data.elapsedUs - data.thresholdUs);
-    const int frameCount = static_cast<int>(data.frames.size());
+    const int frameCount = static_cast<int>(std::max(data.frames.size(), data.resolvedFrames.size()));
     const int symbolCount = resolvedSymbolCount_(data);
+    const int sourceCount = resolvedSourceCount_(data);
+    const int moduleCount = resolvedModuleCount_(data);
+    SwString topSource;
+    SwString topModulePath;
+    for (size_t i = 0; i < data.resolvedFrames.size(); ++i) {
+        if (topSource.isEmpty() && data.resolvedFrames[i].lineResolved) {
+            topSource = sourceLocationText_(data.resolvedFrames[i]);
+        }
+        if (topModulePath.isEmpty() && !data.resolvedFrames[i].modulePath.isEmpty()) {
+            topModulePath = data.resolvedFrames[i].modulePath;
+        }
+        if (!topSource.isEmpty() && !topModulePath.isEmpty()) {
+            break;
+        }
+    }
 
     auto appendKeyValue = [](SwString& out, const char* key, const SwString& value) {
         SwString keyText(key ? key : "");
@@ -553,15 +706,43 @@ SwString RuntimeProfilerStackInspectorWidget::reportTextFor_(const RuntimeProfil
     appendLine(report, "-------");
     appendKeyValue(report, "frames", SwString::number(frameCount));
     appendKeyValue(report, "symbols", SwString::number(symbolCount) + " / " + SwString::number(frameCount));
+    appendKeyValue(report, "sources", SwString::number(sourceCount) + " / " + SwString::number(frameCount));
+    appendKeyValue(report, "modules", SwString::number(moduleCount));
     appendKeyValue(report, "top_frame", firstResolvedFrame_(data));
+    appendKeyValue(report, "top_source", topSource.isEmpty() ? SwString("<none>") : topSource);
+    appendKeyValue(report, "module_path", topModulePath.isEmpty() ? SwString("<none>") : topModulePath);
+    appendKeyValue(report, "backend", data.symbolBackend.isEmpty() ? SwString("<default>") : data.symbolBackend);
     appendKeyValue(report, "quality", captureQuality_(data));
     appendKeyValue(report, "heuristic", blockingHint_(data));
+    if (!data.symbolSearchPath.isEmpty()) {
+        appendKeyValue(report, "search_path", data.symbolSearchPath);
+    }
     appendLine(report, "");
 
     appendLine(report, "STACK TRACE");
     appendLine(report, "-----------");
     if (frameCount == 0 && data.symbols.isEmpty()) {
         appendLine(report, "No stack frames were captured for this stall.");
+    } else if (!data.resolvedFrames.isEmpty()) {
+        for (size_t i = 0; i < data.resolvedFrames.size(); ++i) {
+            const SwRuntimeResolvedFrame& frame = data.resolvedFrames[i];
+            SwString index = SwString::number(static_cast<long long>(i + 1));
+            if (index.size() < 2) {
+                index = "0" + index;
+            }
+
+            appendLine(report, "[" + index + "] " + frameHeadline_(frame) + " @ " + hexAddress_(frame.address));
+            if (frame.lineResolved) {
+                appendKeyValue(report, "  source", sourceLocationText_(frame));
+            }
+            if (!frame.modulePath.isEmpty()) {
+                appendKeyValue(report, "  module", frame.modulePath);
+            }
+            if (!frame.symbolResolved && !frame.moduleResolved) {
+                appendKeyValue(report, "  status", "unresolved address");
+            }
+            appendLine(report, "");
+        }
     } else {
         const size_t lineCount = std::max(data.frames.size(), data.symbols.size());
         for (size_t i = 0; i < lineCount; ++i) {
@@ -586,7 +767,8 @@ SwString RuntimeProfilerStackInspectorWidget::reportTextFor_(const RuntimeProfil
     appendLine(report, "NOTES");
     appendLine(report, "-----");
     appendLine(report, "- Overshoot is computed against the active stall threshold.");
-    appendLine(report, "- Stack quality reflects how many captured frames resolved to symbols.");
+    appendLine(report, "- Stack quality reflects how many frames resolved to symbols and source lines.");
+    appendLine(report, "- Module and source paths come from the active PDB + loaded module state on the sampled thread.");
 
     return report;
 }

@@ -53,7 +53,6 @@ private:
     const SwList<RuntimeProfilerDashboardStallEntry>* stalls_{nullptr};
     const SwList<RuntimeProfilerDashboardLoadSample>* loadSamples_{nullptr};
 
-    SwSplitter* mainSplitter_{nullptr};
     SwSplitter* detailSplitter_{nullptr};
     RuntimeProfilerMonitoringBarWidget* monitorBar_{nullptr};
     RuntimeProfilerStallTimelineWidget* timelineWidget_{nullptr};

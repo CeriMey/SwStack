@@ -90,9 +90,9 @@ public:
         : m_parent(parent), m_url(url) {
         parseUrl();
         m_socket = new SwTcpSocket(m_parent);
-        m_pollTimer = new SwTimer(10, m_parent);
+        m_watchdogTimer = new SwTimer(250, m_parent);
         m_reconnectTimer = new SwTimer(1000, m_parent);
-        SwObject::connect(m_pollTimer, &SwTimer::timeout, [this]() { poll(); });
+        SwObject::connect(m_watchdogTimer, &SwTimer::timeout, [this]() { checkFrameTimeout(); });
         SwObject::connect(m_reconnectTimer, &SwTimer::timeout, [this]() { attemptReconnect(); });
         SwObject::connect(m_socket, &SwTcpSocket::connected, [this]() {
             m_requestSent = true;
@@ -106,6 +106,7 @@ public:
             sendRequest();
             swCDebug(kSwLogCategory_SwHttpMjpegSource) << "[SwHttpMjpegSource] Connected, request sent";
         });
+        SwObject::connect(m_socket, &SwTcpSocket::readyRead, [this]() { drainSocket(); });
         SwObject::connect(m_socket, &SwTcpSocket::disconnected, [this]() {
             swCWarning(kSwLogCategory_SwHttpMjpegSource) << "[SwHttpMjpegSource] Disconnected";
             handleDisconnect();
@@ -124,7 +125,7 @@ public:
     ~SwHttpMjpegSource() override {
         stop();
         delete m_reconnectTimer;
-        delete m_pollTimer;
+        delete m_watchdogTimer;
         delete m_socket;
     }
 
@@ -160,7 +161,7 @@ public:
         m_lastDataTime = {};
         m_requestSent = false;
         setRunning(true);
-        m_pollTimer->start();
+        m_watchdogTimer->start();
         attemptReconnect();
     }
 
@@ -175,8 +176,8 @@ public:
         }
         setRunning(false);
         m_requestSent = false;
-        if (m_pollTimer) {
-            m_pollTimer->stop();
+        if (m_watchdogTimer) {
+            m_watchdogTimer->stop();
         }
         if (m_reconnectTimer) {
             m_reconnectTimer->stop();
@@ -216,11 +217,10 @@ private:
         m_socket->write(SwString(oss.str()));
     }
 
-    void poll() {
+    void drainSocket() {
         if (!isRunning() || !m_socket) {
             return;
         }
-        // Read everything available (non-blocking)
         for (;;) {
             SwString chunk = m_socket->read(8192);
             if (chunk.isEmpty()) {
@@ -449,7 +449,7 @@ private:
     SwString m_path{"/"};
 
     SwTcpSocket* m_socket{nullptr};
-    SwTimer* m_pollTimer{nullptr};
+    SwTimer* m_watchdogTimer{nullptr};
     SwTimer* m_reconnectTimer{nullptr};
 
     SwMutex m_bufferMutex;

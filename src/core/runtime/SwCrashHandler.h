@@ -462,10 +462,13 @@ private:
         HANDLE thread = ::GetCurrentThread();
 
         ::SymSetOptions(SYMOPT_UNDNAME | SYMOPT_LOAD_LINES | SYMOPT_DEFERRED_LOADS);
-        if (!::SymInitialize(process, nullptr, TRUE)) {
-            std::fprintf(f, "SymInitialize failed: %lu\n", ::GetLastError());
+        const BOOL symInitializedHere = ::SymInitialize(process, nullptr, TRUE);
+        const DWORD symInitError = symInitializedHere ? ERROR_SUCCESS : ::GetLastError();
+        if (!symInitializedHere && symInitError != ERROR_INVALID_PARAMETER) {
+            std::fprintf(f, "SymInitialize failed: %lu\n", static_cast<unsigned long>(symInitError));
             return;
         }
+        (void)::SymRefreshModuleList(process);
 
         CONTEXT ctx = *ep->ContextRecord;
         STACKFRAME64 frame{};
@@ -546,7 +549,9 @@ private:
             }
         }
 
-        ::SymCleanup(process);
+        if (symInitializedHere) {
+            ::SymCleanup(process);
+        }
     }
 
     /**

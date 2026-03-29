@@ -10,5 +10,13 @@ target_include_directories(RtspUdpClient PRIVATE
     ${CMAKE_SOURCE_DIR}/src/core)
 
 if(WIN32)
-    target_link_libraries(RtspUdpClient PRIVATE ws2_32)
+    target_link_libraries(RtspUdpClient PRIVATE
+        ws2_32
+        mfplat
+        mfreadwrite
+        mf
+        mfuuid
+        ole32
+        oleaut32
+        uuid)
 endif()

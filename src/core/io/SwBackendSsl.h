@@ -110,7 +110,106 @@ public:
     }
 
     /**
-     * @brief Performs the `init` operation.
+     * @brief Creates a shared SSL_CTX configured for server-side TLS.
+     * @param certPath Path to the PEM certificate file.
+     * @param keyPath Path to the PEM private key file.
+     * @param outError Receives the error description on failure.
+     * @return An opaque pointer to the SSL_CTX, or nullptr on failure.
+     */
+    static void* createServerContext(const std::string& certPath,
+                                     const std::string& keyPath,
+                                     std::string& outError) {
+        SwBackendSsl tmp;
+        if (!tmp.ensureLoaded()) {
+            outError = "OpenSSL libraries not found";
+            return nullptr;
+        }
+        Loader* loader = tmp.m_loader;
+        if (!loader->TLS_server_method) {
+            outError = "TLS_server_method not available";
+            return nullptr;
+        }
+        void* ctx = loader->SSL_CTX_new(loader->TLS_server_method());
+        if (!ctx) {
+            outError = "SSL_CTX_new (server) failed";
+            return nullptr;
+        }
+        // SSL_FILETYPE_PEM = 1
+        if (!loader->SSL_CTX_use_certificate_file ||
+            loader->SSL_CTX_use_certificate_file(ctx, certPath.c_str(), 1) != 1) {
+            outError = "Failed to load certificate: " + certPath;
+            loader->SSL_CTX_free(ctx);
+            return nullptr;
+        }
+        if (!loader->SSL_CTX_use_PrivateKey_file ||
+            loader->SSL_CTX_use_PrivateKey_file(ctx, keyPath.c_str(), 1) != 1) {
+            outError = "Failed to load private key: " + keyPath;
+            loader->SSL_CTX_free(ctx);
+            return nullptr;
+        }
+        if (loader->SSL_CTX_check_private_key &&
+            loader->SSL_CTX_check_private_key(ctx) != 1) {
+            outError = "Private key does not match certificate";
+            loader->SSL_CTX_free(ctx);
+            return nullptr;
+        }
+        return ctx;
+    }
+
+    /**
+     * @brief Frees a server SSL_CTX previously created by createServerContext().
+     * @param ctx The context to free.
+     */
+    static void freeServerContext(void* ctx) {
+        if (!ctx) {
+            return;
+        }
+        SwBackendSsl tmp;
+        if (tmp.ensureLoaded() && tmp.m_loader->SSL_CTX_free) {
+            tmp.m_loader->SSL_CTX_free(ctx);
+        }
+    }
+
+    /**
+     * @brief Initializes a server-side TLS session from a shared SSL_CTX.
+     * @param sharedCtx An SSL_CTX pointer created by createServerContext().
+     * @param fd The accepted socket file descriptor.
+     * @return true on success.
+     */
+    bool initServer(void* sharedCtx, intptr_t fd) {
+        if (!sharedCtx) {
+            m_lastError = "Null server SSL_CTX";
+            return false;
+        }
+        if (!ensureLoaded()) {
+            return false;
+        }
+        if (!m_loader->SSL_set_accept_state) {
+            m_lastError = "SSL_set_accept_state not available";
+            return false;
+        }
+
+        // We do NOT own the CTX — it is shared. Store nullptr so cleanup() won't free it.
+        m_ctx = nullptr;
+        m_ssl = m_loader->SSL_new(sharedCtx);
+        if (!m_ssl) {
+            m_lastError = "SSL_new (server) failed";
+            return false;
+        }
+        if (fd > std::numeric_limits<int>::max()) {
+            m_lastError = "Socket handle out of range for SSL_set_fd";
+            return false;
+        }
+        if (m_loader->SSL_set_fd(m_ssl, static_cast<int>(fd)) != 1) {
+            m_lastError = "SSL_set_fd failed";
+            return false;
+        }
+        m_loader->SSL_set_accept_state(m_ssl);
+        return true;
+    }
+
+    /**
+     * @brief Initializes a client-side TLS session.
      * @param host Value passed to the method.
      * @param fd Value passed to the method.
      * @return `true` on success; otherwise `false`.
@@ -262,11 +361,16 @@ private:
         using FnSet1Host = int (*)(void*, const char*);
         using FnCtrl = long (*)(void*, int, long, void*);
         using FnSetConnectState = void (*)(void*);
+        using FnSetAcceptState = void (*)(void*);
         using FnDoHandshake = int (*)(void*);
         using FnGetError = int (*)(const void*, int);
         using FnRead = int (*)(void*, void*, int);
         using FnWrite = int (*)(void*, const void*, int);
         using FnShutdown = int (*)(void*);
+        using FnTLSServerMethod = const void* (*)();
+        using FnCTXUseCertFile = int (*)(void*, const char*, int);
+        using FnCTXUseKeyFile = int (*)(void*, const char*, int);
+        using FnCTXCheckPrivateKey = int (*)(const void*);
 
         FnOpenSSLInit OPENSSL_init_ssl = nullptr;
         FnTLSClientMethod TLS_client_method = nullptr;
@@ -280,11 +384,16 @@ private:
         FnSet1Host SSL_set1_host = nullptr;
         FnCtrl SSL_ctrl = nullptr;
         FnSetConnectState SSL_set_connect_state = nullptr;
+        FnSetAcceptState SSL_set_accept_state = nullptr;
         FnDoHandshake SSL_do_handshake = nullptr;
         FnGetError SSL_get_error = nullptr;
         FnRead SSL_read = nullptr;
         FnWrite SSL_write = nullptr;
         FnShutdown SSL_shutdown = nullptr;
+        FnTLSServerMethod TLS_server_method = nullptr;
+        FnCTXUseCertFile SSL_CTX_use_certificate_file = nullptr;
+        FnCTXUseKeyFile SSL_CTX_use_PrivateKey_file = nullptr;
+        FnCTXCheckPrivateKey SSL_CTX_check_private_key = nullptr;
 
         /**
          * @brief Performs the `load` operation on the associated resource.
@@ -333,11 +442,16 @@ private:
             SSL_set1_host = (FnSet1Host)sym(ssl, "SSL_set1_host");
             SSL_ctrl = (FnCtrl)sym(ssl, "SSL_ctrl");
             SSL_set_connect_state = (FnSetConnectState)sym(ssl, "SSL_set_connect_state");
+            SSL_set_accept_state = (FnSetAcceptState)sym(ssl, "SSL_set_accept_state");
             SSL_do_handshake = (FnDoHandshake)sym(ssl, "SSL_do_handshake");
             SSL_get_error = (FnGetError)sym(ssl, "SSL_get_error");
             SSL_read = (FnRead)sym(ssl, "SSL_read");
             SSL_write = (FnWrite)sym(ssl, "SSL_write");
             SSL_shutdown = (FnShutdown)sym(ssl, "SSL_shutdown");
+            TLS_server_method = (FnTLSServerMethod)sym(ssl, "TLS_server_method");
+            SSL_CTX_use_certificate_file = (FnCTXUseCertFile)sym(ssl, "SSL_CTX_use_certificate_file");
+            SSL_CTX_use_PrivateKey_file = (FnCTXUseKeyFile)sym(ssl, "SSL_CTX_use_PrivateKey_file");
+            SSL_CTX_check_private_key = (FnCTXCheckPrivateKey)sym(ssl, "SSL_CTX_check_private_key");
 
             if (!TLS_client_method || !SSL_CTX_new || !SSL_new || !SSL_set_fd || !SSL_do_handshake ||
                 !SSL_get_error || !SSL_read || !SSL_write || !SSL_shutdown) {
