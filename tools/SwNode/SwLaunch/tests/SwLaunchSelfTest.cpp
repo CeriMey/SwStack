@@ -8,6 +8,7 @@
 #include "SwJsonValue.h"
 #include "SwFile.h"
 #include "SwDir.h"
+#include "SwLaunchDeploySupport.h"
 #include "SwStandardLocation.h"
 
 #include <iostream>
@@ -147,7 +148,7 @@ static void testSanitizeFileLeaf() {
     check("slashes", sanitizeFileLeaf_("a/b\\c") == "a_b_c");
     check("colon", sanitizeFileLeaf_("C:foo") == "C_foo");
     check("space", sanitizeFileLeaf_("hello world") == "hello_world");
-    check("quotes", sanitizeFileLeaf_("it's \"fine\"") == "it_s _fine_");
+    check("quotes", sanitizeFileLeaf_("it's \"fine\"") == "it_s__fine_");
     check("clean unchanged", sanitizeFileLeaf_("clean_name") == "clean_name");
 }
 
@@ -292,6 +293,33 @@ static void testConfigLoadingEdgeCases() {
     check("array is not object", !doc.isObject());
 }
 
+static void testDeploySupportHelpers() {
+    std::cout << "[suite] Deploy support helpers" << std::endl;
+
+    check("safe relative path accepted", swLaunchIsSafeRelativePath_("bin/app.exe"));
+    check("unsafe parent path rejected", !swLaunchIsSafeRelativePath_("../bin/app.exe"));
+    check("unsafe absolute path rejected", !swLaunchIsSafeRelativePath_("C:/bin/app.exe"));
+    check("sha256 hex accepted", swLaunchIsSha256Hex_("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"));
+    check("sha256 bad length rejected", !swLaunchIsSha256Hex_("0123"));
+    check("sha256 bad chars rejected", !swLaunchIsSha256Hex_("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"));
+
+    const SwString tempRoot = joinPath_(SwStandardLocation::standardLocation(SwStandardLocationId::Temp), "swlaunch_selftest");
+    check("create temp root", SwDir::mkpathAbsolute(tempRoot, false));
+
+    const SwString filePath = joinPath_(tempRoot, "checksum.txt");
+    SwString writeErr;
+    check("write helper creates file", swLaunchWriteTextFile_(filePath, "abc", &writeErr));
+
+    const SwString checksum = swLaunchChecksumForFile_(filePath).toLower();
+    check("checksum for file is sha256(abc)",
+          checksum == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+
+    const SwString joined = swLaunchJoinRootAndRelative_(tempRoot, "nested/file.bin");
+    check("join root and relative keeps child path", joined.endsWith("/nested/file.bin") || joined.endsWith("\\nested\\file.bin"));
+
+    (void)SwDir::removeRecursively(tempRoot);
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────
 
 int main(int argc, char** argv) {
@@ -309,6 +337,7 @@ int main(int argc, char** argv) {
     testLaunchJsonStructure();
     testSafeAccessors();
     testConfigLoadingEdgeCases();
+    testDeploySupportHelpers();
 
     std::cout << std::endl;
     std::cout << "=== Results: " << sPassed << " passed, " << sFailed << " failed ===" << std::endl;

@@ -55,9 +55,11 @@
  **************************************************************************************************/
 
 #include "SwByteArray.h"
+#include "SwAbstractSocket.h"
 #include "SwDebug.h"
 #include "SwMap.h"
 #include "SwObject.h"
+#include "SwSslSocket.h"
 #include "SwString.h"
 #include "SwTcpSocket.h"
 
@@ -105,6 +107,10 @@ public:
      */
     void setRawHeader(const SwString& key, const SwString& value) {
         m_headerMap[key] = value;
+    }
+
+    void setTrustedCaFile(const SwString& path) {
+        m_trustedCaFile = path;
     }
 
     /**
@@ -226,15 +232,32 @@ public:
 
         resetResponseState_();
 
-        m_socket = new SwTcpSocket(this);
-        m_socket->useSsl(m_https, m_host);
+        SwSslSocket* sslSocket = m_https ? new SwSslSocket(this) : nullptr;
+        m_socket = sslSocket ? static_cast<SwAbstractSocket*>(sslSocket) : new SwTcpSocket(this);
+        if (sslSocket) {
+            sslSocket->setPeerHostName(m_host);
+            if (!m_trustedCaFile.isEmpty()) {
+                sslSocket->setTrustedCaFile(m_trustedCaFile);
+            }
+            SwObject::connect(sslSocket, &SwSslSocket::sslErrors, [this](const SwSslErrorList& errors) {
+                if (!errors.isEmpty()) {
+                    swCError(kSwLogCategory_FireBDHttpClient) << "[FireBDHttpClient] TLS error: " << errors.first();
+                }
+            });
+        }
 
-        connect(m_socket, &SwTcpSocket::connected, this, &FireBDHttpClient::onConnected_);
-        connect(m_socket, &SwTcpSocket::errorOccurred, this, &FireBDHttpClient::onError_);
-        connect(m_socket, &SwTcpSocket::disconnected, this, &FireBDHttpClient::onDisconnected_);
-        connect(m_socket, &SwTcpSocket::readyRead, this, &FireBDHttpClient::onReadyRead_);
+        connect(m_socket, &SwAbstractSocket::errorOccurred, this, &FireBDHttpClient::onError_);
+        connect(m_socket, &SwAbstractSocket::disconnected, this, &FireBDHttpClient::onDisconnected_);
+        connect(m_socket, &SwIODevice::readyRead, this, &FireBDHttpClient::onReadyRead_);
+        if (sslSocket) {
+            connect(sslSocket, &SwSslSocket::encrypted, this, &FireBDHttpClient::onConnected_);
+        } else {
+            connect(m_socket, &SwAbstractSocket::connected, this, &FireBDHttpClient::onConnected_);
+        }
 
-        if (!m_socket->connectToHost(m_host, m_port)) {
+        const bool connectOk = sslSocket ? sslSocket->connectToHostEncrypted(m_host, m_port)
+                                         : m_socket->connectToHost(m_host, m_port);
+        if (!connectOk) {
             cleanupSocket_();
             emit errorOccurred(-2);
             return false;
@@ -600,7 +623,8 @@ private:
         return !host.isEmpty();
     }
 
-    SwTcpSocket* m_socket{nullptr};
+    SwAbstractSocket* m_socket{nullptr};
+    SwString m_trustedCaFile;
 
     Method m_method{Method::Get};
     SwString m_scheme;

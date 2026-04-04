@@ -6,6 +6,8 @@
 
 struct RuntimeProfilerDashboardStallEntry {
     unsigned long long sequence{0};
+    unsigned long long applicationId{0};
+    SwString applicationLabel;
     SwRuntimeTimingKind kind{SwRuntimeTimingKind::ManualScope};
     SwString label;
     long long elapsedUs{0};
@@ -21,11 +23,16 @@ struct RuntimeProfilerDashboardStallEntry {
 
 struct RuntimeProfilerDashboardLoadSample {
     long long sampleTimeNs{0};
+    unsigned long long applicationId{0};
+    unsigned long long threadId{0};
+    SwString seriesLabel;
     double loadPercentage{0.0};
 };
 
 struct RuntimeProfilerStackInspectorData {
     unsigned long long sequence{0};
+    unsigned long long applicationId{0};
+    SwString applicationLabel;
     SwRuntimeTimingKind kind{SwRuntimeTimingKind::ManualScope};
     SwString label;
     long long elapsedUs{0};

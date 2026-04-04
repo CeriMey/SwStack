@@ -52,11 +52,20 @@
 #include <memory>
 #include <cstdlib>
 #include <limits>
+#include <array>
+#include <cerrno>
+#include <cstring>
 
 #if defined(_WIN32)
 #include <windows.h>
+#include <wincrypt.h>
+#if defined(_MSC_VER)
+#pragma comment(lib, "crypt32.lib")
+#endif
 #else
 #include <dlfcn.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 /**
@@ -109,6 +118,14 @@ public:
         }
     }
 
+    static void setFallbackTrustedCaFile(const std::string& path) {
+        fallbackTrustedCaFile_() = path;
+    }
+
+    static void setFallbackTrustedCaDirectory(const std::string& path) {
+        fallbackTrustedCaDirectory_() = path;
+    }
+
     /**
      * @brief Creates a shared SSL_CTX configured for server-side TLS.
      * @param certPath Path to the PEM certificate file.
@@ -134,12 +151,21 @@ public:
             outError = "SSL_CTX_new (server) failed";
             return nullptr;
         }
-        // SSL_FILETYPE_PEM = 1
-        if (!loader->SSL_CTX_use_certificate_file ||
-            loader->SSL_CTX_use_certificate_file(ctx, certPath.c_str(), 1) != 1) {
-            outError = "Failed to load certificate: " + certPath;
-            loader->SSL_CTX_free(ctx);
-            return nullptr;
+        bool certificateLoaded = false;
+        if (loader->SSL_CTX_use_certificate_chain_file) {
+            certificateLoaded = (loader->SSL_CTX_use_certificate_chain_file(ctx, certPath.c_str()) == 1);
+            if (!certificateLoaded && loader->ERR_clear_error) {
+                loader->ERR_clear_error();
+            }
+        }
+        if (!certificateLoaded) {
+            // SSL_FILETYPE_PEM = 1
+            if (!loader->SSL_CTX_use_certificate_file ||
+                loader->SSL_CTX_use_certificate_file(ctx, certPath.c_str(), 1) != 1) {
+                outError = "Failed to load certificate: " + certPath;
+                loader->SSL_CTX_free(ctx);
+                return nullptr;
+            }
         }
         if (!loader->SSL_CTX_use_PrivateKey_file ||
             loader->SSL_CTX_use_PrivateKey_file(ctx, keyPath.c_str(), 1) != 1) {
@@ -220,7 +246,7 @@ public:
      * @param fd Value passed to the method.
      * @return `true` on success; otherwise `false`.
      */
-    bool init(const std::string& host, intptr_t fd) {
+    bool init(const std::string& host, intptr_t fd, const std::string& caFilePath = std::string()) {
         if (!ensureLoaded()) {
             m_lastError = "OpenSSL libraries not found";
             return false;
@@ -230,6 +256,18 @@ public:
             m_lastError = "OpenSSL TLS_client_method missing";
             return false;
         }
+        if (host.empty()) {
+            m_lastError = "TLS peer hostname is required";
+            return false;
+        }
+        if (!m_loader->SSL_CTX_set_verify) {
+            m_lastError = "SSL_CTX_set_verify missing";
+            return false;
+        }
+        if (!m_loader->SSL_set1_host) {
+            m_lastError = "SSL_set1_host missing";
+            return false;
+        }
 
         m_ctx = m_loader->SSL_CTX_new(m_loader->TLS_client_method());
         if (!m_ctx) {
@@ -237,9 +275,10 @@ public:
             return false;
         }
 
-        // For now disable verification to unblock connectivity; add CA paths later if needed.
-        m_loader->SSL_CTX_set_verify(m_ctx, 0 /*SSL_VERIFY_NONE*/, nullptr);
-        m_loader->SSL_CTX_set_default_verify_paths(m_ctx);
+        m_loader->SSL_CTX_set_verify(m_ctx, SSL_VERIFY_PEER, nullptr);
+        if (!configureClientTrust_(caFilePath)) {
+            return false;
+        }
 
         // Enable partial writes for non-blocking sockets.
         if (m_loader->SSL_CTX_ctrl) {
@@ -346,6 +385,358 @@ public:
     }
 
 private:
+    bool configureClientTrust_(const std::string& caFilePath) {
+        if (!caFilePath.empty()) {
+            if (!pathIsFile_(caFilePath)) {
+                m_lastError = "Failed to load CA file: " + caFilePath + " (file not found)";
+                return false;
+            }
+            if (!m_loader->SSL_CTX_load_verify_locations ||
+                m_loader->SSL_CTX_load_verify_locations(m_ctx, caFilePath.c_str(), nullptr) != 1) {
+                m_lastError = "Failed to load CA file: " + caFilePath;
+                const std::string detail = describeOpenSslFailure_();
+                if (!detail.empty()) {
+                    m_lastError += " " + detail;
+                }
+                if (m_loader->ERR_clear_error) {
+                    m_loader->ERR_clear_error();
+                }
+                return false;
+            }
+            return true;
+        }
+
+        std::string trustSummary;
+        bool trustLoaded = false;
+
+        trustLoaded = loadDefaultVerifyPaths_(trustSummary) || trustLoaded;
+#if defined(_WIN32)
+        trustLoaded = loadWindowsSystemStores_(trustSummary) || trustLoaded;
+#else
+        trustLoaded = loadPosixSystemTrust_(trustSummary) || trustLoaded;
+#endif
+        trustLoaded = loadFallbackTrustSources_(trustSummary) || trustLoaded;
+
+        if (!trustLoaded) {
+            m_lastError = "No trusted CA certificates available";
+            if (!trustSummary.empty()) {
+                m_lastError += " (" + trustSummary + ")";
+            }
+            return false;
+        }
+        return true;
+    }
+
+    bool loadDefaultVerifyPaths_(std::string& trustSummary) {
+        if (!m_loader->SSL_CTX_set_default_verify_paths) {
+            appendTrustSummary_(trustSummary, "openssl-defaults unavailable");
+            return false;
+        }
+
+        if (m_loader->SSL_CTX_set_default_verify_paths(m_ctx) == 1) {
+            appendTrustSummary_(trustSummary, "openssl-defaults");
+            return true;
+        }
+
+        if (m_loader->ERR_clear_error) {
+            m_loader->ERR_clear_error();
+        }
+        appendTrustSummary_(trustSummary, "openssl-defaults failed");
+        return false;
+    }
+
+    bool loadVerifyLocation_(const std::string& filePath,
+                             const std::string& dirPath,
+                             const std::string& label,
+                             std::string& trustSummary) {
+        if ((!filePath.empty() && !pathIsFile_(filePath)) ||
+            (!dirPath.empty() && !pathIsDirectory_(dirPath))) {
+            return false;
+        }
+        if (!m_loader->SSL_CTX_load_verify_locations) {
+            appendTrustSummary_(trustSummary, label + " unavailable");
+            return false;
+        }
+
+        const char* fileArg = filePath.empty() ? nullptr : filePath.c_str();
+        const char* dirArg = dirPath.empty() ? nullptr : dirPath.c_str();
+        if (m_loader->SSL_CTX_load_verify_locations(m_ctx, fileArg, dirArg) == 1) {
+            appendTrustSummary_(trustSummary, label);
+            return true;
+        }
+
+        if (m_loader->ERR_clear_error) {
+            m_loader->ERR_clear_error();
+        }
+        appendTrustSummary_(trustSummary, label + " failed");
+        return false;
+    }
+
+#if !defined(_WIN32)
+    bool loadPosixSystemTrust_(std::string& trustSummary) {
+        bool loaded = false;
+
+        const std::string envFile = environmentValue_("SSL_CERT_FILE");
+        if (!envFile.empty()) {
+            loaded = loadVerifyLocation_(envFile, std::string(), "env SSL_CERT_FILE", trustSummary) || loaded;
+        }
+
+        const std::string envDir = environmentValue_("SSL_CERT_DIR");
+        if (!envDir.empty()) {
+            loaded = loadVerifyLocation_(std::string(), envDir, "env SSL_CERT_DIR", trustSummary) || loaded;
+        }
+
+        static const std::array<const char*, 7> kSystemCaFiles = {
+            "/etc/ssl/certs/ca-certificates.crt",
+            "/etc/pki/tls/certs/ca-bundle.crt",
+            "/etc/ssl/ca-bundle.pem",
+            "/etc/pki/tls/cacert.pem",
+            "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+            "/etc/ssl/cert.pem",
+            "/etc/openssl/certs/ca-certificates.crt"
+        };
+        for (const char* file : kSystemCaFiles) {
+            loaded = loadVerifyLocation_(file, std::string(), std::string("system-ca-file:") + file, trustSummary) || loaded;
+        }
+
+        static const std::array<const char*, 4> kSystemCaDirs = {
+            "/etc/ssl/certs",
+            "/etc/pki/tls/certs",
+            "/etc/ca-certificates/extracted/cadir",
+            "/etc/openssl/certs"
+        };
+        for (const char* dir : kSystemCaDirs) {
+            loaded = loadVerifyLocation_(std::string(), dir, std::string("system-ca-dir:") + dir, trustSummary) || loaded;
+        }
+
+        return loaded;
+    }
+#endif
+
+    bool loadFallbackTrustSources_(std::string& trustSummary) {
+        bool loaded = false;
+
+        const std::string configuredFile = fallbackTrustedCaFile_();
+        if (!configuredFile.empty()) {
+            loaded = loadVerifyLocation_(configuredFile, std::string(), "fallback-ca-file", trustSummary) || loaded;
+        }
+
+        const std::string configuredDir = fallbackTrustedCaDirectory_();
+        if (!configuredDir.empty()) {
+            loaded = loadVerifyLocation_(std::string(), configuredDir, "fallback-ca-dir", trustSummary) || loaded;
+        }
+
+        const std::string envFile = environmentValue_("SW_SSL_CA_FILE");
+        if (!envFile.empty()) {
+            loaded = loadVerifyLocation_(envFile, std::string(), "env SW_SSL_CA_FILE", trustSummary) || loaded;
+        }
+
+        const std::string envDir = environmentValue_("SW_SSL_CA_DIR");
+        if (!envDir.empty()) {
+            loaded = loadVerifyLocation_(std::string(), envDir, "env SW_SSL_CA_DIR", trustSummary) || loaded;
+        }
+
+        for (const std::string& candidate : bundledTrustFileCandidates_()) {
+            loaded = loadVerifyLocation_(candidate, std::string(), std::string("bundle:") + candidate, trustSummary) || loaded;
+        }
+
+        for (const std::string& candidate : bundledTrustDirectoryCandidates_()) {
+            loaded = loadVerifyLocation_(std::string(), candidate, std::string("bundle-dir:") + candidate, trustSummary) || loaded;
+        }
+
+        return loaded;
+    }
+
+    static void appendTrustSummary_(std::string& trustSummary, const std::string& detail) {
+        if (detail.empty()) {
+            return;
+        }
+        if (!trustSummary.empty()) {
+            trustSummary += "; ";
+        }
+        trustSummary += detail;
+    }
+
+    static bool pathIsFile_(const std::string& path) {
+        if (path.empty()) {
+            return false;
+        }
+#if defined(_WIN32)
+        const DWORD attrs = GetFileAttributesA(path.c_str());
+        return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0;
+#else
+        struct stat st;
+        return ::stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+#endif
+    }
+
+    static bool pathIsDirectory_(const std::string& path) {
+        if (path.empty()) {
+            return false;
+        }
+#if defined(_WIN32)
+        const DWORD attrs = GetFileAttributesA(path.c_str());
+        return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+#else
+        struct stat st;
+        return ::stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+#endif
+    }
+
+    static std::string normalizePathSeparators_(std::string path) {
+        for (char& c : path) {
+            if (c == '\\') {
+                c = '/';
+            }
+        }
+        return path;
+    }
+
+    static std::string parentDirectory_(const std::string& path) {
+        if (path.empty()) {
+            return {};
+        }
+        const std::string normalized = normalizePathSeparators_(path);
+        const std::size_t pos = normalized.find_last_of('/');
+        if (pos == std::string::npos) {
+            return {};
+        }
+        return normalized.substr(0, pos);
+    }
+
+    static std::string joinPath_(const std::string& base, const std::string& leaf) {
+        if (base.empty()) {
+            return normalizePathSeparators_(leaf);
+        }
+        std::string result = normalizePathSeparators_(base);
+        if (!result.empty() && result.back() != '/') {
+            result.push_back('/');
+        }
+        result += normalizePathSeparators_(leaf);
+        return result;
+    }
+
+    static std::string currentExecutableDirectory_() {
+#if defined(_WIN32)
+        std::vector<char> buffer(static_cast<size_t>(MAX_PATH), '\0');
+        DWORD len = ::GetModuleFileNameA(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+        while (len > 0 && len >= buffer.size() - 1) {
+            buffer.resize(buffer.size() * 2, '\0');
+            len = ::GetModuleFileNameA(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+        }
+        if (len == 0) {
+            return {};
+        }
+        return parentDirectory_(std::string(buffer.data(), len));
+#else
+        std::array<char, 4096> buffer{};
+        const ssize_t len = ::readlink("/proc/self/exe", buffer.data(), buffer.size() - 1);
+        if (len <= 0) {
+            return {};
+        }
+        buffer[static_cast<std::size_t>(len)] = '\0';
+        return parentDirectory_(std::string(buffer.data(), static_cast<std::size_t>(len)));
+#endif
+    }
+
+    static std::string currentWorkingDirectory_() {
+#if defined(_WIN32)
+        DWORD len = ::GetCurrentDirectoryA(0, nullptr);
+        if (len == 0) {
+            return {};
+        }
+        std::vector<char> buffer(static_cast<std::size_t>(len) + 1, '\0');
+        len = ::GetCurrentDirectoryA(static_cast<DWORD>(buffer.size()), buffer.data());
+        if (len == 0) {
+            return {};
+        }
+        return normalizePathSeparators_(std::string(buffer.data(), len));
+#else
+        std::array<char, 4096> buffer{};
+        if (!::getcwd(buffer.data(), buffer.size())) {
+            return {};
+        }
+        return normalizePathSeparators_(std::string(buffer.data()));
+#endif
+    }
+
+    static std::vector<std::string> bundledTrustFileCandidates_() {
+        static const std::array<const char*, 9> kRelativeFiles = {
+            "certs/ca-bundle.pem",
+            "certs/ca-bundle.crt",
+            "certs/cacert.pem",
+            "certs/cert.pem",
+            "ssl/cert.pem",
+            "ca-bundle.pem",
+            "ca-bundle.crt",
+            "cacert.pem",
+            "cert.pem"
+        };
+
+        std::vector<std::string> candidates;
+        const std::string exeDir = currentExecutableDirectory_();
+        const std::string cwd = currentWorkingDirectory_();
+        for (const char* rel : kRelativeFiles) {
+            if (!exeDir.empty()) {
+                candidates.push_back(joinPath_(exeDir, rel));
+            }
+            if (!cwd.empty() && cwd != exeDir) {
+                candidates.push_back(joinPath_(cwd, rel));
+            }
+        }
+        return candidates;
+    }
+
+    static std::vector<std::string> bundledTrustDirectoryCandidates_() {
+        static const std::array<const char*, 3> kRelativeDirs = {
+            "certs",
+            "ssl/certs",
+            "ca"
+        };
+
+        std::vector<std::string> candidates;
+        const std::string exeDir = currentExecutableDirectory_();
+        const std::string cwd = currentWorkingDirectory_();
+        for (const char* rel : kRelativeDirs) {
+            if (!exeDir.empty()) {
+                candidates.push_back(joinPath_(exeDir, rel));
+            }
+            if (!cwd.empty() && cwd != exeDir) {
+                candidates.push_back(joinPath_(cwd, rel));
+            }
+        }
+        return candidates;
+    }
+
+    static std::string environmentValue_(const char* key) {
+        if (!key || !*key) {
+            return {};
+        }
+#if defined(_MSC_VER)
+        char* value = nullptr;
+        size_t valueLen = 0;
+        if (_dupenv_s(&value, &valueLen, key) != 0 || !value) {
+            return {};
+        }
+        std::string out(value);
+        std::free(value);
+        return out;
+#else
+        const char* value = std::getenv(key);
+        return value ? std::string(value) : std::string();
+#endif
+    }
+
+    static std::string& fallbackTrustedCaFile_() {
+        static std::string path;
+        return path;
+    }
+
+    static std::string& fallbackTrustedCaDirectory_() {
+        static std::string path;
+        return path;
+    }
+
     struct Loader {
         using LibHandle =
 #if defined(_WIN32)
@@ -366,6 +757,7 @@ private:
         using FnCTXFree = void (*)(void*);
         using FnCTXSetVerify = void (*)(void*, int, int (*)(int, void*));
         using FnCTXSetDefaultVerifyPaths = int (*)(void*);
+        using FnCTXLoadVerifyLocations = int (*)(void*, const char*, const char*);
         using FnNew = void* (*)(void*);
         using FnFree = void (*)(void*);
         using FnSetFd = int (*)(void*, int);
@@ -380,8 +772,18 @@ private:
         using FnShutdown = int (*)(void*);
         using FnTLSServerMethod = const void* (*)();
         using FnCTXUseCertFile = int (*)(void*, const char*, int);
+        using FnCTXUseCertChainFile = int (*)(void*, const char*);
         using FnCTXUseKeyFile = int (*)(void*, const char*, int);
         using FnCTXCheckPrivateKey = int (*)(const void*);
+        using FnSSLGetVerifyResult = long (*)(const void*);
+        using FnErrGetError = unsigned long (*)();
+        using FnErrClearError = void (*)();
+        using FnErrErrorStringN = void (*)(unsigned long, char*, size_t);
+        using FnX509VerifyCertErrorString = const char* (*)(long);
+        using FnCTXGetCertStore = void* (*)(void*);
+        using FnD2IX509 = void* (*)(void**, const unsigned char**, long);
+        using FnX509StoreAddCert = int (*)(void*, void*);
+        using FnX509Free = void (*)(void*);
 
         FnOpenSSLInit OPENSSL_init_ssl = nullptr;
         FnTLSClientMethod TLS_client_method = nullptr;
@@ -389,6 +791,7 @@ private:
         FnCTXFree SSL_CTX_free = nullptr;
         FnCTXSetVerify SSL_CTX_set_verify = nullptr;
         FnCTXSetDefaultVerifyPaths SSL_CTX_set_default_verify_paths = nullptr;
+        FnCTXLoadVerifyLocations SSL_CTX_load_verify_locations = nullptr;
         FnNew SSL_new = nullptr;
         FnFree SSL_free = nullptr;
         FnSetFd SSL_set_fd = nullptr;
@@ -403,10 +806,20 @@ private:
         FnShutdown SSL_shutdown = nullptr;
         FnTLSServerMethod TLS_server_method = nullptr;
         FnCTXUseCertFile SSL_CTX_use_certificate_file = nullptr;
+        FnCTXUseCertChainFile SSL_CTX_use_certificate_chain_file = nullptr;
         FnCTXUseKeyFile SSL_CTX_use_PrivateKey_file = nullptr;
         FnCTXCheckPrivateKey SSL_CTX_check_private_key = nullptr;
         using FnCTXCtrl = long (*)(void*, int, long, void*);
         FnCTXCtrl SSL_CTX_ctrl = nullptr;
+        FnSSLGetVerifyResult SSL_get_verify_result = nullptr;
+        FnErrGetError ERR_get_error = nullptr;
+        FnErrClearError ERR_clear_error = nullptr;
+        FnErrErrorStringN ERR_error_string_n = nullptr;
+        FnX509VerifyCertErrorString X509_verify_cert_error_string = nullptr;
+        FnCTXGetCertStore SSL_CTX_get_cert_store = nullptr;
+        FnD2IX509 d2i_X509 = nullptr;
+        FnX509StoreAddCert X509_STORE_add_cert = nullptr;
+        FnX509Free X509_free = nullptr;
 
         /**
          * @brief Performs the `load` operation on the associated resource.
@@ -449,6 +862,7 @@ private:
             SSL_CTX_free = (FnCTXFree)sym(ssl, "SSL_CTX_free");
             SSL_CTX_set_verify = (FnCTXSetVerify)sym(ssl, "SSL_CTX_set_verify");
             SSL_CTX_set_default_verify_paths = (FnCTXSetDefaultVerifyPaths)sym(ssl, "SSL_CTX_set_default_verify_paths");
+            SSL_CTX_load_verify_locations = (FnCTXLoadVerifyLocations)sym(ssl, "SSL_CTX_load_verify_locations");
             SSL_new = (FnNew)sym(ssl, "SSL_new");
             SSL_free = (FnFree)sym(ssl, "SSL_free");
             SSL_set_fd = (FnSetFd)sym(ssl, "SSL_set_fd");
@@ -463,9 +877,21 @@ private:
             SSL_shutdown = (FnShutdown)sym(ssl, "SSL_shutdown");
             TLS_server_method = (FnTLSServerMethod)sym(ssl, "TLS_server_method");
             SSL_CTX_use_certificate_file = (FnCTXUseCertFile)sym(ssl, "SSL_CTX_use_certificate_file");
+            SSL_CTX_use_certificate_chain_file =
+                (FnCTXUseCertChainFile)sym(ssl, "SSL_CTX_use_certificate_chain_file");
             SSL_CTX_use_PrivateKey_file = (FnCTXUseKeyFile)sym(ssl, "SSL_CTX_use_PrivateKey_file");
             SSL_CTX_check_private_key = (FnCTXCheckPrivateKey)sym(ssl, "SSL_CTX_check_private_key");
             SSL_CTX_ctrl = (FnCTXCtrl)sym(ssl, "SSL_CTX_ctrl");
+            SSL_get_verify_result = (FnSSLGetVerifyResult)sym(ssl, "SSL_get_verify_result");
+            ERR_get_error = (FnErrGetError)sym(crypto, "ERR_get_error");
+            ERR_clear_error = (FnErrClearError)sym(crypto, "ERR_clear_error");
+            ERR_error_string_n = (FnErrErrorStringN)sym(crypto, "ERR_error_string_n");
+            X509_verify_cert_error_string =
+                (FnX509VerifyCertErrorString)sym(crypto, "X509_verify_cert_error_string");
+            SSL_CTX_get_cert_store = (FnCTXGetCertStore)sym(ssl, "SSL_CTX_get_cert_store");
+            d2i_X509 = (FnD2IX509)sym(crypto, "d2i_X509");
+            X509_STORE_add_cert = (FnX509StoreAddCert)sym(crypto, "X509_STORE_add_cert");
+            X509_free = (FnX509Free)sym(crypto, "X509_free");
 
             if (!TLS_client_method || !SSL_CTX_new || !SSL_new || !SSL_set_fd || !SSL_do_handshake ||
                 !SSL_get_error || !SSL_read || !SSL_write || !SSL_shutdown) {
@@ -547,9 +973,52 @@ private:
 #else
             sys = errno;
 #endif
+            std::string detail = describeOpenSslFailure_();
             m_lastError = "SSL error code " + std::to_string(err) + " sys=" + std::to_string(sys);
+            if (!detail.empty()) {
+                m_lastError += " " + detail;
+            }
             return IoResult::Error;
         }
+    }
+
+    std::string describeOpenSslFailure_() const {
+        if (!m_loader) {
+            return {};
+        }
+
+        std::string detail;
+        if (m_loader->SSL_get_verify_result && m_ssl) {
+            const long verifyResult = m_loader->SSL_get_verify_result(m_ssl);
+            if (verifyResult != X509_V_OK) {
+                detail = "verify=" + std::to_string(verifyResult);
+                if (m_loader->X509_verify_cert_error_string) {
+                    const char* verifyText = m_loader->X509_verify_cert_error_string(verifyResult);
+                    if (verifyText && *verifyText) {
+                        detail += " (" + std::string(verifyText) + ")";
+                    }
+                }
+            }
+        }
+
+        if (m_loader->ERR_get_error) {
+            const unsigned long errCode = m_loader->ERR_get_error();
+            if (errCode != 0) {
+                char buffer[256] = {};
+                if (m_loader->ERR_error_string_n) {
+                    m_loader->ERR_error_string_n(errCode, buffer, sizeof(buffer));
+                }
+                if (!detail.empty()) {
+                    detail += " ";
+                }
+                detail += "openssl=" + std::to_string(errCode);
+                if (buffer[0] != '\0') {
+                    detail += " (" + std::string(buffer) + ")";
+                }
+            }
+        }
+
+        return detail;
     }
 
     void cleanup() {
@@ -579,6 +1048,70 @@ private:
     static constexpr int kSSL_ERROR_WANT_WRITE = 3;
     static constexpr int kSSL_ERROR_ZERO_RETURN = 6;
     static constexpr int SSL_VERIFY_PEER = 0x01;
+    static constexpr long X509_V_OK = 0;
+
+#if defined(_WIN32)
+    bool loadWindowsSystemStores_(std::string& trustSummary) {
+        bool loaded = false;
+        loaded = loadWindowsSystemStore_(L"ROOT", CERT_SYSTEM_STORE_CURRENT_USER) || loaded;
+        loaded = loadWindowsSystemStore_(L"CA", CERT_SYSTEM_STORE_CURRENT_USER) || loaded;
+        loaded = loadWindowsSystemStore_(L"ROOT", CERT_SYSTEM_STORE_LOCAL_MACHINE) || loaded;
+        loaded = loadWindowsSystemStore_(L"CA", CERT_SYSTEM_STORE_LOCAL_MACHINE) || loaded;
+        if (loaded) {
+            appendTrustSummary_(trustSummary, "windows-system-store");
+        } else {
+            appendTrustSummary_(trustSummary, "windows-system-store unavailable");
+        }
+        return loaded;
+    }
+
+    bool loadWindowsSystemStore_(const wchar_t* storeName, DWORD locationFlag) {
+        if (!m_ctx || !m_loader || !m_loader->SSL_CTX_get_cert_store || !m_loader->d2i_X509 ||
+            !m_loader->X509_STORE_add_cert || !m_loader->X509_free) {
+            return false;
+        }
+
+        HCERTSTORE store = CertOpenStore(CERT_STORE_PROV_SYSTEM_W,
+                                         0,
+                                         0,
+                                         locationFlag | CERT_STORE_OPEN_EXISTING_FLAG | CERT_STORE_READONLY_FLAG,
+                                         storeName);
+        if (!store) {
+            return false;
+        }
+
+        void* x509Store = m_loader->SSL_CTX_get_cert_store(m_ctx);
+        if (!x509Store) {
+            CertCloseStore(store, 0);
+            return false;
+        }
+
+        bool loaded = false;
+        PCCERT_CONTEXT certContext = nullptr;
+        while ((certContext = CertEnumCertificatesInStore(store, certContext)) != nullptr) {
+            const unsigned char* encoded =
+                reinterpret_cast<const unsigned char*>(certContext->pbCertEncoded);
+            void* x509 = m_loader->d2i_X509(nullptr, &encoded, static_cast<long>(certContext->cbCertEncoded));
+            if (!x509) {
+                if (m_loader->ERR_clear_error) {
+                    m_loader->ERR_clear_error();
+                }
+                continue;
+            }
+
+            if (m_loader->X509_STORE_add_cert(x509Store, x509) == 1) {
+                loaded = true;
+            } else if (m_loader->ERR_clear_error) {
+                m_loader->ERR_clear_error();
+            }
+
+            m_loader->X509_free(x509);
+        }
+
+        CertCloseStore(store, 0);
+        return loaded;
+    }
+#endif
 
     static std::vector<std::string>& extraSearchPaths() {
         static std::vector<std::string> paths;

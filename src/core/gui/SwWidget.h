@@ -76,6 +76,12 @@ private:
 };
 
 // Classe pour l'Ã©vÃ©nement de dessin
+class CloseEvent : public Event {
+public:
+    CloseEvent() : Event(EventType::Close) { accept(); }
+    CloseEvent* clone() const override { return new CloseEvent(*this); }
+};
+
 class PaintEvent : public Event {
 public:
     PaintEvent(SwPainter* painter, const SwRect& paintRect)
@@ -508,7 +514,10 @@ private:
             if (!child) {
                 continue;
             }
-            out.push_back(SavedLocalGeometry_{child, child->geometry()});
+            SavedLocalGeometry_ savedChild;
+            savedChild.widget = child;
+            savedChild.geometry = child->geometry();
+            out.push_back(savedChild);
             collectDescendantLocalGeometry_(child, out);
         }
     }
@@ -1008,6 +1017,23 @@ signals:
         return findFocusedWidgetInHierarchy_();
     }
 
+    SwWidget* hoveredWidgetFromRoot() const {
+        const SwWidget* hoverRoot = mouseGrabScopeRoot_();
+        if (!hoverRoot) {
+            return nullptr;
+        }
+
+        const SwList<SwWidget*>& hoveredPath = hoverRoot->m_hoveredPath_;
+        for (size_t i = hoveredPath.size(); i > 0; --i) {
+            SwWidget* hoveredWidget = hoveredPath[i - 1];
+            if (hoveredWidget && SwObject::isLive(hoveredWidget)) {
+                return hoveredWidget;
+            }
+        }
+
+        return nullptr;
+    }
+
     void bindToNativeWindowRecursive(const SwWidgetPlatformHandle& handle) {
         setNativeWindowHandleRecursive(handle);
     }
@@ -1360,8 +1386,9 @@ protected:
             return false;
         }
 
+        SwWidget* hoverTarget = nullptr;
         if (rootEvent.type() == EventType::MouseMoveEvent) {
-            updateHoverStateFromRoot_(rootEvent.pos());
+            hoverTarget = updateHoverStateFromRoot_(rootEvent.pos());
         }
 
         SwWidget* target = nullptr;
@@ -1382,6 +1409,9 @@ protected:
             target = grabber;
         }
 
+        if (!target && hoverTarget) {
+            target = hoverTarget;
+        }
         if (!target) {
             target = getChildUnderCursor(rootEvent.x(), rootEvent.y());
         }
@@ -1500,6 +1530,17 @@ protected:
 
     virtual void moveEvent(MoveEvent* event) {
         SW_UNUSED(event);
+    }
+
+    /**
+     * @brief Called when the window receives a close request (e.g. user clicks X).
+     *
+     * Override this to prevent closing (call event->ignore()) or to minimize to
+     * system tray instead. Default implementation accepts the event.
+     */
+    virtual void closeEvent(CloseEvent* event) {
+        SW_UNUSED(event);
+        // Default: accept (allow close)
     }
 
     virtual void showEvent(Event* event) {
@@ -1813,6 +1854,7 @@ protected:
     SwWidgetPlatformHandle m_nativeWindowHandle;
     SwWidget* m_mouseGrabberWidget{nullptr};
     unsigned int m_mouseGrabButtons{0};
+    SwList<SwWidget*> m_hoveredPath_;
 
 private:
     bool m_visibilityEventInFlight{false};
@@ -1916,7 +1958,23 @@ protected:
         targetWidget->setFocus(true);
     }
 
+    void clearHoverPathOnRoot_() {
+        SwList<SwWidget*>& hoveredPath = mouseGrabScopeRoot_()->m_hoveredPath_;
+        for (size_t i = hoveredPath.size(); i > 0; --i) {
+            SwWidget* widget = hoveredPath[i - 1];
+            if (widget && SwObject::isLive(widget)) {
+                widget->setHover(false);
+            }
+        }
+        hoveredPath.clear();
+    }
+
     void clearHoverRecursive_() {
+        if (this == mouseGrabScopeRoot_()) {
+            clearHoverPathOnRoot_();
+            return;
+        }
+
         setHover(false);
         const auto& directChildren = children();
         size_t i = 0;
@@ -1932,26 +1990,69 @@ protected:
         }
     }
 
-    void updateHoverStateFromRoot_(const SwPoint& pointInThis) {
-        const bool inside = isVisibleInHierarchy() && isPointInside(pointInThis.x, pointInThis.y);
-        setHover(inside);
+    SwWidget* buildHoverPathToPoint_(const SwPoint& pointInThis, SwList<SwWidget*>& pathOut) {
+        if (!isVisibleInHierarchy() || !isPointInside(pointInThis.x, pointInThis.y)) {
+            return nullptr;
+        }
+
+        pathOut.append(this);
 
         const auto& directChildren = children();
-        size_t i = 0;
-        while (i < directChildren.size()) {
-            SwObject* obj = directChildren[i];
+        for (int i = static_cast<int>(directChildren.size()) - 1; i >= 0; --i) {
+            SwObject* obj = directChildren[static_cast<size_t>(i)];
             SwWidget* child = obj ? dynamic_cast<SwWidget*>(obj) : nullptr;
-            if (child) {
-                if (!inside) {
-                    child->clearHoverRecursive_();
-                } else {
-                    child->updateHoverStateFromRoot_(child->mapFromParent(pointInThis));
-                }
+            if (!child || !child->isVisibleInHierarchy()) {
+                continue;
             }
-            if (i < directChildren.size() && directChildren[i] == obj) {
-                ++i;
+
+            const SwPoint childLocalPoint = child->mapFromParent(pointInThis);
+            if (!child->isPointInside(childLocalPoint.x, childLocalPoint.y)) {
+                continue;
+            }
+
+            SwWidget* leaf = child->buildHoverPathToPoint_(childLocalPoint, pathOut);
+            return leaf ? leaf : child;
+        }
+
+        return this;
+    }
+
+    SwWidget* updateHoverStateFromRoot_(const SwPoint& pointInThis) {
+        SwWidget* hoverRoot = mouseGrabScopeRoot_();
+        if (hoverRoot != this) {
+            return hoverRoot->updateHoverStateFromRoot_(hoverRoot->mapFrom(this, pointInThis));
+        }
+
+        SwList<SwWidget*> newHoveredPath;
+        SwWidget* hoveredLeaf = buildHoverPathToPoint_(pointInThis, newHoveredPath);
+
+        SwList<SwWidget*>& oldHoveredPath = m_hoveredPath_;
+        size_t commonPrefixSize = 0;
+        while (commonPrefixSize < oldHoveredPath.size() &&
+               commonPrefixSize < newHoveredPath.size()) {
+            SwWidget* oldWidget = oldHoveredPath[commonPrefixSize];
+            if (!oldWidget || !SwObject::isLive(oldWidget) || oldWidget != newHoveredPath[commonPrefixSize]) {
+                break;
+            }
+            ++commonPrefixSize;
+        }
+
+        for (size_t i = oldHoveredPath.size(); i > commonPrefixSize; --i) {
+            SwWidget* oldWidget = oldHoveredPath[i - 1];
+            if (oldWidget && SwObject::isLive(oldWidget)) {
+                oldWidget->setHover(false);
             }
         }
+
+        for (size_t i = commonPrefixSize; i < newHoveredPath.size(); ++i) {
+            SwWidget* newWidget = newHoveredPath[i];
+            if (newWidget) {
+                newWidget->setHover(true);
+            }
+        }
+
+        oldHoveredPath = newHoveredPath;
+        return hoveredLeaf;
     }
 
     bool deliverMouseEventToChain_(SwWidget* target, const MouseEvent& rootEvent, SwWidget** acceptedBy = nullptr) {

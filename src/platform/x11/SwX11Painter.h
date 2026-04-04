@@ -55,7 +55,11 @@
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#include <cstdint>
+#include <map>
+#include <mutex>
 #include <string>
+#include <tuple>
 #include <vector>
 #include <cmath>
 
@@ -82,6 +86,8 @@ public:
         ensureDrawable();
     }
 
+    static void releaseSharedBackbuffer(Display* display, ::Window window);
+
     void begin(const SwPlatformPaintEvent& event) override {
         end();
 
@@ -100,16 +106,6 @@ public:
     void end() override {
         m_finalizeRequested = true;
         presentIfNeeded_();
-        if (m_display && m_gc) {
-            XFreeGC(m_display, m_gc);
-        }
-        if (m_display && m_presentGC) {
-            XFreeGC(m_display, m_presentGC);
-        }
-        if (m_display && m_backBuffer) {
-            XFreePixmap(m_display, m_backBuffer);
-        }
-
         m_gc = 0;
         m_presentGC = 0;
         m_backBuffer = 0;
@@ -772,6 +768,54 @@ public:
     }
 
 private:
+    struct SharedBackbuffer {
+        Pixmap backBuffer{0};
+        GC gc{0};
+        GC presentGC{0};
+        int width{0};
+        int height{0};
+    };
+
+    using SharedBackbufferKey = std::pair<std::uintptr_t, std::uintptr_t>;
+    using SharedBackbufferMap = std::map<SharedBackbufferKey, SharedBackbuffer>;
+
+    static SharedBackbufferKey sharedBackbufferKey_(Display* display, ::Window window) {
+        return SharedBackbufferKey(reinterpret_cast<std::uintptr_t>(display),
+                                   static_cast<std::uintptr_t>(window));
+    }
+
+    static SharedBackbufferMap& sharedBackbuffers_() {
+        static SharedBackbufferMap buffers;
+        return buffers;
+    }
+
+    static std::mutex& sharedBackbufferMutex_() {
+        static std::mutex mutex;
+        return mutex;
+    }
+
+    static void clearBackbuffer_(Display* display, Pixmap backBuffer, int width, int height) {
+        if (!display || !backBuffer || width <= 0 || height <= 0) {
+            return;
+        }
+
+        GC clearGc = XCreateGC(display, backBuffer, 0, nullptr);
+        if (!clearGc) {
+            return;
+        }
+
+        const unsigned long win11Surface = (249u << 16) | (249u << 8) | 249u;
+        XSetForeground(display, clearGc, win11Surface);
+        XFillRectangle(display,
+                       backBuffer,
+                       clearGc,
+                       0,
+                       0,
+                       static_cast<unsigned int>(width),
+                       static_cast<unsigned int>(height));
+        XFreeGC(display, clearGc);
+    }
+
     void presentIfNeeded_() {
         if (!m_finalizeRequested || m_presented || !m_display) {
             return;
@@ -821,48 +865,48 @@ private:
             return false;
         }
 
-        if (m_backBuffer &&
-            (m_bufferWidth != m_width || m_bufferHeight != m_height)) {
-            XFreePixmap(m_display, m_backBuffer);
-            m_backBuffer = 0;
+        std::lock_guard<std::mutex> lock(sharedBackbufferMutex_());
+        SharedBackbuffer& shared = sharedBackbuffers_()[sharedBackbufferKey_(m_display, m_window)];
+
+        if (shared.backBuffer &&
+            (shared.width != m_width || shared.height != m_height)) {
+            XFreePixmap(m_display, shared.backBuffer);
+            shared.backBuffer = 0;
+            shared.width = 0;
+            shared.height = 0;
         }
 
-        if (!m_backBuffer) {
+        if (!shared.backBuffer) {
             const int depth = DefaultDepth(m_display, DefaultScreen(m_display));
-            m_backBuffer = XCreatePixmap(m_display,
-                                         m_window,
-                                         static_cast<unsigned int>(m_width),
-                                         static_cast<unsigned int>(m_height),
-                                         static_cast<unsigned int>(depth));
-            m_bufferWidth = m_width;
-            m_bufferHeight = m_height;
+            shared.backBuffer = XCreatePixmap(m_display,
+                                              m_window,
+                                              static_cast<unsigned int>(m_width),
+                                              static_cast<unsigned int>(m_height),
+                                              static_cast<unsigned int>(depth));
+            shared.width = m_width;
+            shared.height = m_height;
+            clearBackbuffer_(m_display, shared.backBuffer, shared.width, shared.height);
+        }
 
-            // Clear new back-buffer to white so unpainted regions aren't black
-            GC clearGc = XCreateGC(m_display, m_backBuffer, 0, nullptr);
-            if (clearGc) {
-                // Windows 11 default surface: rgb(249, 249, 249)
-                const unsigned long win11Surface = (249u << 16) | (249u << 8) | 249u;
-                XSetForeground(m_display, clearGc, win11Surface);
-                XFillRectangle(m_display, m_backBuffer, clearGc, 0, 0,
-                               static_cast<unsigned int>(m_width),
-                               static_cast<unsigned int>(m_height));
-                XFreeGC(m_display, clearGc);
+        if (!shared.gc) {
+            shared.gc = XCreateGC(m_display, m_window, 0, nullptr);
+            if (shared.gc) {
+                XSetGraphicsExposures(m_display, shared.gc, False);
             }
         }
 
-        if (!m_gc) {
-            m_gc = XCreateGC(m_display, m_window, 0, nullptr);
-            if (m_gc) {
-                XSetGraphicsExposures(m_display, m_gc, False);
+        if (!shared.presentGC) {
+            shared.presentGC = XCreateGC(m_display, m_window, 0, nullptr);
+            if (shared.presentGC) {
+                XSetGraphicsExposures(m_display, shared.presentGC, False);
             }
         }
 
-        if (!m_presentGC) {
-            m_presentGC = XCreateGC(m_display, m_window, 0, nullptr);
-            if (m_presentGC) {
-                XSetGraphicsExposures(m_display, m_presentGC, False);
-            }
-        }
+        m_gc = shared.gc;
+        m_presentGC = shared.presentGC;
+        m_backBuffer = shared.backBuffer;
+        m_bufferWidth = shared.width;
+        m_bufferHeight = shared.height;
         return m_gc != 0;
     }
 
@@ -896,5 +940,28 @@ private:
     bool m_deferPresent{true};
     std::vector<XRectangle> m_clipStack;
 };
+
+inline void SwX11Painter::releaseSharedBackbuffer(Display* display, ::Window window) {
+    if (!display || !window) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(sharedBackbufferMutex_());
+    SharedBackbufferMap::iterator it = sharedBackbuffers_().find(sharedBackbufferKey_(display, window));
+    if (it == sharedBackbuffers_().end()) {
+        return;
+    }
+
+    if (it->second.gc) {
+        XFreeGC(display, it->second.gc);
+    }
+    if (it->second.presentGC) {
+        XFreeGC(display, it->second.presentGC);
+    }
+    if (it->second.backBuffer) {
+        XFreePixmap(display, it->second.backBuffer);
+    }
+    sharedBackbuffers_().erase(it);
+}
 
 #endif

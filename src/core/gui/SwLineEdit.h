@@ -51,7 +51,10 @@
 #include "SwGuiApplication.h"
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <cstdlib>
 #include <cwctype>
+#include <limits>
 #include <sstream>
 #include <vector>
 #include "SwTimer.h"
@@ -148,6 +151,9 @@ public:
             }
             else {
                 monitorTimer->stop();
+                clearSelection_();
+                resetPendingMultiClick_();
+                isSelecting = false;
             }
             update();
         });
@@ -197,6 +203,9 @@ public:
                 monitorTimer->start();
             } else {
                 monitorTimer->stop();
+                clearSelection_();
+                resetPendingMultiClick_();
+                isSelecting = false;
             }
             update();
         });
@@ -494,6 +503,16 @@ public:
     virtual void mousePressEvent(MouseEvent* event) override {
         if (!getReadOnly()) {
             this->setFocus(true);
+            if (isTripleClickPress_(event)) {
+                selectAllText_();
+                resetPendingMultiClick_();
+                isSelecting = false;
+                event->accept();
+                update();
+                SwWidget::mousePressEvent(event);
+                return;
+            }
+            resetPendingMultiClick_();
             cursorPos = getCharacterIndexAtPosition(event->x());
             if (SwWidgetPlatformAdapter::isShiftModifierActive()) {
                 selectionEnd = cursorPos;
@@ -517,10 +536,17 @@ public:
      * @details Override this hook when the default framework behavior needs to be extended or replaced.
      */
     virtual void mouseDoubleClickEvent(MouseEvent* event) override {
-        selectionStart = 0;
-        selectionEnd = getText().size();
+        if (!event) {
+            return;
+        }
+        if (!getReadOnly()) {
+            this->setFocus(true);
+        }
+        cursorPos = getCharacterIndexAtPosition(event->x());
+        selectWordAtCursor_();
+        rememberDoubleClick_(event);
+        isSelecting = false;
         event->accept();
-        isSelecting = true;
         update();
     }
 
@@ -580,10 +606,22 @@ private:
     bool m_caretVisible{true};
     size_t firstVisibleCharacter{0};
     SwColor m_focusAccent{59, 130, 246};
+    bool m_pendingMultiClick{false};
+    SwPoint m_lastDoubleClickPos{};
+    std::chrono::steady_clock::time_point m_lastDoubleClickTime{};
+
+    static constexpr long long kTripleClickIntervalMs_ = 500;
+    static constexpr int kTripleClickDistancePx_ = 6;
 
     static bool isUtf8ContinuationByte_(unsigned char byte) {
         return (byte & 0xC0U) == 0x80U;
     }
+
+    struct Utf8CodePoint_ {
+        size_t start{0};
+        size_t end{0};
+        char32_t value{0};
+    };
 
     static size_t clampUtf8Boundary_(const SwString& text, size_t offset) {
         const std::string utf8 = text.toStdString();
@@ -619,6 +657,72 @@ private:
             --current;
         }
         return current;
+    }
+
+    static char32_t decodeUtf8CodePoint_(const std::string& utf8, size_t start, size_t end) {
+        if (start >= utf8.size() || end <= start) {
+            return 0;
+        }
+
+        const unsigned char first = static_cast<unsigned char>(utf8[start]);
+        const size_t length = end - start;
+        if ((first & 0x80U) == 0 || length == 1) {
+            return first;
+        }
+        if ((first & 0xE0U) == 0xC0U && length >= 2) {
+            return (static_cast<char32_t>(first & 0x1FU) << 6) |
+                   static_cast<char32_t>(static_cast<unsigned char>(utf8[start + 1]) & 0x3FU);
+        }
+        if ((first & 0xF0U) == 0xE0U && length >= 3) {
+            return (static_cast<char32_t>(first & 0x0FU) << 12) |
+                   (static_cast<char32_t>(static_cast<unsigned char>(utf8[start + 1]) & 0x3FU) << 6) |
+                   static_cast<char32_t>(static_cast<unsigned char>(utf8[start + 2]) & 0x3FU);
+        }
+        if ((first & 0xF8U) == 0xF0U && length >= 4) {
+            return (static_cast<char32_t>(first & 0x07U) << 18) |
+                   (static_cast<char32_t>(static_cast<unsigned char>(utf8[start + 1]) & 0x3FU) << 12) |
+                   (static_cast<char32_t>(static_cast<unsigned char>(utf8[start + 2]) & 0x3FU) << 6) |
+                   static_cast<char32_t>(static_cast<unsigned char>(utf8[start + 3]) & 0x3FU);
+        }
+        return first;
+    }
+
+    static bool isWordCodePoint_(char32_t codePoint) {
+        if (codePoint == U'_') {
+            return true;
+        }
+        if (codePoint < 128U) {
+            return std::isalnum(static_cast<unsigned char>(codePoint)) != 0;
+        }
+        if (codePoint <= static_cast<char32_t>((std::numeric_limits<wchar_t>::max)())) {
+            const wchar_t wide = static_cast<wchar_t>(codePoint);
+            if (std::iswspace(wide) != 0 || std::iswpunct(wide) != 0) {
+                return false;
+            }
+            if (std::iswalnum(wide) != 0) {
+                return true;
+            }
+        }
+        return true;
+    }
+
+    static std::vector<Utf8CodePoint_> utf8CodePoints_(const SwString& text) {
+        std::vector<Utf8CodePoint_> codePoints;
+        const std::string utf8 = text.toStdString();
+        size_t offset = 0;
+        while (offset < utf8.size()) {
+            const size_t next = nextUtf8Boundary_(text, offset);
+            if (next <= offset) {
+                break;
+            }
+            Utf8CodePoint_ codePoint;
+            codePoint.start = offset;
+            codePoint.end = next;
+            codePoint.value = decodeUtf8CodePoint_(utf8, offset, next);
+            codePoints.push_back(codePoint);
+            offset = next;
+        }
+        return codePoints;
     }
 
     static SwString utf8FromWideChar_(wchar_t wc) {
@@ -668,7 +772,7 @@ private:
 		size_t end = (std::max)(selectionStart, selectionEnd);
         m_Text.erase(start, end - start);
         cursorPos = start;
-        selectionStart = selectionEnd = cursorPos;
+        clearSelection_();
         if (firstVisibleCharacter > m_Text.length()) {
             firstVisibleCharacter = m_Text.length();
         }
@@ -706,6 +810,107 @@ private:
                 }
             }
         }
+    }
+
+    void clearSelection_() {
+        selectionStart = selectionEnd = cursorPos;
+    }
+
+    void selectAllText_() {
+        selectionStart = 0;
+        selectionEnd = m_Text.length();
+        cursorPos = selectionEnd;
+    }
+
+    void rememberDoubleClick_(const MouseEvent* event) {
+        if (!event) {
+            return;
+        }
+        m_pendingMultiClick = true;
+        m_lastDoubleClickPos = event->pos();
+        m_lastDoubleClickTime = std::chrono::steady_clock::now();
+    }
+
+    void resetPendingMultiClick_() {
+        m_pendingMultiClick = false;
+    }
+
+    bool isTripleClickPress_(const MouseEvent* event) const {
+        if (!event || !m_pendingMultiClick || event->button() != SwMouseButton::Left) {
+            return false;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        const long long elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_lastDoubleClickTime).count();
+        if (elapsedMs < 0 || elapsedMs > kTripleClickIntervalMs_) {
+            return false;
+        }
+
+        const SwPoint pos = event->pos();
+        return std::abs(pos.x - m_lastDoubleClickPos.x) <= kTripleClickDistancePx_ &&
+               std::abs(pos.y - m_lastDoubleClickPos.y) <= kTripleClickDistancePx_;
+    }
+
+    void selectWordAtCursor_() {
+        const size_t length = m_Text.length();
+        if (length == 0) {
+            cursorPos = 0;
+            clearSelection_();
+            return;
+        }
+
+        const std::vector<Utf8CodePoint_> codePoints = utf8CodePoints_(m_Text);
+        if (codePoints.empty()) {
+            cursorPos = length;
+            clearSelection_();
+            return;
+        }
+
+        size_t pos = clampUtf8Boundary_(m_Text, (std::min)(cursorPos, length));
+        if (pos == length) {
+            pos = previousUtf8Boundary_(m_Text, pos);
+        }
+        if (pos >= length) {
+            cursorPos = length;
+            clearSelection_();
+            return;
+        }
+
+        size_t anchorIndex = codePoints.size() - 1;
+        for (size_t i = 0; i < codePoints.size(); ++i) {
+            if (codePoints[i].start >= pos) {
+                anchorIndex = i;
+                break;
+            }
+        }
+
+        if (codePoints[anchorIndex].start == pos &&
+            !isWordCodePoint_(codePoints[anchorIndex].value) &&
+            anchorIndex > 0 &&
+            isWordCodePoint_(codePoints[anchorIndex - 1].value)) {
+            --anchorIndex;
+        }
+
+        if (!isWordCodePoint_(codePoints[anchorIndex].value)) {
+            selectionStart = codePoints[anchorIndex].start;
+            selectionEnd = codePoints[anchorIndex].end;
+            cursorPos = selectionEnd;
+            return;
+        }
+
+        size_t startIndex = anchorIndex;
+        while (startIndex > 0 && isWordCodePoint_(codePoints[startIndex - 1].value)) {
+            --startIndex;
+        }
+
+        size_t endIndex = anchorIndex;
+        while (endIndex + 1 < codePoints.size() && isWordCodePoint_(codePoints[endIndex + 1].value)) {
+            ++endIndex;
+        }
+
+        selectionStart = codePoints[startIndex].start;
+        selectionEnd = codePoints[endIndex].end;
+        cursorPos = selectionEnd;
     }
 
     Padding resolvePadding() {
@@ -876,4 +1081,3 @@ private:
         }
     }
 };
-

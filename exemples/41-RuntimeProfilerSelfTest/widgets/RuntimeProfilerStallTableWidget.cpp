@@ -355,10 +355,15 @@ void RuntimeProfilerStallTableWidget::rebuild(const SwList<RuntimeProfilerDashbo
         SwStandardItem* kindItem = new SwStandardItem(timingKindName_(entry.kind));
         SwStandardItem* scopeItem = new SwStandardItem(entry.label.isEmpty() ? SwString("<unnamed>") : entry.label);
 
-        const SwString tooltip = "#" + SwString::number(entry.sequence) +
-                                 "  |  lane " + laneName_(entry.lane) +
-                                 "  |  thread " + SwString::number(entry.threadId) +
-                                 "  |  threshold " + durationMsString_(thresholdUs_);
+        SwString tooltip = "#" + SwString::number(entry.sequence) +
+                           "  |  lane " + laneName_(entry.lane) +
+                           "  |  thread " + SwString::number(entry.threadId);
+        if (!entry.applicationLabel.isEmpty()) {
+            tooltip += "  |  runtime " + entry.applicationLabel;
+        } else if (entry.applicationId != 0ULL) {
+            tooltip += "  |  runtime #" + SwString::number(entry.applicationId);
+        }
+        tooltip += "  |  threshold " + durationMsString_(thresholdUs_);
         timeItem->setToolTip(tooltip);
         durationItem->setToolTip(tooltip);
         kindItem->setToolTip(tooltip);

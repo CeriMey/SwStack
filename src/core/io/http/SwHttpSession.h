@@ -47,7 +47,8 @@
  ***************************************************************************************************/
 
 #include "SwObject.h"
-#include "SwTcpSocket.h"
+#include "SwAbstractSocket.h"
+#include "SwPointer.h"
 #include "SwTimer.h"
 #include "SwFile.h"
 #include "SwDebug.h"
@@ -81,16 +82,20 @@ public:
      *
      * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
      */
-    SwHttpSession(SwTcpSocket* socket,
+    SwHttpSession(SwAbstractSocket* socket,
                   SwHttpRouter* router,
                   const SwHttpLimits& limits,
                   const SwHttpTimeouts& timeouts,
+                  bool isTls,
+                  uint16_t localPort,
                   SwObject* parent = nullptr)
         : SwObject(parent),
           m_socket(socket),
           m_router(router),
           m_limits(limits),
-          m_timeouts(timeouts) {
+          m_timeouts(timeouts),
+          m_isTls(isTls),
+          m_localPort(localPort) {
         if (!m_socket || !m_router) {
             deleteLater();
             return;
@@ -98,10 +103,10 @@ public:
 
         m_parser.setLimits(m_limits);
         m_socket->setParent(this);
-        connect(m_socket, &SwTcpSocket::readyRead, this, &SwHttpSession::onReadyRead_);
-        connect(m_socket, &SwTcpSocket::disconnected, this, &SwHttpSession::onDisconnected_);
-        connect(m_socket, &SwTcpSocket::errorOccurred, this, &SwHttpSession::onError_);
-        connect(m_socket, &SwTcpSocket::writeFinished, this, &SwHttpSession::onWriteFinished_);
+        connect(m_socket, &SwIODevice::readyRead, this, &SwHttpSession::onReadyRead_);
+        connect(m_socket, &SwAbstractSocket::disconnected, this, &SwHttpSession::onDisconnected_);
+        connect(m_socket, &SwAbstractSocket::errorOccurred, this, &SwHttpSession::onError_);
+        connect(m_socket, &SwAbstractSocket::writeFinished, this, &SwHttpSession::onWriteFinished_);
 
         m_timeoutWatch = new SwTimer(200, this);
         connect(m_timeoutWatch, &SwTimer::timeout, this, &SwHttpSession::onTimeoutWatch_);
@@ -160,6 +165,10 @@ public:
         cleanup_();
     }
 
+    void startBufferedReadProcessing() {
+        onReadyRead_();
+    }
+
 private:
     enum class SendState {
         Idle,
@@ -167,7 +176,7 @@ private:
         SendingChunked
     };
 
-    SwTcpSocket* m_socket = nullptr;
+    SwAbstractSocket* m_socket = nullptr;
     SwHttpRouter* m_router = nullptr;
     SwHttpParser m_parser;
     SwHttpLimits m_limits;
@@ -194,11 +203,13 @@ private:
     bool m_chunkTerminatorSent = false;
     SwList<SwString> m_requestTempFiles;
     SwHttpRequest m_activeRequest;
-    std::function<void(SwTcpSocket*)> m_socketHandoverCallback;
+    std::function<void(SwAbstractSocket*)> m_socketHandoverCallback;
 
     SwHttpRequestHandler m_requestHandler;
     std::function<void(SwHttpSession*)> m_onFinished;
     SwList<std::function<void()>> m_cleanupHooks;
+    bool m_isTls = false;
+    uint16_t m_localPort = 0;
 
     std::chrono::steady_clock::time_point m_lastReadAt;
     std::chrono::steady_clock::time_point m_requestStartedAt;
@@ -236,6 +247,8 @@ private slots:
             }
 
             for (std::size_t i = 0; i < parsedRequests.size(); ++i) {
+                parsedRequests[i].isTls = m_isTls;
+                parsedRequests[i].localPort = m_localPort;
                 m_pendingRequests.append(parsedRequests[i]);
                 if (m_pendingRequests.size() > m_limits.maxPipelinedRequests) {
                     sendErrorAndClose_(400, "Too many pipelined requests");
@@ -342,6 +355,25 @@ private slots:
     }
 
 private:
+    void scheduleDeferredWriteFinished_() {
+        if (m_deferredWriteScheduled || !m_socket || m_cleaned) {
+            return;
+        }
+
+        m_deferredWriteScheduled = true;
+        SwPointer<SwHttpSession> self(this);
+        if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
+            app->postEventOnLane([self]() {
+                if (self) {
+                    self->onDeferredWriteFinished_();
+                }
+            }, SwFiberLane::Normal);
+            return;
+        }
+
+        SwTimer::singleShot(0, this, &SwHttpSession::onDeferredWriteFinished_);
+    }
+
     void writeSocket_(const SwString& data) {
         if (!m_socket || data.isEmpty()) {
             return;
@@ -353,10 +385,7 @@ private:
 
         if (m_writeFinishedDeferred) {
             m_writeFinishedDeferred = false;
-            if (!m_deferredWriteScheduled) {
-                m_deferredWriteScheduled = true;
-                SwTimer::singleShot(0, this, &SwHttpSession::onDeferredWriteFinished_);
-            }
+            scheduleDeferredWriteFinished_();
         }
     }
 
@@ -460,6 +489,16 @@ private:
             m_handoverAfterWrite = true;
             m_socketHandoverCallback = response.onSwitchToRawSocket;
             m_closeAfterWrite = false;
+            if (response.switchToRawSocketWithoutHttpResponse) {
+                response.headOnly = true;
+                response.hasFile = false;
+                response.useChunkedTransfer = false;
+                response.chunkedParts.clear();
+                response.body.clear();
+                m_responsePayloadDone = true;
+                finalizeResponse_();
+                return;
+            }
             response.headOnly = true;
             response.hasFile = false;
             response.useChunkedTransfer = false;
@@ -608,7 +647,7 @@ private:
                 };
 
                 if (affinity && ThreadHandle::currentThread() != affinity) {
-                    affinity->postTask(deliver);
+                    affinity->postTaskOnLane(deliver, SwFiberLane::Control);
                 } else {
                     deliver();
                 }
@@ -659,12 +698,12 @@ private:
             return;
         }
 
-        SwTcpSocket* rawSocket = m_socket;
+        SwAbstractSocket* rawSocket = m_socket;
         m_socket = nullptr;
         rawSocket->disconnectAllSlots();
         rawSocket->setParent(nullptr);
 
-        std::function<void(SwTcpSocket*)> handover = m_socketHandoverCallback;
+        std::function<void(SwAbstractSocket*)> handover = m_socketHandoverCallback;
         m_socketHandoverCallback = nullptr;
         m_handoverAfterWrite = false;
 

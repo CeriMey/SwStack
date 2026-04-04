@@ -523,7 +523,7 @@ private:
 
     SwString m_clipboard;
     mutable std::mutex m_clipboardMutex;
-    size_t m_eventFdWaitableId{0};
+    SwIoDispatcher::Token m_eventFdWatchToken{0};
 };
 
 inline SwX11PlatformWindow::SwX11PlatformWindow(SwX11PlatformIntegration* integration,
@@ -591,6 +591,7 @@ inline void SwX11PlatformWindow::releaseNativeResources() {
     }
     if (m_display && m_window) {
         SwWidgetPlatformAdapter::finishSyntheticExpose(m_window);
+        SwX11Painter::releaseSharedBackbuffer(m_display, m_window);
         XDestroyWindow(m_display, m_window);
         m_window = 0;
     }
@@ -633,15 +634,9 @@ inline void SwX11PlatformWindow::move(int x, int y) {
 
 inline void SwX11PlatformWindow::requestUpdate() {
     if (m_display && m_window) {
-        if (!SwWidgetPlatformAdapter::requestSyntheticExpose(m_window)) {
-            return;
-        }
-        XEvent exposeEvent;
-        std::memset(&exposeEvent, 0, sizeof(exposeEvent));
-        exposeEvent.type = Expose;
-        exposeEvent.xexpose.window = m_window;
-        XSendEvent(m_display, m_window, False, ExposureMask, &exposeEvent);
-        XFlush(m_display);
+        SwWidgetPlatformAdapter::invalidateRect(
+            SwWidgetPlatformAdapter::fromNativeHandle(nativeHandle(), nativeDisplay()),
+            SwRect{0, 0, std::max(1, m_size.width), std::max(1, m_size.height)});
     }
 }
 
@@ -675,18 +670,31 @@ inline void SwX11PlatformIntegration::initialize(SwGuiApplication* app) {
     ensureClipboardWindow();
     if (SwCoreApplication* coreApp = SwCoreApplication::instance(false)) {
         const int x11Fd = ConnectionNumber(m_display);
-        m_eventFdWaitableId = coreApp->addWaitFd(x11Fd, [this]() {
-            processPlatformEvents();
-        });
+        m_eventFdWatchToken = coreApp->ioDispatcher().watchFd(
+            x11Fd,
+            SwIoDispatcher::Readable,
+            [coreApp](std::function<void()> task) {
+                if (coreApp) {
+                    coreApp->postEventOnLane(std::move(task), SwFiberLane::Control);
+                    return;
+                }
+                task();
+            },
+            [this](uint32_t events) {
+                if ((events & SwIoDispatcher::Readable) == 0) {
+                    return;
+                }
+                processPlatformEvents();
+            });
     }
 }
 
 inline void SwX11PlatformIntegration::shutdown() {
-    if (m_eventFdWaitableId) {
+    if (m_eventFdWatchToken) {
         if (SwCoreApplication* coreApp = SwCoreApplication::instance(false)) {
-            coreApp->removeWaitable(m_eventFdWaitableId);
+            coreApp->ioDispatcher().remove(m_eventFdWatchToken);
         }
-        m_eventFdWaitableId = 0;
+        m_eventFdWatchToken = 0;
     }
 
     {
@@ -711,7 +719,7 @@ inline void SwX11PlatformIntegration::shutdown() {
     m_utf8StringAtom = 0;
     m_textAtom = 0;
     m_clipboardProperty = 0;
-    m_eventFdWaitableId = 0;
+    m_eventFdWatchToken = 0;
 }
 
 inline std::unique_ptr<SwPlatformWindow> SwX11PlatformIntegration::createWindow(
@@ -773,6 +781,9 @@ inline void SwX11PlatformIntegration::dispatchEvent(const XEvent& event) {
                 paintEvent.nativeWindowHandle = window->nativeHandle();
                 paintEvent.nativeDisplay = window->nativeDisplay();
                 window->callbacks().paintRequestHandler(paintEvent);
+                SwWidgetPlatformAdapter::notePainted(
+                    SwWidgetPlatformAdapter::fromNativeHandle(window->nativeHandle(),
+                                                              window->nativeDisplay()));
             }
         }
         break;
@@ -962,15 +973,7 @@ inline void SwX11PlatformIntegration::handleConfigureEvent(const XConfigureEvent
     if (window->callbacks().resizeHandler) {
         window->callbacks().resizeHandler(SwPlatformSize{event.width, event.height});
     }
-    if (window->callbacks().paintRequestHandler) {
-        SwPlatformPaintEvent paintEvent;
-        paintEvent.dirtyRect = SwPlatformRect{0, 0, event.width, event.height};
-        paintEvent.surfaceSize = SwPlatformSize{event.width, event.height};
-        paintEvent.nativePaintDevice = window->nativeHandle();
-        paintEvent.nativeWindowHandle = window->nativeHandle();
-        paintEvent.nativeDisplay = window->nativeDisplay();
-        window->callbacks().paintRequestHandler(paintEvent);
-    }
+    SwWidgetPlatformAdapter::flushDamage(true);
 }
 
 inline void SwX11PlatformIntegration::handleClientMessage(const XClientMessageEvent& event) {

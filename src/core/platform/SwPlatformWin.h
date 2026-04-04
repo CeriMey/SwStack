@@ -337,12 +337,35 @@ public:
      * @return The requested normalize Path.
      */
     SwString normalizePath(const SwString& path) const override {
-        SwString result = path;
+        SwString result = path.trimmed();
         result.replace("/", "\\");
-        if (!result.isEmpty() && !result.startsWith("\\\\?\\")) {
-            result = SwString("\\\\?\\") + result;
+        if (result.isEmpty()) {
+            return result;
         }
-        return result;
+
+        if (result.startsWith("\\\\?\\")) {
+            return result;
+        }
+
+        const bool isDriveAbsolute = result.size() > 1 && result[1] == ':';
+        const bool isUnc = result.startsWith("\\\\");
+        if (!isDriveAbsolute && !isUnc) {
+            wchar_t buffer[MAX_PATH];
+            DWORD len = GetFullPathNameW(toWide(result).c_str(), MAX_PATH, buffer, nullptr);
+            if (len != 0 && len < MAX_PATH) {
+                result = fromWide(buffer);
+                result.replace("/", "\\");
+            }
+        }
+
+        if (result.startsWith("\\\\")) {
+            if (!result.startsWith("\\\\?\\UNC\\")) {
+                result = SwString("\\\\?\\UNC\\") + result.mid(2);
+            }
+            return result;
+        }
+
+        return SwString("\\\\?\\") + result;
     }
 
     /**
@@ -434,7 +457,10 @@ public:
         }
 
         DWORD err = GetLastError();
-        if (err == ERROR_ALREADY_EXISTS) {
+        const DWORD attr = GetFileAttributesW(wide.c_str());
+        if (err == ERROR_ALREADY_EXISTS ||
+            (err == ERROR_ACCESS_DENIED && attr != INVALID_FILE_ATTRIBUTES &&
+             (attr & FILE_ATTRIBUTE_DIRECTORY))) {
             return true;
         }
 
@@ -460,7 +486,10 @@ public:
                     continue;
                 }
                 DWORD partialErr = GetLastError();
-                if (partialErr != ERROR_ALREADY_EXISTS) {
+                const DWORD partialAttr = GetFileAttributesW(partial.c_str());
+                if (partialErr != ERROR_ALREADY_EXISTS &&
+                    !(partialErr == ERROR_ACCESS_DENIED && partialAttr != INVALID_FILE_ATTRIBUTES &&
+                      (partialAttr & FILE_ATTRIBUTE_DIRECTORY))) {
                     // Stop trying to build parents if we hit an unexpected error.
                     break;
                 }
@@ -472,7 +501,10 @@ public:
         }
 
         err = GetLastError();
-        return err == ERROR_ALREADY_EXISTS;
+        const DWORD finalAttr = GetFileAttributesW(wide.c_str());
+        return err == ERROR_ALREADY_EXISTS ||
+               (err == ERROR_ACCESS_DENIED && finalAttr != INVALID_FILE_ATTRIBUTES &&
+                (finalAttr & FILE_ATTRIBUTE_DIRECTORY));
     }
 
     /**

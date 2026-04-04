@@ -185,6 +185,42 @@ private:
         return true;
     }
 
+    static const char* advanceReasonToString_(SwRtpJitterBuffer::AdvanceReason reason) {
+        switch (reason) {
+        case SwRtpJitterBuffer::AdvanceReason::AgeLimit:
+            return "age";
+        case SwRtpJitterBuffer::AdvanceReason::BufferLimit:
+            return "size";
+        default:
+            return "none";
+        }
+    }
+
+    static bool shouldLogCounter_(uint64_t count) {
+        return count <= 4 || (count != 0 && (count & (count - 1)) == 0);
+    }
+
+    static int waitBucketMs_(int waitMs) {
+        if (waitMs >= 800) return 800;
+        if (waitMs >= 400) return 400;
+        if (waitMs >= 200) return 200;
+        if (waitMs >= 100) return 100;
+        if (waitMs >= 50) return 50;
+        if (waitMs >= 20) return 20;
+        return 0;
+    }
+
+    static int gapBucket_(int gap) {
+        if (gap >= 256) return 256;
+        if (gap >= 128) return 128;
+        if (gap >= 64) return 64;
+        if (gap >= 32) return 32;
+        if (gap >= 16) return 16;
+        if (gap >= 8) return 8;
+        if (gap >= 4) return 4;
+        return 0;
+    }
+
     void resetRuntimeState_() {
         m_jitterBuffer.reset();
         m_detectedRtpSenderAddress.clear();
@@ -203,6 +239,10 @@ private:
         m_lastLoggedRtpSocketDrops = 0;
         m_lastLoggedRtcpSocketRx = 0;
         m_lastLoggedRtcpSocketDrops = 0;
+        m_hasLoggedBlockedSequence = false;
+        m_lastBlockedExpectedSequence = 0;
+        m_lastBlockedWaitBucketMs = 0;
+        m_lastBlockedGapBucket = 0;
     }
 
     bool bindSockets_() {
@@ -268,8 +308,16 @@ private:
                                                              datagram,
                                                              std::chrono::steady_clock::now());
             if (insertResult == SwRtpJitterBuffer::InsertResult::Late) {
-                ++m_stats.m_latePackets;
+                const uint64_t lateCount = ++m_stats.m_latePackets;
+                maybeLogLatePacket_(sequenceNumber, lateCount);
                 continue;
+            }
+            if (insertResult == SwRtpJitterBuffer::InsertResult::Duplicate) {
+                const uint64_t duplicateCount = ++m_stats.m_duplicatePackets;
+                maybeLogDuplicatePacket_(sequenceNumber, duplicateCount);
+            } else if (insertResult == SwRtpJitterBuffer::InsertResult::AcceptedOutOfOrder) {
+                const uint64_t outOfOrderCount = ++m_stats.m_outOfOrderPackets;
+                maybeLogOutOfOrderPacket_(sequenceNumber, outOfOrderCount);
             }
             drainBufferedPackets_(false);
         }
@@ -279,6 +327,7 @@ private:
         while (m_running.load()) {
             SwRtpJitterBuffer::PopResult result = m_jitterBuffer.popReady(allowGapAdvance);
             if (!result.ready) {
+                maybeLogBlockedReorder_();
                 break;
             }
             Packet packet;
@@ -287,13 +336,23 @@ private:
             }
             if (result.gapAdvanced) {
                 ++m_stats.m_gapEvents;
+                if (result.advanceReason == SwRtpJitterBuffer::AdvanceReason::BufferLimit) {
+                    ++m_stats.m_gapAdvanceBySize;
+                } else if (result.advanceReason == SwRtpJitterBuffer::AdvanceReason::AgeLimit) {
+                    ++m_stats.m_gapAdvanceByAge;
+                }
                 if (m_gapCallback) {
                     m_gapCallback(result.expectedSequence, result.actualSequence);
                 }
                 swCWarning(kSwLogCategory_SwRtpSession)
-                    << "[SwRtpSession] RTP sequence discontinuity expected="
+                    << "[SwRtpSession] RTP gap advance reason="
+                    << advanceReasonToString_(result.advanceReason)
+                    << " expected="
                     << result.expectedSequence
-                    << " got=" << result.actualSequence;
+                    << " got=" << result.actualSequence
+                    << " gap=" << result.gapDistance
+                    << " waitMs=" << result.waitAgeMs
+                    << " jbQueued=" << result.queuedPackets;
             }
             m_lastRtpTime = std::chrono::steady_clock::now();
             if (m_remoteSsrc == 0 && packet.ssrc != 0) {
@@ -308,6 +367,90 @@ private:
                 m_packetCallback(packet);
             }
         }
+    }
+
+    void maybeLogLatePacket_(uint16_t sequenceNumber, uint64_t lateCount) {
+        if (!shouldLogCounter_(lateCount)) {
+            return;
+        }
+        const auto snapshot = m_jitterBuffer.snapshot();
+        swCWarning(kSwLogCategory_SwRtpSession)
+            << "[SwRtpSession] RTP late packet dropped"
+            << " seq=" << sequenceNumber
+            << " expected=" << (snapshot.expectedValid ? snapshot.expectedSequence : 0)
+            << " jbQueued=" << snapshot.queuedPackets
+            << " lateCount=" << lateCount;
+    }
+
+    void maybeLogDuplicatePacket_(uint16_t sequenceNumber, uint64_t duplicateCount) {
+        if (!shouldLogCounter_(duplicateCount)) {
+            return;
+        }
+        const auto snapshot = m_jitterBuffer.snapshot();
+        swCWarning(kSwLogCategory_SwRtpSession)
+            << "[SwRtpSession] RTP duplicate packet"
+            << " seq=" << sequenceNumber
+            << " expected=" << (snapshot.expectedValid ? snapshot.expectedSequence : 0)
+            << " jbQueued=" << snapshot.queuedPackets
+            << " duplicateCount=" << duplicateCount;
+    }
+
+    void maybeLogOutOfOrderPacket_(uint16_t sequenceNumber, uint64_t outOfOrderCount) {
+        const auto snapshot = m_jitterBuffer.snapshot();
+        const bool stressed = snapshot.blocked || snapshot.queuedPackets >= 16;
+        if (!stressed && !shouldLogCounter_(outOfOrderCount)) {
+            return;
+        }
+        swCWarning(kSwLogCategory_SwRtpSession)
+            << "[SwRtpSession] RTP out-of-order packet buffered"
+            << " seq=" << sequenceNumber
+            << " expected=" << (snapshot.expectedValid ? snapshot.expectedSequence : 0)
+            << " jbQueued=" << snapshot.queuedPackets
+            << " blockedGap=" << snapshot.blockedGap
+            << " blockedWaitMs=" << snapshot.blockedAgeMs
+            << " outOfOrderCount=" << outOfOrderCount;
+    }
+
+    void maybeLogBlockedReorder_() {
+        const auto snapshot = m_jitterBuffer.snapshot();
+        if (!snapshot.blocked) {
+            m_hasLoggedBlockedSequence = false;
+            m_lastBlockedExpectedSequence = 0;
+            m_lastBlockedWaitBucketMs = 0;
+            m_lastBlockedGapBucket = 0;
+            return;
+        }
+
+        if (!m_hasLoggedBlockedSequence ||
+            snapshot.blockedExpectedSequence != m_lastBlockedExpectedSequence) {
+            m_hasLoggedBlockedSequence = true;
+            m_lastBlockedExpectedSequence = snapshot.blockedExpectedSequence;
+            m_lastBlockedWaitBucketMs = 0;
+            m_lastBlockedGapBucket = 0;
+        }
+
+        const int waitBucket = waitBucketMs_(snapshot.blockedAgeMs);
+        const int gapBucket = gapBucket_(snapshot.blockedGap);
+        if (waitBucket <= m_lastBlockedWaitBucketMs &&
+            gapBucket <= m_lastBlockedGapBucket) {
+            return;
+        }
+
+        m_lastBlockedWaitBucketMs = waitBucket > m_lastBlockedWaitBucketMs
+                                        ? waitBucket
+                                        : m_lastBlockedWaitBucketMs;
+        m_lastBlockedGapBucket = gapBucket > m_lastBlockedGapBucket
+                                     ? gapBucket
+                                     : m_lastBlockedGapBucket;
+
+        swCWarning(kSwLogCategory_SwRtpSession)
+            << "[SwRtpSession] RTP reorder waiting for missing sequence"
+            << " expected=" << snapshot.blockedExpectedSequence
+            << " next=" << snapshot.blockedNextSequence
+            << " gap=" << snapshot.blockedGap
+            << " waitMs=" << snapshot.blockedAgeMs
+            << " jbQueued=" << snapshot.queuedPackets
+            << " jbHw=" << snapshot.queueHighWatermark;
     }
 
     bool parseRtpPacket_(const SwByteArray& datagram, Packet& outPacket) {
@@ -491,6 +634,8 @@ private:
             }
         }
 
+        const SwRtpJitterBuffer::Snapshot jitterSnapshot = m_jitterBuffer.snapshot();
+        m_stats.m_trimmedLatePackets.store(jitterSnapshot.trimmedLatePackets);
         const SwRtpStatsSnapshot snapshot = m_stats.snapshot();
         const uint64_t rtpSocketRx = m_rtpSocket ? m_rtpSocket->totalReceivedDatagrams() : 0;
         const uint64_t rtpSocketDrops = m_rtpSocket ? m_rtpSocket->droppedDatagrams() : 0;
@@ -506,16 +651,31 @@ private:
             << " (+" << (rtpSocketRx - m_lastLoggedRtpSocketRx) << ")"
             << " emitted=" << snapshot.emittedPackets
             << " (+" << (snapshot.emittedPackets - m_lastTransportSnapshot.emittedPackets) << ")"
+            << " ooo=" << snapshot.outOfOrderPackets
+            << " (+" << (snapshot.outOfOrderPackets - m_lastTransportSnapshot.outOfOrderPackets) << ")"
+            << " dup=" << snapshot.duplicatePackets
+            << " (+" << (snapshot.duplicatePackets - m_lastTransportSnapshot.duplicatePackets) << ")"
             << " gaps=" << snapshot.gapEvents
             << " (+" << (snapshot.gapEvents - m_lastTransportSnapshot.gapEvents) << ")"
+            << " gapAge=" << snapshot.gapAdvanceByAge
+            << " (+" << (snapshot.gapAdvanceByAge - m_lastTransportSnapshot.gapAdvanceByAge) << ")"
+            << " gapSize=" << snapshot.gapAdvanceBySize
+            << " (+" << (snapshot.gapAdvanceBySize - m_lastTransportSnapshot.gapAdvanceBySize) << ")"
             << " late=" << snapshot.latePackets
             << " (+" << (snapshot.latePackets - m_lastTransportSnapshot.latePackets) << ")"
+            << " trimmed=" << snapshot.trimmedLatePackets
+            << " (+" << (snapshot.trimmedLatePackets - m_lastTransportSnapshot.trimmedLatePackets) << ")"
             << " pli=" << snapshot.pliSent
             << " (+" << (snapshot.pliSent - m_lastTransportSnapshot.pliSent) << ")"
             << " udpPending=" << rtpSocketPending
             << " udpDrops=" << rtpSocketDrops
             << " (+" << (rtpSocketDrops - m_lastLoggedRtpSocketDrops) << ")"
             << " udpQueueHw=" << rtpSocketQueueHw
+            << " jbQueued=" << jitterSnapshot.queuedPackets
+            << " jbHw=" << jitterSnapshot.queueHighWatermark
+            << " jbBlocked=" << (jitterSnapshot.blocked ? 1 : 0)
+            << " jbGap=" << jitterSnapshot.blockedGap
+            << " jbWaitMs=" << jitterSnapshot.blockedAgeMs
             << " rtcpRx=" << rtcpSocketRx
             << " (+" << (rtcpSocketRx - m_lastLoggedRtcpSocketRx) << ")"
             << " rtcpDrops=" << rtcpSocketDrops
@@ -602,4 +762,8 @@ private:
     uint64_t m_lastLoggedRtcpSocketRx{0};
     uint64_t m_lastLoggedRtcpSocketDrops{0};
     int m_lastLoggedTimeoutSec{-1};
+    bool m_hasLoggedBlockedSequence{false};
+    uint16_t m_lastBlockedExpectedSequence{0};
+    int m_lastBlockedWaitBucketMs{0};
+    int m_lastBlockedGapBucket{0};
 };

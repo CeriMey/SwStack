@@ -47,6 +47,9 @@
  ***************************************************************************************************/
 
 #include "SwObject.h"
+#include "SwAbstractSocket.h"
+#include "SwPointer.h"
+#include "SwSslServer.h"
 #include "SwTcpServer.h"
 #include "SwTcpSocket.h"
 #include "SwList.h"
@@ -59,10 +62,8 @@
 #include "http/SwHttpSession.h"
 #include "http/SwHttpStaticFileHandler.h"
 
-#include <memory>
 #include <functional>
 #include <chrono>
-#include <atomic>
 
 static constexpr const char* kSwLogCategory_SwHttpServer = "sw.core.io.swhttpserver";
 
@@ -96,6 +97,8 @@ struct SwHttpServerMetrics {
     SwMap<SwString, long long> statusCounters;
 };
 
+using SwHttpPreRouteHandler = std::function<bool(const SwHttpRequest&, SwHttpResponse&)>;
+
 class SwHttpServer : public SwObject {
     SW_OBJECT(SwHttpServer, SwObject)
 
@@ -114,6 +117,7 @@ public:
     explicit SwHttpServer(SwObject* parent = nullptr)
         : SwObject(parent) {
         connect(&m_tcpServer, &SwTcpServer::newConnection, this, &SwHttpServer::onNewTcpConnection_);
+        connect(&m_sslServer, &SwTcpServer::newConnection, this, &SwHttpServer::onNewTcpConnection_);
 
         m_router.setNotFoundHandler([](const SwHttpRequest& request) {
             SwHttpResponse response = swHttpTextResponse(404, "Not Found");
@@ -129,6 +133,35 @@ public:
      */
     ~SwHttpServer() override {
         close();
+        while (!m_staticHandlers.isEmpty()) {
+            SwHttpStaticFileHandler* handler = m_staticHandlers.first();
+            m_staticHandlers.removeFirst();
+            delete handler;
+        }
+    }
+
+    bool isHttpListening() const {
+        return m_tcpServer.isListening();
+    }
+
+    bool isHttpsListening() const {
+        return m_sslServer.isListening();
+    }
+
+    uint16_t httpPort() const {
+        return m_tcpServer.localPort();
+    }
+
+    SwString httpAddress() const {
+        return m_tcpServer.localAddress();
+    }
+
+    uint16_t httpsPort() const {
+        return m_sslServer.localPort();
+    }
+
+    SwString httpsAddress() const {
+        return m_sslServer.localAddress();
     }
 
     /**
@@ -139,7 +172,12 @@ public:
      * @details The call affects the runtime state associated with the underlying resource or service.
      */
     bool listen(uint16_t port) {
-        return m_tcpServer.listen(port);
+        return listen(SwString(), port);
+    }
+
+    bool listen(const SwString& bindAddress, uint16_t port) {
+        closeListeners_();
+        return listenHttp(bindAddress, port);
     }
 
     /**
@@ -150,10 +188,45 @@ public:
      * @return `true` on success; otherwise `false`.
      */
     bool listen(uint16_t port, const SwString& certPath, const SwString& keyPath) {
-        if (!m_tcpServer.enableTls(certPath, keyPath)) {
+        return listen(SwString(), port, certPath, keyPath);
+    }
+
+    bool listen(const SwString& bindAddress,
+                uint16_t port,
+                const SwString& certPath,
+                const SwString& keyPath) {
+        closeListeners_();
+        return listenHttps(bindAddress, port, certPath, keyPath);
+    }
+
+    bool listenHttp(uint16_t port) {
+        return listenHttp(SwString(), port);
+    }
+
+    bool listenHttp(const SwString& bindAddress, uint16_t port) {
+        return m_tcpServer.listen(bindAddress, port);
+    }
+
+    bool listenHttps(uint16_t port, const SwString& certPath, const SwString& keyPath) {
+        return listenHttps(SwString(), port, certPath, keyPath);
+    }
+
+    bool listenHttps(const SwString& bindAddress, uint16_t port, const SwString& certPath, const SwString& keyPath) {
+        if (!m_sslServer.setLocalCredentials(certPath, keyPath)) {
             return false;
         }
-        return m_tcpServer.listen(port);
+        return m_sslServer.listen(bindAddress, port);
+    }
+
+    bool reloadHttpsCredentials(uint16_t port, const SwString& certPath, const SwString& keyPath) {
+        if (!m_sslServer.reloadLocalCredentials(certPath, keyPath)) {
+            return false;
+        }
+
+        if (m_sslServer.isListening() && m_sslServer.localPort() == port) {
+            return true;
+        }
+        return m_sslServer.listen(port);
     }
 
     /**
@@ -162,7 +235,7 @@ public:
      * @details The call affects the runtime state associated with the underlying resource or service.
      */
     void close() {
-        m_tcpServer.close();
+        closeListeners_();
         while (!m_sessions.isEmpty()) {
             SwHttpSession* session = m_sessions.first();
             m_sessions.removeFirst();
@@ -180,7 +253,7 @@ public:
      * @details The method stops accepting new work first, then waits until the active operations drain or the timeout expires.
      */
     bool closeGraceful(int timeoutMs = 5000) {
-        m_tcpServer.close();
+        closeListeners_();
         int waitedMs = 0;
         while (!m_sessions.isEmpty()) {
             if (timeoutMs >= 0 && waitedMs >= timeoutMs) {
@@ -300,6 +373,17 @@ public:
         m_router.setNotFoundHandler(callback);
     }
 
+    void addPreRouteHandler(const SwHttpPreRouteHandler& handler) {
+        if (!handler) {
+            return;
+        }
+        m_preRouteHandlers.append(handler);
+    }
+
+    void clearPreRouteHandlers() {
+        m_preRouteHandlers.clear();
+    }
+
     /**
      * @brief Configures how the router handles paths that differ only by a trailing slash.
      * @param policy Trailing-slash policy forwarded to the router.
@@ -364,7 +448,7 @@ public:
      * a dedicated `SwHttpStaticFileHandler`.
      */
     void mountStatic(const SwString& prefix, const SwString& rootDir, const SwHttpStaticOptions& options = SwHttpStaticOptions()) {
-        std::shared_ptr<SwHttpStaticFileHandler> handler(new SwHttpStaticFileHandler(prefix, rootDir, options));
+        SwHttpStaticFileHandler* handler = new SwHttpStaticFileHandler(prefix, rootDir, options);
         m_staticHandlers.append(handler);
 
         SwString routePattern = swHttpNormalizePath(prefix);
@@ -455,48 +539,78 @@ private slots:
      * request completion callbacks, and removes finished sessions from the live session list.
      */
     void onNewTcpConnection_() {
-        while (SwTcpSocket* socket = m_tcpServer.nextPendingConnection()) {
-            if (m_limits.maxConnections > 0 && m_sessions.size() >= m_limits.maxConnections) {
-                {
-                    SwMutexLocker locker(&m_metricsMutex);
-                    ++m_metrics.rejectedConnections;
-                }
-                socket->close();
-                socket->deleteLater();
-                continue;
-            }
-            SwHttpSession* session = new SwHttpSession(socket, &m_router, m_limits, m_timeouts, this);
-            std::shared_ptr<std::atomic<bool>> sessionAlive(new std::atomic<bool>(true));
-            session->addCleanupHook([sessionAlive]() {
-                sessionAlive->store(false);
-            });
-            session->setRequestHandler([this, sessionAlive](const SwHttpRequest& request,
-                                                            const SwHttpSession::SwHttpResponseCallback& complete) {
-                SwHttpSession::SwHttpResponseCallback guardedComplete =
-                    [sessionAlive, complete](const SwHttpResponse& response) {
-                        if (!sessionAlive->load()) {
-                            return;
-                        }
-                        if (complete) {
-                            complete(response);
-                        }
-                    };
-                dispatchRequest_(request, guardedComplete);
-            });
-            m_sessions.append(session);
-            session->setFinishedCallback([this](SwHttpSession* doneSession) {
-                m_sessions.removeOne(doneSession);
-                if (doneSession) {
-                    doneSession->deleteLater();
-                }
-            });
+        while (SwAbstractSocket* socket = m_tcpServer.nextPendingConnection()) {
+            attachAcceptedSocket_(socket, false, m_tcpServer.localPort());
+        }
+        while (SwAbstractSocket* socket = m_sslServer.nextPendingConnection()) {
+            attachAcceptedSocket_(socket, true, m_sslServer.localPort());
         }
     }
 
 private:
+    void closeListeners_() {
+        m_tcpServer.close();
+        m_sslServer.close();
+    }
+
+    void attachAcceptedSocket_(SwAbstractSocket* socket, bool isTls, uint16_t localPort) {
+        if (!socket) {
+            return;
+        }
+        if (m_limits.maxConnections > 0 && m_sessions.size() >= m_limits.maxConnections) {
+            {
+                SwMutexLocker locker(&m_metricsMutex);
+                ++m_metrics.rejectedConnections;
+            }
+            socket->close();
+            socket->deleteLater();
+            return;
+        }
+
+        SwHttpSession* session = new SwHttpSession(socket, &m_router, m_limits, m_timeouts, isTls, localPort, this);
+        SwPointer<SwHttpSession> sessionGuard(session);
+        session->setRequestHandler([this, sessionGuard](const SwHttpRequest& request,
+                                                        const SwHttpSession::SwHttpResponseCallback& complete) {
+            SwHttpSession::SwHttpResponseCallback guardedComplete =
+                [sessionGuard, complete](const SwHttpResponse& response) {
+                    if (!sessionGuard) {
+                        return;
+                    }
+                    if (complete) {
+                        complete(response);
+                    }
+                };
+            dispatchRequest_(request, guardedComplete);
+        });
+        m_sessions.append(session);
+        session->setFinishedCallback([this](SwHttpSession* doneSession) {
+            m_sessions.removeOne(doneSession);
+            if (doneSession) {
+                doneSession->deleteLater();
+            }
+        });
+        session->startBufferedReadProcessing();
+    }
+
+    bool tryPreRoute_(const SwHttpRequest& request, SwHttpResponse& response) const {
+        for (size_t i = 0; i < m_preRouteHandlers.size(); ++i) {
+            const SwHttpPreRouteHandler& handler = m_preRouteHandlers[i];
+            if (!handler) {
+                continue;
+            }
+            if (handler(request, response)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     SwHttpResponse routeRequestInline_(const SwHttpRequest& request) {
         SwHttpResponse response;
-        bool handled = m_router.route(request, response);
+        bool handled = tryPreRoute_(request, response);
+        if (!handled) {
+            handled = m_router.route(request, response);
+        }
         if (!handled) {
             response = swHttpTextResponse(404, "Not Found");
             response.closeConnection = !request.keepAlive;
@@ -506,6 +620,14 @@ private:
 
     void routeRequestAsync_(const SwHttpRequest& request,
                             const SwHttpSession::SwHttpResponseCallback& complete) {
+        SwHttpResponse preRouteResponse;
+        if (tryPreRoute_(request, preRouteResponse)) {
+            if (complete) {
+                complete(preRouteResponse);
+            }
+            return;
+        }
+
         const bool handled = m_router.routeAsync(request, [request, complete](const SwHttpResponse& response) {
             if (complete) {
                 complete(response);
@@ -559,7 +681,8 @@ private:
             }
 
             ThreadHandle* affinity = threadHandle();
-            bool started = m_threadPool->tryStart([this, request, complete, startAt, affinity]() {
+            bool rejectedByBackpressure = false;
+            bool started = m_threadPool->tryStartQueued([this, request, complete, startAt, affinity]() {
                 SwHttpResponse computed = routeRequestInline_(request);
 
                 releaseThreadPoolDispatch_();
@@ -567,18 +690,21 @@ private:
                     completeDispatch_(complete, computed, startAt);
                 };
                 if (affinity && ThreadHandle::currentThread() != affinity) {
-                    affinity->postTask(completeOnAffinity);
+                    affinity->postTaskOnLane(completeOnAffinity, SwFiberLane::Control);
                 } else {
                     completeOnAffinity();
                 }
-            });
+            }, 0, &rejectedByBackpressure);
 
             if (started) {
                 return;
             }
 
             releaseThreadPoolDispatch_();
-            SwHttpResponse saturated = swHttpTextResponse(503, "ThreadPool saturated");
+            SwHttpResponse saturated = swHttpTextResponse(
+                503,
+                rejectedByBackpressure ? SwString("ThreadPool saturated")
+                                       : SwString("ThreadPool unavailable"));
             saturated.closeConnection = !request.keepAlive;
             completeDispatch_(complete, saturated, startAt);
             return;
@@ -593,7 +719,7 @@ private:
     bool tryAcquireInFlight_(const SwHttpRequest& request) {
         SwMutexLocker locker(&m_metricsMutex);
         if (m_limits.maxInFlightRequests > 0 &&
-            static_cast<std::size_t>(m_metrics.inFlightRequests) >= m_limits.maxInFlightRequests) {
+            static_cast<size_t>(m_metrics.inFlightRequests) >= m_limits.maxInFlightRequests) {
             ++m_metrics.rejectedInFlight;
             return false;
         }
@@ -613,7 +739,7 @@ private:
     bool tryReserveThreadPoolDispatch_() {
         SwMutexLocker locker(&m_metricsMutex);
         if (m_limits.maxThreadPoolQueuedDispatches > 0 &&
-            static_cast<std::size_t>(m_threadPoolQueuedDispatches) >= m_limits.maxThreadPoolQueuedDispatches) {
+            static_cast<size_t>(m_threadPoolQueuedDispatches) >= m_limits.maxThreadPoolQueuedDispatches) {
             ++m_metrics.rejectedThreadPoolSaturation;
             return false;
         }
@@ -634,13 +760,13 @@ private:
             .count();
     }
 
-    static std::size_t responseBodySize_(const SwHttpResponse& response) {
+    static size_t responseBodySize_(const SwHttpResponse& response) {
         if (response.hasFile) {
             return response.fileLength;
         }
         if (response.useChunkedTransfer) {
-            std::size_t total = 0;
-            for (std::size_t i = 0; i < response.chunkedParts.size(); ++i) {
+            size_t total = 0;
+            for (size_t i = 0; i < response.chunkedParts.size(); ++i) {
                 total += response.chunkedParts[i].size();
             }
             return total;
@@ -662,9 +788,11 @@ private:
     }
 
     SwTcpServer m_tcpServer;
+    SwSslServer m_sslServer;
     SwHttpRouter m_router;
     SwList<SwHttpSession*> m_sessions;
-    SwList<std::shared_ptr<SwHttpStaticFileHandler>> m_staticHandlers;
+    SwList<SwHttpPreRouteHandler> m_preRouteHandlers;
+    SwList<SwHttpStaticFileHandler*> m_staticHandlers;
     SwHttpLimits m_limits;
     SwHttpTimeouts m_timeouts;
     SwThreadPool* m_threadPool = nullptr;

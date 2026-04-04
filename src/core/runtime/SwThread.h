@@ -169,6 +169,16 @@ public:
     }
 
     /**
+     * @brief Performs the `postTaskOnLane` operation.
+     * @param task Value passed to the method.
+     * @param lane Value passed to the method.
+     * @return `true` on success; otherwise `false`.
+     */
+    bool postTaskOnLane(std::function<void()> task, SwFiberLane lane) {
+        return m_threadHandle ? m_threadHandle->postTaskOnLane(std::move(task), lane) : false;
+    }
+
+    /**
      * @brief Returns the current application.
      * @return The current application.
      *

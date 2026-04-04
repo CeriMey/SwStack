@@ -55,6 +55,7 @@
 #include "SwFrame.h"
 #include "SwGroupBox.h"
 #include "SwLabel.h"
+#include "SwLoadingOverlay.h"
 #include "SwLineEdit.h"
 #include "SwPlainTextEdit.h"
 #include "SwProgressBar.h"
@@ -215,6 +216,7 @@ inline UiFactory::UiFactory() {
     registerWidget("SwFrame", [](SwWidget* p) -> SwWidget* { return new SwFrame(p); });
     registerWidget("Line", [](SwWidget* p) -> SwWidget* { return new SwFrame(p); }); // Line separator used by the designer
     registerWidget("SwLabel", [](SwWidget* p) -> SwWidget* { return new SwLabel(p); });
+    registerWidget("SwLoadingOverlay", [](SwWidget* p) -> SwWidget* { return new SwLoadingOverlay(p); });
     registerWidget("SwPushButton", [](SwWidget* p) -> SwWidget* { return new SwPushButton("PushButton", p); });
     registerWidget("SwLineEdit", [](SwWidget* p) -> SwWidget* { return new SwLineEdit(p); });
     registerWidget("SwCheckBox", [](SwWidget* p) -> SwWidget* { return new SwCheckBox(p); });

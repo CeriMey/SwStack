@@ -29,9 +29,30 @@ static void ensureDirectory(const std::string& path) {
 #endif
 }
 
+static std::string environmentValue(const char* name) {
+#if defined(_MSC_VER)
+    char* value = nullptr;
+    size_t length = 0;
+    if (_dupenv_s(&value, &length, name) != 0 || !value || !*value) {
+        std::free(value);
+        return std::string();
+    }
+
+    std::string result(value, length > 0 ? (length - 1) : 0);
+    std::free(value);
+    return result;
+#else
+    const char* value = std::getenv(name);
+    if (!value || !value[0]) {
+        return std::string();
+    }
+    return std::string(value);
+#endif
+}
+
 static std::string mapboxTerrainUrlTemplate() {
-    const char* token = std::getenv("MAPBOX_ACCESS_TOKEN");
-    if (!token || !token[0]) {
+    const std::string token = environmentValue("MAPBOX_ACCESS_TOKEN");
+    if (token.empty()) {
         return std::string();
     }
 

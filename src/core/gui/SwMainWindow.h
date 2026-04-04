@@ -52,6 +52,7 @@
 #include "SwMenuBar.h"
 #include "SwPushButton.h"
 #include "SwStatusBar.h"
+#include "SwIcon.h"
 #include "SwTextEdit.h"
 #include "SwToolBar.h"
 #include "SwWidget.h"
@@ -108,6 +109,11 @@ public:
         callbacks.mouseWheelHandler = [this](const SwMouseEvent& event) { handleWheelEvent(event); };
         callbacks.keyPressHandler = [this](const SwKeyEvent& event) { handleKeyEvent(event); };
         callbacks.keyReleaseHandler = [this](const SwKeyEvent& event) { handleKeyReleaseEvent(event); };
+        callbacks.closeHandler = [this]() -> bool {
+            CloseEvent ev;
+            closeEvent(&ev);
+            return ev.isAccepted();
+        };
 
         SwPlatformWindowOptions options;
         options.role = SwPlatformWindowRole::MainWindow;
@@ -382,6 +388,25 @@ public:
     }
 
     /**
+     * @brief Sets the window icon (taskbar + title bar).
+     * @param icon SwIcon to use as the window icon.
+     */
+    void setWindowIcon(const SwIcon& icon) {
+        m_windowIcon = icon;
+#ifdef _WIN32
+        HWND hwnd = nativeHwnd_();
+        if (hwnd) {
+            HICON hSmall = icon.toHICON(GetSystemMetrics(SM_CXSMICON));
+            HICON hLarge = icon.toHICON(GetSystemMetrics(SM_CXICON));
+            if (hSmall) SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hSmall);
+            if (hLarge) SendMessageW(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hLarge);
+        }
+#endif
+    }
+
+    const SwIcon& windowIcon() const { return m_windowIcon; }
+
+    /**
      * @brief Sets the window Title.
      * @param title Title text applied by the operation.
      *
@@ -550,6 +575,7 @@ public:
 private:
     std::unique_ptr<SwPlatformWindow> m_platformWindow;
     std::wstring m_windowTitle;
+    SwIcon m_windowIcon;
     struct {
         int x{0};
         int y{0};
@@ -890,11 +916,12 @@ private:
         lastMousePosition.x = x;
         lastMousePosition.y = y;
 
-        // Optionally, call the base class mouseMoveEvent if necessary
-        SwWidgetPlatformAdapter::setCursor(CursorType::Arrow);
         mouseEvent.setGlobalPos(mapToGlobal(mouseEvent.pos()));
-        dispatchMouseEventFromRoot_(mouseEvent);
-        SwToolTip::handleMouseMove(this, x, y);
+        const bool handled = dispatchMouseEventFromRoot_(mouseEvent);
+        if (!handled) {
+            SwWidgetPlatformAdapter::setCursor(CursorType::Arrow);
+        }
+        SwToolTip::handleMouseMove(this, hoveredWidgetFromRoot(), x, y);
     }
 
     void onMouseLeave() {
@@ -999,4 +1026,3 @@ private:
         onKeyRelease(event.keyCode, event.ctrl, event.shift, event.alt);
     }
 };
-

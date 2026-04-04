@@ -64,14 +64,16 @@ RuntimeProfilerMonitoringBarWidget::RuntimeProfilerMonitoringBarWidget(SwWidget*
 
     toggleButton_ = new SwPushButton("Demarrer le suivi", this);
     toggleButton_->setCheckable(true);
-    toggleButton_->resize(160, 28);
+    toggleButton_->resize(160, 25);
+    toggleButton_->setMinimumSize(160, 25);
 
     SwLabel* thresholdLabel = new SwLabel("Seuil:", this);
     thresholdLabel->resize(40, 16);
     thresholdLabel->setStyleSheet("SwLabel { background-color: rgba(0,0,0,0); border-width: 0px; color: rgb(156, 156, 156); font-size: 12px; }");
 
     thresholdSpinBox_ = new SwSpinBox(this);
-    thresholdSpinBox_->resize(74, 28);
+    thresholdSpinBox_->resize(74, 25);
+    thresholdSpinBox_->setMinimumSize(74, 25);
     thresholdSpinBox_->setRange(1, 5000);
     thresholdSpinBox_->setSingleStep(1);
     thresholdSpinBox_->setStyleSheet(R"(
@@ -117,6 +119,12 @@ RuntimeProfilerMonitoringBarWidget::RuntimeProfilerMonitoringBarWidget(SwWidget*
     stackCaptureLabel_->resize(72, 16);
     stackCaptureLabel_->setStyleSheet("SwLabel { background-color: rgba(0,0,0,0); border-width: 0px; color: rgb(156, 156, 156); font-size: 12px; }");
 
+    loadSummaryLabel_ = new SwLabel(this);
+    loadSummaryLabel_->setMinimumSize(320, 16);
+    loadSummaryLabel_->setAlignment(DrawTextFormats(DrawTextFormat::Left | DrawTextFormat::VCenter | DrawTextFormat::SingleLine));
+    loadSummaryLabel_->setStyleSheet(
+        "SwLabel { background-color: rgba(0,0,0,0); border-width: 0px; color: rgb(120, 180, 170); font-size: 11px; }");
+
     statusLed_ = new RuntimeProfilerStatusLedWidget(this);
     statusLed_->resize(14, 14);
 
@@ -133,6 +141,7 @@ RuntimeProfilerMonitoringBarWidget::RuntimeProfilerMonitoringBarWidget(SwWidget*
     layout->addWidget(thresholdSpinBox_, 0, 74);
     layout->addWidget(thresholdUnitLabel, 0, 20);
     layout->addWidget(stackCaptureLabel_, 0, 70);
+    layout->addWidget(loadSummaryLabel_, 1, 320);
     layout->addStretch(1);
     layout->addWidget(statusLed_, 0, 14);
     layout->addWidget(stallLabel_, 0, 74);
@@ -189,6 +198,11 @@ void RuntimeProfilerMonitoringBarWidget::setThresholdUs(long long thresholdUs) {
 
 void RuntimeProfilerMonitoringBarWidget::setStallCount(unsigned long long stallCount) {
     stallCount_ = stallCount;
+    updateVisualState_();
+}
+
+void RuntimeProfilerMonitoringBarWidget::setLoadSummary(const SwString& summary) {
+    loadSummary_ = summary;
     updateVisualState_();
 }
 
@@ -249,6 +263,12 @@ void RuntimeProfilerMonitoringBarWidget::updateVisualState_() {
         stackCaptureLabel_->setStyleSheet(monitoringEnabled_
                                               ? "SwLabel { background-color: rgba(0,0,0,0); border-width: 0px; color: rgb(156, 156, 156); font-size: 12px; }"
                                               : "SwLabel { background-color: rgba(0,0,0,0); border-width: 0px; color: rgb(110, 110, 110); font-size: 12px; }");
+    }
+    if (loadSummaryLabel_) {
+        loadSummaryLabel_->setText(loadSummary_.isEmpty() ? SwString("Charge: --") : loadSummary_);
+        loadSummaryLabel_->setStyleSheet(monitoringEnabled_
+                                             ? "SwLabel { background-color: rgba(0,0,0,0); border-width: 0px; color: rgb(120, 180, 170); font-size: 11px; }"
+                                             : "SwLabel { background-color: rgba(0,0,0,0); border-width: 0px; color: rgb(90, 110, 106); font-size: 11px; }");
     }
 }
 

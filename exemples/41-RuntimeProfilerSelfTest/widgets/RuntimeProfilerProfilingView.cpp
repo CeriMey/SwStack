@@ -36,6 +36,73 @@ static void applyProfilerSplitterStyle_(SwSplitter* splitter) {
     )");
 }
 
+static SwString compactLoadSeriesLabel_(const SwString& seriesLabel) {
+    if (seriesLabel.isEmpty()) {
+        return "runtime";
+    }
+
+    const SwList<SwString> parts = seriesLabel.split('|');
+    if (parts.size() >= 2) {
+        const SwString leftPart = parts[0].trimmed();
+        const SwString rightPart = parts[parts.size() - 1].trimmed();
+        SwString compactLeft = leftPart;
+        if (compactLeft.size() > 18) {
+            compactLeft = compactLeft.left(18) + "...";
+        }
+        if (!compactLeft.isEmpty() && !rightPart.isEmpty()) {
+            return compactLeft + " " + rightPart;
+        }
+        if (!rightPart.isEmpty()) {
+            return rightPart;
+        }
+    }
+
+    if (seriesLabel.size() > 22) {
+        return seriesLabel.left(22) + "...";
+    }
+    return seriesLabel;
+}
+
+static SwString loadSummaryText_(const SwList<RuntimeProfilerDashboardLoadSample>* loadSamples) {
+    if (!loadSamples || loadSamples->isEmpty()) {
+        return "Charge: --";
+    }
+
+    SwList<RuntimeProfilerDashboardLoadSample> latestBySeries;
+    for (int i = static_cast<int>(loadSamples->size()) - 1; i >= 0; --i) {
+        const RuntimeProfilerDashboardLoadSample& sample = (*loadSamples)[static_cast<size_t>(i)];
+        bool found = false;
+        for (size_t j = 0; j < latestBySeries.size(); ++j) {
+            if (latestBySeries[j].applicationId == sample.applicationId &&
+                latestBySeries[j].threadId == sample.threadId) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            latestBySeries.append(sample);
+        }
+    }
+
+    SwString summary = "Charge: ";
+    const size_t visibleCount = std::min<size_t>(latestBySeries.size(), 2);
+    for (size_t i = 0; i < visibleCount; ++i) {
+        if (i > 0) {
+            summary += "  |  ";
+        }
+        const RuntimeProfilerDashboardLoadSample& sample = latestBySeries[i];
+        summary += compactLoadSeriesLabel_(sample.seriesLabel);
+        summary += " ";
+        summary += SwString::number(sample.loadPercentage, 'f', sample.loadPercentage >= 10.0 ? 1 : 2);
+        summary += "%";
+    }
+    if (latestBySeries.size() > visibleCount) {
+        summary += "  |  +";
+        summary += SwString::number(static_cast<unsigned long long>(latestBySeries.size() - visibleCount));
+    }
+    return summary;
+}
+
 } // namespace
 
 RuntimeProfilerProfilingView::RuntimeProfilerProfilingView(SwWidget* parent)
@@ -44,7 +111,7 @@ RuntimeProfilerProfilingView::RuntimeProfilerProfilingView(SwWidget* parent)
 }
 
 SwSize RuntimeProfilerProfilingView::minimumSizeHint() const {
-    return SwSize{620, 280};
+    return SwSize{620, 420};
 }
 
 void RuntimeProfilerProfilingView::setLaunchTimeNs(long long launchTimeNs) {
@@ -105,6 +172,9 @@ void RuntimeProfilerProfilingView::clearEntries() {
     if (tableWidget_) {
         tableWidget_->clearEntries();
     }
+    if (monitorBar_) {
+        monitorBar_->setLoadSummary("Charge: --");
+    }
     resetSelectedStallView_();
     rebuildChart_();
 }
@@ -153,15 +223,17 @@ void RuntimeProfilerProfilingView::buildUi_() {
     setStyleSheet("SwWidget { background-color: rgba(0,0,0,0); border-width: 0px; }");
 
     SwFrame* chartPanel = createPanel_(this);
+    chartPanel->setMinimumSize(0, 246);
     monitorBar_ = new RuntimeProfilerMonitoringBarWidget(chartPanel);
     monitorBar_->setThresholdUs(thresholdUs_);
     timelineWidget_ = new RuntimeProfilerStallTimelineWidget(chartPanel);
+    timelineWidget_->setMinimumSize(0, 200);
 
     SwVerticalLayout* chartLayout = new SwVerticalLayout();
     chartLayout->setMargin(2);
-    chartLayout->setSpacing(2);
+    chartLayout->setSpacing(4);
     chartLayout->addWidget(monitorBar_, 0, 34);
-    chartLayout->addWidget(timelineWidget_, 0, 90);
+    chartLayout->addWidget(timelineWidget_, 0, 200);
     chartPanel->setLayout(chartLayout);
 
     detailSplitter_ = new SwSplitter(SwSplitter::Orientation::Horizontal, this);
@@ -191,8 +263,8 @@ void RuntimeProfilerProfilingView::buildUi_() {
 
     SwVerticalLayout* layout = new SwVerticalLayout();
     layout->setMargin(0);
-    layout->setSpacing(4);
-    layout->addWidget(chartPanel, 0, 128);
+    layout->setSpacing(8);
+    layout->addWidget(chartPanel, 0, 246);
     layout->addWidget(detailSplitter_, 1, 540);
     setLayout(layout);
 
@@ -250,6 +322,8 @@ void RuntimeProfilerProfilingView::showEntryForSequence_(unsigned long long sequ
 
         RuntimeProfilerStackInspectorData data;
         data.sequence = entry.sequence;
+        data.applicationId = entry.applicationId;
+        data.applicationLabel = entry.applicationLabel;
         data.kind = entry.kind;
         data.label = entry.label;
         data.elapsedUs = entry.elapsedUs;
@@ -279,6 +353,10 @@ void RuntimeProfilerProfilingView::resetSelectedStallView_() {
 void RuntimeProfilerProfilingView::rebuildChart_() {
     if (!timelineWidget_) {
         return;
+    }
+
+    if (monitorBar_) {
+        monitorBar_->setLoadSummary(loadSummaryText_(loadSamples_));
     }
 
     double xMin = 0.0;

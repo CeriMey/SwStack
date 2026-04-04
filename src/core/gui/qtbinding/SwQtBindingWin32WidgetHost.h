@@ -264,6 +264,7 @@ private:
     }
 
     void dispatchMouseMove_(const MSG* msg) {
+        swWidgetEnsureMouseLeaveTracking_(msg->hwnd);
         const int x = GET_X_LPARAM(msg->lParam);
         const int y = GET_Y_LPARAM(msg->lParam);
         const UINT keyState = static_cast<UINT>(msg->wParam);
@@ -290,11 +291,15 @@ private:
 
         lastMousePosition_ = SwPoint{x, y};
         mouseEvent.setGlobalPos(mapLocalToGlobal_(x, y));
-        root_->dispatchMouseEventFromRoot(mouseEvent);
-        SwToolTip::handleMouseMove(root_, x, y);
+        const bool handled = root_->dispatchMouseEventFromRoot(mouseEvent);
+        if (!handled) {
+            SwWidgetPlatformAdapter::setCursor(CursorType::Arrow);
+        }
+        SwToolTip::handleMouseMove(root_, root_->hoveredWidgetFromRoot(), x, y);
     }
 
     void dispatchMouseLeave_() {
+        swWidgetClearMouseLeaveTracking_(nativeHostHandle_());
         MouseEvent mouseEvent(EventType::MouseMoveEvent,
                               -100000,
                               -100000,

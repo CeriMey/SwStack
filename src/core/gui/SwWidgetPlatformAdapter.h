@@ -49,10 +49,12 @@
 #include "Sw.h"
 #include "SwFont.h"
 #include "SwString.h"
+#include "core/runtime/SwCoreApplication.h"
 #include "platform/SwPlatformTarget.h"
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <map>
 #include <tuple>
@@ -118,6 +120,7 @@ public:
      * @details Call this method to replace the currently stored value with the caller-provided one.
      */
     static void setCursor(CursorType cursor);
+    static void setDamageThrottleSuppressed(const SwWidgetPlatformHandle& handle, bool suppressed);
     /**
      * @brief Performs the `invalidateRect` operation.
      * @param handle Value passed to the method.
@@ -125,7 +128,8 @@ public:
      * @return The requested invalidate Rect.
      */
     static void invalidateRect(const SwWidgetPlatformHandle& handle, const SwRect& rect);
-    static void flushDamage();
+    static void flushDamage(bool forceImmediate = false);
+    static void notePainted(const SwWidgetPlatformHandle& handle);
     /**
      * @brief Performs the `clientRect` operation.
      * @param handle Value passed to the method.
@@ -303,8 +307,15 @@ public:
 private:
 #if SW_PLATFORM_X11
     struct LinuxExposeTracker {
+        struct PendingWindow {
+            Display* display{nullptr};
+            XRectangle rect{};
+            bool hasDamage{false};
+            bool queued{false};
+            bool inFlight{false};
+        };
         std::mutex mutex;
-        std::unordered_set<std::uintptr_t> pending;
+        std::map<std::uintptr_t, PendingWindow> pending;
     };
     static LinuxExposeTracker& exposeTracker();
 #endif
@@ -339,7 +350,7 @@ inline size_t swWidgetPlatformNextUtf8Boundary_(const std::string& utf8, size_t 
 
 #if SW_PLATFORM_WIN32
 
-inline void SwWidgetPlatformAdapter::setCursor(CursorType cursor) {
+inline HCURSOR swWidgetCursorHandle_(CursorType cursor) {
     LPCTSTR cursorId = IDC_ARROW;
     switch (cursor) {
     case CursorType::Hand: cursorId = IDC_HAND; break;
@@ -354,10 +365,76 @@ inline void SwWidgetPlatformAdapter::setCursor(CursorType cursor) {
     default: cursorId = IDC_ARROW; break;
     }
 
-    HCURSOR cursorHandle = LoadCursor(nullptr, cursorId);
-    if (cursorHandle) {
+    return LoadCursor(nullptr, cursorId);
+}
+
+inline void SwWidgetPlatformAdapter::setCursor(CursorType cursor) {
+    HCURSOR cursorHandle = swWidgetCursorHandle_(cursor);
+    if (cursorHandle && ::GetCursor() != cursorHandle) {
         ::SetCursor(cursorHandle);
     }
+}
+
+inline std::unordered_set<HWND>& swWidgetMouseLeaveTrackedWindows_() {
+    static std::unordered_set<HWND> s_windows;
+    return s_windows;
+}
+
+inline void swWidgetEnsureMouseLeaveTracking_(HWND hwnd) {
+    if (!hwnd || !::IsWindow(hwnd)) {
+        return;
+    }
+
+    std::unordered_set<HWND>& trackedWindows = swWidgetMouseLeaveTrackedWindows_();
+    if (trackedWindows.find(hwnd) != trackedWindows.end()) {
+        return;
+    }
+
+    TRACKMOUSEEVENT tracking{};
+    tracking.cbSize = sizeof(TRACKMOUSEEVENT);
+    tracking.dwFlags = TME_LEAVE;
+    tracking.hwndTrack = hwnd;
+    if (::TrackMouseEvent(&tracking)) {
+        trackedWindows.insert(hwnd);
+    }
+}
+
+inline void swWidgetClearMouseLeaveTracking_(HWND hwnd) {
+    if (!hwnd) {
+        return;
+    }
+    swWidgetMouseLeaveTrackedWindows_().erase(hwnd);
+}
+
+inline std::map<HWND, int>& swWidgetDamageThrottleSuppressionCounts_() {
+    static std::map<HWND, int> s_counts;
+    return s_counts;
+}
+
+inline void SwWidgetPlatformAdapter::setDamageThrottleSuppressed(const SwWidgetPlatformHandle& handle, bool suppressed) {
+    HWND hwnd = nativeHandleAs<HWND>(handle);
+    if (!hwnd) {
+        return;
+    }
+
+    std::map<HWND, int>& suppressionCounts = swWidgetDamageThrottleSuppressionCounts_();
+    if (suppressed) {
+        int& count = suppressionCounts[hwnd];
+        ++count;
+        return;
+    }
+
+    std::map<HWND, int>::iterator it = suppressionCounts.find(hwnd);
+    if (it == suppressionCounts.end()) {
+        return;
+    }
+
+    if (it->second <= 1) {
+        suppressionCounts.erase(it);
+        return;
+    }
+
+    --(it->second);
 }
 
 // ── Damage-region accumulator ────────────────────────────────────────
@@ -365,9 +442,113 @@ inline void SwWidgetPlatformAdapter::setCursor(CursorType cursor) {
 // rects into a single union per HWND.  flushDamage() issues one
 // InvalidateRect call with the accumulated region.  This turns O(N)
 // syscalls per update() tree walk into O(1).
-inline std::map<HWND, RECT>& pendingDamage_() {
+inline std::map<HWND, RECT>& swWidgetPendingDamage_() {
     static std::map<HWND, RECT> s_damage;
     return s_damage;
+}
+
+inline std::map<HWND, long long>& swWidgetLastPaintedAtNs_() {
+    static std::map<HWND, long long> s_lastPaintedAtNs;
+    return s_lastPaintedAtNs;
+}
+
+inline int& swWidgetDamageWakeTimerId_() {
+    static int s_damageWakeTimerId = 0;
+    return s_damageWakeTimerId;
+}
+
+inline long long& swWidgetDamageWakeDeadlineNs_() {
+    static long long s_damageWakeDeadlineNs = 0;
+    return s_damageWakeDeadlineNs;
+}
+
+inline long long swWidgetSteadyNowNs_() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+inline bool swWidgetShouldThrottleDamage_(HWND hwnd,
+                                          const RECT& damageRect,
+                                          long long nowNs,
+                                          long long& remainingUsOut) {
+    remainingUsOut = 0;
+    if (!hwnd || !::IsWindow(hwnd) || !::IsWindowVisible(hwnd) || ::IsIconic(hwnd)) {
+        return false;
+    }
+
+    RECT clientRect{};
+    if (!::GetClientRect(hwnd, &clientRect)) {
+        return false;
+    }
+
+    const long long clientWidth = std::max(1LL, static_cast<long long>(clientRect.right - clientRect.left));
+    const long long clientHeight = std::max(1LL, static_cast<long long>(clientRect.bottom - clientRect.top));
+    const long long clientArea = clientWidth * clientHeight;
+    if (clientArea <= 0) {
+        return false;
+    }
+
+    const long long damageWidth = std::max(1LL, static_cast<long long>(damageRect.right - damageRect.left));
+    const long long damageHeight = std::max(1LL, static_cast<long long>(damageRect.bottom - damageRect.top));
+    const long long damageArea = damageWidth * damageHeight;
+
+    std::map<HWND, int>& suppressionCounts = swWidgetDamageThrottleSuppressionCounts_();
+    std::map<HWND, int>::const_iterator suppressionIt = suppressionCounts.find(hwnd);
+    if (suppressionIt != suppressionCounts.end() && suppressionIt->second > 0) {
+        return false;
+    }
+
+    const bool largeDamage = damageArea >= 320000LL || (damageArea * 100LL) >= (clientArea * 35LL);
+    if (!largeDamage) {
+        return false;
+    }
+
+    std::map<HWND, long long>& lastPainted = swWidgetLastPaintedAtNs_();
+    const std::map<HWND, long long>::const_iterator lastPaintIt = lastPainted.find(hwnd);
+    if (lastPaintIt == lastPainted.end() || lastPaintIt->second <= 0) {
+        return false;
+    }
+
+    static const long long kMinPresentedFrameIntervalUs_ = 100000LL;
+    const long long elapsedUs = std::max(0LL, (nowNs - lastPaintIt->second) / 1000LL);
+    if (elapsedUs >= kMinPresentedFrameIntervalUs_) {
+        return false;
+    }
+
+    remainingUsOut = kMinPresentedFrameIntervalUs_ - elapsedUs;
+    return remainingUsOut > 0;
+}
+
+inline void swWidgetScheduleDamageWake_(long long delayUs) {
+    if (delayUs <= 0) {
+        return;
+    }
+
+    SwCoreApplication* app = SwCoreApplication::instance(false);
+    if (!app) {
+        return;
+    }
+
+    const long long requestedDelayUs = std::max(1000LL, delayUs);
+    const long long requestedDeadlineNs = swWidgetSteadyNowNs_() + (requestedDelayUs * 1000LL);
+
+    int& timerId = swWidgetDamageWakeTimerId_();
+    long long& deadlineNs = swWidgetDamageWakeDeadlineNs_();
+    if (timerId != 0 && deadlineNs != 0 && requestedDeadlineNs >= deadlineNs) {
+        return;
+    }
+
+    if (timerId != 0) {
+        app->removeTimer(timerId);
+        timerId = 0;
+    }
+
+    deadlineNs = requestedDeadlineNs;
+    timerId = app->addTimer([]() {
+        swWidgetDamageWakeTimerId_() = 0;
+        swWidgetDamageWakeDeadlineNs_() = 0;
+    }, static_cast<int>(requestedDelayUs), true, SwFiberLane::Control);
 }
 
 inline void SwWidgetPlatformAdapter::invalidateRect(const SwWidgetPlatformHandle& handle,
@@ -382,7 +563,7 @@ inline void SwWidgetPlatformAdapter::invalidateRect(const SwWidgetPlatformHandle
     r.right = rect.x + rect.width;
     r.bottom = rect.y + rect.height;
 
-    auto& damage = pendingDamage_();
+    auto& damage = swWidgetPendingDamage_();
     auto it = damage.find(hwnd);
     if (it == damage.end()) {
         damage[hwnd] = r;
@@ -396,12 +577,46 @@ inline void SwWidgetPlatformAdapter::invalidateRect(const SwWidgetPlatformHandle
     }
 }
 
-inline void SwWidgetPlatformAdapter::flushDamage() {
-    auto& damage = pendingDamage_();
-    for (auto& kv : damage) {
-        ::InvalidateRect(kv.first, &kv.second, FALSE);
+inline void SwWidgetPlatformAdapter::flushDamage(bool forceImmediate) {
+    auto& damage = swWidgetPendingDamage_();
+    if (damage.empty()) {
+        return;
     }
-    damage.clear();
+
+    const long long nowNs = swWidgetSteadyNowNs_();
+    long long shortestRemainingUs = 0;
+    for (std::map<HWND, RECT>::iterator it = damage.begin(); it != damage.end();) {
+        HWND hwnd = it->first;
+        if (!hwnd || !::IsWindow(hwnd)) {
+            swWidgetLastPaintedAtNs_().erase(hwnd);
+            it = damage.erase(it);
+            continue;
+        }
+
+        long long remainingUs = 0;
+        if (!forceImmediate && swWidgetShouldThrottleDamage_(hwnd, it->second, nowNs, remainingUs)) {
+            if (shortestRemainingUs == 0 || remainingUs < shortestRemainingUs) {
+                shortestRemainingUs = remainingUs;
+            }
+            ++it;
+            continue;
+        }
+
+        ::InvalidateRect(hwnd, &it->second, FALSE);
+        it = damage.erase(it);
+    }
+
+    if (shortestRemainingUs > 0) {
+        swWidgetScheduleDamageWake_(shortestRemainingUs);
+    }
+}
+
+inline void SwWidgetPlatformAdapter::notePainted(const SwWidgetPlatformHandle& handle) {
+    HWND hwnd = nativeHandleAs<HWND>(handle);
+    if (!hwnd) {
+        return;
+    }
+    swWidgetLastPaintedAtNs_()[hwnd] = swWidgetSteadyNowNs_();
 }
 
 inline SwRect SwWidgetPlatformAdapter::clientRect(const SwWidgetPlatformHandle& handle) {
@@ -632,6 +847,7 @@ inline bool SwWidgetPlatformAdapter::isShiftModifierActive() {
 #elif SW_PLATFORM_ANDROID
 
 inline void SwWidgetPlatformAdapter::setCursor(CursorType) {}
+inline void SwWidgetPlatformAdapter::setDamageThrottleSuppressed(const SwWidgetPlatformHandle&, bool) {}
 
 inline void SwWidgetPlatformAdapter::invalidateRect(const SwWidgetPlatformHandle& handle,
                                                     const SwRect&) {
@@ -643,7 +859,9 @@ inline void SwWidgetPlatformAdapter::invalidateRect(const SwWidgetPlatformHandle
     window->requestUpdate();
 }
 
-inline void SwWidgetPlatformAdapter::flushDamage() {}
+inline void SwWidgetPlatformAdapter::flushDamage(bool) {}
+
+inline void SwWidgetPlatformAdapter::notePainted(const SwWidgetPlatformHandle&) {}
 
 inline SwRect SwWidgetPlatformAdapter::clientRect(const SwWidgetPlatformHandle& handle) {
     SwAndroidPlatformWindow* window =
@@ -797,8 +1015,13 @@ inline bool SwWidgetPlatformAdapter::requestSyntheticExpose(::Window window) {
     }
     auto& tracker = exposeTracker();
     std::lock_guard<std::mutex> lock(tracker.mutex);
-    const auto key = reinterpret_cast<std::uintptr_t>(window);
-    return tracker.pending.insert(key).second;
+    const std::uintptr_t key = static_cast<std::uintptr_t>(window);
+    LinuxExposeTracker::PendingWindow& pendingWindow = tracker.pending[key];
+    if (pendingWindow.queued || pendingWindow.inFlight) {
+        return false;
+    }
+    pendingWindow.queued = true;
+    return true;
 }
 
 inline void SwWidgetPlatformAdapter::finishSyntheticExpose(::Window window) {
@@ -807,7 +1030,22 @@ inline void SwWidgetPlatformAdapter::finishSyntheticExpose(::Window window) {
     }
     auto& tracker = exposeTracker();
     std::lock_guard<std::mutex> lock(tracker.mutex);
-    tracker.pending.erase(reinterpret_cast<std::uintptr_t>(window));
+    const std::uintptr_t key = static_cast<std::uintptr_t>(window);
+    std::map<std::uintptr_t, LinuxExposeTracker::PendingWindow>::iterator it =
+        tracker.pending.find(key);
+    if (it == tracker.pending.end()) {
+        return;
+    }
+
+    it->second.inFlight = false;
+    if (it->second.hasDamage) {
+        it->second.queued = true;
+        return;
+    }
+
+    if (!it->second.queued) {
+        tracker.pending.erase(it);
+    }
 }
 
 namespace SwLinuxFontCache {
@@ -953,6 +1191,7 @@ inline XFontStruct* acquire(Display* display, const SwFont& font) {
 } // namespace SwLinuxFontCache
 
 inline void SwWidgetPlatformAdapter::setCursor(CursorType) {}
+inline void SwWidgetPlatformAdapter::setDamageThrottleSuppressed(const SwWidgetPlatformHandle&, bool) {}
 
 inline void SwWidgetPlatformAdapter::invalidateRect(const SwWidgetPlatformHandle& handle,
                                                     const SwRect& rect) {
@@ -961,27 +1200,103 @@ inline void SwWidgetPlatformAdapter::invalidateRect(const SwWidgetPlatformHandle
     if (!display || window == 0) {
         return;
     }
-    if (!requestSyntheticExpose(window)) {
-        return;
+
+    XRectangle dirtyRect{};
+    dirtyRect.x = static_cast<short>(rect.x);
+    dirtyRect.y = static_cast<short>(rect.y);
+    dirtyRect.width = static_cast<unsigned short>(rect.width > 0 ? rect.width : 1);
+    dirtyRect.height = static_cast<unsigned short>(rect.height > 0 ? rect.height : 1);
+
+    auto& tracker = exposeTracker();
+    std::lock_guard<std::mutex> lock(tracker.mutex);
+    const std::uintptr_t key = static_cast<std::uintptr_t>(window);
+    LinuxExposeTracker::PendingWindow& pendingWindow = tracker.pending[key];
+    pendingWindow.display = display;
+
+    if (!pendingWindow.hasDamage) {
+        pendingWindow.rect = dirtyRect;
+        pendingWindow.hasDamage = true;
+    } else {
+        const int left = std::min(static_cast<int>(pendingWindow.rect.x), static_cast<int>(dirtyRect.x));
+        const int top = std::min(static_cast<int>(pendingWindow.rect.y), static_cast<int>(dirtyRect.y));
+        const int right = std::max(static_cast<int>(pendingWindow.rect.x) + static_cast<int>(pendingWindow.rect.width),
+                                   static_cast<int>(dirtyRect.x) + static_cast<int>(dirtyRect.width));
+        const int bottom = std::max(static_cast<int>(pendingWindow.rect.y) + static_cast<int>(pendingWindow.rect.height),
+                                    static_cast<int>(dirtyRect.y) + static_cast<int>(dirtyRect.height));
+
+        pendingWindow.rect.x = static_cast<short>(left);
+        pendingWindow.rect.y = static_cast<short>(top);
+        pendingWindow.rect.width = static_cast<unsigned short>(std::max(1, right - left));
+        pendingWindow.rect.height = static_cast<unsigned short>(std::max(1, bottom - top));
     }
 
-    XEvent exposeEvent{};
-    exposeEvent.type = Expose;
-    exposeEvent.xexpose.window = window;
-    exposeEvent.xexpose.x = rect.x;
-    exposeEvent.xexpose.y = rect.y;
-    exposeEvent.xexpose.width = rect.width > 0 ? rect.width : 1;
-    exposeEvent.xexpose.height = rect.height > 0 ? rect.height : 1;
-    exposeEvent.xexpose.count = 0;
-
-    XSendEvent(display, window, False, ExposureMask, &exposeEvent);
-    XFlush(display);
+    if (!pendingWindow.inFlight) {
+        pendingWindow.queued = true;
+    }
 }
 
-inline void SwWidgetPlatformAdapter::flushDamage() {
-    // X11: invalidateRect already sends XSendEvent + XFlush per call,
-    // so there is no pending damage to flush.  This is a no-op.
+inline void SwWidgetPlatformAdapter::flushDamage(bool) {
+    struct PendingExpose {
+        Display* display{nullptr};
+        ::Window window{0};
+        XRectangle rect{};
+    };
+
+    std::vector<PendingExpose> exposes;
+    exposes.reserve(16);
+
+    auto& tracker = exposeTracker();
+    {
+        std::lock_guard<std::mutex> lock(tracker.mutex);
+        for (std::map<std::uintptr_t, LinuxExposeTracker::PendingWindow>::iterator it = tracker.pending.begin();
+             it != tracker.pending.end();
+             ++it) {
+            LinuxExposeTracker::PendingWindow& pendingWindow = it->second;
+            if (!pendingWindow.queued || !pendingWindow.hasDamage || !pendingWindow.display) {
+                continue;
+            }
+
+            PendingExpose expose;
+            expose.display = pendingWindow.display;
+            expose.window = static_cast<::Window>(it->first);
+            expose.rect = pendingWindow.rect;
+            exposes.push_back(expose);
+
+            pendingWindow.queued = false;
+            pendingWindow.inFlight = true;
+            pendingWindow.hasDamage = false;
+        }
+    }
+
+    std::unordered_set<Display*> flushedDisplays;
+    for (size_t i = 0; i < exposes.size(); ++i) {
+        const PendingExpose& expose = exposes[i];
+        if (!expose.display || expose.window == 0) {
+            continue;
+        }
+
+        XEvent exposeEvent{};
+        exposeEvent.type = Expose;
+        exposeEvent.xexpose.window = expose.window;
+        exposeEvent.xexpose.x = expose.rect.x;
+        exposeEvent.xexpose.y = expose.rect.y;
+        exposeEvent.xexpose.width = expose.rect.width > 0 ? expose.rect.width : 1;
+        exposeEvent.xexpose.height = expose.rect.height > 0 ? expose.rect.height : 1;
+        exposeEvent.xexpose.count = 0;
+        XSendEvent(expose.display, expose.window, False, ExposureMask, &exposeEvent);
+        flushedDisplays.insert(expose.display);
+    }
+
+    for (std::unordered_set<Display*>::const_iterator it = flushedDisplays.begin();
+         it != flushedDisplays.end();
+         ++it) {
+        if (*it) {
+            XFlush(*it);
+        }
+    }
 }
+
+inline void SwWidgetPlatformAdapter::notePainted(const SwWidgetPlatformHandle&) {}
 
 inline SwRect SwWidgetPlatformAdapter::clientRect(const SwWidgetPlatformHandle& handle) {
     Display* display = reinterpret_cast<Display*>(handle.nativeDisplay);
@@ -1196,8 +1511,10 @@ inline bool SwWidgetPlatformAdapter::isShiftModifierActive() {
 #else
 
 inline void SwWidgetPlatformAdapter::setCursor(CursorType) {}
+inline void SwWidgetPlatformAdapter::setDamageThrottleSuppressed(const SwWidgetPlatformHandle&, bool) {}
 inline void SwWidgetPlatformAdapter::invalidateRect(const SwWidgetPlatformHandle&, const SwRect&) {}
-inline void SwWidgetPlatformAdapter::flushDamage() {}
+inline void SwWidgetPlatformAdapter::flushDamage(bool) {}
+inline void SwWidgetPlatformAdapter::notePainted(const SwWidgetPlatformHandle&) {}
 inline SwRect SwWidgetPlatformAdapter::clientRect(const SwWidgetPlatformHandle&) { return SwRect{0, 0, 0, 0}; }
 inline SwPoint SwWidgetPlatformAdapter::clientOriginOnScreen(const SwWidgetPlatformHandle&) { return SwPoint{0, 0}; }
 inline SwRect SwWidgetPlatformAdapter::windowFrameRect(const SwWidgetPlatformHandle&) { return SwRect{0, 0, 0, 0}; }

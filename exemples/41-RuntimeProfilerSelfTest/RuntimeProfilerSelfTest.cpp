@@ -11,7 +11,7 @@
 #include "widgets/RuntimeProfilerProfilingView.h"
 #include "widgets/RuntimeProfilerViewTypes.h"
 #include "core/fs/SwMutex.h"
-#include "core/runtime/SwRuntimeProfiler.h"
+#include "core/runtime/SwRuntimeApplicationMonitor.h"
 
 #include <algorithm>
 #include <chrono>
@@ -37,6 +37,8 @@ static SwString hexAddress_(unsigned long long value);
 static bool hasFlag_(int argc, char** argv, const char* flag);
 static int intArgumentValue_(int argc, char** argv, const char* key, int fallbackValue);
 static long long steadyNowNs_();
+static SwRuntimeApplicationMonitorConfig runtimeMonitorConfigFromProfilerConfig_(
+    const SwRuntimeProfilerConfig& profilerConfig);
 static void applyProfilerScrollBarStyle_(SwScrollBar* scrollBar);
 static void applyProfilerSplitterStyle_(SwSplitter* splitter);
 
@@ -796,7 +798,7 @@ private:
     SwList<unsigned long long> sequences_;
 };
 
-class RuntimeProfilerDashboardSink : public SwRuntimeProfileSink {
+class RuntimeProfilerDashboardSink : public SwRuntimeApplicationMonitorSink {
 public:
     struct Snapshot {
         SwRuntimeCountersSnapshot counters;
@@ -818,13 +820,16 @@ public:
         }
     };
 
-    void onRuntimeBatch(const SwList<SwRuntimeTimingRecord>& records,
-                        const SwRuntimeCountersSnapshot& counters) override;
-    void onStall(const SwRuntimeStallReport& report) override;
+    void setSelectedApplicationId(unsigned long long applicationId);
+    void reset();
+    void onRuntimeApplicationDetached(const SwRuntimeApplicationDescriptor& descriptor);
+    void onRuntimeApplicationTimingBatch(const SwRuntimeApplicationTimingBatch& batch);
+    void onRuntimeApplicationStall(const SwRuntimeApplicationStallEvent& event);
     Snapshot consume();
 
 private:
     SwMutex mutex_;
+    unsigned long long selectedApplicationId_{0};
     SwRuntimeCountersSnapshot latestCounters_;
     SwList<RuntimeProfilerDashboardStallEntry> pendingStalls_;
     unsigned long long stallSequence_{0};
@@ -852,9 +857,9 @@ class RuntimeProfilerDashboardWindow : public SwMainWindow {
 
 public:
     RuntimeProfilerDashboardWindow(SwGuiApplication* app,
-                                   const SwRuntimeProfileConfig& profilerConfig);
+                                   const SwRuntimeProfilerConfig& profilerConfig);
+    ~RuntimeProfilerDashboardWindow() override;
 
-    SwRuntimeProfileSink* sink();
     void start();
 
 protected:
@@ -892,10 +897,12 @@ private:
     void clearUi_();
 
     SwGuiApplication* app_{nullptr};
-    SwRuntimeProfileConfig profilerConfig_{};
+    SwRuntimeProfilerConfig profilerConfig_{};
     RuntimeProfilerDashboardSink sink_{};
+    SwRuntimeApplicationMonitor monitor_;
     RuntimeProfilerObjectReceiver objectReceiver_;
     long long launchTimeNs_{0};
+    unsigned long long selectedApplicationId_{0};
 
     SwWidget* root_{nullptr};
     RuntimeProfilerProfilingView* profilingView_{nullptr};
@@ -966,6 +973,17 @@ static SwString percentString_(double value) {
     return SwString::number(value, 'f', 1) + "%";
 }
 
+static SwString runtimeSeriesLabel_(const SwRuntimeApplicationDescriptor& descriptor) {
+    SwString label = descriptor.label;
+    if (label.isEmpty()) {
+        label = descriptor.runtimeKind.isEmpty()
+                    ? ("runtime #" + SwString::number(descriptor.applicationId))
+                    : (descriptor.runtimeKind + " runtime #" + SwString::number(descriptor.applicationId));
+    }
+    label += "  |  T" + SwString::number(descriptor.threadId);
+    return label;
+}
+
 static int timingKindIndex_(SwRuntimeTimingKind kind) {
     const int rawIndex = static_cast<int>(kind);
     if (rawIndex < 0) {
@@ -1018,7 +1036,7 @@ static int intArgumentValue_(int argc, char** argv, const char* key, int fallbac
         }
         if (arg.startsWith(prefix)) {
             bool ok = false;
-            const int parsed = arg.mid(prefix.size()).toInt(&ok);
+            const int parsed = arg.mid(static_cast<int>(prefix.size())).toInt(&ok);
             if (ok) {
                 return parsed;
             }
@@ -1031,6 +1049,17 @@ static long long steadyNowNs_() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
                std::chrono::steady_clock::now().time_since_epoch())
         .count();
+}
+
+static SwRuntimeApplicationMonitorConfig runtimeMonitorConfigFromProfilerConfig_(
+    const SwRuntimeProfilerConfig& profilerConfig) {
+    SwRuntimeApplicationMonitorConfig config;
+    config.captureIterationSamples = false;
+    config.captureTimingBatches = true;
+    config.captureStalls = true;
+    config.profilerCaptureEnabledOnStart = false;
+    config.profilerConfig = profilerConfig;
+    return config;
 }
 
 static void applyProfilerScrollBarStyle_(SwScrollBar* scrollBar) {
@@ -1086,34 +1115,74 @@ static void applyProfilerSplitterStyle_(SwSplitter* splitter) {
     )");
 }
 
-void RuntimeProfilerDashboardSink::onRuntimeBatch(const SwList<SwRuntimeTimingRecord>& records,
-                                                  const SwRuntimeCountersSnapshot& counters) {
+void RuntimeProfilerDashboardSink::setSelectedApplicationId(unsigned long long applicationId) {
     SwMutexLocker locker(mutex_);
-    latestCounters_ = counters;
+    selectedApplicationId_ = applicationId;
+}
+
+void RuntimeProfilerDashboardSink::reset() {
+    SwMutexLocker locker(mutex_);
+    latestCounters_ = SwRuntimeCountersSnapshot();
+    pendingStalls_.clear();
+    stallSequence_ = 0;
+    timingCount_ = 0;
+    batchCount_ = 0;
+    worstStallUs_ = 0;
+    for (int i = 0; i < kTimingKindCount_; ++i) {
+        timingByKind_[i] = 0;
+    }
+}
+
+void RuntimeProfilerDashboardSink::onRuntimeApplicationDetached(const SwRuntimeApplicationDescriptor& descriptor) {
+    SwMutexLocker locker(mutex_);
+    if (descriptor.applicationId == selectedApplicationId_) {
+        latestCounters_ = SwRuntimeCountersSnapshot();
+        pendingStalls_.clear();
+        stallSequence_ = 0;
+        timingCount_ = 0;
+        batchCount_ = 0;
+        worstStallUs_ = 0;
+        for (int i = 0; i < kTimingKindCount_; ++i) {
+            timingByKind_[i] = 0;
+        }
+    }
+}
+
+void RuntimeProfilerDashboardSink::onRuntimeApplicationTimingBatch(const SwRuntimeApplicationTimingBatch& batch) {
+    SwMutexLocker locker(mutex_);
+    if (batch.application.applicationId != selectedApplicationId_) {
+        return;
+    }
+    latestCounters_ = batch.counters;
     ++batchCount_;
-    timingCount_ += static_cast<unsigned long long>(records.size());
-    for (size_t i = 0; i < records.size(); ++i) {
-        const int index = timingKindIndex_(records[i].kind);
+    timingCount_ += static_cast<unsigned long long>(batch.records.size());
+    for (size_t i = 0; i < batch.records.size(); ++i) {
+        const int index = timingKindIndex_(batch.records[i].kind);
         ++timingByKind_[index];
     }
 }
 
-void RuntimeProfilerDashboardSink::onStall(const SwRuntimeStallReport& report) {
+void RuntimeProfilerDashboardSink::onRuntimeApplicationStall(const SwRuntimeApplicationStallEvent& event) {
     RuntimeProfilerDashboardStallEntry entry;
-    entry.sequence = ++stallSequence_;
-    entry.kind = report.kind;
-    entry.label = report.label ? SwString(report.label) : SwString();
-    entry.elapsedUs = report.elapsedUs;
-    entry.sampleTimeNs = steadyNowNs_();
-    entry.lane = report.lane;
-    entry.threadId = report.threadId;
-    entry.frames = report.frames;
-    entry.resolvedFrames = report.resolvedFrames;
-    entry.symbols = report.symbols;
-    entry.symbolBackend = report.symbolBackend;
-    entry.symbolSearchPath = report.symbolSearchPath;
+    entry.applicationId = event.application.applicationId;
+    entry.applicationLabel = runtimeSeriesLabel_(event.application);
+    entry.kind = event.stall.kind;
+    entry.label = event.stall.label ? SwString(event.stall.label) : SwString();
+    entry.elapsedUs = event.stall.elapsedUs;
+    entry.sampleTimeNs = event.sampleTimeNs != 0 ? event.sampleTimeNs : steadyNowNs_();
+    entry.lane = event.stall.lane;
+    entry.threadId = event.stall.threadId;
+    entry.frames = event.stall.frames;
+    entry.resolvedFrames = event.stall.resolvedFrames;
+    entry.symbols = event.stall.symbols;
+    entry.symbolBackend = event.stall.symbolBackend;
+    entry.symbolSearchPath = event.stall.symbolSearchPath;
 
     SwMutexLocker locker(mutex_);
+    if (event.application.applicationId != selectedApplicationId_) {
+        return;
+    }
+    entry.sequence = ++stallSequence_;
     pendingStalls_.append(entry);
     if (entry.elapsedUs > worstStallUs_) {
         worstStallUs_ = entry.elapsedUs;
@@ -1171,26 +1240,35 @@ bool RuntimeProfilerObjectReceiver::event(SwEvent* event) {
 }
 
 RuntimeProfilerDashboardWindow::RuntimeProfilerDashboardWindow(SwGuiApplication* app,
-                                                               const SwRuntimeProfileConfig& profilerConfig)
+                                                               const SwRuntimeProfilerConfig& profilerConfig)
     : SwMainWindow(L"Runtime Profiler Control Room", 1480, 930),
       app_(app),
       profilerConfig_(profilerConfig),
+      monitor_(&sink_, runtimeMonitorConfigFromProfilerConfig_(profilerConfig)),
       objectReceiver_(app),
-      launchTimeNs_(steadyNowNs_()) {
+      launchTimeNs_(steadyNowNs_()),
+      selectedApplicationId_(app ? app->runtimeApplicationId() : 0) {
+    sink_.setSelectedApplicationId(selectedApplicationId_);
     setStyleSheet("SwMainWindow { background-color: rgb(30, 30, 30); }");
     stripChrome_();
     buildUi_();
     updateSummary_();
 }
 
-SwRuntimeProfileSink* RuntimeProfilerDashboardWindow::sink() {
-    return &sink_;
+RuntimeProfilerDashboardWindow::~RuntimeProfilerDashboardWindow() {
+    if (app_ && refreshTimerId_ >= 0) {
+        app_->removeTimer(refreshTimerId_);
+    }
+    if (app_ && autoFeedTimerId_ >= 0) {
+        app_->removeTimer(autoFeedTimerId_);
+    }
+    monitor_.stop();
 }
 
 void RuntimeProfilerDashboardWindow::start() {
     refreshTimerId_ = app_ ? app_->addTimer([this]() { pullProfilerState_(); }, kUiRefreshPeriodUs_) : -1;
     autoFeedTimerId_ = app_ ? app_->addTimer([this]() { scheduleNextAutoStall_(); }, kAutoFeedPeriodUs_) : -1;
-    setMonitoringEnabled_(app_ && app_->profilerCaptureEnabled());
+    setMonitoringEnabled_(app_ != nullptr);
     autoFeedEnabled_ = true;
     if (autoFeedButton_) {
         autoFeedButton_->setChecked(true);
@@ -1671,23 +1749,27 @@ void RuntimeProfilerDashboardWindow::setMonitoringEnabled_(bool enabled) {
         return;
     }
 
-    if (!app_->profilerEnabled()) {
-        if (!enabled) {
-            monitoringActive_ = false;
-            if (profilingView_) {
-                profilingView_->setMonitoringActive(false);
-            }
-            updateSummary_();
-            return;
+    if (!enabled) {
+        monitoringActive_ = false;
+        monitor_.setProfilerCaptureEnabledForApplication(selectedApplicationId_, false);
+        monitor_.stop();
+        sink_.reset();
+        clearUi_();
+        if (profilingView_) {
+            profilingView_->setMonitoringActive(false);
         }
-        app_->installProfiler(sink(), profilerConfig_);
+        updateSummary_();
+        return;
     }
 
-    if (app_->profilerEnabled()) {
-        app_->setProfilerCaptureEnabled(enabled);
+    if (!monitor_.running()) {
+        sink_.reset();
+        monitor_.start();
     }
-
-    monitoringActive_ = app_->profilerCaptureEnabled();
+    sink_.setSelectedApplicationId(selectedApplicationId_);
+    monitor_.setProfilerStallThresholdUsForApplication(selectedApplicationId_, profilerConfig_.stallThresholdUs);
+    monitor_.setProfilerCaptureEnabledForApplication(selectedApplicationId_, true);
+    monitoringActive_ = monitor_.running();
     if (profilingView_) {
         profilingView_->setMonitoringActive(monitoringActive_);
     }
@@ -1709,8 +1791,8 @@ void RuntimeProfilerDashboardWindow::setThresholdUs_(long long thresholdUs) {
         profilingView_->setThresholdUs(profilerConfig_.stallThresholdUs);
     }
 
-    if (app_ && app_->profilerEnabled()) {
-        app_->setProfilerStallThresholdUs(profilerConfig_.stallThresholdUs);
+    if (monitor_.running()) {
+        monitor_.setProfilerStallThresholdUsForApplication(selectedApplicationId_, profilerConfig_.stallThresholdUs);
     }
 
     updateSummary_();
@@ -1727,6 +1809,11 @@ void RuntimeProfilerDashboardWindow::pullProfilerState_() {
 void RuntimeProfilerDashboardWindow::applySnapshot_(const RuntimeProfilerDashboardSink::Snapshot& snapshot) {
     RuntimeProfilerDashboardLoadSample loadSample;
     loadSample.sampleTimeNs = steadyNowNs_();
+    const SwRuntimeApplicationDescriptor descriptor =
+        app_ ? app_->runtimeApplicationDescriptor() : SwRuntimeApplicationDescriptor();
+    loadSample.applicationId = descriptor.applicationId;
+    loadSample.threadId = descriptor.threadId;
+    loadSample.seriesLabel = runtimeSeriesLabel_(descriptor);
     loadSample.loadPercentage = snapshot.counters.lastSecondLoadPercentage > 0.0
                                     ? snapshot.counters.lastSecondLoadPercentage
                                     : snapshot.counters.loadPercentage;
@@ -1795,6 +1882,8 @@ void RuntimeProfilerDashboardWindow::updateSummary_() {
     SwString summary;
     summary.append("Monitoring ");
     summary.append(monitoringActive_ ? "on" : "off");
+    summary.append("  |  app ");
+    summary.append(app_ ? app_->runtimeApplicationDescriptor().label : SwString("n/a"));
     summary.append("  |  ");
     summary.append("Threshold ");
     summary.append(durationMsString_(profilerConfig_.stallThresholdUs));
@@ -1818,8 +1907,16 @@ void RuntimeProfilerDashboardWindow::updateSummary_() {
 }
 
 void RuntimeProfilerDashboardWindow::clearUi_() {
+    sink_.reset();
     stallHistory_.clear();
     loadHistory_.clear();
+    latestCounters_ = SwRuntimeCountersSnapshot();
+    latestTimingCount_ = 0;
+    latestBatchCount_ = 0;
+    latestWorstStallUs_ = 0;
+    for (int i = 0; i < kTimingKindCount_; ++i) {
+        latestTimingByKind_[i] = 0;
+    }
     if (profilingView_) {
         profilingView_->clearEntries();
         profilingView_->setObservedStallCount(0);
@@ -1831,8 +1928,9 @@ void RuntimeProfilerDashboardWindow::clearUi_() {
 
 int main(int argc, char** argv) {
     SwGuiApplication app;
+    app.setRuntimeApplicationLabel("Runtime Profiler Self-Test");
 
-    SwRuntimeProfileConfig config;
+    SwRuntimeProfilerConfig config;
     config.stallThresholdUs = 10000;
     config.monitorPeriodUs = 2000;
     config.maxStackFrames = 64;
@@ -1842,10 +1940,6 @@ int main(int argc, char** argv) {
     config.enableStackCaptureOnStall = true;
 
     RuntimeProfilerDashboardWindow window(&app, config);
-    if (!app.installProfiler(window.sink(), config)) {
-        return 10;
-    }
-
     window.show();
     window.start();
 
@@ -1854,7 +1948,5 @@ int main(int argc, char** argv) {
         app.addTimer([&app]() { app.quit(); }, smokeMs * 1000, true);
     }
 
-    const int exitCode = app.exec();
-    app.uninstallProfiler();
-    return exitCode;
+    return app.exec();
 }

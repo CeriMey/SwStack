@@ -86,6 +86,7 @@ public:
      */
     SwGuiApplication() {
         instance(false) = this;
+        setRuntimeApplicationKind("gui", true);
         m_platformIntegration = SwCreateDefaultPlatformIntegration();
         if (!m_platformIntegration) {
             throw std::runtime_error("No platform integration available");
@@ -124,22 +125,23 @@ public:
      */
     int exec(int maxDurationMicroseconds = 0) override {
         setHighThreadPriority();
-        (void)profilerSessionForCurrentThread_();
-        auto startTime = std::chrono::steady_clock::now();
-        auto lastTime = startTime;
+        (void)profilerSessionsForCurrentThread_();
+        const auto startTime = std::chrono::steady_clock::now();
+        auto iterationBoundary = startTime;
 
         while (running) {
             busyElapsedIteration = 0;
 
+            const auto busyStart = std::chrono::steady_clock::now();
+
             if (m_platformIntegration) {
-                SwRuntimeProfilerSession* profilerSession = profilerSessionForCurrentThread_();
-                SwRuntimeScopedSpan platformScope(profilerSession && profilerSession->autoRuntimeScopesEnabled()
-                                                      ? profilerSession
-                                                      : nullptr,
-                                                  SwRuntimeTimingKind::PlatformPump,
-                                                  "platform_pump",
-                                                  SwFiberLane::Control,
-                                                  true);
+                const SwList<std::shared_ptr<SwRuntimeProfilerSession>> profilerSessions =
+                    autoRuntimeProfilerSessionsForCurrentThread_();
+                MultiRuntimeScopedSpan_ platformScope(profilerSessions,
+                                                      SwRuntimeTimingKind::PlatformPump,
+                                                      "platform_pump",
+                                                      SwFiberLane::Control,
+                                                      true);
                 m_platformIntegration->processPlatformEvents();
             }
 
@@ -161,44 +163,23 @@ public:
 
             // Process freshly posted paint/input messages that may have been queued by processEvent().
             if (m_platformIntegration) {
-                SwRuntimeProfilerSession* profilerSession = profilerSessionForCurrentThread_();
-                SwRuntimeScopedSpan platformScope(profilerSession && profilerSession->autoRuntimeScopesEnabled()
-                                                      ? profilerSession
-                                                      : nullptr,
-                                                  SwRuntimeTimingKind::PlatformPump,
-                                                  "platform_pump",
-                                                  SwFiberLane::Control,
-                                                  true);
+                const SwList<std::shared_ptr<SwRuntimeProfilerSession>> profilerSessions =
+                    autoRuntimeProfilerSessionsForCurrentThread_();
+                MultiRuntimeScopedSpan_ platformScope(profilerSessions,
+                                                      SwRuntimeTimingKind::PlatformPump,
+                                                      "platform_pump",
+                                                      SwFiberLane::Control,
+                                                      true);
                 m_platformIntegration->processPlatformEvents();
             }
+            const auto busyEnd = std::chrono::steady_clock::now();
+            busyElapsedIteration = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(busyEnd - busyStart).count());
 
-            auto currentTime = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(currentTime - lastTime).count();
-            lastTime = currentTime;
-
-            totalTimeMicroseconds += static_cast<uint64_t>(elapsed);
-            totalBusyTimeMicroseconds += static_cast<uint64_t>(busyElapsedIteration);
-
-            measurements.push_back({
-                currentTime,
-                static_cast<uint64_t>(busyElapsedIteration),
-                static_cast<uint64_t>(elapsed)
-            });
-
-            auto oneSecondAgo = currentTime - std::chrono::seconds(1);
-            while (!measurements.empty() && measurements.front().timestamp < oneSecondAgo) {
-                measurements.pop_front();
+            if (!running) {
+                sleepDuration = 0;
             }
 
-            profilerUpdateIterationSnapshot_();
-
-            auto totalElapsed =
-                std::chrono::duration_cast<std::chrono::microseconds>(currentTime - startTime).count();
-            if (maxDurationMicroseconds != 0 && totalElapsed >= maxDurationMicroseconds) {
-                break;
-            }
-
-            if (!running) break;
             if (sleepDuration != 0) {
 #if defined(_WIN32)
                 // Wait on core waitables (IPC signals, wake events, ...) *and* Win32 messages.
@@ -215,8 +196,22 @@ public:
                 waitForWork(sleepDuration);
 #endif
             }
+
+            const auto iterationEnd = std::chrono::steady_clock::now();
+            const uint64_t totalElapsedIteration = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(iterationEnd - iterationBoundary).count());
+            iterationBoundary = iterationEnd;
+
+            this->recordRuntimeIterationMeasurement_(iterationEnd, busyElapsedIteration, totalElapsedIteration);
+            this->publishRuntimeIterationSnapshot_();
+
+            const auto totalElapsed =
+                std::chrono::duration_cast<std::chrono::microseconds>(iterationEnd - startTime).count();
+            if (maxDurationMicroseconds != 0 && totalElapsed >= maxDurationMicroseconds) {
+                break;
+            }
         }
-        return exitCode;
+        return exitCode.load(std::memory_order_acquire);
     }
 
     /**

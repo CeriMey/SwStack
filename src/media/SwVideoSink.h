@@ -104,6 +104,44 @@ public:
         }
     }
 
+    void setDedicatedDecodeThreadEnabled(bool enabled) {
+        if (m_pipeline) {
+            m_pipeline->setAsyncDecode(enabled);
+        }
+    }
+
+    void setRuntimeDecoderRerouteEnabled(bool enabled) {
+        if (m_pipeline) {
+            m_pipeline->setRuntimeDecoderRerouteEnabled(enabled);
+        }
+    }
+
+    void setDecodeQueueLimits(std::size_t maxPackets, std::size_t maxBytes) {
+        if (m_pipeline) {
+            m_pipeline->setQueueLimits(maxPackets, maxBytes);
+        }
+    }
+
+    void setDecoderStallRecoveryEnabled(bool enabled) {
+        if (m_pipeline) {
+            m_pipeline->setDecoderStallRecoveryEnabled(enabled);
+        }
+    }
+
+    void recoverLiveEdge(const SwMediaSource::RecoveryEvent& event) {
+        {
+            std::lock_guard<std::mutex> lock(m_frameMutex);
+            m_currentFrame = SwVideoFrame();
+            m_firstFrameTime = std::chrono::steady_clock::time_point{};
+            m_lastFrameTime = std::chrono::steady_clock::time_point{};
+        }
+        m_loggedFirstPresentedFrame.store(false);
+        m_presentedFrameCount.store(0);
+        if (m_pipeline) {
+            m_pipeline->recoverLiveEdge(event);
+        }
+    }
+
     void setFrameCallback(FrameCallback callback) {
         std::lock_guard<std::mutex> lock(m_frameMutex);
         m_frameArrived = std::move(callback);

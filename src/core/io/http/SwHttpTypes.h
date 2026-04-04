@@ -56,7 +56,7 @@
 #include <cstdint>
 #include <functional>
 
-class SwTcpSocket;
+class SwAbstractSocket;
 
 struct SwHttpLimits {
     std::size_t maxRequestLineBytes = 8 * 1024;
@@ -106,6 +106,8 @@ struct SwHttpRequest {
     bool keepAlive = true;
     bool isChunkedBody = false;
     bool isMultipartFormData = false;
+    bool isTls = false;
+    uint16_t localPort = 0;
 
     struct MultipartPart {
         SwMap<SwString, SwString> headers;
@@ -155,15 +157,17 @@ struct SwHttpResponse {
     // When set, the HTTP session sends the response headers then transfers
     // socket ownership to the callback instead of closing/keeping HTTP parsing.
     bool switchToRawSocket = false;
+    bool switchToRawSocketWithoutHttpResponse = false;
     /**
      * @brief Performs the `function<void` operation.
      * @return The requested function<void.
      */
-    std::function<void(SwTcpSocket*)> onSwitchToRawSocket;
+    std::function<void(SwAbstractSocket*)> onSwitchToRawSocket;
 };
 
 inline SwString swHttpStatusReason(int status) {
     switch (status) {
+    case 101: return "Switching Protocols";
     case 200: return "OK";
     case 201: return "Created";
     case 204: return "No Content";
@@ -181,6 +185,7 @@ inline SwString swHttpStatusReason(int status) {
     case 413: return "Payload Too Large";
     case 414: return "URI Too Long";
     case 416: return "Range Not Satisfiable";
+    case 426: return "Upgrade Required";
     case 431: return "Request Header Fields Too Large";
     case 308: return "Permanent Redirect";
     case 500: return "Internal Server Error";

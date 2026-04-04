@@ -1,5 +1,6 @@
 #include "SwCoreApplication.h"
 #include "SwHttpApp.h"
+#include "SwSslSocket.h"
 #include "http/SwHttpMiddlewarePack.h"
 #include "SwTcpSocket.h"
 #include "SwDir.h"
@@ -1210,18 +1211,28 @@ public:
         headers["content-length"] = SwString::number(static_cast<long long>(m_request.body.size()));
         m_payload = proxyBuildRequestPayload_(m_request.method, upstreamPath, headers, m_request.body);
 
-        m_socket = new SwTcpSocket(this);
-        m_socket->useSsl(m_upstream.protocol == "https", m_upstream.host);
-        connect(m_socket, SIGNAL(connected), this, &ProxyHttpForwardJob::onConnected_);
+        SwSslSocket* sslSocket = (m_upstream.protocol == "https") ? new SwSslSocket(this) : nullptr;
+        m_socket = sslSocket ? static_cast<SwAbstractSocket*>(sslSocket) : new SwTcpSocket(this);
+        if (sslSocket) {
+            sslSocket->setPeerHostName(m_upstream.host);
+        }
         connect(m_socket, SIGNAL(readyRead), this, &ProxyHttpForwardJob::onReadyRead_);
         connect(m_socket, SIGNAL(disconnected), this, &ProxyHttpForwardJob::onDisconnected_);
         connect(m_socket, SIGNAL(errorOccurred), this, &ProxyHttpForwardJob::onError_);
+        if (sslSocket) {
+            connect(sslSocket, &SwSslSocket::encrypted, this, &ProxyHttpForwardJob::onConnected_);
+        } else {
+            connect(m_socket, SIGNAL(connected), this, &ProxyHttpForwardJob::onConnected_);
+        }
 
         m_timeoutWatch = new SwTimer(100, this);
         connect(m_timeoutWatch, SIGNAL(timeout), this, &ProxyHttpForwardJob::onTimeout_);
         m_timeoutWatch->start();
 
-        if (!m_socket->connectToHost(m_upstream.host, static_cast<uint16_t>(m_upstream.port))) {
+        const bool connectOk = sslSocket ? sslSocket->connectToHostEncrypted(m_upstream.host,
+                                                                             static_cast<uint16_t>(m_upstream.port))
+                                         : m_socket->connectToHost(m_upstream.host, static_cast<uint16_t>(m_upstream.port));
+        if (!connectOk) {
             fail_("Unable to connect to upstream");
             return;
         }
@@ -1347,7 +1358,7 @@ private:
     SwHttpLimits m_limits;
     DoneCallback m_done;
 
-    SwTcpSocket* m_socket = nullptr;
+    SwAbstractSocket* m_socket = nullptr;
     SwTimer* m_timeoutWatch = nullptr;
     SwByteArray m_payload;
     SwByteArray m_rawResponse;
@@ -1396,18 +1407,28 @@ public:
         headers["content-length"] = "0";
         m_handshakePayload = proxyBuildRequestPayload_("GET", upstreamPath, headers, SwByteArray());
 
-        m_upstreamSocket = new SwTcpSocket(this);
-        m_upstreamSocket->useSsl(m_upstream.protocol == "https", m_upstream.host);
-        connect(m_upstreamSocket, SIGNAL(connected), this, &ProxyWebSocketTunnelBridge::onUpstreamConnected_);
+        SwSslSocket* sslSocket = (m_upstream.protocol == "https") ? new SwSslSocket(this) : nullptr;
+        m_upstreamSocket = sslSocket ? static_cast<SwAbstractSocket*>(sslSocket) : new SwTcpSocket(this);
+        if (sslSocket) {
+            sslSocket->setPeerHostName(m_upstream.host);
+        }
         connect(m_upstreamSocket, SIGNAL(readyRead), this, &ProxyWebSocketTunnelBridge::onUpstreamReadyRead_);
         connect(m_upstreamSocket, SIGNAL(disconnected), this, &ProxyWebSocketTunnelBridge::onUpstreamDisconnected_);
         connect(m_upstreamSocket, SIGNAL(errorOccurred), this, &ProxyWebSocketTunnelBridge::onUpstreamError_);
+        if (sslSocket) {
+            connect(sslSocket, &SwSslSocket::encrypted, this, &ProxyWebSocketTunnelBridge::onUpstreamConnected_);
+        } else {
+            connect(m_upstreamSocket, SIGNAL(connected), this, &ProxyWebSocketTunnelBridge::onUpstreamConnected_);
+        }
 
         m_timeoutWatch = new SwTimer(100, this);
         connect(m_timeoutWatch, SIGNAL(timeout), this, &ProxyWebSocketTunnelBridge::onTimeout_);
         m_timeoutWatch->start();
 
-        if (!m_upstreamSocket->connectToHost(m_upstream.host, static_cast<uint16_t>(m_upstream.port))) {
+        const bool connectOk = sslSocket ? sslSocket->connectToHostEncrypted(m_upstream.host,
+                                                                             static_cast<uint16_t>(m_upstream.port))
+                                         : m_upstreamSocket->connectToHost(m_upstream.host, static_cast<uint16_t>(m_upstream.port));
+        if (!connectOk) {
             fail_("Unable to connect to websocket upstream");
         }
     }
@@ -1481,7 +1502,7 @@ private slots:
                 m_upstream.protocol + "://" + m_upstream.host + ":" + SwString::number(m_upstream.port);
             response.headers["x-proxy-route"] = m_route.host + m_route.pathPrefix;
             response.switchToRawSocket = true;
-            response.onSwitchToRawSocket = [this](SwTcpSocket* clientSocket) {
+            response.onSwitchToRawSocket = [this](SwAbstractSocket* clientSocket) {
                 onClientSocketHandover_(clientSocket);
             };
 
@@ -1554,7 +1575,7 @@ private slots:
     }
 
 private:
-    void onClientSocketHandover_(SwTcpSocket* clientSocket) {
+    void onClientSocketHandover_(SwAbstractSocket* clientSocket) {
         m_waitingClientHandover = false;
         if (m_finished || !clientSocket) {
             if (clientSocket) {
@@ -1576,12 +1597,14 @@ private:
             m_pendingUpstreamBytesAfterHandshake.clear();
         }
 
+        onClientReadyRead_();
+
         if (m_closeWhenClientAttached) {
             closeTunnel_();
         }
     }
 
-    void pumpSocket_(SwTcpSocket* src, SwTcpSocket* dst) {
+    void pumpSocket_(SwAbstractSocket* src, SwAbstractSocket* dst) {
         if (m_finished || !src || !dst) {
             return;
         }
@@ -1662,8 +1685,8 @@ private:
     SwHttpLimits m_limits;
     DoneCallback m_done;
 
-    SwTcpSocket* m_upstreamSocket = nullptr;
-    SwTcpSocket* m_clientSocket = nullptr;
+    SwAbstractSocket* m_upstreamSocket = nullptr;
+    SwAbstractSocket* m_clientSocket = nullptr;
     SwTimer* m_timeoutWatch = nullptr;
 
     SwByteArray m_handshakePayload;

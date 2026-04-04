@@ -8,6 +8,7 @@
 #include <QMouseEvent>
 #include <QPaintEngine>
 #include <QResizeEvent>
+#include <QSize>
 #include <QShowEvent>
 
 #include "SwLabel.h"
@@ -15,6 +16,7 @@
 #include "SwList.h"
 #include "SwPushButton.h"
 #include "SwWidget.h"
+#include "SwWidgetSnapshot.h"
 #include "gui/qtbinding/SwQtBindingWin32WidgetHost.h"
 
 #if defined(_WIN32)
@@ -64,8 +66,10 @@ protected:
         const SwRect bounds = rect();
         const SwColor ringFill = selected_ ? SwColor{15, 23, 42} : SwColor{255, 255, 255};
         const SwColor ringBorder = selected_ ? SwColor{15, 23, 42} : SwColor{203, 213, 225};
-        painter->fillEllipse(bounds, ringFill, ringBorder, selected_ ? 2 : 1);
-        painter->fillEllipse(SwRect{4, 4, std::max(0, bounds.width - 8), std::max(0, bounds.height - 8)},
+        const SwRect outer{1, 1, std::max(0, bounds.width - 2), std::max(0, bounds.height - 2)};
+        const SwRect inner{5, 5, std::max(0, bounds.width - 10), std::max(0, bounds.height - 10)};
+        painter->fillEllipse(outer, ringFill, ringBorder, selected_ ? 2 : 1);
+        painter->fillEllipse(inner,
                              color_,
                              color_,
                              0);
@@ -111,7 +115,7 @@ public:
         : SwWidget(parent) {
         setCursor(CursorType::Cross);
         resize(320, 260);
-        setMinimumSize(220, 220);
+        setMinimumSize(example42CanvasMinimumWidth(), example42CanvasMinimumHeight());
         setStyleSheet("SwSketchCanvas { background-color: rgb(255, 255, 255); border-color: rgb(220, 224, 232); border-width: 1px; border-radius: 18px; }");
     }
 
@@ -170,7 +174,7 @@ protected:
 
         if (strokes_.size() == 0) {
             painter->drawText(SwRect{24, 0, bounds.width - 48, bounds.height},
-                              "Hold the mouse and sketch here",
+                              example42TextSw(example42PaneTexts().emptyCanvasHint),
                               DrawTextFormats(DrawTextFormat::Center | DrawTextFormat::VCenter | DrawTextFormat::SingleLine),
                               SwColor{148, 163, 184},
                               getFont());
@@ -250,36 +254,48 @@ public:
         : SwWidget(parent)
         , onSendToQt_(std::move(onSendToQt))
         , onWorkerFiberRequested_(std::move(onWorkerFiberRequested)) {
+        const Example42PaneTextSet& texts = example42PaneTexts();
         setStyleSheet("EmbeddedSwRoot { background-color: rgb(244, 247, 251); border-width: 0px; }");
 
-        titleLabel_ = new SwLabel("Sw Sketch Studio", this);
+        titleLabel_ = new SwLabel(example42TextSw(texts.title), this);
         titleLabel_->setStyleSheet("SwLabel { background-color: rgba(0,0,0,0); color: rgb(15, 23, 42); font-size: 20px; border-width: 0px; }");
+        titleLabel_->setMinimumSize(example42ContentMinimumWidth(), example42TitleHeight());
 
-        subtitleLabel_ = new SwLabel("Sw widgets + SwPainter", this);
+        subtitleLabel_ = new SwLabel(example42TextSw(texts.subtitle), this);
         subtitleLabel_->setStyleSheet("SwLabel { background-color: rgba(0,0,0,0); color: rgb(100, 116, 139); font-size: 12px; border-width: 0px; }");
+        subtitleLabel_->setMinimumSize(example42ContentMinimumWidth(), example42SubtitleHeight());
 
-        statusLabel_ = new SwLabel("Sw side ready", this);
+        statusLabel_ = new SwLabel(example42TextSw(texts.readyStatus), this);
         statusLabel_->setStyleSheet("SwLabel { background-color: rgba(0,0,0,0); color: rgb(37, 99, 235); font-size: 13px; border-width: 0px; }");
+        statusLabel_->setMinimumSize(example42ContentMinimumWidth(), example42StatusHeight());
 
-        runtimeLabel_ = new SwLabel("SwThread idle", this);
+        runtimeLabel_ = new SwLabel(example42TextSw(texts.runtimeIdle), this);
         runtimeLabel_->setStyleSheet("SwLabel { background-color: rgba(0,0,0,0); color: rgb(71, 85, 105); font-size: 12px; border-width: 0px; }");
+        runtimeLabel_->setMinimumSize(example42ContentMinimumWidth(), example42RuntimeHeight());
 
-        button_ = new SwPushButton("Send to Qt", this);
+        button_ = new SwPushButton(example42TextSw(texts.bridgeButton), this);
         button_->setStyleSheet(swPrimaryButtonStyleSheet());
+        button_->setMinimumSize(example42ContentMinimumWidth(), example42BridgeButtonHeight());
 
-        fiberButton_ = new SwPushButton("Run SwThread Fiber", this);
+        fiberButton_ = new SwPushButton(example42TextSw(texts.fiberButton), this);
         fiberButton_->setStyleSheet(swSecondaryButtonStyleSheet());
+        fiberButton_->setMinimumSize(example42ContentMinimumWidth(), example42FiberButtonHeight());
 
-        lineEdit_ = new SwLineEdit("Write a message for Qt", this);
+        lineEdit_ = new SwLineEdit(example42TextSw(texts.placeholder), this);
+        lineEdit_->setStyleSheet(swLineEditStyleSheet());
+        lineEdit_->setMinimumSize(example42ContentMinimumWidth(), example42LineEditHeight());
 
-        paletteLabel_ = new SwLabel("Palette", this);
+        paletteLabel_ = new SwLabel(example42TextSw(texts.paletteLabel), this);
         paletteLabel_->setStyleSheet("SwLabel { background-color: rgba(0,0,0,0); color: rgb(71, 85, 105); font-size: 12px; border-width: 0px; }");
+        paletteLabel_->setMinimumSize(example42PaletteLabelWidth(), example42PaletteRowHeight());
 
         currentInkLabel_ = new SwLabel(inkLabelTextSw(0), this);
         currentInkLabel_->setStyleSheet("SwLabel { background-color: rgba(0,0,0,0); color: rgb(100, 116, 139); font-size: 12px; border-width: 0px; }");
+        currentInkLabel_->setMinimumSize(example42CurrentInkLabelWidth(), example42PaletteRowHeight());
 
-        clearButton_ = new SwPushButton("Clear canvas", this);
+        clearButton_ = new SwPushButton(example42TextSw(texts.clearButton), this);
         clearButton_->setStyleSheet(swSecondaryButtonStyleSheet());
+        clearButton_->setMinimumSize(example42ClearButtonWidth(), example42ClearButtonHeight());
 
         canvas_ = new SwSketchCanvas(this);
 
@@ -314,54 +330,43 @@ public:
         });
 
         selectInk_(0);
+        setMinimumSize(example42PaneMinimumWidth(), example42PaneMinimumHeight());
+    }
+
+    SwSize minimumSizeHint() const override {
+        return SwSize{example42PaneMinimumWidth(), example42PaneMinimumHeight()};
+    }
+
+    SwSize sizeHint() const override {
+        return SwSize{example42PanePreferredWidth(), example42PanePreferredHeight()};
     }
 
     void resizeEvent(ResizeEvent* event) override {
         SwWidget::resizeEvent(event);
 
-        const int outerMargin = 24;
-        const int spacing = 12;
-        const int availableWidth = std::max(180, event->width() - outerMargin * 2);
-        int y = outerMargin;
+        const Example42PaneLayout layout = computeExample42PaneLayout(event->width(), event->height());
 
-        titleLabel_->setGeometry(outerMargin, y, availableWidth, 28);
-        y += 28;
+        titleLabel_->setGeometry(layout.title.x, layout.title.y, layout.title.width, layout.title.height);
+        subtitleLabel_->setGeometry(layout.subtitle.x, layout.subtitle.y, layout.subtitle.width, layout.subtitle.height);
+        statusLabel_->setGeometry(layout.status.x, layout.status.y, layout.status.width, layout.status.height);
+        runtimeLabel_->setGeometry(layout.runtime.x, layout.runtime.y, layout.runtime.width, layout.runtime.height);
+        button_->setGeometry(layout.bridgeButton.x, layout.bridgeButton.y, layout.bridgeButton.width, layout.bridgeButton.height);
+        fiberButton_->setGeometry(layout.fiberButton.x, layout.fiberButton.y, layout.fiberButton.width, layout.fiberButton.height);
+        lineEdit_->setGeometry(layout.lineEdit.x, layout.lineEdit.y, layout.lineEdit.width, layout.lineEdit.height);
+        paletteLabel_->setGeometry(layout.paletteLabel.x, layout.paletteLabel.y, layout.paletteLabel.width, layout.paletteLabel.height);
+        currentInkLabel_->setGeometry(layout.currentInkLabel.x,
+                                      layout.currentInkLabel.y,
+                                      layout.currentInkLabel.width,
+                                      layout.currentInkLabel.height);
 
-        subtitleLabel_->setGeometry(outerMargin, y, availableWidth, 20);
-        y += 20 + 6;
-
-        statusLabel_->setGeometry(outerMargin, y, availableWidth, 22);
-        y += 22 + spacing;
-
-        runtimeLabel_->setGeometry(outerMargin, y, availableWidth, 20);
-        y += 20 + spacing;
-
-        button_->setGeometry(outerMargin, y, availableWidth, 42);
-        y += 42 + spacing;
-
-        fiberButton_->setGeometry(outerMargin, y, availableWidth, 34);
-        y += 34 + spacing;
-
-        lineEdit_->setGeometry(outerMargin, y, availableWidth, 38);
-        y += 38 + spacing;
-
-        paletteLabel_->setGeometry(outerMargin, y, 100, 22);
-        currentInkLabel_->setGeometry(event->width() - outerMargin - 160, y, 160, 22);
-        y += 22 + 10;
-
-        int x = outerMargin;
+        int x = layout.paletteLabel.x;
         for (SwColorChipButton* swatch : swatches_) {
-            swatch->setGeometry(x, y, 30, 30);
-            x += 38;
+            swatch->setGeometry(x, layout.clearButton.y + 2, example42SwatchSize(), example42SwatchSize());
+            x += example42SwatchStep();
         }
 
-        clearButton_->setGeometry(event->width() - outerMargin - 124, y - 2, 124, 34);
-        y += 30 + spacing;
-
-        canvas_->setGeometry(outerMargin,
-                             y,
-                             availableWidth,
-                             std::max(220, event->height() - y - outerMargin));
+        clearButton_->setGeometry(layout.clearButton.x, layout.clearButton.y, layout.clearButton.width, layout.clearButton.height);
+        canvas_->setGeometry(layout.canvas.x, layout.canvas.y, layout.canvas.width, layout.canvas.height);
     }
 
     void setIncomingMessage(const SwString& text) {
@@ -448,6 +453,13 @@ public:
         return root_;
     }
 
+    bool saveSwRootSnapshot(const QString& filePath) const {
+        if (!root_) {
+            return false;
+        }
+        return SwWidgetSnapshot::savePng(root_, toSwString(filePath));
+    }
+
     void showEvent(QShowEvent*) {
         syncBridgeToNativeHost_();
         hostBinding_.attach();
@@ -506,7 +518,7 @@ QtSwHostWidget::QtSwHostWidget(QWidget* parent)
     setAutoFillBackground(false);
     setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(true);
-    setMinimumWidth(320);
+    setMinimumSize(example42PaneMinimumWidth(), example42PaneMinimumHeight());
 }
 
 QtSwHostWidget::~QtSwHostWidget() {
@@ -527,6 +539,26 @@ void QtSwHostWidget::showIncomingMessage(const QString& text) {
 
 void QtSwHostWidget::setRuntimeStatusText(const QString& text) {
     impl_->setRuntimeStatusText(text);
+}
+
+bool QtSwHostWidget::saveSwRootSnapshot(const QString& filePath) const {
+    return impl_->saveSwRootSnapshot(filePath);
+}
+
+QSize QtSwHostWidget::minimumSizeHint() const {
+    if (impl_->root()) {
+        const SwSize hint = impl_->root()->minimumSizeHint();
+        return QSize(hint.width, hint.height);
+    }
+    return QSize(example42PaneMinimumWidth(), example42PaneMinimumHeight());
+}
+
+QSize QtSwHostWidget::sizeHint() const {
+    if (impl_->root()) {
+        const SwSize hint = impl_->root()->sizeHint();
+        return QSize(hint.width, hint.height);
+    }
+    return QSize(example42PanePreferredWidth(), example42PanePreferredHeight());
 }
 
 QPaintEngine* QtSwHostWidget::paintEngine() const {

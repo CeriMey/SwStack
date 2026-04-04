@@ -36,6 +36,7 @@ public:
 
         if (scheme == "rtsp") {
             auto source = std::make_shared<SwRtspUdpSource>(options.sourceUrl());
+            source->setLowLatencyMode(options.lowLatency, 500);
             source->setEnableAudio(options.enableAudio);
             source->setEnableMetadata(options.enableMetadata);
             if (!options.bindAddress.isEmpty()) {

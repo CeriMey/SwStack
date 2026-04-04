@@ -59,6 +59,13 @@ public:
         m_active = false;
     }
 
+    void flush() {
+        if (!m_sink) {
+            return;
+        }
+        m_sink->flush();
+    }
+
     bool pushFrame(const SwAudioFrame& frame) {
         if (!m_sink || !frame.isValid()) {
             return false;

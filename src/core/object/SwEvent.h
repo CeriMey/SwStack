@@ -26,6 +26,7 @@ enum class EventType : int {
     WheelEvent,
     Show,
     Hide,
+    Close,
     GraphicsSceneDispatch = 900,
     User = 1000
 };

@@ -54,14 +54,19 @@
 #include <ctime>
 #endif
 #include "SwObject.h"
-#include "SwIODescriptor.h"
-#include "SwTimer.h"
+#include "SwCoreApplication.h"
 #include "SwString.h"
 #include "SwByteArray.h"
 
 class SwIODevice : public SwObject {
     SW_OBJECT(SwIODevice, SwObject)
 public:
+#if defined(_WIN32)
+    using NativeDescriptor = HANDLE;
+#else
+    using NativeDescriptor = int;
+#endif
+
     enum OpenModeFlag {
         NotOpen = 0x0,
         Read = 0x1,
@@ -75,10 +80,7 @@ public:
      *
      * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
      */
-    SwIODevice(SwObject* parent = nullptr) : SwObject(parent), monitoring(false), m_timerDercriptor(new SwTimer(100, this)){
-    
-        connect(m_timerDercriptor, &SwTimer::timeout, this, &SwIODevice::onTimerDescriptor);
-    }
+    SwIODevice(SwObject* parent = nullptr) : SwObject(parent), monitoring(false) {}
 
     /**
      * @brief Destroys the `SwIODevice` instance.
@@ -86,8 +88,7 @@ public:
      * @details Use this hook to release any resources that remain associated with the instance.
      */
     virtual ~SwIODevice() {
-        // m_timerDercriptor has `this` as parent, SwObject will delete it.
-        m_timerDercriptor->stop();
+        unregisterFileWatcher_();
     }
 
     /**
@@ -97,7 +98,7 @@ public:
      *
      * @details The call affects the runtime state associated with the underlying resource or service.
      */
-    virtual bool open(typename SwIODescriptor::Descriptor hFile) {
+    virtual bool open(NativeDescriptor hFile) {
         SW_UNUSED(hFile)
         return false;
     }
@@ -206,65 +207,6 @@ signals:
     DECLARE_SIGNAL_VOID(readyWrite);
 
 protected:
-    SwTimer* m_timerDercriptor;
-   
-
-    /**
-     * @brief Adds the specified descriptor.
-     * @param descriptor Value passed to the method.
-     */
-    void addDescriptor(SwIODescriptor* descriptor) {
-        if (descriptor && !descriptors_.contains(descriptor)) {
-            descriptors_.append(descriptor);
-        }
-    }
-
-    /**
-     * @brief Removes the specified descriptor.
-     * @param descriptor Value passed to the method.
-     */
-    void removeDescriptor(SwIODescriptor*& descriptor) {
-          if (!descriptor) return;
-          if (descriptors_.removeOne(descriptor)) {
-              safeDelete(descriptor);
-          }
-      }
-
-    /**
-     * @brief Returns the current descriptor Count.
-     * @return The current descriptor Count.
-     *
-     * @details The returned value reflects the state currently stored by the instance.
-     */
-    size_t getDescriptorCount() const {
-        return descriptors_.size();
-    }
-
-protected slots:
-    /**
-     * @brief Returns the current on Timer Descriptor.
-     * @return The current on Timer Descriptor.
-     *
-     * @details The returned value reflects the state currently stored by the instance.
-     */
-    virtual void onTimerDescriptor() {
-        bool readyToRead = false, readyToWrite = false;
-
-        for (auto descriptor : descriptors_) {
-            if (descriptor->waitForEvent(readyToRead, readyToWrite, 1)) {
-                if (readyToRead) {
-                    readyRead();
-                    emitSignal("readyRead" + descriptor->descriptorName());
-                }
-                if (readyToWrite) {
-                    readyWrite();
-                    emitSignal("readyWrite" + descriptor->descriptorName());
-                }
-            }
-        }
-    }
-
-protected:
     SwString filePath_;
 #if defined(_WIN32)
     FILETIME lastWriteTime_;
@@ -320,7 +262,6 @@ protected:
     }
 
 private:
-    SwList<SwIODescriptor*> descriptors_;
     bool monitoring;
     size_t m_fileWatchToken{0};
 #if defined(_WIN32)

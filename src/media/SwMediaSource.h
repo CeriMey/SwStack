@@ -24,6 +24,19 @@ public:
         Streaming
     };
 
+    struct RecoveryEvent {
+        enum class Kind {
+            LiveCut,
+            TransportReset,
+            Timeout,
+            Reconnect
+        };
+
+        uint64_t epoch{0};
+        Kind kind{Kind::LiveCut};
+        SwString reason{};
+    };
+
     struct StreamStatus {
         StreamState state{StreamState::Stopped};
         SwString reason{};
@@ -32,6 +45,7 @@ public:
     using MediaPacketCallback = std::function<void(const SwMediaPacket&)>;
     using StatusCallback = std::function<void(const StreamStatus&)>;
     using TracksChangedCallback = std::function<void(const SwList<SwMediaTrack>&)>;
+    using RecoveryCallback = std::function<void(const RecoveryEvent&)>;
 
     virtual ~SwMediaSource() = default;
 
@@ -78,6 +92,11 @@ public:
         }
     }
 
+    void setRecoveryCallback(RecoveryCallback callback) {
+        SwMutexLocker lock(m_recoveryMutex);
+        m_recoveryCallback = std::move(callback);
+    }
+
     StreamStatus streamStatus() const {
         SwMutexLocker lock(m_statusMutex);
         return m_streamStatus;
@@ -89,6 +108,11 @@ public:
     }
 
 protected:
+    bool hasMediaPacketCallback() const {
+        SwMutexLocker lock(m_mediaCallbackMutex);
+        return static_cast<bool>(m_mediaPacketCallback);
+    }
+
     void emitMediaPacket(const SwMediaPacket& packet) {
         MediaPacketCallback cb;
         {
@@ -105,6 +129,9 @@ protected:
         StreamStatus status;
         {
             SwMutexLocker lock(m_statusMutex);
+            if (m_streamStatus.state == state && m_streamStatus.reason == reason) {
+                return;
+            }
             m_streamStatus.state = state;
             m_streamStatus.reason = reason;
             status = m_streamStatus;
@@ -128,6 +155,22 @@ protected:
         }
     }
 
+    void emitRecovery(RecoveryEvent::Kind kind,
+                      const SwString& reason = SwString()) {
+        RecoveryCallback cb;
+        RecoveryEvent event;
+        {
+            SwMutexLocker lock(m_recoveryMutex);
+            event.epoch = m_nextRecoveryEpoch.fetch_add(1);
+            event.kind = kind;
+            event.reason = reason;
+            cb = m_recoveryCallback;
+        }
+        if (cb) {
+            cb(event);
+        }
+    }
+
     bool isRunning() const { return m_running.load(); }
     void setRunning(bool running) { m_running.store(running); }
 
@@ -140,5 +183,8 @@ private:
     mutable SwMutex m_tracksMutex;
     TracksChangedCallback m_tracksChangedCallback{};
     SwList<SwMediaTrack> m_tracks{};
+    mutable SwMutex m_recoveryMutex;
+    RecoveryCallback m_recoveryCallback{};
+    std::atomic<uint64_t> m_nextRecoveryEpoch{1};
     std::atomic<bool> m_running{false};
 };

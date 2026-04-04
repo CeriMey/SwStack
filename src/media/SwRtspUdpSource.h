@@ -49,7 +49,7 @@
  * Minimal RTSP (RTP over UDP) video source.
  *
  * Focuses on a single video track, assumes H.264 payload, and performs a lightweight depayloader
- * (single NAL, STAP-A, FU-A) to emit SwVideoPacket::H264 packets.
+ * (single NAL, STAP-A/B, FU-A/B) to emit SwVideoPacket::H264 packets.
  **************************************************************************************************/
 
 #include "media/SwMediaUrl.h"
@@ -61,6 +61,7 @@
 #include "media/rtp/SwRtpSession.h"
 #include "media/rtp/SwRtpSessionDescriptor.h"
 #include "core/io/SwTcpSocket.h"
+#include "core/runtime/SwThread.h"
 #include "core/runtime/SwTimer.h"
 #include "core/types/SwByteArray.h"
 #include "SwDebug.h"
@@ -78,6 +79,7 @@
 #include <iterator>
 #include <limits>
 #include <map>
+#include <condition_variable>
 #include <mutex>
 #include <random>
 #include <sstream>
@@ -105,6 +107,8 @@ public:
         : m_url(url) {
         SW_UNUSED(parent);
         parseUrl();
+        m_sourceThread = new SwThread("SwRtspUdpSourceThread");
+        m_sourceThread->start();
         m_callbackContext = new SwObject();
         m_trackGraph = std::make_unique<SwRtspTrackGraph>();
         m_rtspSocket = new SwTcpSocket();
@@ -143,6 +147,14 @@ public:
             stopStreaming(false);
             scheduleReconnect("RTSP socket error");
         });
+
+        if (m_sourceThread) {
+            m_callbackContext->moveToThread(m_sourceThread);
+            m_rtspSocket->moveToThread(m_sourceThread);
+            m_reconnectTimer->moveToThread(m_sourceThread);
+            m_keepAliveTimer->moveToThread(m_sourceThread);
+            m_monitorTimer->moveToThread(m_sourceThread);
+        }
 
         configureTrackGraph_();
     }
@@ -214,11 +226,16 @@ public:
         }
         std::vector<uint8_t> sps;
         std::vector<uint8_t> pps;
+        int packetizationMode = -1;
         auto parts = split(stripFmtpPayloadPrefix(fmtp), ';');
         for (auto& raw : parts) {
             std::string trimmed = raw;
             trim(trimmed);
             std::string entry = toLower(trimmed);
+            if (entry.rfind("packetization-mode=", 0) == 0) {
+                packetizationMode = std::atoi(trimmed.substr(trimmed.find('=') + 1).c_str());
+                continue;
+            }
             if (entry.rfind("sprop-parameter-sets=", 0) != 0) {
                 continue;
             }
@@ -233,6 +250,7 @@ public:
         }
         if (!m_loggedH264Fmtp.exchange(true)) {
             swCWarning(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Parsed H264 fmtp"
+                        << " packetizationMode=" << packetizationMode
                         << " sps=" << sps.size()
                         << " pps=" << pps.size();
         }
@@ -291,13 +309,34 @@ public:
      * @details Use this hook to release any resources that remain associated with the instance.
      */
     ~SwRtspUdpSource() override {
+        runOnSourceThreadBlocking_([this]() {
+            m_autoReconnect.store(false);
+            cancelReconnect();
+            if (m_monitorTimer) {
+                m_monitorTimer->stop();
+            }
+            if (m_trackGraph) {
+                m_trackGraph->stop();
+            }
+            stopStreaming(true);
+            emitStatus(SwVideoSource::StreamState::Stopped, "Stream stopped");
+        });
+        if (m_sourceThread) {
+            m_sourceThread->quit();
+            m_sourceThread->wait();
+        }
+        delete m_monitorTimer;
+        m_monitorTimer = nullptr;
+        delete m_keepAliveTimer;
+        m_keepAliveTimer = nullptr;
+        delete m_reconnectTimer;
+        m_reconnectTimer = nullptr;
+        delete m_rtspSocket;
+        m_rtspSocket = nullptr;
         delete m_callbackContext;
         m_callbackContext = nullptr;
-        stop();
-        delete m_monitorTimer;
-        delete m_keepAliveTimer;
-        delete m_reconnectTimer;
-        delete m_rtspSocket;
+        delete m_sourceThread;
+        m_sourceThread = nullptr;
     }
 
     /**
@@ -333,6 +372,29 @@ public:
      */
     void setUseTcpTransport(bool enable) { m_useTcpTransport = enable; }
 
+    void setLowLatencyMode(bool enabled, int latencyTargetMs = 500) {
+        m_lowLatencyDrop = enabled;
+        if (latencyTargetMs > 0) {
+            m_latencyTargetMs = latencyTargetMs;
+        }
+        if (m_trackGraph) {
+            SwRtspTrackGraph::VideoConfig videoConfig;
+            videoConfig.codec = isHevcCodec() ? SwVideoPacket::Codec::H265
+                                              : SwVideoPacket::Codec::H264;
+            videoConfig.payloadType = m_payloadType;
+            videoConfig.clockRate = m_clockRate;
+            videoConfig.liveTrimEnabled = m_lowLatencyDrop;
+            videoConfig.latencyTargetMs = m_latencyTargetMs;
+            videoConfig.transportStream = isTransportStreamCodec();
+            if (m_selectedTrackIndex >= 0 &&
+                static_cast<std::size_t>(m_selectedTrackIndex) < m_tracks.size()) {
+                videoConfig.fmtp =
+                    SwString(m_tracks[static_cast<std::size_t>(m_selectedTrackIndex)].fmtpLine);
+            }
+            m_trackGraph->setVideoConfig(videoConfig);
+        }
+    }
+
     /**
      * @brief Performs the `forceLocalBind` operation.
      * @param addr Value passed to the method.
@@ -351,19 +413,21 @@ public:
      * @details The call affects the runtime state associated with the underlying resource or service.
      */
     void start() override {
-        m_autoReconnect.store(true);
-        m_triedTcpFallback = m_useTcpTransport;
-        m_autoTcpFallbackActive = false;
-        if (m_trackGraph) {
-            m_trackGraph->start();
-        }
-        if (!isRunning()) {
-            setRunning(true);
-        }
-        if (m_monitorTimer && !m_monitorTimer->isActive()) {
-            m_monitorTimer->start();
-        }
-        initiateConnection();
+        postToSourceThread_([this]() {
+            m_autoReconnect.store(true);
+            m_triedTcpFallback = m_useTcpTransport;
+            m_autoTcpFallbackActive = false;
+            if (m_trackGraph) {
+                m_trackGraph->start();
+            }
+            if (!isRunning()) {
+                setRunning(true);
+            }
+            if (m_monitorTimer && !m_monitorTimer->isActive()) {
+                m_monitorTimer->start();
+            }
+            initiateConnection();
+        });
     }
 
     /**
@@ -373,20 +437,30 @@ public:
      */
     void stop() override {
         m_autoReconnect.store(false);
-        cancelReconnect();
-        if (m_monitorTimer) {
-            m_monitorTimer->stop();
-        }
-        if (m_trackGraph) {
-            m_trackGraph->stop();
-        }
-        if (!isRunning()) {
+        postToSourceThread_([this]() {
+            cancelReconnect();
+            if (m_monitorTimer) {
+                m_monitorTimer->stop();
+            }
+            if (m_trackGraph) {
+                m_trackGraph->stop();
+            }
+            if (!isRunning()) {
+                stopStreaming(true);
+                emitStatus(SwVideoSource::StreamState::Stopped, "Stream stopped");
+                return;
+            }
             stopStreaming(true);
             emitStatus(SwVideoSource::StreamState::Stopped, "Stream stopped");
-            return;
-        }
-        stopStreaming(true);
-        emitStatus(SwVideoSource::StreamState::Stopped, "Stream stopped");
+        });
+    }
+
+    void handleConsumerPressureChanged(const SwVideoSource::ConsumerPressure& pressure) override {
+        postToSourceThread_([this, pressure]() {
+            if (m_trackGraph) {
+                m_trackGraph->setConsumerPressure(pressure);
+            }
+        });
     }
 
 private:
@@ -1280,6 +1354,46 @@ private:
         task();
     }
 
+    void runOnSourceThreadBlocking_(std::function<void()> task) {
+        if (!task) {
+            return;
+        }
+        ThreadHandle* targetThread = m_callbackContext ? m_callbackContext->threadHandle()
+                                                       : nullptr;
+        if (!targetThread || !ThreadHandle::isLive(targetThread) || !targetThread->isRunning()) {
+            task();
+            return;
+        }
+        const std::thread::id targetId = targetThread->threadId();
+        if (targetId != std::thread::id{} &&
+            targetId == std::this_thread::get_id()) {
+            task();
+            return;
+        }
+
+        struct BlockingContext {
+            std::mutex mutex;
+            std::condition_variable cv;
+            bool completed{false};
+        };
+
+        std::shared_ptr<BlockingContext> ctx = std::make_shared<BlockingContext>();
+        if (!targetThread->postTask([task, ctx]() mutable {
+                task();
+                {
+                    std::lock_guard<std::mutex> lock(ctx->mutex);
+                    ctx->completed = true;
+                }
+                ctx->cv.notify_one();
+            })) {
+            task();
+            return;
+        }
+
+        std::unique_lock<std::mutex> lock(ctx->mutex);
+        ctx->cv.wait(lock, [ctx]() { return ctx->completed; });
+    }
+
     void updateProgramTracks_(const SwList<SwMediaTrack>& tracks) {
         m_programTracks = tracks;
         publishTracks_();
@@ -1294,7 +1408,7 @@ private:
                                           : SwVideoPacket::Codec::H264;
         videoConfig.payloadType = m_payloadType;
         videoConfig.clockRate = m_clockRate;
-        videoConfig.lowLatencyDrop = m_lowLatencyDrop;
+        videoConfig.liveTrimEnabled = m_lowLatencyDrop;
         videoConfig.latencyTargetMs = m_latencyTargetMs;
         videoConfig.transportStream = isTransportStreamCodec();
         if (m_selectedTrackIndex >= 0 &&
@@ -1303,6 +1417,7 @@ private:
                 SwString(m_tracks[static_cast<std::size_t>(m_selectedTrackIndex)].fmtpLine);
         }
         m_trackGraph->setVideoConfig(videoConfig);
+        m_trackGraph->setConsumerPressure(consumerPressure());
         m_trackGraph->setVideoPacketCallback([this](const SwVideoPacket& packet) {
             emitStatus(SwVideoSource::StreamState::Streaming, "Streaming");
             emitPacket(packet);
@@ -1320,6 +1435,10 @@ private:
             postToSourceThread_([this, reason]() {
                 requestKeyFrame(reason);
             });
+        });
+        m_trackGraph->setRecoveryCallback([this](SwMediaSource::RecoveryEvent::Kind kind,
+                                                 const SwString& reason) {
+            emitRecovery(kind, reason);
         });
     }
 
@@ -1409,9 +1528,6 @@ private:
         }
         headers.emplace_back("Range", "npt=0.000-");
         sendRtsp("PLAY", aggregateOnly ? aggregatePlayUrl() : playUrl(), headers);
-        if (m_trackGraph) {
-            m_trackGraph->notePlaybackStarted();
-        }
     }
 
     void sendKeepAlive() {
@@ -1521,6 +1637,8 @@ private:
         m_triedTcpFallback = true;
         m_autoTcpFallbackActive = true;
         emitStatus(SwVideoSource::StreamState::Recovering, "Switching RTSP transport to TCP...");
+        emitRecovery(SwMediaSource::RecoveryEvent::Kind::TransportReset,
+                     reason ? SwString(reason) : SwString("Switching RTSP transport to TCP"));
         swCWarning(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Falling back to RTSP/TCP"
                     << (reason ? SwString(" (") + SwString(reason) + SwString(")") : SwString());
         m_useTcpTransport = true;
@@ -1533,6 +1651,8 @@ private:
             return;
         }
         emitStatus(SwVideoSource::StreamState::Recovering, "Returning RTSP transport to UDP...");
+        emitRecovery(SwMediaSource::RecoveryEvent::Kind::TransportReset,
+                     reason ? SwString(reason) : SwString("Returning RTSP transport to UDP"));
         swCWarning(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Returning to RTSP/UDP"
                     << (reason ? SwString(" (") + SwString(reason) + SwString(")") : SwString());
         m_useTcpTransport = false;
@@ -1556,6 +1676,8 @@ private:
         if (m_reconnectPending.exchange(true)) {
             return;
         }
+        emitRecovery(SwMediaSource::RecoveryEvent::Kind::Reconnect,
+                     reason ? SwString(reason) : SwString("Scheduling RTSP reconnect..."));
         m_reconnectTimer->stop();
         m_reconnectTimer->start(m_reconnectDelayMs);
     }
@@ -1972,6 +2094,10 @@ private:
                         << ", expected remote=" << portHint << ")";
         }
         emitStatus(SwVideoSource::StreamState::Recovering, "Video stream stalled...");
+        if (previousElapsed < 0) {
+            emitRecovery(SwMediaSource::RecoveryEvent::Kind::Timeout,
+                         "Video stream stalled...");
+        }
     }
 
     bool parseAuxiliaryRtpPacket_(const uint8_t* data,
@@ -2202,6 +2328,10 @@ private:
                             << ", expected remote=" << portHint << ")";
             }
             emitStatus(SwVideoSource::StreamState::Recovering, "Video stream stalled...");
+            if (previousElapsed < 0) {
+                emitRecovery(SwMediaSource::RecoveryEvent::Kind::Timeout,
+                             "Video stream stalled...");
+            }
             return;
         }
         m_lastLoggedRtpTimeoutSec.store(-1);
@@ -2257,6 +2387,7 @@ private:
     int m_maxRequestRetries{1};
 
     SwObject* m_callbackContext{nullptr};
+    SwThread* m_sourceThread{nullptr};
     std::unique_ptr<SwRtspTrackGraph> m_trackGraph{};
     SwTcpSocket* m_rtspSocket{nullptr};
     std::unique_ptr<SwRtpSession> m_udpSession{};
@@ -2324,8 +2455,8 @@ private:
     std::atomic<uint64_t> m_rtpPackets{0};
     std::atomic<uint64_t> m_framesEmitted{0};
     std::atomic<uint64_t> m_sequenceDiscontinuities{0};
-    bool m_lowLatencyDrop{false};
-    int m_latencyTargetMs{150};
+    bool m_lowLatencyDrop{true};
+    int m_latencyTargetMs{500};
     std::atomic<int> m_rtspDisconnectSuppress{0};
     std::chrono::steady_clock::time_point m_lastRtpTime{};
     std::atomic<long long> m_lastLoggedRtpTimeoutSec{-1};

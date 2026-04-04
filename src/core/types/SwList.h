@@ -266,6 +266,14 @@ public:
         data_.push_back(value);
     }
 
+    /**
+     * @brief Performs the `append` operation.
+     * @param value Value passed to the method.
+     */
+    void append(T&& value) {
+        data_.push_back(std::move(value));
+    }
+
     template<typename Iter>
     /**
      * @brief Performs the `append` operation.
@@ -291,11 +299,25 @@ public:
     void prepend(const T& value) {
         data_.insert(data_.begin(), value);
     }
+
+    /**
+     * @brief Performs the `prepend` operation.
+     * @param value Value passed to the method.
+     */
+    void prepend(T&& value) {
+        data_.insert(data_.begin(), std::move(value));
+    }
     /**
      * @brief Performs the `push_back` operation.
      * @param value Value passed to the method.
      */
     void push_back(const T& value) { data_.push_back(value); }
+
+    /**
+     * @brief Performs the `push_back` operation.
+     * @param value Value passed to the method.
+     */
+    void push_back(T&& value) { data_.push_back(std::move(value)); }
 
     /**
      * @brief Performs the `insert` operation.
@@ -307,6 +329,18 @@ public:
             throw std::out_of_range("Index out of range");
         }
         data_.insert(data_.begin() + index, value);
+    }
+
+    /**
+     * @brief Performs the `insert` operation.
+     * @param index Value passed to the method.
+     * @param value Value passed to the method.
+     */
+    void insert(size_t index, T&& value) {
+        if (index > data_.size()) {
+            throw std::out_of_range("Index out of range");
+        }
+        data_.insert(data_.begin() + index, std::move(value));
     }
 
     /**

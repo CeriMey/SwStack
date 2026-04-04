@@ -88,7 +88,6 @@ private slots:
             }
 
             upstream_ = new SwTcpSocket(this);
-            upstream_->useSsl(false);
 
             connect(upstream_, SIGNAL(connected), this, &HttpConnectTunnel::onUpstreamConnected_);
             connect(upstream_, SIGNAL(readyRead), this, &HttpConnectTunnel::onUpstreamReadyRead_);

@@ -448,11 +448,7 @@ private:
             return 0;
         }
         case WM_MOUSEMOVE: {
-            TRACKMOUSEEVENT tracking{};
-            tracking.cbSize = sizeof(TRACKMOUSEEVENT);
-            tracking.dwFlags = TME_LEAVE;
-            tracking.hwndTrack = hwnd;
-            TrackMouseEvent(&tracking);
+            swWidgetEnsureMouseLeaveTracking_(hwnd);
             int x = LOWORD(lParam);
             int y = HIWORD(lParam);
             const bool ctrlPressed = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
@@ -462,6 +458,7 @@ private:
             return 0;
         }
         case WM_MOUSELEAVE: {
+            swWidgetClearMouseLeaveTracking_(hwnd);
             dialog->nativePostMouseLeave();
             return 0;
         }
@@ -827,10 +824,12 @@ private:
 
     void nativeDispatchMouseMove(int x, int y, bool ctrlPressed, bool shiftPressed, bool altPressed) {
         MouseEvent mouseEvent(EventType::MouseMoveEvent, x, y, SwMouseButton::NoButton, ctrlPressed, shiftPressed, altPressed);
-        SwWidgetPlatformAdapter::setCursor(CursorType::Arrow);
         mouseEvent.setGlobalPos(mapToGlobal(mouseEvent.pos()));
-        dispatchMouseEventFromRoot_(mouseEvent);
-        SwToolTip::handleMouseMove(this, x, y);
+        const bool handled = dispatchMouseEventFromRoot_(mouseEvent);
+        if (!handled) {
+            SwWidgetPlatformAdapter::setCursor(CursorType::Arrow);
+        }
+        SwToolTip::handleMouseMove(this, hoveredWidgetFromRoot(), x, y);
     }
 
     void nativeDispatchMouseWheel(int x, int y, int delta, bool ctrlPressed, bool shiftPressed, bool altPressed) {
@@ -1297,10 +1296,12 @@ private:
                          evt.ctrl,
                          evt.shift,
                          evt.alt);
-        SwWidgetPlatformAdapter::setCursor(CursorType::Arrow);
         event.setGlobalPos(mapToGlobal(event.pos()));
-        dispatchMouseEventFromRoot_(event);
-        SwToolTip::handleMouseMove(this, evt.position.x, evt.position.y);
+        const bool handled = dispatchMouseEventFromRoot_(event);
+        if (!handled) {
+            SwWidgetPlatformAdapter::setCursor(CursorType::Arrow);
+        }
+        SwToolTip::handleMouseMove(this, hoveredWidgetFromRoot(), evt.position.x, evt.position.y);
     }
 
     void dispatchNativeMouseLeave_() {

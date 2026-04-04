@@ -155,6 +155,23 @@ public:
         m_lastPlayedTimestamp.store(-1);
     }
 
+    void flush() override {
+        {
+            std::lock_guard<std::mutex> lock(m_queueMutex);
+            m_chunks.clear();
+        }
+        m_lastPlayedTimestamp.store(-1);
+        if (!m_open || !m_audioClient) {
+            return;
+        }
+        m_audioClient->Stop();
+        m_audioClient->Reset();
+        m_audioClient->Start();
+        if (m_event) {
+            SetEvent(m_event.get());
+        }
+    }
+
     bool pushFrame(const SwAudioFrame& frame) override {
         if (!m_open || !frame.isValid() || frame.sampleFormat() != SwAudioFrame::SampleFormat::Float32) {
             return false;

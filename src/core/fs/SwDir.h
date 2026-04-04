@@ -260,6 +260,21 @@ public:
     }
 
     /**
+     * @brief Returns whether the provided path is absolute on the active platform.
+     * @param path Path used by the operation.
+     * @return `true` when the path is absolute; otherwise `false`.
+     */
+    static bool isAbsolutePath(const SwString& path) {
+        if (path.isEmpty()) {
+            return false;
+        }
+        if (path.startsWith("/") || path.startsWith("\\")) {
+            return true;
+        }
+        return path.size() > 1 && path[1] == ':';
+    }
+
+    /**
      * @brief Returns the current dir Name.
      * @return The current dir Name.
      *
@@ -277,16 +292,6 @@ public:
 
 private:
     SwString m_path;
-
-    static bool isAbsolutePath(const SwString& path) {
-        if (path.isEmpty()) {
-            return false;
-        }
-        if (path.startsWith("/") || path.startsWith("\\")) {
-            return true;
-        }
-        return path.size() > 1 && path[1] == ':';
-    }
 
     static bool createPathTree(const SwString& rawPath) {
         if (rawPath.isEmpty()) {

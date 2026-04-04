@@ -154,12 +154,11 @@ inline SwJsonObject extractOptions_(const SwJsonObject& cfg) {
 inline void applyOptions_(SwCoreApplication& app, const SwJsonObject& options) {
     if (options.contains("watchdog") && options["watchdog"].toBool()) {
         app.activeWatchDog();
-        return;
     }
     if (options.contains("activeWatchDog") && options["activeWatchDog"].toBool()) {
         app.activeWatchDog();
-        return;
     }
+    // systemTray is handled by SwLaunch, not by the node itself
 }
 
 inline void applyParams_(SwRemoteObject& node,

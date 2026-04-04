@@ -1,159 +1,383 @@
-# `SwLaunch` (launcher "launch" JSON, style ROS2 launch)
+# `SwLaunch`
 
-Ce binaire est un **launcher multi-process** pilote par JSON:
+`SwLaunch` est devenu un outil d'orchestration complet. Il ne sert plus seulement a lancer des process a partir d'un JSON. Il sait maintenant:
 
-- il lit un JSON de "launch" (fichier ou string),
-- il demarre des **process fils**: containers (typiquement `SwComponentContainer`) et/ou nodes executables,
-- il peut **relancer** un process sur crash, ou si le `SwRemoteObject` du process "disparait" de la SHM registry (watchdog de presence),
-- il genere au besoin des `--config_file` temporaires (dans le dossier Temp) pour ne pas embarquer de JSON projet dans le repo.
+- charger un etat desire depuis un fichier ou une string JSON,
+- demarrer des `nodes` et des `containers`,
+- surveiller les process et les redemarrer selon des regles simples,
+- exposer une API HTTP de controle protegee par token,
+- appliquer des changements de configuration a chaud,
+- deployer des binaires et des fichiers metier avec verification SHA-256,
+- persister l'etat final dans le `launch.json`,
+- revenir a l'etat precedent si un deploiement echoue.
 
-Sources de reference:
-- `SwNode/SwLaunch/SwLaunch.cpp` (parsing JSON + start/monitor/restart des process).
-- `src/core/remote/SwRemoteObjectNode.h` (CLI et `main()` standard des nodes via `SW_REMOTE_OBJECT_NODE`).
-- `SwNode/SwComponentContainer/SwComponentContainer.cpp` (schema `composition/*` + RPC du container).
+Ce document est le guide d'ensemble. Pour le detail fonctionnalite par fonctionnalite, voir `docs/nodes/SwLaunch_FunctionalDetails.md`.
 
-## Build
+Sources principales:
 
-Depuis la racine:
-- `build.bat`
+- `tools/SwNode/SwLaunch/SwLaunch.cpp`
+- `tools/SwNode/SwLaunch/SwLaunchController.h`
+- `tools/SwNode/SwLaunch/SwLaunchDeploySupport.h`
+- `docs/nodes/SwComponentContainer.md`
 
-Targets utiles:
-- `SwLaunch` (launcher)
-- `SwComponentContainer` (container)
-- `PingPongPlugin` (plugin demo, construit depuis `exemples/24-ComponentPlugin/PingPongPlugin.cpp`)
-- `SwPingNode`, `SwPongNode` (nodes demo, construits depuis `exemples/29-IpcPingPongNodes/SwPingNode.cpp` et `exemples/29-IpcPingPongNodes/SwPongNode.cpp`)
+## Role de `SwLaunch`
 
-## Run (CLI)
+`SwLaunch` est le point d'entree qui transforme un JSON de lancement en systeme reel en cours d'execution.
 
-`SwLaunch` exige **un** des deux arguments:
-- `--config_file=<path>` (JSON lu depuis disque)
-- `--config_json=<json>` (string JSON)
+Concretement, il fait quatre choses:
 
-Overrides optionnels (prioritaires sur le JSON):
-- `--sys=<domain>` (sys par defaut des enfants; defaut JSON: `"demo"`)
-- `--duration_ms=<ms>` (stoppe tout apres ce delai; `0` = infini)
+1. Il interprete un etat desire.
+2. Il demarre les unites demandees.
+3. Il surveille leur sante et leur presence.
+4. Il accepte, si on l'active, des ordres de controle et de deploiement a chaud.
 
-Codes retour (cf `main()` dans `SwNode/SwLaunch/SwLaunch.cpp`):
-- `2`: JSON manquant / invalide / schema incomplet
-- `3`: un child n'a pas pu demarrer
+Il faut le voir comme un superviseur local, oriente fichier et process, pas comme un orchestrateur distribue.
 
-## Regles de resolution des chemins
+## Ce que `SwLaunch` sait piloter
 
-Dans `SwNode/SwLaunch/SwLaunch.cpp`:
+Deux types d'unites sont geres:
 
-- `baseDir` = dossier du `--config_file` si fourni, sinon `SwDir::currentPath()`.
-- `executable` et `workingDirectory` sont resolus par `resolvePath_(baseDir, value)`:
-  - si `value` est relatif, il est interprete depuis `baseDir`,
-  - puis converti en chemin absolu (plateforme).
-- si `workingDirectory` est absent: fallback sur le dossier de l'exe.
+- `nodes`: executables autonomes, generalement bases sur `SwRemoteObjectNode`.
+- `containers`: process comme `SwComponentContainer`, capables d'heberger plusieurs composants.
 
-Attention: **les plugins** du container sont resolus par `SwPluginLoader` **dans le process container** (via le backend `SwLibrary`, donc depuis son CWD). Donc, pour des paths de plugin simples (ex: `"PingPongPlugin"`), mets un `workingDirectory` coherent (souvent le dossier de l'exe qui contient aussi les `.dll`).
+Chaque unite est identifiee par une cle stable:
 
-## Schema JSON (launch)
+- node: `node:<ns>/<name>`
+- container: `container:<ns>/<name>`
 
-Le root JSON doit etre un object et contenir au moins un tableau non vide:
-- `containers` et/ou `nodes` (sinon erreur: "launch json must contain 'containers' and/or 'nodes' arrays")
+Cette cle est importante, car elle sert:
 
-### Root
+- dans l'etat runtime,
+- dans les jobs de deploiement,
+- dans les artefacts uploades,
+- dans la logique de restart cible.
 
-- `sys` (string, optionnel): sys par defaut des process enfants. Defaut: `"demo"`.
-- `duration_ms` (int, optionnel): delai avant arret de tout. Defaut: `0` (infini).
-- `containers` (array<object>, optionnel): liste des process containers a demarrer.
-- `nodes` (array<object>, optionnel): liste des process nodes "standalone" a demarrer.
+## Modes d'utilisation
 
-### Container entry
+### 1. Mode lancement simple
 
-Champs d'identite:
-- `sys` (string, optionnel): override du sys pour CE container.
-- `ns` / `namespace` (string, requis): namespace du container.
-- `name` / `object` (string, requis): nom du container.
+Vous fournissez un `launch.json`. `SwLaunch` demarre les unites et s'arrete quand on lui demande.
 
-Execution:
-- `executable` (string, requis): chemin vers l'exe container (ex: `SwComponentContainer.exe`).
-- `workingDirectory` (string, optionnel): CWD du process (defaut: dossier de l'exe).
-- `duration_ms` (int, optionnel): passe au container via `--duration_ms` (0 = run jusqu'a arret du launcher).
+### 2. Mode supervision
 
-Config:
-- `config_file` (string, optionnel): si present, passe tel quel au container via `--config_file`.
-- sinon: `SwLaunch` genere un fichier temporaire `sw_launch_<ns_name>.json` dans `SwStandardLocation::Temp` (voir `ensureConfigFile_()`):
-  - il y met `{ "composition": { ... }, "options": { ... } }`,
-  - puis le passe au container via `--config_file`.
+En plus du lancement, `SwLaunch` peut:
 
-Composition (si pas de `config_file`):
-- `composition` (object, optionnel): object "composition" a forwarder au container.
-  - alias accepte: si `composition` est absent, `ensureConfigFile_()` utilise l'object de la spec comme source.
-  - alias accepte: `nodes` est copie vers `components` si `components` est absent.
+- relancer un process si son `exitCode` est anormal,
+- relancer un process si son `SwRemoteObject` disparait de la SHM registry.
 
-Options launcher + flags process (dans `spec.options`):
-- `reloadOnCrash` (bool): restart si exitCode != 0 (voir `onTerminated_()`).
-- `restartDelayMs` (int): delai avant restart (defaut: 1000).
-- `reloadOnDisconnect` (bool): restart si le `SwRemoteObject` du container n'est plus vu en SHM registry.
-- `disconnectTimeoutMs` (int): timeout d'absence en registry avant restart (defaut: 5000).
-- `disconnectCheckMs` (int): periode de polling registry (defaut: 1000).
-- Windows (flags `SwProcess`): `createNoWindow`, `createNewConsole`, `detached`, `suspended` (voir `processFlagsFromOptions_()`).
+### 3. Mode controle HTTP
 
-### Node entry (process standalone)
+Si vous demarrez `SwLaunch` avec les bons arguments, il ouvre une API HTTP locale protegee par bearer token.
 
-Champs d'identite:
-- `sys` (string, optionnel): override sys pour CE node.
-- `ns` / `namespace` (string, requis): namespace du node.
-- `name` / `object` (string, requis): nom du node.
+### 4. Mode deploiement a chaud
 
-Execution:
-- `executable` (string, requis): chemin vers l'exe du node (base sur `SW_REMOTE_OBJECT_NODE` ou compatible).
-- `workingDirectory` (string, optionnel): CWD du process (defaut: dossier de l'exe).
-- `duration_ms` (int, optionnel): passe au node via `--duration_ms`.
-- `config_root` (string, optionnel): passe au node via `--config_root` (voir `SW_REMOTE_OBJECT_NODE`).
+Dans ce mode, `SwLaunch` recoit un manifeste multipart avec des fichiers, verifie les checksums, remplace les fichiers non identiques, persiste la nouvelle configuration, redemarre seulement les unites impactees, puis publie le resultat dans un job de deploiement.
 
-Config:
-- `config_file` (string, optionnel): si present, passe tel quel au node via `--config_file`.
-- sinon: si `params` et/ou `options` et/ou `config_root` est present, `SwLaunch` genere `sw_node_<ns_name>.json` dans `SwStandardLocation::Temp` avec `{ "params": {...}, "options": {...}, "config_root": "..." }`.
+## Cycle de vie general
 
-Options launcher + flags process (dans `spec.options`):
-- meme cles que pour un container (`reloadOnCrash`, `reloadOnDisconnect`, `restartDelayMs`, `disconnectTimeoutMs`, `disconnectCheckMs`, flags Windows).
-- en plus, si un `config_file` temporaire est genere, le bloc `options` est aussi forwarde au node: `SW_REMOTE_OBJECT_NODE` n'utilise aujourd'hui que `watchdog` / `activeWatchDog` (voir `src/core/remote/SwRemoteObjectNode.h`).
+Le fonctionnement nominal est le suivant:
 
-## Supervision "reloadOnDisconnect" (presence SHM)
+1. `SwLaunch` charge le JSON depuis `--config_file` ou `--config_json`.
+2. Il determine le `baseDir`.
+3. Il resout les chemins d'executables et de repertoires de travail.
+4. Il construit le plan d'unites a gerer.
+5. Il demarre les process.
+6. Si l'API de controle est activee, il ouvre l'ecoute HTTP.
+7. Pendant l'execution, il maintient:
+   - l'etat desire courant,
+   - la liste des unites actives,
+   - la liste des jobs de deploiement,
+   - les regles de supervision et de restart.
 
-Implementation (cf `remoteObjectLastSeenMs_()` + `checkOnline_()` dans `SwNode/SwLaunch/SwLaunch.cpp`):
+## CLI
 
-- le launcher lit un snapshot: `sw::ipc::shmRegistrySnapshot(sys)`,
-- il cherche une entree dont:
-  - `object` == `<ns>/<name>`
-  - `signal` commence par `__config__|` (marqueur de presence publie par `SwRemoteObject` quand la config SHM est active),
-- si rien n'est vu pendant `disconnectTimeoutMs`, alors restart.
+`SwLaunch` exige un des deux arguments suivants:
 
-## Exemple (inline JSON)
+- `--config_file=<path>`
+- `--config_json=<json>`
 
-Exemple minimal: 1 container + 1 plugin + 2 composants.
+Overrides globaux:
 
-```json
-{
-  "sys": "demo",
-  "containers": [
-    {
-      "ns": "demo",
-      "name": "container",
-      "executable": "./SwComponentContainer.exe",
-      "workingDirectory": ".",
-      "options": {
-        "reloadOnCrash": true,
-        "reloadOnDisconnect": true,
-        "disconnectTimeoutMs": 5000
-      },
-      "composition": {
-        "threading": "same_thread",
-        "plugins": ["PingPongPlugin"],
-        "components": [
-          { "type": "demo/PingComponent", "ns": "demo", "name": "ping", "params": { "peer": "demo/pong" } },
-          { "type": "demo/PongComponent", "ns": "demo", "name": "pong", "params": { "peer": "demo/ping" } }
-        ]
-      }
-    }
-  ]
-}
-```
+- `--sys=<domain>`
+- `--duration_ms=<ms>`
 
-Notes:
-- les `type` des composants viennent de `SW_REGISTER_COMPONENT_NODE(...)` et sont normalises (ex: `demo::PingComponent` -> `demo/PingComponent`). Voir `src/core/remote/SwRemoteObjectComponent.h`.
-- pour le schema precis du container + ses RPC: `docs/nodes/SwComponentContainer.md`.
+Activation de l'API de controle:
+
+- `--control_port=<port>`
+- `--control_bind=<ipv4>`
+- `--control_token=<secret>`
+
+Regles importantes:
+
+- `control_bind` vaut `127.0.0.1` par defaut.
+- l'API de controle n'est activee que si `control_port > 0`.
+- les mutations runtime sont refusees si `SwLaunch` n'a pas ete demarre avec `--config_file`.
+- le token de controle ne doit jamais etre stocke dans le `launch.json`.
+
+## Structure du `launch.json`
+
+Le root JSON contient principalement:
+
+- `sys`
+- `duration_ms`
+- `control_api` optionnel pour les valeurs non secretes (`bind`, `port`)
+- `nodes`
+- `containers`
+
+Le modele de verite de `SwLaunch` est un etat desire complet. Cela signifie qu'un `PUT /api/launch/state` remplace l'etat logique du launcher, il ne fait pas un patch partiel opportuniste.
+
+Le fichier peut etre modifie et repersiste par `SwLaunch` lui-meme si une mutation ou un deploiement reussit.
+
+## Resolution des chemins
+
+`baseDir` est le dossier du `--config_file` si vous utilisez un fichier. Sinon, c'est le repertoire courant.
+
+Les champs suivants sont resolus a partir de ce `baseDir`:
+
+- `executable`
+- `workingDirectory`
+- `config_file`
+- certains chemins de travail internes
+
+Quand `workingDirectory` n'est pas fourni, `SwLaunch` prend le dossier de l'executable.
+
+Cette regle est fondamentale, car elle determine:
+
+- ou le child est lance,
+- depuis ou les plugins sont resolus,
+- ou les artefacts peuvent etre deployes.
+
+## Supervision runtime
+
+Deux mecanismes de supervision existent.
+
+### Restart sur crash
+
+Si `reloadOnCrash` est actif, un process termine avec un `exitCode != 0` est relance apres `restartDelayMs`.
+
+### Restart sur disparition SHM
+
+Si `reloadOnDisconnect` est actif, `SwLaunch` surveille la presence du `SwRemoteObject` dans la registry SHM. Si l'objet attendu disparait plus longtemps que `disconnectTimeoutMs`, le process est considere hors ligne et relance.
+
+Ce mecanisme est utile quand le process reste vivant mais ne publie plus correctement son etat.
+
+## API de controle HTTP
+
+L'API de controle est volontairement etroite. Elle n'est pas une API generique d'administration.
+
+Routes disponibles:
+
+- `GET /api/launch/state`
+- `PUT /api/launch/state`
+- `POST /api/launch/deploy`
+- `GET /api/launch/deploy/:jobId`
+
+Toutes les routes `/api/*` exigent:
+
+- `Authorization: Bearer <token>`
+
+### `GET /api/launch/state`
+
+Retourne:
+
+- l'etat desire courant,
+- un resume runtime des unites,
+- l'etat de l'API de controle.
+
+Le token n'est jamais retourne.
+
+### `PUT /api/launch/state`
+
+Accepte un etat desire complet et applique une reconciliation ciblee:
+
+- unite supprimee du JSON: arret runtime,
+- unite ajoutee: demarrage,
+- unite modifiee: restart cible,
+- unite inchangee: pas d'action.
+
+Cette route est utile pour des changements de configuration sans upload de fichiers.
+
+### `POST /api/launch/deploy`
+
+Accepte un `multipart/form-data` avec:
+
+- une part `manifest`,
+- une ou plusieurs parts fichier,
+- un etat final desire dans le manifeste.
+
+Le deploiement se fait comme un job asynchrone et retourne `202`.
+
+### `GET /api/launch/deploy/:jobId`
+
+Permet de suivre l'etat d'un job:
+
+- `queued`
+- `running`
+- `succeeded`
+- `failed`
+
+Le job publie aussi:
+
+- `phase`
+- `errors`
+- `impactedUnits`
+- `replacedFiles`
+- `skippedFiles`
+
+## Deploiement a chaud
+
+Le deploiement a chaud suit toujours la meme logique.
+
+1. Le client envoie un manifeste + des fichiers.
+2. `SwLaunch` verifie que chaque part attendue est bien presente.
+3. Il calcule le SHA-256 de chaque upload.
+4. Il compare chaque checksum avec le checksum du fichier deja deploye.
+5. Il ne remplace pas un fichier deja identique.
+6. Il determine les unites impactees.
+7. Il arrete seulement ces unites.
+8. Il remplace les fichiers non identiques.
+9. Il persiste le `launch.json`.
+10. Il redemarre l'etat final.
+11. Si un echec survient, il rollbacke les fichiers et le runtime.
+
+Le deploiement est donc:
+
+- cible,
+- controle par checksum,
+- transactionnel a l'echelle du launcher.
+
+## Manifeste de deploiement
+
+Le manifeste V1 contient:
+
+- `formatVersion`
+- `deploymentId` optionnel
+- `desiredState`
+- `artifacts`
+
+Chaque artefact contient:
+
+- `partName`
+- `ownerKey`
+- `relativePath`
+- `sha256`
+
+Contraintes importantes:
+
+- `relativePath` doit rester relatif,
+- les chemins absolus sont rejetes,
+- les chemins avec `..` sont rejetes,
+- l'artefact doit appartenir a une unite connue du nouvel etat desire.
+
+## Comment `SwLaunch` choisit le repertoire d'ecriture
+
+L'ecriture d'un artefact n'est pas libre. Elle est limitee a la racine de l'unite cible:
+
+- `workingDirectory` si defini,
+- sinon repertoire de l'executable.
+
+Autrement dit, `SwLaunch` sait remplacer des fichiers du perimetre d'une unite, mais ne devient pas un serveur d'ecriture arbitraire sur toute la machine.
+
+## Effet du checksum
+
+Le checksum sert a deux choses:
+
+1. verifier l'integrite de l'upload,
+2. eviter de remplacer un fichier deja identique.
+
+Si un binaire ou un fichier metier est deja identique:
+
+- le remplacement est ignore,
+- l'artefact apparait dans `skippedFiles`,
+- il n'y a pas de restart induit par ce fichier seul.
+
+Cette regle permet de rejouer un bundle sans provoquer de restart inutile.
+
+## Persistance du `launch.json`
+
+Quand une mutation reussit, `SwLaunch` reecrit le `launch.json`.
+
+Cette reecriture:
+
+- conserve le modele d'etat desire courant,
+- n'ecrit pas le token de controle,
+- se fait de maniere atomique avec fichier temporaire puis remplacement.
+
+Si l'application runtime echoue, la persistance est rollbackee avec le reste.
+
+## Repertoires et fichiers generes
+
+Selon les cas, `SwLaunch` peut creer:
+
+- des `config_file` temporaires pour les enfants,
+- `systemConfig/` pour la configuration trace,
+- `_runlogs/_http_multipart/` pour le staging HTTP multipart,
+- `_runlogs/_deploy/` pour les jobs de deploiement,
+- `log/SwLaunch.log` selon la configuration de trace.
+
+Ces dossiers ne sont pas des entrees metier de votre etat desire. Ce sont des repertoires techniques de fonctionnement.
+
+## Ce qui redemarre et ce qui ne redemarre pas
+
+`SwLaunch` cherche a minimiser l'impact.
+
+Redemarrage cible:
+
+- changement de spec d'un node: restart de ce node,
+- changement de spec d'un container: restart de ce container,
+- artefact d'un node: restart de ce node,
+- artefact d'un container: restart de ce container.
+
+En V1, un changement interne a la composition d'un container est normalise en restart du container proprietaire. Il n'y a pas de hot reload fin par plugin ou composant via RPC dans le flux de deploiement.
+
+## Sequencement et concurrence
+
+`SwLaunch` ne traite qu'une mutation a la fois.
+
+Consequences:
+
+- si un `PUT /api/launch/state` arrive pendant une autre mutation, il recoit `409`,
+- si un `POST /api/launch/deploy` arrive pendant un job en cours, il recoit `409`.
+
+Cette serialisation est volontaire. Elle simplifie les garanties de rollback.
+
+## Ce qu'il faut verifier en exploitation
+
+Verification minimale:
+
+1. l'API de controle repond si elle est activee,
+2. `GET /api/launch/state` retourne bien l'unite attendue avec `running=true`,
+3. un job de deploiement passe a `succeeded`,
+4. les `replacedFiles` et `skippedFiles` correspondent a ce qui etait attendu,
+5. le `launch.json` persiste bien le nouvel etat,
+6. le token de controle n'apparait jamais dans le fichier de config.
+
+## Cas d'usage typiques
+
+### Cas 1. Lancement local simple
+
+Vous avez un `launch.json` fixe et vous voulez juste lancer un systeme de demo ou d'integration.
+
+### Cas 2. Supervision locale
+
+Vous voulez que les process reviennent automatiquement apres crash ou disparition SHM.
+
+### Cas 3. Teleoperation locale
+
+Vous exposez l'API de controle sur `127.0.0.1` et vous pilotez le launcher depuis un outil d'admin ou un service compagnon.
+
+### Cas 4. Mise a jour ciblee
+
+Vous envoyez un nouveau binaire pour un seul node avec son manifeste. `SwLaunch` remplace uniquement ce binaire et ne redemarre que ce node.
+
+## Limites actuelles
+
+- l'API de controle est locale par defaut et attend un bearer token simple,
+- la mutation runtime exige `--config_file`,
+- le hot reload granulaire d'un composant interne n'est pas le mode de deploiement V1,
+- les suppressions de fichiers metier obsoletes ne sont pas automatisees,
+- le modele reste volontairement local et fichier-centrique.
+
+## Document suivant
+
+Pour comprendre une fonctionnalite precise sans relire tout le guide, ouvrir `docs/nodes/SwLaunch_FunctionalDetails.md`.

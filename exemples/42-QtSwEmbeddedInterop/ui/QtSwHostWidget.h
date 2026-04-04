@@ -26,6 +26,9 @@ public:
     void shutdownSw();
     void showIncomingMessage(const QString& text);
     void setRuntimeStatusText(const QString& text);
+    bool saveSwRootSnapshot(const QString& filePath) const;
+    QSize minimumSizeHint() const override;
+    QSize sizeHint() const override;
 
     QPaintEngine* paintEngine() const override;
 

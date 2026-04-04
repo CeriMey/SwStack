@@ -52,7 +52,8 @@ public:
      * @param y Vertical coordinate.
      * @return The requested handle Mouse Move.
      */
-    static void handleMouseMove(SwWidget* root, int x, int y) { instance_().handleMouseMove_(root, x, y); }
+    static void handleMouseMove(SwWidget* root, int x, int y) { instance_().handleMouseMove_(root, nullptr, x, y); }
+    static void handleMouseMove(SwWidget* root, SwWidget* hoveredWidget, int x, int y) { instance_().handleMouseMove_(root, hoveredWidget, x, y); }
     /**
      * @brief Performs the `handleMousePress` operation.
      * @return The requested handle Mouse Press.
@@ -237,13 +238,16 @@ private:
         return nullptr;
     }
 
-    void handleMouseMove_(SwWidget* root, int x, int y) {
+    void handleMouseMove_(SwWidget* root, SwWidget* hoveredWidget, int x, int y) {
         if (!root) {
             hide_();
             return;
         }
 
-        SwWidget* deepest = deepestChildAt_(root, x, y);
+        SwWidget* deepest = hoveredWidget;
+        if (!deepest || !SwObject::isLive(deepest) || !deepest->isVisibleInHierarchy()) {
+            deepest = deepestChildAt_(root, x, y);
+        }
         SwWidget* provider = tooltipProviderFor_(deepest);
         const SwString text = provider ? provider->getToolTips() : SwString();
 

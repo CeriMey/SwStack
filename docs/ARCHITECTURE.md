@@ -1,76 +1,79 @@
-# Architecture (vue d’ensemble)
+# Architecture (vue d'ensemble)
 
-## Vue “composants”
+## Vue composants
 
-Le dépôt est construit autour de 3 piliers:
+Le depot s'appuie sur quatre briques principales :
 
-1. **Runtime coopératif** (event loop + timers + fibres) pour exécuter des tâches sans bloquer le thread.
-2. **Modèle objet** façon Qt (signaux/slots, propriétés, affinité thread) pour structurer l’app.
-3. **IPC same machine** via mémoire partagée + wakeups OS, pour pub/sub et RPC inter-process.
-
-Les couches GUI et Media se greffent au runtime.
+1. Runtime cooperatif (`SwCoreApplication`, event loop, timers, fibres, threads).
+2. Modele objet facon Qt (`SwObject`, signaux/slots, affinite thread).
+3. IPC same-machine (SHM, RPC, ring buffers, discovery).
+4. Stockage embarque local (`SwEmbeddedDb`) pour gros volumes sur disque local.
 
 ```mermaid
 flowchart LR
   subgraph R[Runtime]
-    A[SwCoreApplication\n(src/core/runtime/SwCoreApplication.h)]
-    EL[SwEventLoop\n(src/core/runtime/SwEventLoop.h)]
-    T[SwTimer\n(src/core/runtime/SwTimer.h)]
-    TH[Threads\n(src/atomic/thread.h + src/core/runtime/SwThread.h)]
+    A[SwCoreApplication]
+    EL[SwEventLoop]
+    T[SwTimer]
+    TH[SwThread / fibres]
   end
 
-  subgraph O[Modèle objet]
-    OBJ[SwObject\n(src/core/object/SwObject.h)]
-    MT[Meta/Any\n(src/core/object/SwMetaType.h + src/core/types/SwAny.h)]
+  subgraph O[Modele objet]
+    OBJ[SwObject]
+    MT[Meta / Any]
   end
 
-  subgraph IPC[IPC (same machine)]
-    SHM[Signal/pubsub\n(src/core/remote/SwSharedMemorySignal.h)]
-    RPC[RPC\n(src/core/remote/SwIpcRpc.h)]
-    RB[NoCopyRingBuffer\n(src/core/remote/SwIpcNoCopyRingBuffer.h)]
-    REM[Remote/Discovery\n(src/core/remote/SwIpcRemote*.h)]
+  subgraph IPC[IPC local]
+    SHM[SwSharedMemorySignal]
+    RPC[SwIpcRpc]
+    RB[SwIpcNoCopyRingBuffer]
+    REM[Discovery / remote]
   end
 
-  subgraph CFG[Config/Nodes]
-    RO[SwRemoteObject\n(src/core/remote/SwRemoteObject.h)]
-    NODE[Node main macro\n(src/core/remote/SwRemoteObjectNode.h)]
-    SC[systemConfig/**]
+  subgraph IO[IO]
+    SOCK[TCP / UDP / TLS]
+    HTTP[HTTP]
+    PROC[Files / Process]
   end
 
-  subgraph IO[IO réseau]
-    SOCK[TCP/UDP\n(src/core/io/Sw*Socket.h)]
-    HTTP[HTTP GET\n(src/core/io/SwNetworkAccessManager.h)]
-    TLS[TLS\n(src/core/io/SwBackendSsl.h)]
+  subgraph STO[Stockage local]
+    DB[SwEmbeddedDb]
+    WAL[WAL + CURRENT + manifest]
+    SST[SSTables + index secondaires]
+    BLOB[Blob store]
+    DBP[SwDbPlatform]
   end
 
   subgraph GUI[GUI]
-    GA[SwGuiApplication\n(src/core/gui/SwGuiApplication.h)]
-    PI[PlatformIntegration\n(src/platform/SwPlatformIntegration.h)]
-    W[Widgets\n(src/core/gui/SwWidget.h + ...)]
+    GA[SwGuiApplication]
+    PI[PlatformIntegration]
+    W[Widgets]
   end
 
   subgraph MEDIA[Media]
-    VS[VideoSource\n(src/media/SwVideoSource.h)]
-    VD[VideoDecoder\n(src/media/SwVideoDecoder.h)]
-    RTSP[RTSP/UDP\n(src/media/SwRtspUdpSource.h)]
+    VS[VideoSource]
+    VD[VideoDecoder]
+    RTSP[RTSP / UDP]
   end
 
   A --> EL
   A --> T
   A --> TH
   A --> OBJ
-
   OBJ --> MT
+
   A --> SHM --> RPC
   SHM --> RB
   SHM --> REM
 
-  RO --> SHM
-  NODE --> RO
-  RO --> SC
-
   A --> SOCK --> HTTP
-  SOCK --> TLS
+  A --> PROC
+
+  A --> DB
+  DB --> WAL
+  DB --> SST
+  DB --> BLOB
+  DB --> DBP
 
   GA --> A
   GA --> PI
@@ -79,92 +82,68 @@ flowchart LR
   MEDIA --> A
 ```
 
-## Runtime: boucle d’événements + fibres
+## Runtime
 
-### Intention (Pourquoi)
+Intentions :
 
-Le runtime cherche à:
+- executer des callbacks sans bloquer le thread principal,
+- gerer timers, wakeups et fibres,
+- permettre des attentes locales sans stopper tout le runtime.
 
-- exécuter des callbacks **sans bloquer** (approche coopérative),
-- gérer **timers** et **wakeups**,
-- permettre des “attentes” locales (nested event loop) sans arrêter toute l’app.
+References :
 
-### Références (où)
+- `src/core/runtime/SwCoreApplication.h`
+- `src/core/runtime/SwEventLoop.h`
+- `src/core/runtime/SwTimer.h`
+- `src/core/runtime/SwThread.h`
 
-- `src/core/runtime/SwCoreApplication.h` (`exec`, `processEvent`, `yieldFiber`, `waitForWork_`)
-- `src/core/runtime/SwEventLoop.h` (`SwEventLoop::exec`, macros `swhile/tswhile`)
-- `src/core/runtime/SwTimer.h` (`SwTimer`, `SwTimer::singleShot`)
-- Fibres Linux: `src/core/runtime/linux_fiber.h` (`À CONFIRMER`: portabilité/maturité selon plateformes)
+## Modele objet
 
-## Modèle objet: `SwObject`, signaux/slots, affinité thread
+Intentions :
 
-### Intention
+- hierarchie parent/enfant,
+- signaux/slots avec deconnexion,
+- affinite thread et `moveToThread`.
 
-Fournir une ossature proche de Qt:
+References :
 
-- hiérarchie parent/enfant, lifecycle, `destroyed()` etc,
-- signaux/slots avec déconnexion,
-- thread affinity + migration `moveToThread` vers un event loop dédié.
+- `src/core/object/SwObject.h`
+- `src/core/object/SwMetaType.h`
 
-### Références
+## IPC local
 
-- `src/core/object/SwObject.h` (macros `SW_OBJECT`, `DECLARE_SIGNAL`, `connect`, `disconnect`, `moveToThread`)
-- `src/core/runtime/SwThread.h` (pont `SwThread` ↔ `sw::atomic::Thread`)
-- `src/atomic/thread.h` (`sw::atomic::Thread`: thread worker + son `SwCoreApplication`)
+Intentions :
 
-## IPC: mémoire partagée + notifications OS
+- pub/sub et RPC entre processus sur la meme machine,
+- wakeups event-driven,
+- transport efficace pour gros payloads.
 
-### Intention
+References :
 
-Permettre pub/sub et RPC **entre processus** sur la même machine, avec:
+- `src/core/remote/SwSharedMemorySignal.h`
+- `src/core/remote/SwIpcRpc.h`
+- `src/core/remote/SwIpcNoCopyRingBuffer.h`
 
-- transport “latest value wins” pour signaux d’état,
-- wakeup event-driven (éviter polling),
-- introspection “best-effort” via registries partagés.
+## Stockage local : `SwEmbeddedDb`
 
-### Références
+Intentions :
 
-- `src/core/remote/SwSharedMemorySignal.h` (`Registry`, `LoopPoller`, registries `RegistryTable`…)
-- `src/core/remote/SwIpcRpc.h` (`RpcMethodClient`, queues `__rpc__|...` / `__rpc_ret__|...`)
-- `src/core/remote/SwIpcNoCopyRingBuffer.h` (`NoCopyRingBuffer`, `ShmMappingDyn`)
+- base embarquee locale pure C++11,
+- writer unique inter-process via lock OS,
+- lecteurs multiples avec `CURRENT + MANIFEST + WAL`,
+- primaire KV + index secondaires ordonnes,
+- flush en SSTables immuables et blobs separes pour grosses valeurs.
 
-## Config & “nodes”
+References :
 
-### Config multi-couches
+- `src/core/storage/SwEmbeddedDb.h`
+- `src/core/platform/SwDbPlatform.h`
 
-`SwRemoteObject` charge une config JSON en surcouches et peut publier/recevoir des updates via IPC:
+## GUI et Media
 
-- `systemConfig/global/<objectName>.json`
-- `systemConfig/local/<nameSpace>_<objectName>.json`
-- `systemConfig/user/<nameSpace>_<objectName>.json`
+References :
 
-Référence: `src/core/remote/SwRemoteObject.h` (commentaire “Load order”, `ConfigPaths`, `setConfigValue`).
-
-### Pattern “node main”
-
-`src/core/remote/SwRemoteObjectNode.h` fournit `SW_REMOTE_OBJECT_NODE` pour générer un `main()` standard:
-
-- parsing args (`--sys`, `--ns`, `--name`, `--duration_ms`, `--config_file`, `--config_json`, …),
-- application des params JSON sur la config (`SwRemoteObject::setConfigValue`),
-- watchdog optionnel (`SwCoreApplication::activeWatchDog`),
-- auto-quit via `SwTimer::singleShot`.
-
-## GUI: intégration platform + widgets
-
-`SwGuiApplication` hérite de `SwCoreApplication` et ajoute une pompe d’événements platform.
-
-Références:
-
-- `src/core/gui/SwGuiApplication.h` (`exec`, `platformIntegration()`)
-- `src/platform/SwPlatformIntegration.h` (interfaces `SwPlatformWindow/Painter/Image`)
-- `src/platform/SwPlatformFactory.h` (sélection win/x11)
-- Widgets: `src/core/gui/SwWidget.h`, `src/core/gui/SwMainWindow.h`, `src/core/gui/SwLayout.h`, etc.
-
-## Media: sources + décodage + rendu
-
-Références:
-
-- Types: `src/media/SwVideoTypes.h`, `src/media/SwVideoFrame.h`, `src/media/SwVideoPacket.h`
-- Sources: `src/media/SwVideoSource.h`, `src/media/SwRtspUdpSource.h`, `src/media/SwHttpMjpegSource.h`, `src/media/SwFileVideoSource.h`
-- Décodage: `src/media/SwVideoDecoder.h`, `src/media/SwMediaFoundationH264Decoder.h` (`À CONFIRMER`: backends Linux)
-- Rendu widget: `src/core/gui/SwVideoWidget.h`
+- `src/core/gui/SwGuiApplication.h`
+- `src/platform/SwPlatformIntegration.h`
+- `src/media/SwVideoSource.h`
+- `src/media/SwVideoDecoder.h`

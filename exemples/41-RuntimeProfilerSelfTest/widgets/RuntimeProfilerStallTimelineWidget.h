@@ -41,8 +41,7 @@ private:
                                   const SwColor& textColor,
                                   const SwFont& font) const;
     void drawLoadSeries_(SwPainter* painter,
-                         const SwRect& plot,
-                         const SwColor& color) const;
+                         const SwRect& plot) const;
     double secondsSinceLaunch_(long long sampleTimeNs) const;
     int xForSeconds_(double seconds, const SwRect& plot) const;
     int yForDuration_(double durationMs, const SwRect& plot) const;

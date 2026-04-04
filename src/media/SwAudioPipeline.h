@@ -121,6 +121,15 @@ public:
         return m_audioOutput->pushFrame(frame);
     }
 
+    void flush() {
+        if (m_decoder) {
+            m_decoder->flush();
+        }
+        if (m_audioOutput) {
+            m_audioOutput->flush();
+        }
+    }
+
 private:
     std::shared_ptr<SwAudioDecoder> acquireDecoder_(SwAudioPacket::Codec codec) {
         if (m_decoder && m_decoderCodec == codec) {

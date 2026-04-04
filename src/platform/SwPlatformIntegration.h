@@ -284,6 +284,8 @@ struct SwWindowCallbacks {
      * @details The returned value reflects the state currently stored by the instance.
      */
     std::function<void(const SwPlatformPaintEvent&)> paintRequestHandler;
+    /** @brief Called on close request. Return true to allow, false to prevent. */
+    std::function<bool()> closeHandler;
 };
 
 class SwPlatformImage {

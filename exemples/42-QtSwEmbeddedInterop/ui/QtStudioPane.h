@@ -20,6 +20,8 @@ public:
     QString messageText() const;
     void setStatusText(const QString& text);
     void setRuntimeStatusText(const QString& text);
+    QSize minimumSizeHint() const override;
+    QSize sizeHint() const override;
 
 protected:
     void resizeEvent(QResizeEvent* event) override;

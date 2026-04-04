@@ -699,6 +699,11 @@ SwString RuntimeProfilerStackInspectorWidget::reportTextFor_(const RuntimeProfil
     appendKeyValue(report, "overshoot", overshootUs > 0 ? ("+" + durationText_(overshootUs)) : SwString("within threshold"));
     appendKeyValue(report, "severity", severityText_(data));
     appendKeyValue(report, "lane", laneName_(data.lane));
+    if (!data.applicationLabel.isEmpty()) {
+        appendKeyValue(report, "runtime", data.applicationLabel);
+    } else if (data.applicationId != 0ULL) {
+        appendKeyValue(report, "runtime", "#" + SwString::number(data.applicationId));
+    }
     appendKeyValue(report, "thread", SwString::number(data.threadId));
     appendLine(report, "");
 

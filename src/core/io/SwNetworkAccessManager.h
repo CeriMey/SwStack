@@ -46,6 +46,8 @@
  ***************************************************************************************************/
 
 #include "SwObject.h"
+#include "SwAbstractSocket.h"
+#include "SwSslSocket.h"
 #include "SwTcpSocket.h"
 #include "SwString.h"
 #include "SwByteArray.h"
@@ -126,6 +128,10 @@ public:
         m_headerMap[key] = value;
     }
 
+    void setTrustedCaFile(const SwString& path) {
+        m_trustedCaFile = path;
+    }
+
     /**
      * @brief Starts an asynchronous GET request.
      *
@@ -151,19 +157,33 @@ public:
 
         resetResponseState();
 
-        m_socket = new SwTcpSocket(this);
-        if (m_https) {
-            m_socket->useSsl(true, m_host);
-        } else {
-            m_socket->useSsl(false);
+        SwSslSocket* sslSocket = m_https ? new SwSslSocket(this) : nullptr;
+        m_socket = sslSocket ? static_cast<SwAbstractSocket*>(sslSocket) : new SwTcpSocket(this);
+        if (sslSocket) {
+            sslSocket->setPeerHostName(m_host);
+            if (!m_trustedCaFile.isEmpty()) {
+                sslSocket->setTrustedCaFile(m_trustedCaFile);
+            }
+            SwObject::connect(sslSocket, &SwSslSocket::sslErrors, [this](const SwSslErrorList& errors) {
+                if (!errors.isEmpty()) {
+                    swCError(kSwLogCategory_SwNetworkAccessManager) << "[SwNetworkAccessManager] TLS error: "
+                                                                    << errors.first();
+                }
+            });
         }
 
-        connect(m_socket, &SwTcpSocket::connected, this, &SwNetworkAccessManager::onConnected);
-        connect(m_socket, &SwTcpSocket::errorOccurred, this, &SwNetworkAccessManager::onError);
-        connect(m_socket, &SwTcpSocket::disconnected, this, &SwNetworkAccessManager::onDisconnected);
-        connect(m_socket, &SwTcpSocket::readyRead, this, &SwNetworkAccessManager::onReadyRead);
+        connect(m_socket, &SwAbstractSocket::errorOccurred, this, &SwNetworkAccessManager::onError);
+        connect(m_socket, &SwAbstractSocket::disconnected, this, &SwNetworkAccessManager::onDisconnected);
+        connect(m_socket, &SwIODevice::readyRead, this, &SwNetworkAccessManager::onReadyRead);
+        if (sslSocket) {
+            connect(sslSocket, &SwSslSocket::encrypted, this, &SwNetworkAccessManager::onConnected);
+        } else {
+            connect(m_socket, &SwAbstractSocket::connected, this, &SwNetworkAccessManager::onConnected);
+        }
 
-        if (!m_socket->connectToHost(m_host, m_port)) {
+        const bool connectOk = sslSocket ? sslSocket->connectToHostEncrypted(m_host, m_port)
+                                         : m_socket->connectToHost(m_host, m_port);
+        if (!connectOk) {
             cleanupSocket();
             emit errorOccurred(-2);
             return false;
@@ -501,12 +521,13 @@ private slots:
         return !host.isEmpty();
     }
 
-    SwTcpSocket* m_socket = nullptr;
+    SwAbstractSocket* m_socket = nullptr;
     SwString m_scheme;
     SwString m_host;
     SwString m_path;
     uint16_t m_port = 0;
     bool m_https = false;
+    SwString m_trustedCaFile;
 
     SwMap<SwString, SwString> m_headerMap;
 

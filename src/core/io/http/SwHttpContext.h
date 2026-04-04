@@ -135,6 +135,14 @@ public:
         return m_request.path;
     }
 
+    bool isTls() const {
+        return m_request.isTls;
+    }
+
+    uint16_t localPort() const {
+        return m_request.localPort;
+    }
+
     /**
      * @brief Performs the `queryValue` operation.
      * @param key Value passed to the method.
@@ -228,7 +236,21 @@ public:
      */
     bool parseJsonBody(SwJsonDocument& outDocument, SwString& outError) const {
         outError.clear();
-        outDocument = SwJsonDocument::fromJson(m_request.body.toStdString(), outError);
+        const std::string rawBody = m_request.body.toStdString();
+        std::string json;
+        json.reserve(rawBody.size());
+        for (std::size_t i = 0; i < rawBody.size(); ++i) {
+            if (rawBody[i] != '\0') {
+                json.push_back(rawBody[i]);
+            }
+        }
+        if (json.size() >= 3 &&
+            static_cast<unsigned char>(json[0]) == 0xEF &&
+            static_cast<unsigned char>(json[1]) == 0xBB &&
+            static_cast<unsigned char>(json[2]) == 0xBF) {
+            json.erase(0, 3);
+        }
+        outDocument = SwJsonDocument::fromJson(json, outError);
         return outError.isEmpty();
     }
 
@@ -419,6 +441,29 @@ public:
      */
     void closeConnection(bool close = true) {
         m_response.closeConnection = close;
+    }
+
+    /**
+     * @brief Hands the connection socket to a higher-level protocol handler.
+     * @param callback Callback receiving the detached socket.
+     * @param sendHttpResponseFirst When `true`, the HTTP response is flushed before the handover.
+     */
+    void switchToRawSocket(const std::function<void(SwAbstractSocket*)>& callback,
+                           bool sendHttpResponseFirst = true) {
+        if (!callback) {
+            return;
+        }
+
+        m_response.switchToRawSocket = true;
+        m_response.switchToRawSocketWithoutHttpResponse = !sendHttpResponseFirst;
+        m_response.onSwitchToRawSocket = callback;
+        if (!sendHttpResponseFirst) {
+            m_response.body.clear();
+            m_response.useChunkedTransfer = false;
+            m_response.chunkedParts.clear();
+            m_response.hasFile = false;
+        }
+        m_handled = true;
     }
 
     /**

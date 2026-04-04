@@ -45,6 +45,8 @@
  ***************************************************************************************************/
 
 #include "SwObject.h"
+#include "SwAbstractSocket.h"
+#include "SwSslSocket.h"
 #include "SwTcpSocket.h"
 #include "SwString.h"
 #include "SwByteArray.h"
@@ -67,7 +69,7 @@
 static constexpr const char* kSwLogCategory_SwWebSocket = "sw.core.io.swwebsocket";
 
 /**
- * @brief Lightweight RFC6455 WebSocket client built on top of SwTcpSocket.
+ * @brief Lightweight RFC6455 WebSocket client built on top of SwAbstractSocket.
  *
  * Goals:
  * - Header-only and cross-platform (Windows/Linux).
@@ -76,7 +78,7 @@ static constexpr const char* kSwLogCategory_SwWebSocket = "sw.core.io.swwebsocke
  *
  * Notes:
  * - Implements a client (masked frames when sending).
- * - Supports ws:// and wss:// URLs (TLS via SwTcpSocket::useSsl).
+ * - Supports ws:// and wss:// URLs (`SwTcpSocket` for plain TCP, `SwSslSocket` for TLS).
  */
 class SwWebSocket : public SwObject {
     SW_OBJECT(SwWebSocket, SwObject)
@@ -154,6 +156,10 @@ public:
      */
     void setOrigin(const SwString& origin) {
         m_origin = origin;
+    }
+
+    void setTrustedCaFile(const SwString& path) {
+        m_trustedCaFile = path;
     }
 
     /**
@@ -481,6 +487,10 @@ public:
         return m_lastError;
     }
 
+    SwString lastErrorText() const {
+        return m_lastErrorText;
+    }
+
     /**
      * @brief Opens the underlying resource managed by the object.
      * @param url Value passed to the method.
@@ -491,35 +501,52 @@ public:
         openInternal_(url, false);
     }
 
-    // Server-side: adopt an already-connected SwTcpSocket and perform the server handshake.
+    // Server-side: adopt an already-connected stream socket and perform the WebSocket handshake.
     // The socket will be re-parented to this SwWebSocket instance.
     /**
      * @brief Performs the `accept` operation.
      * @param socket Socket instance affected by the operation.
      * @return `true` on success; otherwise `false`.
      */
-    bool accept(SwTcpSocket* socket) {
-        if (!socket) {
-            reportError_(kErrorConnectFailed);
+    bool accept(SwAbstractSocket* socket, bool secure = false) {
+        if (!attachAcceptedSocket_(socket)) {
             return false;
         }
 
-        abort();
-        m_lastError = 0;
-        m_role = ServerRole;
+        m_secure = secure;
 
-        m_socket = socket;
-        m_socket->setParent(this);
-
-        connect(m_socket, &SwTcpSocket::disconnected, this, &SwWebSocket::onTcpDisconnected);
-        connect(m_socket, &SwTcpSocket::errorOccurred, this, &SwWebSocket::onTcpError);
-        connect(m_socket, &SwTcpSocket::readyRead, this, &SwWebSocket::onTcpReadyRead);
-
-        m_handshakeDone = false;
-        m_handshakeStage = StageWebSocketHandshake;
-        setState(SwAbstractSocket::ConnectingState);
         // If the client already sent the handshake request, process it immediately.
         onTcpReadyRead();
+        return true;
+    }
+
+    /**
+     * @brief Accepts a WebSocket upgrade whose HTTP request has already been parsed by another layer.
+     * @param socket Connected transport socket to adopt.
+     * @param requestPath Request path extracted from the HTTP upgrade request.
+     * @param requestHeaders Parsed HTTP headers associated with the upgrade request.
+     * @param secure `true` when the transport is already protected by TLS.
+     * @return `true` on success; otherwise `false`.
+     */
+    bool acceptHttpUpgrade(SwAbstractSocket* socket,
+                           const SwString& requestPath,
+                           const SwMap<SwString, SwString>& requestHeaders,
+                           bool secure = false) {
+        if (!attachAcceptedSocket_(socket)) {
+            return false;
+        }
+
+        m_secure = secure;
+        if (!finishAcceptedHandshake_(requestPath, requestHeaders)) {
+            reportError_(kErrorHandshakeFailed);
+            abort();
+            return false;
+        }
+
+        m_handshakeDone = true;
+        m_handshakeStage = StageConnected;
+        setState(SwAbstractSocket::ConnectedState);
+        emit connected();
         return true;
     }
 
@@ -1076,6 +1103,7 @@ private:
 
         abort();
         m_lastError = 0;
+        m_lastErrorText.clear();
         m_role = ClientRole;
 
         m_requestUrl = url;
@@ -1094,26 +1122,42 @@ private:
             }
         }
 
-        m_socket = new SwTcpSocket(this);
-
-        // When using an HTTP proxy CONNECT tunnel, always start in plaintext to the proxy.
-        if (shouldUseProxy_()) {
-            m_socket->useSsl(false);
-        } else {
-            m_socket->useSsl(m_secure, m_host);
+        m_sslSocket = m_secure ? new SwSslSocket(this) : nullptr;
+        m_socket = m_sslSocket ? static_cast<SwAbstractSocket*>(m_sslSocket) : new SwTcpSocket(this);
+        if (m_sslSocket) {
+            m_sslSocket->setPeerHostName(m_host);
+            if (!m_trustedCaFile.isEmpty()) {
+                m_sslSocket->setTrustedCaFile(m_trustedCaFile);
+            }
+            SwObject::connect(m_sslSocket, &SwSslSocket::sslErrors, [this](const SwSslErrorList& errors) {
+                if (!errors.isEmpty()) {
+                    m_lastErrorText = errors.first();
+                    swCError(kSwLogCategory_SwWebSocket) << "[SwWebSocket] TLS error: " << errors.first();
+                }
+            });
         }
 
-        connect(m_socket, &SwTcpSocket::connected, this, &SwWebSocket::onTcpConnected);
-        connect(m_socket, &SwTcpSocket::disconnected, this, &SwWebSocket::onTcpDisconnected);
-        connect(m_socket, &SwTcpSocket::errorOccurred, this, &SwWebSocket::onTcpError);
-        connect(m_socket, &SwTcpSocket::readyRead, this, &SwWebSocket::onTcpReadyRead);
+        connect(m_socket, &SwAbstractSocket::disconnected, this, &SwWebSocket::onTcpDisconnected);
+        connect(m_socket, &SwAbstractSocket::errorOccurred, this, &SwWebSocket::onTcpError);
+        connect(m_socket, &SwIODevice::readyRead, this, &SwWebSocket::onTcpReadyRead);
+        if (m_sslSocket && !shouldUseProxy_()) {
+            connect(m_sslSocket, &SwSslSocket::encrypted, this, &SwWebSocket::onTcpConnected);
+        } else if (m_sslSocket && shouldUseProxy_()) {
+            connect(m_socket, &SwAbstractSocket::connected, this, &SwWebSocket::onTcpConnected);
+            connect(m_sslSocket, &SwSslSocket::encrypted, this, &SwWebSocket::onTcpConnected);
+        } else {
+            connect(m_socket, &SwAbstractSocket::connected, this, &SwWebSocket::onTcpConnected);
+        }
 
         m_handshakeStage = StageTcpConnecting;
         setState(SwAbstractSocket::ConnectingState);
 
         const SwString connectHost = shouldUseProxy_() ? m_proxy.host : m_host;
         const uint16_t connectPort = shouldUseProxy_() ? m_proxy.port : m_port;
-        if (!m_socket->connectToHost(connectHost, connectPort)) {
+        const bool connectOk =
+            (m_sslSocket && !shouldUseProxy_()) ? m_sslSocket->connectToHostEncrypted(connectHost, connectPort)
+                                                : m_socket->connectToHost(connectHost, connectPort);
+        if (!connectOk) {
             swCError(kSwLogCategory_SwWebSocket) << "[SwWebSocket] connectToHost failed";
             cleanupSocket();
             setState(SwAbstractSocket::UnconnectedState);
@@ -1201,6 +1245,21 @@ private:
             SwString key = line.left(colon).trimmed().toLower();
             SwString value = line.mid(colon + 1).trimmed();
             headerMap[key] = value;
+        }
+
+        return finishAcceptedHandshake_(path, headerMap);
+    }
+
+    bool finishAcceptedHandshake_(const SwString& requestPath,
+                                  const SwMap<SwString, SwString>& requestHeaders) {
+        SwMap<SwString, SwString> headerMap;
+        for (const auto& header : requestHeaders) {
+            headerMap[header.first.toLower()] = header.second.trimmed();
+        }
+
+        SwString path = requestPath.trimmed();
+        if (path.isEmpty()) {
+            path = "/";
         }
 
         SwString upgrade = headerMap.value("upgrade").trimmed();
@@ -1326,7 +1385,13 @@ private:
         }
 
         m_path = path;
-        m_scheme = "ws";
+        m_scheme = m_secure ? "wss" : "ws";
+        const SwString host = headerMap.value("host").trimmed();
+        if (!host.isEmpty()) {
+            m_requestUrl = m_scheme + "://" + host + m_path;
+        } else {
+            m_requestUrl.clear();
+        }
         return true;
     }
 
@@ -1994,8 +2059,7 @@ private slots:
 
             if (m_secure) {
                 m_handshakeStage = StageTlsHandshake;
-                m_socket->useSsl(true, m_host);
-                if (!m_socket->startClientTls(m_host)) {
+                if (!m_sslSocket || !m_sslSocket->startClientEncryption()) {
                     reportError_(kErrorProxyFailed);
                     abort();
                     return;
@@ -2165,7 +2229,35 @@ private:
             m_socket->deleteLater();
             m_socket = nullptr;
         }
+        m_sslSocket = nullptr;
         m_buffer.clear();
+    }
+
+    bool attachAcceptedSocket_(SwAbstractSocket* socket) {
+        if (!socket) {
+            reportError_(kErrorConnectFailed);
+            return false;
+        }
+
+        abort();
+        m_lastError = 0;
+        m_role = ServerRole;
+        m_secure = false;
+        m_scheme.clear();
+        m_requestUrl.clear();
+        m_path.clear();
+
+        m_socket = socket;
+        m_socket->setParent(this);
+
+        connect(m_socket, &SwAbstractSocket::disconnected, this, &SwWebSocket::onTcpDisconnected);
+        connect(m_socket, &SwAbstractSocket::errorOccurred, this, &SwWebSocket::onTcpError);
+        connect(m_socket, &SwIODevice::readyRead, this, &SwWebSocket::onTcpReadyRead);
+
+        m_handshakeDone = false;
+        m_handshakeStage = StageWebSocketHandshake;
+        setState(SwAbstractSocket::ConnectingState);
+        return true;
     }
 
     void resetProtocolState(bool keepCloseInfo) {
@@ -2457,7 +2549,9 @@ private:
     }
 
 private:
-    SwTcpSocket* m_socket = nullptr;
+    SwAbstractSocket* m_socket = nullptr;
+    SwSslSocket* m_sslSocket = nullptr;
+    SwString m_trustedCaFile;
 
     SwString m_requestUrl;
     SwString m_scheme;
@@ -2502,6 +2596,7 @@ private:
     int m_closeReplyDelayMs = 200;
     SwTimer* m_closeReplyTimer = nullptr;
     int m_lastError = 0;
+    SwString m_lastErrorText;
 
     bool m_closeSent = false;
     bool m_closeReceived = false;

@@ -1219,8 +1219,9 @@ inline SwByteArray& SwByteArray::operator+=(char ch) {
 
 inline void SwByteArray::clear() {
     ensureNotNull();
+    buffer_.resize(1);
+    buffer_[0] = '\0';
     size_ = 0;
-    ensureNullTerminator();
 }
 
 inline void SwByteArray::reserve(size_t capacity) {

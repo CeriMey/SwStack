@@ -3,24 +3,7 @@
 /**
  * @file src/core/io/SwTcpServer.h
  * @ingroup core_io
- * @brief Declares the public interface exposed by SwTcpServer in the CoreSw IO layer.
- *
- * This header belongs to the CoreSw IO layer. It defines files, sockets, servers, descriptors,
- * processes, and network helpers that sit directly at operating-system boundaries.
- *
- * Within that layer, this file focuses on the TCP server interface. The declarations exposed here
- * define the stable surface that adjacent code can rely on while the implementation remains free
- * to evolve behind the header.
- *
- * The main declarations in this header are SwTcpServer.
- *
- * Server-oriented declarations here usually coordinate listener setup, connection or session
- * lifetime, dispatch boundaries, and integration points for higher-level request or protocol
- * logic.
- *
- * IO-facing declarations here usually manage handles, readiness state, buffering, and error
- * propagation while presenting a portable framework API.
- *
+ * @brief TCP-only non-blocking listening socket with overridable accept hooks.
  */
 
 /***************************************************************************************************
@@ -45,110 +28,103 @@
  *
  ***************************************************************************************************/
 
-#include "SwObject.h"
-#include "SwString.h"
-#include "SwTcpSocket.h"
+#include "SwCoreApplication.h"
 #include "SwDebug.h"
+#include "SwList.h"
+#include "SwObject.h"
+#include "SwTcpSocket.h"
+
 static constexpr const char* kSwLogCategory_SwTcpServer = "sw.core.io.swtcpserver";
 
 #if defined(_WIN32)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include "platform/win/SwWindows.h"
-#include <iostream>
 
 #pragma comment(lib, "ws2_32.lib")
 
+using SwNativeListenHandle = SOCKET;
+static constexpr SwNativeListenHandle kSwInvalidListenHandle = INVALID_SOCKET;
+
+#else
+
+#include <arpa/inet.h>
+#include <cerrno>
+#include <cstring>
+#include <fcntl.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+using SwNativeListenHandle = int;
+static constexpr SwNativeListenHandle kSwInvalidListenHandle = -1;
+
+#endif
+
 class SwTcpServer : public SwObject {
     SW_OBJECT(SwTcpServer, SwObject)
+
 public:
-    /**
-     * @brief Constructs a `SwTcpServer` instance.
-     * @param parent Optional parent object that owns this instance.
-     * @param NULL Value passed to the method.
-     *
-     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
-     */
-    SwTcpServer(SwObject* parent = nullptr)
-        : SwObject(parent), m_listenSocket(INVALID_SOCKET), m_listenEvent(NULL)
-    {
-        initializeWinsock();
+    explicit SwTcpServer(SwObject* parent = nullptr)
+        : SwObject(parent) {
+#if defined(_WIN32)
+        initializeWinsock_();
+#endif
     }
 
-    /**
-     * @brief Destroys the `SwTcpServer` instance.
-     *
-     * @details Use this hook to release any resources that remain associated with the instance.
-     */
-    virtual ~SwTcpServer() {
+    ~SwTcpServer() override {
         close();
-        disableTls();
     }
 
-    /**
-     * @brief Enables server-side TLS for all subsequently accepted connections.
-     * @param certPath Path to the PEM certificate file.
-     * @param keyPath Path to the PEM private key file.
-     * @return true on success.
-     */
-    bool enableTls(const SwString& certPath, const SwString& keyPath) {
-        disableTls();
-        std::string err;
-        m_sslCtx = SwBackendSsl::createServerContext(certPath.toStdString(), keyPath.toStdString(), err);
-        if (!m_sslCtx) {
-            swCError(kSwLogCategory_SwTcpServer) << "TLS init failed: " << err;
-            return false;
-        }
-        m_tlsEnabled = true;
-        return true;
+    bool isListening() const {
+        return m_listenSocket != kSwInvalidListenHandle;
     }
 
-    /**
-     * @brief Disables server-side TLS.
-     */
-    void disableTls() {
-        if (m_sslCtx) {
-            SwBackendSsl::freeServerContext(m_sslCtx);
-            m_sslCtx = nullptr;
-        }
-        m_tlsEnabled = false;
+    uint16_t localPort() const {
+        return m_listenPort;
     }
 
-    /**
-     * @brief Returns whether TLS is enabled for incoming connections.
-     */
-    bool isTlsEnabled() const {
-        return m_tlsEnabled;
+    SwString localAddress() const {
+        return m_listenAddress;
     }
 
-    /**
-     * @brief Starts listening for incoming traffic.
-     * @param port Local port used by the operation.
-     * @return `true` on success; otherwise `false`.
-     *
-     * @details The call affects the runtime state associated with the underlying resource or service.
-     */
     bool listen(uint16_t port) {
+        return listen(SwString(), port);
+    }
+
+    bool listen(const SwString& bindAddress, uint16_t port) {
+        SwString effectiveBindAddress = bindAddress.trimmed();
+        if (effectiveBindAddress.isEmpty()) {
+            effectiveBindAddress = "0.0.0.0";
+        }
+
+        if (isListening() && m_listenPort == port && m_listenAddress == effectiveBindAddress) {
+            return true;
+        }
         close();
 
-        m_listenSocket = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
+#if defined(_WIN32)
+        m_listenSocket = ::WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
         if (m_listenSocket == INVALID_SOCKET) {
             swCError(kSwLogCategory_SwTcpServer) << "WSASocket failed: " << WSAGetLastError();
             return false;
         }
 
         u_long mode = 1;
-        ioctlsocket(m_listenSocket, FIONBIO, &mode);
+        ::ioctlsocket(m_listenSocket, FIONBIO, &mode);
 
-        sockaddr_in addr = {0};
+        sockaddr_in addr {};
         addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = htonl(INADDR_ANY);
+        if (effectiveBindAddress == "0.0.0.0") {
+            addr.sin_addr.s_addr = htonl(INADDR_ANY);
+        } else if (::InetPtonA(AF_INET, effectiveBindAddress.toStdString().c_str(), &addr.sin_addr) != 1) {
+            swCError(kSwLogCategory_SwTcpServer) << "invalid bind address: " << effectiveBindAddress;
+            close();
+            return false;
+        }
         addr.sin_port = htons(port);
 
-        if (::bind(m_listenSocket, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
+        if (::bind(m_listenSocket, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
             swCError(kSwLogCategory_SwTcpServer) << "bind failed: " << WSAGetLastError();
             close();
             return false;
@@ -160,290 +136,38 @@ public:
             return false;
         }
 
-        m_listenEvent = WSACreateEvent();
+        m_listenEvent = ::WSACreateEvent();
         if (m_listenEvent == WSA_INVALID_EVENT) {
             swCError(kSwLogCategory_SwTcpServer) << "WSACreateEvent failed: " << WSAGetLastError();
             close();
             return false;
         }
 
-        if (WSAEventSelect(m_listenSocket, m_listenEvent, FD_ACCEPT | FD_CLOSE) == SOCKET_ERROR) {
+        if (::WSAEventSelect(m_listenSocket, m_listenEvent, FD_ACCEPT | FD_CLOSE) == SOCKET_ERROR) {
             swCError(kSwLogCategory_SwTcpServer) << "WSAEventSelect failed: " << WSAGetLastError();
             close();
             return false;
         }
-        registerDispatcher_();
-
-        return true;
-    }
-
-    /**
-     * @brief Closes the underlying resource and stops active work.
-     *
-     * @details The call affects the runtime state associated with the underlying resource or service.
-     */
-    void close() {
-        unregisterDispatcher_();
-        if (m_listenSocket != INVALID_SOCKET) {
-            closesocket(m_listenSocket);
-            m_listenSocket = INVALID_SOCKET;
-        }
-        if (m_listenEvent) {
-            WSACloseEvent(m_listenEvent);
-            m_listenEvent = NULL;
-        }
-    }
-
-    /**
-     * @brief Returns the current next Pending Connection.
-     * @return The current next Pending Connection.
-     *
-     * @details The returned value reflects the state currently stored by the instance.
-     */
-    SwTcpSocket* nextPendingConnection() {
-        if (m_pendingConnections.isEmpty()) {
-            return nullptr;
-        }
-        SwTcpSocket* sock = m_pendingConnections.first();
-        m_pendingConnections.removeFirst();
-        return sock;
-    }
-
-signals:
-    DECLARE_SIGNAL_VOID(newConnection)
-
-private slots:
-    /**
-     * @brief Performs the `onCheckEvents` operation.
-     */
-    void onCheckEvents() {
-        if (m_listenEvent == NULL || m_listenSocket == INVALID_SOCKET) {
-            return;
-        }
-
-        WSAResetEvent(m_listenEvent);
-
-        WSANETWORKEVENTS networkEvents;
-        if (WSAEnumNetworkEvents(m_listenSocket, m_listenEvent, &networkEvents) == SOCKET_ERROR) {
-            swCError(kSwLogCategory_SwTcpServer) << "WSAEnumNetworkEvents error: " << WSAGetLastError();
-            return;
-        }
-
-        if (networkEvents.lNetworkEvents & FD_ACCEPT) {
-            if (networkEvents.iErrorCode[FD_ACCEPT_BIT] == 0) {
-                SOCKET clientSocket = accept(m_listenSocket, NULL, NULL);
-                if (clientSocket == INVALID_SOCKET) {
-                    swCError(kSwLogCategory_SwTcpServer) << "accept failed: " << WSAGetLastError();
-                } else {
-                    handleAcceptedSocket_(clientSocket);
-                }
-            } else {
-                swCError(kSwLogCategory_SwTcpServer) << "FD_ACCEPT error: " << networkEvents.iErrorCode[FD_ACCEPT_BIT];
-            }
-        }
-
-        if (networkEvents.lNetworkEvents & FD_CLOSE) {
-            swCWarning(kSwLogCategory_SwTcpServer) << "Listen socket closed by external event.";
-            close();
-        }
-    }
-
-private:
-    SOCKET m_listenSocket;
-    WSAEVENT m_listenEvent;
-    SwList<SwTcpSocket*> m_pendingConnections;
-
-    bool m_tlsEnabled = false;
-    void* m_sslCtx = nullptr;
-    size_t m_dispatchToken = 0;
-
-    static void initializeWinsock() {
-        static bool initialized = false;
-        if (!initialized) {
-            WSADATA wsaData;
-            int result = WSAStartup(MAKEWORD(2,2), &wsaData);
-            if (result != 0) {
-                swCError(kSwLogCategory_SwTcpServer) << "WSAStartup failed: " << result;
-            } else {
-                initialized = true;
-            }
-        }
-    }
-
-    void registerDispatcher_() {
-        unregisterDispatcher_();
-        if (m_listenEvent == NULL) {
-            return;
-        }
-        SwCoreApplication* app = SwCoreApplication::instance(false);
-        if (!app) {
-            return;
-        }
-        ThreadHandle* affinity = threadHandle();
-        if (!affinity) {
-            affinity = ThreadHandle::currentThread();
-        }
-        m_dispatchToken = app->ioDispatcher().watchHandle(m_listenEvent,
-                                                          [affinity](std::function<void()> task) mutable {
-                                                              if (affinity && ThreadHandle::isLive(affinity) &&
-                                                                  ThreadHandle::currentThread() != affinity) {
-                                                                  affinity->postTask(std::move(task));
-                                                                  return;
-                                                              }
-                                                              task();
-                                                          },
-                                                          [this]() {
-            if (!SwObject::isLive(this)) {
-                return;
-            }
-            onCheckEvents();
-        });
-    }
-
-    void unregisterDispatcher_() {
-        if (!m_dispatchToken) {
-            return;
-        }
-        if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
-            app->ioDispatcher().remove(m_dispatchToken);
-        }
-        m_dispatchToken = 0;
-    }
-
-    void handleAcceptedSocket_(SOCKET sock) {
-        SwTcpSocket* client = new SwTcpSocket();
-        client->adoptSocket(sock, !m_tlsEnabled || !m_sslCtx);
-
-        if (!m_tlsEnabled || !m_sslCtx) {
-            m_pendingConnections.append(client);
-            emit newConnection();
-            return;
-        }
-
-        std::shared_ptr<bool> completed(new bool(false));
-        connect(client, &SwTcpSocket::connected, this, [this, client, completed]() {
-            if (*completed) {
-                return;
-            }
-            *completed = true;
-            m_pendingConnections.append(client);
-            emit newConnection();
-        });
-        auto failHandshake = [client, completed]() {
-            if (*completed) {
-                return;
-            }
-            *completed = true;
-            client->close();
-            client->deleteLater();
-        };
-        connect(client, &SwTcpSocket::errorOccurred, this, [failHandshake](int) { failHandshake(); });
-        connect(client, &SwTcpSocket::disconnected, this, failHandshake);
-
-        if (!client->startServerTls(m_sslCtx)) {
-            failHandshake();
-        }
-    }
-};
-
-#else // !_WIN32
-
-#include <arpa/inet.h>
-#include <iostream>
-#include <cerrno>
-#include <cstring>
-#include <fcntl.h>
-#include <poll.h>
-#include <sys/socket.h>
-#include <unistd.h>
-
-class SwTcpServer : public SwObject {
-    SW_OBJECT(SwTcpServer, SwObject)
-public:
-    /**
-     * @brief Constructs a `SwTcpServer` instance.
-     * @param parent Optional parent object that owns this instance.
-     *
-     * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
-     */
-    SwTcpServer(SwObject* parent = nullptr)
-        : SwObject(parent), m_listenSocket(-1)
-    {
-    }
-
-    /**
-     * @brief Destroys the `SwTcpServer` instance.
-     *
-     * @details Use this hook to release any resources that remain associated with the instance.
-     */
-    virtual ~SwTcpServer() {
-        close();
-        disableTls();
-    }
-
-    /**
-     * @brief Enables server-side TLS for all subsequently accepted connections.
-     * @param certPath Path to the PEM certificate file.
-     * @param keyPath Path to the PEM private key file.
-     * @return true on success.
-     */
-    bool enableTls(const SwString& certPath, const SwString& keyPath) {
-        disableTls();
-        std::string err;
-        m_sslCtx = SwBackendSsl::createServerContext(certPath.toStdString(), keyPath.toStdString(), err);
-        if (!m_sslCtx) {
-            swCError(kSwLogCategory_SwTcpServer) << "TLS init failed: " << err;
-            return false;
-        }
-        m_tlsEnabled = true;
-        return true;
-    }
-
-    /**
-     * @brief Disables server-side TLS.
-     */
-    void disableTls() {
-        if (m_sslCtx) {
-            SwBackendSsl::freeServerContext(m_sslCtx);
-            m_sslCtx = nullptr;
-        }
-        m_tlsEnabled = false;
-    }
-
-    /**
-     * @brief Returns whether TLS is enabled for incoming connections.
-     */
-    bool isTlsEnabled() const {
-        return m_tlsEnabled;
-    }
-
-    /**
-     * @brief Starts listening for incoming traffic.
-     * @param port Local port used by the operation.
-     * @return `true` on success; otherwise `false`.
-     *
-     * @details The call affects the runtime state associated with the underlying resource or service.
-     */
-    bool listen(uint16_t port) {
-        close();
-
+#else
         m_listenSocket = ::socket(AF_INET, SOCK_STREAM, 0);
         if (m_listenSocket < 0) {
             swCError(kSwLogCategory_SwTcpServer) << "socket failed: " << std::strerror(errno);
             return false;
-    }
-        int opt = 1;
-        setsockopt(m_listenSocket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        }
 
-        if (!setNonBlocking(m_listenSocket)) {
-            swCError(kSwLogCategory_SwTcpServer) << "failed to set non-blocking mode";
+        int opt = 1;
+        ::setsockopt(m_listenSocket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        setNonBlocking_(m_listenSocket);
+
+        sockaddr_in addr {};
+        addr.sin_family = AF_INET;
+        if (effectiveBindAddress == "0.0.0.0") {
+            addr.sin_addr.s_addr = INADDR_ANY;
+        } else if (::inet_pton(AF_INET, effectiveBindAddress.toStdString().c_str(), &addr.sin_addr) != 1) {
+            swCError(kSwLogCategory_SwTcpServer) << "invalid bind address: " << effectiveBindAddress;
             close();
             return false;
         }
-
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = INADDR_ANY;
         addr.sin_port = htons(port);
 
         if (::bind(m_listenSocket, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
@@ -457,32 +181,41 @@ public:
             close();
             return false;
         }
+#endif
 
-        registerDispatcher_();
+        if (!registerDispatcher_()) {
+            close();
+            return false;
+        }
 
+        m_listenPort = port;
+        m_listenAddress = effectiveBindAddress;
         return true;
     }
 
-    /**
-     * @brief Closes the underlying resource and stops active work.
-     *
-     * @details The call affects the runtime state associated with the underlying resource or service.
-     */
     void close() {
         unregisterDispatcher_();
+
+#if defined(_WIN32)
+        if (m_listenSocket != INVALID_SOCKET) {
+            ::closesocket(m_listenSocket);
+            m_listenSocket = INVALID_SOCKET;
+        }
+        if (m_listenEvent) {
+            ::WSACloseEvent(m_listenEvent);
+            m_listenEvent = NULL;
+        }
+#else
         if (m_listenSocket >= 0) {
             ::close(m_listenSocket);
             m_listenSocket = -1;
         }
+#endif
+        m_listenPort = 0;
+        m_listenAddress.clear();
     }
 
-    /**
-     * @brief Returns the current next Pending Connection.
-     * @return The current next Pending Connection.
-     *
-     * @details The returned value reflects the state currently stored by the instance.
-     */
-    SwTcpSocket* nextPendingConnection() {
+    virtual SwTcpSocket* nextPendingConnection() {
         if (m_pendingConnections.isEmpty()) {
             return nullptr;
         }
@@ -494,73 +227,98 @@ public:
 signals:
     DECLARE_SIGNAL_VOID(newConnection)
 
-private slots:
-    /**
-     * @brief Performs the `onCheckEvents` operation.
-     */
-    void onCheckEvents() {
-        if (m_listenSocket < 0) {
+protected:
+    SwList<SwTcpSocket*> m_pendingConnections;
+
+    virtual SwTcpSocket* createPendingSocket_() {
+        return new SwTcpSocket();
+    }
+
+    virtual bool shouldEmitConnectedOnAdopt_(SwTcpSocket*) const {
+        return true;
+    }
+
+    virtual bool finalizeAcceptedSocket_(SwTcpSocket* socket) {
+        queuePendingConnection_(socket);
+        return true;
+    }
+
+    void queuePendingConnection_(SwTcpSocket* socket) {
+        if (!socket) {
             return;
         }
-
-        while (true) {
-            int clientFd = ::accept(m_listenSocket, nullptr, nullptr);
-            if (clientFd < 0) {
-                if (errno != EWOULDBLOCK && errno != EAGAIN) {
-                    swCError(kSwLogCategory_SwTcpServer) << "accept failed: " << std::strerror(errno);
-                }
-                break;
-            }
-
-            handleAcceptedSocket_(clientFd);
-        }
+        m_pendingConnections.append(socket);
+        emit newConnection();
     }
 
 private:
-    bool setNonBlocking(int fd) {
-        int flags = fcntl(fd, F_GETFL, 0);
-        if (flags == -1) {
+    SwNativeListenHandle m_listenSocket = kSwInvalidListenHandle;
+    size_t m_dispatchToken = 0;
+    uint16_t m_listenPort = 0;
+    SwString m_listenAddress = "0.0.0.0";
+
+#if defined(_WIN32)
+    WSAEVENT m_listenEvent = NULL;
+#endif
+
+    bool registerDispatcher_() {
+        unregisterDispatcher_();
+
+#if defined(_WIN32)
+        if (m_listenEvent == NULL) {
             return false;
         }
-        return fcntl(fd, F_SETFL, flags | O_NONBLOCK) != -1;
-    }
-
-    int m_listenSocket;
-    SwList<SwTcpSocket*> m_pendingConnections;
-
-    bool m_tlsEnabled = false;
-    void* m_sslCtx = nullptr;
-    size_t m_dispatchToken = 0;
-
-    void registerDispatcher_() {
-        unregisterDispatcher_();
+#else
         if (m_listenSocket < 0) {
-            return;
+            return false;
         }
+#endif
+
         SwCoreApplication* app = SwCoreApplication::instance(false);
         if (!app) {
-            return;
+            return false;
         }
+
         ThreadHandle* affinity = threadHandle();
         if (!affinity) {
             affinity = ThreadHandle::currentThread();
         }
-        m_dispatchToken = app->ioDispatcher().watchFd(m_listenSocket,
-                                                      SwIoDispatcher::Readable,
-                                                      [affinity](std::function<void()> task) mutable {
-                                                          if (affinity && ThreadHandle::isLive(affinity) &&
-                                                              ThreadHandle::currentThread() != affinity) {
-                                                              affinity->postTask(std::move(task));
-                                                              return;
-                                                          }
-                                                          task();
-                                                      },
-                                                      [this](uint32_t) {
-                                                          if (!SwObject::isLive(this)) {
-                                                              return;
-                                                          }
-                                                          onCheckEvents();
-                                                      });
+
+#if defined(_WIN32)
+        m_dispatchToken = app->ioDispatcher().watchHandle(
+            m_listenEvent,
+            [affinity](std::function<void()> task) mutable {
+                if (affinity && ThreadHandle::isLive(affinity) && ThreadHandle::currentThread() != affinity) {
+                    affinity->postTask(std::move(task));
+                    return;
+                }
+                task();
+            },
+            [this]() {
+                if (!SwObject::isLive(this)) {
+                    return;
+                }
+                onCheckEvents_();
+            });
+#else
+        m_dispatchToken = app->ioDispatcher().watchFd(
+            m_listenSocket,
+            SwIoDispatcher::Readable | SwIoDispatcher::Error | SwIoDispatcher::Hangup,
+            [affinity](std::function<void()> task) mutable {
+                if (affinity && ThreadHandle::isLive(affinity) && ThreadHandle::currentThread() != affinity) {
+                    affinity->postTask(std::move(task));
+                    return;
+                }
+                task();
+            },
+            [this](uint32_t) {
+                if (!SwObject::isLive(this)) {
+                    return;
+                }
+                onCheckEvents_();
+            });
+#endif
+        return m_dispatchToken != 0;
     }
 
     void unregisterDispatcher_() {
@@ -573,40 +331,92 @@ private:
         m_dispatchToken = 0;
     }
 
-    void handleAcceptedSocket_(int fd) {
-        SwTcpSocket* client = new SwTcpSocket();
-        client->adoptSocket(fd, !m_tlsEnabled || !m_sslCtx);
-
-        if (!m_tlsEnabled || !m_sslCtx) {
-            m_pendingConnections.append(client);
-            emit newConnection();
+    void onCheckEvents_() {
+#if defined(_WIN32)
+        if (m_listenEvent == NULL || m_listenSocket == INVALID_SOCKET) {
             return;
         }
 
-        std::shared_ptr<bool> completed(new bool(false));
-        connect(client, &SwTcpSocket::connected, this, [this, client, completed]() {
-            if (*completed) {
-                return;
+        WSANETWORKEVENTS networkEvents {};
+        if (::WSAEnumNetworkEvents(m_listenSocket, m_listenEvent, &networkEvents) == SOCKET_ERROR) {
+            swCError(kSwLogCategory_SwTcpServer) << "WSAEnumNetworkEvents error: " << WSAGetLastError();
+            return;
+        }
+
+        if (networkEvents.lNetworkEvents & FD_ACCEPT) {
+            if (networkEvents.iErrorCode[FD_ACCEPT_BIT] != 0) {
+                swCError(kSwLogCategory_SwTcpServer) << "FD_ACCEPT error: " << networkEvents.iErrorCode[FD_ACCEPT_BIT];
+            } else {
+                while (true) {
+                    SOCKET clientSocket = ::accept(m_listenSocket, NULL, NULL);
+                    if (clientSocket == INVALID_SOCKET) {
+                        const int acceptError = WSAGetLastError();
+                        if (acceptError != WSAEWOULDBLOCK) {
+                            swCError(kSwLogCategory_SwTcpServer) << "accept failed: " << acceptError;
+                        }
+                        break;
+                    }
+                    handleAcceptedSocket_(clientSocket);
+                }
             }
-            *completed = true;
-            m_pendingConnections.append(client);
-            emit newConnection();
-        });
-        auto failHandshake = [client, completed]() {
-            if (*completed) {
-                return;
+        }
+
+        if (networkEvents.lNetworkEvents & FD_CLOSE) {
+            close();
+        }
+#else
+        if (m_listenSocket < 0) {
+            return;
+        }
+
+        while (true) {
+            int clientFd = ::accept(m_listenSocket, nullptr, nullptr);
+            if (clientFd < 0) {
+                if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    swCError(kSwLogCategory_SwTcpServer) << "accept failed: " << std::strerror(errno);
+                }
+                break;
             }
-            *completed = true;
+            handleAcceptedSocket_(clientFd);
+        }
+#endif
+    }
+
+    void handleAcceptedSocket_(SwNativeSocketHandle socketHandle) {
+        SwTcpSocket* client = createPendingSocket_();
+        if (!client) {
+#if defined(_WIN32)
+            ::closesocket(socketHandle);
+#else
+            ::close(socketHandle);
+#endif
+            return;
+        }
+
+        client->adoptSocket(socketHandle, shouldEmitConnectedOnAdopt_(client));
+        if (!finalizeAcceptedSocket_(client)) {
             client->close();
             client->deleteLater();
-        };
-        connect(client, &SwTcpSocket::errorOccurred, this, [failHandshake](int) { failHandshake(); });
-        connect(client, &SwTcpSocket::disconnected, this, failHandshake);
-
-        if (!client->startServerTls(m_sslCtx)) {
-            failHandshake();
         }
     }
-};
 
-#endif // _WIN32
+#if defined(_WIN32)
+    static void initializeWinsock_() {
+        static bool initialized = false;
+        if (initialized) {
+            return;
+        }
+        WSADATA wsaData {};
+        if (::WSAStartup(MAKEWORD(2, 2), &wsaData) == 0) {
+            initialized = true;
+        }
+    }
+#else
+    void setNonBlocking_(int fd) {
+        const int flags = ::fcntl(fd, F_GETFL, 0);
+        if (flags >= 0) {
+            ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        }
+    }
+#endif
+};

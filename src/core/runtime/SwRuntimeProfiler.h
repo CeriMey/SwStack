@@ -46,7 +46,7 @@ enum class SwRuntimeTimingKind {
     ManualScope = 5
 };
 
-struct SwRuntimeProfileConfig {
+struct SwRuntimeProfilerConfig {
     long long stallThresholdUs;
     long long monitorPeriodUs;
     int recordCapacity;
@@ -56,7 +56,7 @@ struct SwRuntimeProfileConfig {
     bool enableManualScopes;
     bool enableStackCaptureOnStall;
 
-    SwRuntimeProfileConfig()
+    SwRuntimeProfilerConfig()
         : stallThresholdUs(10000),
           monitorPeriodUs(2000),
           recordCapacity(4096),
@@ -149,9 +149,9 @@ struct SwRuntimeStallReport {
           lane(SwFiberLane::Normal) {}
 };
 
-class SwRuntimeProfileSink {
+class SwRuntimeProfilerSink {
 public:
-    virtual ~SwRuntimeProfileSink() {}
+    virtual ~SwRuntimeProfilerSink() {}
     virtual void onRuntimeBatch(const SwList<SwRuntimeTimingRecord>& records,
                                 const SwRuntimeCountersSnapshot& counters) = 0;
     virtual void onStall(const SwRuntimeStallReport& report) = 0;
@@ -175,9 +175,10 @@ private:
 class SwProfileScope {
 public:
     explicit SwProfileScope(const char* label);
+    ~SwProfileScope();
 
 private:
-    SwRuntimeScopedSpan scope_;
+    SwList<SwRuntimeProfilerSession*> sessions_;
 };
 
 class SwRuntimeProfilerService;
@@ -185,11 +186,11 @@ class SwRuntimeProfilerService;
 class SwRuntimeProfilerSession : public SwFiberPoolObserver,
                                  public std::enable_shared_from_this<SwRuntimeProfilerSession> {
 public:
-    explicit SwRuntimeProfilerSession(SwRuntimeProfileSink* sink,
-                                      const SwRuntimeProfileConfig& config = SwRuntimeProfileConfig());
+    explicit SwRuntimeProfilerSession(SwRuntimeProfilerSink* sink,
+                                      const SwRuntimeProfilerConfig& config = SwRuntimeProfilerConfig());
     ~SwRuntimeProfilerSession();
 
-    const SwRuntimeProfileConfig& config() const;
+    const SwRuntimeProfilerConfig& config() const;
     bool autoRuntimeScopesEnabled() const;
     bool manualScopesEnabled() const;
     void setEnabled(bool enabled);
@@ -200,6 +201,9 @@ public:
     void bindToCurrentThread();
     void clearThreadCurrent();
     static SwRuntimeProfilerSession* current();
+    static SwList<SwRuntimeProfilerSession*> currentSessions();
+    void markAttached(bool attached);
+    bool attached() const;
 
     void updateCounters(const SwRuntimeCountersSnapshot& snapshot);
     SwRuntimeCountersSnapshot countersSnapshot() const;
@@ -277,9 +281,11 @@ private:
 #endif
 
     static SwRuntimeProfilerSession*& currentSessionTls_();
+    static std::vector<SwRuntimeProfilerSession*>& currentSessionsTls_();
 
-    SwRuntimeProfileSink* sink_;
-    SwRuntimeProfileConfig config_;
+    SwRuntimeProfilerSink* sink_;
+    SwRuntimeProfilerConfig config_;
+    std::atomic<bool> attachedLive_;
     std::atomic<bool> enabledLive_;
     std::atomic<long long> stallThresholdUsLive_;
     std::vector<SwRuntimeTimingRecord> records_;
@@ -553,6 +559,27 @@ private:
         return SwString::fromUtf8(value);
     }
 
+    static SwString environmentValue_(const char* name) {
+#if defined(_MSC_VER)
+        char* value = nullptr;
+        size_t length = 0;
+        if (_dupenv_s(&value, &length, name) != 0 || !value || !*value) {
+            std::free(value);
+            return SwString();
+        }
+
+        SwString result = SwString::fromUtf8(value, length > 0 ? (length - 1) : 0);
+        std::free(value);
+        return result;
+#else
+        const char* value = std::getenv(name);
+        if (!value || !*value) {
+            return SwString();
+        }
+        return SwString::fromUtf8(value);
+#endif
+    }
+
     static SwString buildSearchPath_() {
         std::vector<SwString> paths;
 
@@ -562,11 +589,11 @@ private:
 
         const char* const envNames[] = {"SW_PDB_SYMBOL_PATH", "_NT_SYMBOL_PATH", "NT_SYMBOL_PATH"};
         for (size_t i = 0; i < sizeof(envNames) / sizeof(envNames[0]); ++i) {
-            const char* envValue = std::getenv(envNames[i]);
-            if (!envValue || !*envValue) {
+            const SwString envValue = environmentValue_(envNames[i]);
+            if (envValue.isEmpty()) {
                 continue;
             }
-            appendUniquePath_(paths, SwString::fromUtf8(envValue));
+            appendUniquePath_(paths, envValue);
         }
 
         SwString searchPath;
@@ -620,10 +647,11 @@ inline bool SwRuntimeProfilerSession::tryPushRecord_(const SwRuntimeTimingRecord
     return true;
 }
 
-inline SwRuntimeProfilerSession::SwRuntimeProfilerSession(SwRuntimeProfileSink* sink,
-                                                          const SwRuntimeProfileConfig& config)
+inline SwRuntimeProfilerSession::SwRuntimeProfilerSession(SwRuntimeProfilerSink* sink,
+                                                          const SwRuntimeProfilerConfig& config)
     : sink_(sink),
       config_(config),
+      attachedLive_(false),
       enabledLive_(true),
       stallThresholdUsLive_(config_.stallThresholdUs),
       head_(0),
@@ -660,12 +688,16 @@ inline SwRuntimeProfilerSession::SwRuntimeProfilerSession(SwRuntimeProfileSink* 
 }
 
 inline SwRuntimeProfilerSession::~SwRuntimeProfilerSession() {
+    attachedLive_.store(false, std::memory_order_release);
     clearThreadCurrent();
 }
 
-inline const SwRuntimeProfileConfig& SwRuntimeProfilerSession::config() const {
+inline const SwRuntimeProfilerConfig& SwRuntimeProfilerSession::config() const {
     return config_;
 }
+
+using SwRuntimeProfileConfig = SwRuntimeProfilerConfig;
+using SwRuntimeProfileSink = SwRuntimeProfilerSink;
 
 inline bool SwRuntimeProfilerSession::autoRuntimeScopesEnabled() const {
     return enabled() && config_.enableAutoRuntimeScopes;
@@ -691,11 +723,35 @@ inline long long SwRuntimeProfilerSession::stallThresholdUs() const {
     return stallThresholdUsLive_.load(std::memory_order_acquire);
 }
 
+inline void SwRuntimeProfilerSession::markAttached(bool attached) {
+    attachedLive_.store(attached, std::memory_order_release);
+}
+
+inline bool SwRuntimeProfilerSession::attached() const {
+    return attachedLive_.load(std::memory_order_acquire);
+}
+
 inline void SwRuntimeProfilerSession::bindToCurrentThread() {
+    if (!attached()) {
+        return;
+    }
+    std::vector<SwRuntimeProfilerSession*>& sessions = currentSessionsTls_();
+    bool alreadyBoundToThread = false;
+    for (std::size_t i = 0; i < sessions.size(); ++i) {
+        if (sessions[i] == this) {
+            alreadyBoundToThread = true;
+            break;
+        }
+    }
+    if (!alreadyBoundToThread) {
+        sessions.push_back(this);
+    }
     currentSessionTls_() = this;
+
     if (ownerBound_.load(std::memory_order_acquire)) {
         return;
     }
+
     currentThreadIdKey_ = currentThreadKey_();
 #if defined(_WIN32)
     nativeThreadId_ = ::GetCurrentThreadId();
@@ -706,13 +762,46 @@ inline void SwRuntimeProfilerSession::bindToCurrentThread() {
 }
 
 inline void SwRuntimeProfilerSession::clearThreadCurrent() {
+    std::vector<SwRuntimeProfilerSession*>& sessions = currentSessionsTls_();
+    for (std::vector<SwRuntimeProfilerSession*>::iterator it = sessions.begin(); it != sessions.end(); ) {
+        if (*it == this || !(*it) || !(*it)->attached()) {
+            it = sessions.erase(it);
+            continue;
+        }
+        ++it;
+    }
+
     if (currentSessionTls_() == this) {
-        currentSessionTls_() = nullptr;
+        currentSessionTls_() = sessions.empty() ? nullptr : sessions.back();
     }
 }
 
 inline SwRuntimeProfilerSession* SwRuntimeProfilerSession::current() {
-    return currentSessionTls_();
+    const SwList<SwRuntimeProfilerSession*> sessions = currentSessions();
+    return sessions.isEmpty() ? nullptr : sessions.last();
+}
+
+inline SwList<SwRuntimeProfilerSession*> SwRuntimeProfilerSession::currentSessions() {
+    SwList<SwRuntimeProfilerSession*> sessionsSnapshot;
+    std::vector<SwRuntimeProfilerSession*>& sessions = currentSessionsTls_();
+    for (std::vector<SwRuntimeProfilerSession*>::iterator it = sessions.begin(); it != sessions.end(); ) {
+        SwRuntimeProfilerSession* session = *it;
+        if (!session || !session->attached()) {
+            it = sessions.erase(it);
+            continue;
+        }
+        sessionsSnapshot.append(session);
+        ++it;
+    }
+
+    if (currentSessionTls_() && !currentSessionTls_()->attached()) {
+        currentSessionTls_() = nullptr;
+    }
+    if (!sessionsSnapshot.isEmpty()) {
+        currentSessionTls_() = sessionsSnapshot.last();
+    }
+
+    return sessionsSnapshot;
 }
 
 inline void SwRuntimeProfilerSession::updateCounters(const SwRuntimeCountersSnapshot& snapshot) {
@@ -924,7 +1013,7 @@ inline void SwRuntimeProfilerSession::callSinkStall_(const SwRuntimeStallReport&
 }
 
 inline bool SwRuntimeProfilerSession::emitBatchIfNeeded() {
-    if (!sink_ || !enabled()) {
+    if (!sink_ || !enabled() || !attached()) {
         return false;
     }
     SwList<SwRuntimeTimingRecord> batch = drainRecords();
@@ -937,7 +1026,7 @@ inline bool SwRuntimeProfilerSession::emitBatchIfNeeded() {
 }
 
 inline bool SwRuntimeProfilerSession::maybeEmitStall() {
-    if (!sink_ || !enabled() || !config_.enableStackCaptureOnStall) {
+    if (!sink_ || !enabled() || !attached() || !config_.enableStackCaptureOnStall) {
         return false;
     }
 
@@ -1155,20 +1244,24 @@ inline void SwRuntimeProfilerSession::installLinuxSignalHandlerOnce_() {
 inline void SwRuntimeProfilerSession::linuxSignalHandler_(int /*signalNumber*/,
                                                           siginfo_t* /*info*/,
                                                           void* /*uctx*/) {
-    SwRuntimeProfilerSession* session = currentSessionTls_();
-    if (!session) {
-        return;
-    }
-    const unsigned long long request = session->sampleRequestSeq_.load(std::memory_order_acquire);
-    const unsigned long long response = session->sampleResponseSeq_.load(std::memory_order_acquire);
-    if (request == 0 || request == response) {
-        return;
-    }
+    std::vector<SwRuntimeProfilerSession*>& sessions = currentSessionsTls_();
+    for (std::size_t i = 0; i < sessions.size(); ++i) {
+        SwRuntimeProfilerSession* session = sessions[i];
+        if (!session || !session->attached()) {
+            continue;
+        }
 
-    const int frameLimit = std::max(1, std::min(session->config_.maxStackFrames, kLinuxMaxSampleFrames_));
-    const int captured = ::backtrace(session->sampleFrames_, frameLimit);
-    session->sampleFrameCount_.store(captured, std::memory_order_release);
-    session->sampleResponseSeq_.store(request, std::memory_order_release);
+        const unsigned long long request = session->sampleRequestSeq_.load(std::memory_order_acquire);
+        const unsigned long long response = session->sampleResponseSeq_.load(std::memory_order_acquire);
+        if (request == 0 || request == response) {
+            continue;
+        }
+
+        const int frameLimit = std::max(1, std::min(session->config_.maxStackFrames, kLinuxMaxSampleFrames_));
+        const int captured = ::backtrace(session->sampleFrames_, frameLimit);
+        session->sampleFrameCount_.store(captured, std::memory_order_release);
+        session->sampleResponseSeq_.store(request, std::memory_order_release);
+    }
 }
 
 inline void SwRuntimeProfilerSession::captureLinuxStack_(SwList<unsigned long long>& framesOut,
@@ -1268,6 +1361,11 @@ inline void SwRuntimeProfilerSession::captureLinuxStack_(SwList<unsigned long lo
 inline SwRuntimeProfilerSession*& SwRuntimeProfilerSession::currentSessionTls_() {
     static thread_local SwRuntimeProfilerSession* s_session = nullptr;
     return s_session;
+}
+
+inline std::vector<SwRuntimeProfilerSession*>& SwRuntimeProfilerSession::currentSessionsTls_() {
+    static thread_local std::vector<SwRuntimeProfilerSession*> s_sessions;
+    return s_sessions;
 }
 
 inline SwRuntimeProfilerService::State_::~State_() {
@@ -1377,14 +1475,28 @@ inline SwRuntimeScopedSpan::~SwRuntimeScopedSpan() {
 }
 
 inline SwProfileScope::SwProfileScope(const char* label)
-    : scope_(SwRuntimeProfilerSession::current() &&
-                 SwRuntimeProfilerSession::current()->manualScopesEnabled()
-                 ? SwRuntimeProfilerSession::current()
-                 : nullptr,
-             SwRuntimeTimingKind::ManualScope,
-             label ? label : "",
-             SwFiberLane::Normal,
-             true) {}
+    : sessions_() {
+    const SwList<SwRuntimeProfilerSession*> currentSessions = SwRuntimeProfilerSession::currentSessions();
+    for (size_t i = 0; i < currentSessions.size(); ++i) {
+        SwRuntimeProfilerSession* session = currentSessions[i];
+        if (!session || !session->manualScopesEnabled()) {
+            continue;
+        }
+        session->beginScope(SwRuntimeTimingKind::ManualScope,
+                            label ? label : "",
+                            SwFiberLane::Normal,
+                            true);
+        sessions_.append(session);
+    }
+}
+
+inline SwProfileScope::~SwProfileScope() {
+    for (size_t i = sessions_.size(); i > 0; --i) {
+        if (sessions_[i - 1]) {
+            sessions_[i - 1]->endScope();
+        }
+    }
+}
 
 #ifndef SW_RUNTIME_PROFILE_CONCAT_INNER_
 #define SW_RUNTIME_PROFILE_CONCAT_INNER_(a, b) a##b

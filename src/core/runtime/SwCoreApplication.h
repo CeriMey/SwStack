@@ -118,6 +118,7 @@ static constexpr const char* kSwLogCategory_SwCoreApplication = "sw.core.runtime
 #include "SwEventDispatchSupport.h"
 #include "SwFiberPool.h"
 #include "SwIoDispatcher.h"
+#include "SwRuntimeTelemetry.h"
 #include "SwRuntimeProfiler.h"
 #include <thread>
 
@@ -273,6 +274,16 @@ static BOOL WINAPI ConsoleHandler(DWORD ctrlType);
  * @warning This class heavily relies on Windows-specific APIs (fibers and multimedia timers).
  *          It is not portable to non-Windows platforms.
  */
+class SwCoreApplication;
+
+class SwCoreApplicationRegistryObserver {
+public:
+    virtual ~SwCoreApplicationRegistryObserver() {}
+    virtual void onRuntimeApplicationRegistered(SwCoreApplication* app,
+                                                const SwRuntimeApplicationDescriptor& descriptor) = 0;
+    virtual void onRuntimeApplicationUnregistered(const SwRuntimeApplicationDescriptor& descriptor) = 0;
+};
+
 class SwCoreApplication {
 
     friend class SwTimer;
@@ -283,6 +294,72 @@ private:
         SwObject* receiver{nullptr};
         std::unique_ptr<SwEvent> event;
         int priority{0};
+    };
+
+protected:
+    class MultiRuntimeScopedSpan_ {
+    public:
+        MultiRuntimeScopedSpan_(const SwList<std::shared_ptr<SwRuntimeProfilerSession>>& sessions,
+                                SwRuntimeTimingKind kind,
+                                const char* label,
+                                SwFiberLane lane,
+                                bool emitTiming)
+            : sessions_(sessions) {
+            for (size_t i = 0; i < sessions_.size(); ++i) {
+                if (!sessions_[i]) {
+                    continue;
+                }
+                sessions_[i]->bindToCurrentThread();
+                sessions_[i]->beginScope(kind, label ? label : "", lane, emitTiming);
+            }
+        }
+
+        ~MultiRuntimeScopedSpan_() {
+            for (size_t i = sessions_.size(); i > 0; --i) {
+                if (sessions_[i - 1]) {
+                    sessions_[i - 1]->endScope();
+                }
+            }
+        }
+
+    private:
+        SwList<std::shared_ptr<SwRuntimeProfilerSession>> sessions_;
+    };
+
+private:
+    class ProfilerRelay_ : public SwFiberPoolObserver {
+    public:
+        explicit ProfilerRelay_(SwCoreApplication* app)
+            : app_(app) {}
+
+        void onFiberDispatchEnter(SwFiberLane lane, bool resumed) override {
+            if (!app_) {
+                return;
+            }
+            const SwList<std::shared_ptr<SwRuntimeProfilerSession>> sessions =
+                app_->profilerSessionsForCurrentThread_();
+            for (size_t i = 0; i < sessions.size(); ++i) {
+                if (sessions[i]) {
+                    sessions[i]->onFiberDispatchEnter(lane, resumed);
+                }
+            }
+        }
+
+        void onFiberDispatchExit(SwFiberLane lane, bool resumed, long long durationUs) override {
+            if (!app_) {
+                return;
+            }
+            const SwList<std::shared_ptr<SwRuntimeProfilerSession>> sessions =
+                app_->profilerSessionsForCurrentThread_();
+            for (size_t i = 0; i < sessions.size(); ++i) {
+                if (sessions[i]) {
+                    sessions[i]->onFiberDispatchExit(lane, resumed, durationUs);
+                }
+            }
+        }
+
+    private:
+        SwCoreApplication* app_{nullptr};
     };
 
 #if !defined(_WIN32)
@@ -402,7 +479,11 @@ public:
      * Initializes high-precision timers, converts the main thread to a fiber, and sets up necessary structures.
      */
     SwCoreApplication()
-        : running(true), exitCode(0) {
+        : running(true),
+          exitCode(0),
+          runtimeApplicationId_(nextRuntimeApplicationId_()),
+          runtimeThreadId_(currentRuntimeThreadId_()),
+          profilerRelay_(this) {
         bindInstanceToCurrentThread(this);
         enableHighPrecisionTimers();
         initFibers();
@@ -419,6 +500,7 @@ public:
         installUnixSignalHandlersOnce_();
         mainThreadPthread_ = pthread_self();
 #endif
+        announceRuntimeApplicationRegistered_();
     }
 
     /**
@@ -430,7 +512,11 @@ public:
      * and sets up necessary structures.
      */
     SwCoreApplication(int argc, char* argv[])
-        : running(true), exitCode(0) {
+        : running(true),
+          exitCode(0),
+          runtimeApplicationId_(nextRuntimeApplicationId_()),
+          runtimeThreadId_(currentRuntimeThreadId_()),
+          profilerRelay_(this) {
         bindInstanceToCurrentThread(this);
         enableHighPrecisionTimers();
         parseArguments(argc, argv);
@@ -448,6 +534,7 @@ public:
         installUnixSignalHandlersOnce_();
         mainThreadPthread_ = pthread_self();
 #endif
+        announceRuntimeApplicationRegistered_();
     }
 
     /**
@@ -456,9 +543,11 @@ public:
      * Disables high-precision timers and performs necessary cleanup.
      */
     virtual ~SwCoreApplication() {
-        uninstallProfiler();
+        detachAllTelemetrySessions();
+        detachAllProfilerSessions();
         desactiveWatchDog();
         fiberPool_.shutdown();
+        cleanupTimerStorage_();
         shutdownWakeup_();
         disableHighPrecisionTimers();
         unbindInstanceFromCurrentThread(this);
@@ -499,6 +588,73 @@ public:
             }
         }
         return requested;
+    }
+
+    static SwList<SwCoreApplication*> instancesSnapshot() {
+        SwList<SwCoreApplication*> apps;
+        std::lock_guard<std::mutex> lock(instanceRegistryMutex());
+        for (std::map<std::thread::id, SwCoreApplication*>::const_iterator it = instanceRegistry().begin();
+             it != instanceRegistry().end();
+             ++it) {
+            if (it->second) {
+                apps.append(it->second);
+            }
+        }
+        return apps;
+    }
+
+    static void attachRegistryObserver(SwCoreApplicationRegistryObserver* observer) {
+        if (!observer) {
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(instanceRegistryObserversMutex_());
+        std::vector<SwCoreApplicationRegistryObserver*>& observers = instanceRegistryObservers_();
+        if (std::find(observers.begin(), observers.end(), observer) == observers.end()) {
+            observers.push_back(observer);
+        }
+    }
+
+    static void detachRegistryObserver(SwCoreApplicationRegistryObserver* observer) {
+        if (!observer) {
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(instanceRegistryObserversMutex_());
+        std::vector<SwCoreApplicationRegistryObserver*>& observers = instanceRegistryObservers_();
+        observers.erase(std::remove(observers.begin(), observers.end(), observer), observers.end());
+    }
+
+    unsigned long long runtimeApplicationId() const {
+        return runtimeApplicationId_;
+    }
+
+    SwRuntimeApplicationDescriptor runtimeApplicationDescriptor() const {
+        SwRuntimeApplicationDescriptor descriptor;
+        descriptor.applicationId = runtimeApplicationId_;
+        descriptor.threadId = runtimeThreadId_;
+        {
+            std::lock_guard<std::mutex> lock(runtimeDescriptorMutex_);
+            descriptor.runtimeKind = runtimeKind_;
+            descriptor.label = runtimeLabel_;
+            descriptor.isGuiRuntime = runtimeIsGui_;
+        }
+
+        if (descriptor.runtimeKind.isEmpty()) {
+            descriptor.runtimeKind = "core";
+        }
+        if (descriptor.label.isEmpty()) {
+            descriptor.label = descriptor.runtimeKind + " runtime #" + SwString::number(descriptor.applicationId);
+        }
+        return descriptor;
+    }
+
+    void setRuntimeApplicationLabel(const SwString& label) {
+        {
+            std::lock_guard<std::mutex> lock(runtimeDescriptorMutex_);
+            runtimeLabel_ = label.trimmed();
+        }
+        announceRuntimeApplicationRegistered_();
     }
 
     /**
@@ -595,55 +751,128 @@ public:
         return eventFiberStackSize_.load(std::memory_order_relaxed);
     }
 
-    bool installProfiler(SwRuntimeProfileSink* sink,
-                         const SwRuntimeProfileConfig& config = SwRuntimeProfileConfig()) {
-        if (!sink) {
+    bool attachProfilerSession(const std::shared_ptr<SwRuntimeProfilerSession>& session) {
+        if (!session) {
             return false;
         }
 
-        uninstallProfiler();
-        profilerSession_.reset(new SwRuntimeProfilerSession(sink, config));
-        fiberPool_.bindObserver(profilerSession_.get());
-        if (SwCoreApplication::instance(false) == this) {
-            profilerSession_->bindToCurrentThread();
+        {
+            std::lock_guard<std::mutex> lock(profilerSessionsMutex_);
+            for (size_t i = 0; i < profilerSessions_.size(); ++i) {
+                if (profilerSessions_[i].get() == session.get()) {
+                    return false;
+                }
+            }
+            profilerSessions_.append(session);
         }
-        SwRuntimeProfilerService::registerSession(profilerSession_);
+
+        session->markAttached(true);
+        if (SwCoreApplication::instance(false) == this) {
+            session->bindToCurrentThread();
+        }
+        SwRuntimeProfilerService::registerSession(session);
+        refreshProfilerRelayBinding_();
         return true;
     }
 
-    void uninstallProfiler() {
-        if (!profilerSession_) {
-            fiberPool_.bindObserver(nullptr);
+    void detachProfilerSession(SwRuntimeProfilerSession* session) {
+        if (!session) {
             return;
         }
 
-        std::shared_ptr<SwRuntimeProfilerSession> oldSession = profilerSession_;
-        profilerSession_.reset();
-        fiberPool_.bindObserver(nullptr);
-        SwRuntimeProfilerService::unregisterSession(oldSession.get());
-        oldSession->clearThreadCurrent();
-    }
-
-    bool profilerEnabled() const {
-        return static_cast<bool>(profilerSession_);
-    }
-
-    void setProfilerCaptureEnabled(bool enabled) {
-        if (!profilerSession_) {
+        std::shared_ptr<SwRuntimeProfilerSession> removedSession;
+        {
+            std::lock_guard<std::mutex> lock(profilerSessionsMutex_);
+            for (size_t i = 0; i < profilerSessions_.size(); ++i) {
+                if (profilerSessions_[i].get() != session) {
+                    continue;
+                }
+                removedSession = profilerSessions_[i];
+                profilerSessions_.removeAt(i);
+                break;
+            }
+        }
+        refreshProfilerRelayBinding_();
+        if (!removedSession) {
             return;
         }
-        profilerSession_->setEnabled(enabled);
+
+        removedSession->markAttached(false);
+        SwRuntimeProfilerService::unregisterSession(removedSession.get());
     }
 
-    bool profilerCaptureEnabled() const {
-        return profilerSession_ ? profilerSession_->enabled() : false;
+    void detachAllProfilerSessions() {
+        SwList<std::shared_ptr<SwRuntimeProfilerSession>> sessions;
+        {
+            std::lock_guard<std::mutex> lock(profilerSessionsMutex_);
+            sessions = profilerSessions_;
+            profilerSessions_.clear();
+        }
+        refreshProfilerRelayBinding_();
+        for (size_t i = 0; i < sessions.size(); ++i) {
+            if (sessions[i]) {
+                sessions[i]->markAttached(false);
+                SwRuntimeProfilerService::unregisterSession(sessions[i].get());
+            }
+        }
     }
 
-    void setProfilerStallThresholdUs(long long thresholdUs) {
-        if (!profilerSession_) {
+    bool attachTelemetrySession(const std::shared_ptr<SwRuntimeTelemetrySession>& session) {
+        if (!session) {
+            return false;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(telemetrySessionsMutex_);
+            for (size_t i = 0; i < telemetrySessions_.size(); ++i) {
+                if (telemetrySessions_[i].get() == session.get()) {
+                    return false;
+                }
+            }
+            telemetrySessions_.append(session);
+        }
+
+        session->onAttached(this);
+        if (SwCoreApplication::instance(false) == this) {
+            session->bindToCurrentThread();
+        }
+        return true;
+    }
+
+    void detachTelemetrySession(SwRuntimeTelemetrySession* session) {
+        if (!session) {
             return;
         }
-        profilerSession_->setStallThresholdUs(thresholdUs);
+
+        std::shared_ptr<SwRuntimeTelemetrySession> removedSession;
+        {
+            std::lock_guard<std::mutex> lock(telemetrySessionsMutex_);
+            for (size_t i = 0; i < telemetrySessions_.size(); ++i) {
+                if (telemetrySessions_[i].get() != session) {
+                    continue;
+                }
+                removedSession = telemetrySessions_[i];
+                telemetrySessions_.removeAt(i);
+                break;
+            }
+        }
+        if (removedSession) {
+            removedSession->onDetached();
+        }
+    }
+
+    void detachAllTelemetrySessions() {
+        SwList<std::shared_ptr<SwRuntimeTelemetrySession>> sessions;
+        {
+            std::lock_guard<std::mutex> lock(telemetrySessionsMutex_);
+            sessions = telemetrySessions_;
+            telemetrySessions_.clear();
+        }
+        for (size_t i = 0; i < sessions.size(); ++i) {
+            if (sessions[i]) {
+                sessions[i]->onDetached();
+            }
+        }
     }
 
     /**
@@ -659,20 +888,22 @@ public:
     }
 
 private:
-    void postEventOnLaneImpl_(std::function<void()> event,
+    bool postEventOnLaneImpl_(std::function<void()> event,
                               SwFiberLane lane,
                               bool emitPostedTiming) {
         std::function<void()> dispatchedEvent = std::move(event);
-        if (emitPostedTiming && profilerSession_ && profilerSession_->autoRuntimeScopesEnabled()) {
-            std::shared_ptr<SwRuntimeProfilerSession> session = profilerSession_;
+        const SwList<std::shared_ptr<SwRuntimeProfilerSession>> autoProfilerSessions =
+            emitPostedTiming ? autoRuntimeProfilerSessionsSnapshot_() : SwList<std::shared_ptr<SwRuntimeProfilerSession>>();
+        if (!autoProfilerSessions.isEmpty()) {
             std::function<void()> inner = std::move(dispatchedEvent);
-            dispatchedEvent = [session, inner, lane]() mutable {
-                session->bindToCurrentThread();
-                SwRuntimeScopedSpan scope(session.get(),
-                                          SwRuntimeTimingKind::PostedEvent,
-                                          "posted_event",
-                                          lane,
-                                          true);
+            dispatchedEvent = [this, autoProfilerSessions, inner, lane]() mutable {
+                bindTelemetrySessionsToCurrentThread_();
+                bindProfilerSessionsToCurrentThread_(autoProfilerSessions);
+                MultiRuntimeScopedSpan_ scope(autoProfilerSessions,
+                                              SwRuntimeTimingKind::PostedEvent,
+                                              "posted_event",
+                                              lane,
+                                              true);
                 inner();
             };
         }
@@ -682,10 +913,47 @@ private:
         if (!accepted && rejectedByBackpressure) {
             swCWarning(kSwLogCategory_SwCoreApplication)
                 << "SwFiberPool saturated; rejecting posted event on lane=" << static_cast<int>(lane);
-            return;
+            return false;
+        }
+        if (!accepted) {
+            return false;
         }
         cv.notify_one();
         signalWakeup_();
+        return true;
+    }
+
+    void cleanupTimerStorage_() {
+        SwList<_T*> timersToDelete;
+        {
+            std::lock_guard<std::mutex> lock(eventQueueMutex);
+            auto appendUniqueTimer = [&timersToDelete](_T* timer) {
+                if (!timer) {
+                    return;
+                }
+                for (size_t i = 0; i < timersToDelete.size(); ++i) {
+                    if (timersToDelete[i] == timer) {
+                        return;
+                    }
+                }
+                timersToDelete.push_back(timer);
+            };
+
+            for (auto it = timers.begin(); it != timers.end(); ++it) {
+                appendUniqueTimer(it->second);
+            }
+            timers.clear();
+
+            for (size_t i = 0; i < pendingTimerDeletes_.size(); ++i) {
+                appendUniqueTimer(pendingTimerDeletes_[i]);
+            }
+            pendingTimerDeletes_.clear();
+            processingTimersDepth_ = 0;
+        }
+
+        for (size_t i = 0; i < timersToDelete.size(); ++i) {
+            delete timersToDelete[i];
+        }
     }
 
 public:
@@ -795,14 +1063,13 @@ public:
             return false;
         }
 
-        SwRuntimeProfilerSession* profilerSession = profilerSessionForCurrentThread_();
-        SwRuntimeScopedSpan profileScope(profilerSession && profilerSession->autoRuntimeScopesEnabled()
-                                             ? profilerSession
-                                             : nullptr,
-                                         SwRuntimeTimingKind::ObjectEvent,
-                                         "object_event",
-                                         SwFiberLane::Normal,
-                                         true);
+        const SwList<std::shared_ptr<SwRuntimeProfilerSession>> autoProfilerSessions =
+            autoRuntimeProfilerSessionsForCurrentThread_();
+        MultiRuntimeScopedSpan_ profileScope(autoProfilerSessions,
+                                             SwRuntimeTimingKind::ObjectEvent,
+                                             "object_event",
+                                             SwFiberLane::Normal,
+                                             true);
 
         const bool previousKernelDispatch = event->isKernelDispatched();
         event->setKernelDispatched(true);
@@ -934,19 +1201,24 @@ public:
      */
     virtual int exec(int maxDurationMicroseconds = 0) {
         setHighThreadPriority();
-        (void)profilerSessionForCurrentThread_();
+        (void)profilerSessionsForCurrentThread_();
         auto startTime = std::chrono::steady_clock::now();
-        auto lastTime = startTime;
+        auto iterationBoundary = startTime;
 
         while (running) {
             // Avant de traiter un nouvel événement, on remet à zéro le temps occupé de l'itération
             busyElapsedIteration = 0;
 
-            auto currentTime = std::chrono::steady_clock::now();
+            const auto busyStart = std::chrono::steady_clock::now();
             int sleepDuration = processEvent();
+            const auto busyEnd = std::chrono::steady_clock::now();
+            busyElapsedIteration = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(busyEnd - busyStart).count());
 
-            auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(currentTime - lastTime).count();
-            lastTime = currentTime;
+            if (!running) {
+                sleepDuration = 0;
+            }
+#if 0
 
             {
                 std::lock_guard<std::mutex> lock(measurementsMutex_);
@@ -977,8 +1249,23 @@ public:
             }
 
             if (!running) break;
+#endif
             if (sleepDuration != 0) {
                 waitForWork_(sleepDuration);
+            }
+
+            const auto iterationEnd = std::chrono::steady_clock::now();
+            const uint64_t totalElapsedIteration = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(iterationEnd - iterationBoundary).count());
+            iterationBoundary = iterationEnd;
+
+            recordRuntimeIterationMeasurement_(iterationEnd, busyElapsedIteration, totalElapsedIteration);
+            publishRuntimeIterationSnapshot_();
+
+            const auto totalElapsed =
+                std::chrono::duration_cast<std::chrono::microseconds>(iterationEnd - startTime).count();
+            if (maxDurationMicroseconds != 0 && totalElapsed >= maxDurationMicroseconds) {
+                break;
             }
         }
         return exitCode.load(std::memory_order_acquire);
@@ -1119,6 +1406,15 @@ public:
     }
 
 protected:
+    void setRuntimeApplicationKind(const SwString& runtimeKind, bool isGuiRuntime) {
+        {
+            std::lock_guard<std::mutex> lock(runtimeDescriptorMutex_);
+            runtimeKind_ = runtimeKind.trimmed();
+            runtimeIsGui_ = isGuiRuntime;
+        }
+        announceRuntimeApplicationRegistered_();
+    }
+
     void refreshFiberPoolConfig_() {
         SwFiberPoolConfig config;
         const unsigned int configuredStackSize = eventFiberStackSize_.load(std::memory_order_relaxed);
@@ -1128,20 +1424,71 @@ protected:
         fiberPool_.setConfig(config);
     }
 
-    SwRuntimeProfilerSession* profilerSessionForCurrentThread_() {
-        if (!profilerSession_) {
-            return nullptr;
-        }
-        profilerSession_->bindToCurrentThread();
-        return profilerSession_.get();
+    SwList<std::shared_ptr<SwRuntimeTelemetrySession>> telemetrySessionsSnapshot_() const {
+        std::lock_guard<std::mutex> lock(telemetrySessionsMutex_);
+        return telemetrySessions_;
     }
 
-    double profilerLastSecondLoadPercentage_() const {
+    SwList<std::shared_ptr<SwRuntimeProfilerSession>> profilerSessionsSnapshot_() const {
+        std::lock_guard<std::mutex> lock(profilerSessionsMutex_);
+        return profilerSessions_;
+    }
+
+    void bindTelemetrySessionsToCurrentThread_() {
+        const SwList<std::shared_ptr<SwRuntimeTelemetrySession>> sessions = telemetrySessionsSnapshot_();
+        for (size_t i = 0; i < sessions.size(); ++i) {
+            if (sessions[i]) {
+                sessions[i]->bindToCurrentThread();
+            }
+        }
+    }
+
+    void bindProfilerSessionsToCurrentThread_(const SwList<std::shared_ptr<SwRuntimeProfilerSession>>& sessions) {
+        for (size_t i = 0; i < sessions.size(); ++i) {
+            if (sessions[i]) {
+                sessions[i]->bindToCurrentThread();
+            }
+        }
+    }
+
+    SwList<std::shared_ptr<SwRuntimeProfilerSession>> profilerSessionsForCurrentThread_() {
+        bindTelemetrySessionsToCurrentThread_();
+        const SwList<std::shared_ptr<SwRuntimeProfilerSession>> sessions = profilerSessionsSnapshot_();
+        bindProfilerSessionsToCurrentThread_(sessions);
+        return sessions;
+    }
+
+    SwList<std::shared_ptr<SwRuntimeProfilerSession>> autoRuntimeProfilerSessionsSnapshot_() const {
+        SwList<std::shared_ptr<SwRuntimeProfilerSession>> activeSessions;
+        const SwList<std::shared_ptr<SwRuntimeProfilerSession>> sessions = profilerSessionsSnapshot_();
+        for (size_t i = 0; i < sessions.size(); ++i) {
+            if (!sessions[i] || !sessions[i]->enabled() || !sessions[i]->autoRuntimeScopesEnabled()) {
+                continue;
+            }
+            activeSessions.append(sessions[i]);
+        }
+        return activeSessions;
+    }
+
+    SwList<std::shared_ptr<SwRuntimeProfilerSession>> autoRuntimeProfilerSessionsForCurrentThread_() {
+        const SwList<std::shared_ptr<SwRuntimeProfilerSession>> sessions = autoRuntimeProfilerSessionsSnapshot_();
+        bindTelemetrySessionsToCurrentThread_();
+        bindProfilerSessionsToCurrentThread_(sessions);
+        return sessions;
+    }
+
+    void refreshProfilerRelayBinding_() {
+        const SwList<std::shared_ptr<SwRuntimeProfilerSession>> sessions = profilerSessionsSnapshot_();
+        fiberPool_.bindObserver(sessions.isEmpty() ? nullptr : &profilerRelay_);
+    }
+
+    double runtimeLastSecondLoadPercentage_() const {
         const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
         const std::chrono::steady_clock::time_point oneSecondAgo = now - std::chrono::seconds(1);
 
         uint64_t sumBusy = 0;
         uint64_t sumTotal = 0;
+        std::lock_guard<std::mutex> lock(measurementsMutex_);
         for (std::deque<IterationMeasurement>::const_iterator it = measurements.begin();
              it != measurements.end();
              ++it) {
@@ -1157,45 +1504,83 @@ protected:
         return 100.0 * static_cast<double>(sumBusy) / static_cast<double>(sumTotal);
     }
 
-    void profilerUpdateIterationSnapshot_() {
-        if (!profilerSession_) {
-            return;
-        }
+    void recordRuntimeIterationMeasurement_(const std::chrono::steady_clock::time_point& iterationEnd,
+                                            uint64_t busyMicroseconds,
+                                            uint64_t totalMicroseconds) {
+        std::lock_guard<std::mutex> lock(measurementsMutex_);
+        totalBusyTimeMicroseconds += busyMicroseconds;
+        totalTimeMicroseconds += totalMicroseconds;
+        measurements.push_back({
+            iterationEnd,
+            busyMicroseconds,
+            totalMicroseconds
+        });
 
-        SwRuntimeCountersSnapshot snapshot;
+        const std::chrono::steady_clock::time_point oneSecondAgo = iterationEnd - std::chrono::seconds(1);
+        while (!measurements.empty() && measurements.front().timestamp < oneSecondAgo) {
+            measurements.pop_front();
+        }
+    }
+
+    SwRuntimeIterationSnapshot buildRuntimeIterationSnapshot_() {
+        SwRuntimeIterationSnapshot snapshot;
         snapshot.busyMicroseconds = busyElapsedIteration;
-        if (!measurements.empty()) {
-            snapshot.totalMicroseconds = measurements.back().totalMicroseconds;
+        {
+            std::lock_guard<std::mutex> lock(measurementsMutex_);
+            if (!measurements.empty()) {
+                snapshot.totalMicroseconds = measurements.back().totalMicroseconds;
+            }
+            if (totalTimeMicroseconds != 0) {
+                snapshot.loadPercentage =
+                    100.0 * static_cast<double>(totalBusyTimeMicroseconds) / static_cast<double>(totalTimeMicroseconds);
+            }
         }
-        if (totalTimeMicroseconds != 0) {
-            snapshot.loadPercentage =
-                100.0 * static_cast<double>(totalBusyTimeMicroseconds) / static_cast<double>(totalTimeMicroseconds);
-        }
-        snapshot.lastSecondLoadPercentage = profilerLastSecondLoadPercentage_();
+        snapshot.lastSecondLoadPercentage = runtimeLastSecondLoadPercentage_();
         snapshot.fiberPoolStats = fiberPool_.stats();
-        snapshot.droppedRecords = 0;
-
         {
             std::lock_guard<std::mutex> lock(eventQueueMutex);
             snapshot.postedEventCount = static_cast<int>(postedEventQueue_.size());
             snapshot.priorityPostedEventCount = static_cast<int>(priorityPostedEventQueue_.size());
             snapshot.timerCount = static_cast<int>(timers.size());
         }
+        return snapshot;
+    }
 
-        profilerSession_->updateCounters(snapshot);
+    void publishRuntimeIterationSnapshot_() {
+        const SwList<std::shared_ptr<SwRuntimeTelemetrySession>> sessions = telemetrySessionsSnapshot_();
+        const SwList<std::shared_ptr<SwRuntimeProfilerSession>> profilerSessions = profilerSessionsSnapshot_();
+        if (profilerSessions.isEmpty() && sessions.isEmpty()) {
+            return;
+        }
+
+        const SwRuntimeIterationSnapshot iterationSnapshot = buildRuntimeIterationSnapshot_();
+        for (size_t i = 0; i < sessions.size(); ++i) {
+            if (sessions[i]) {
+                sessions[i]->updateIterationSnapshot(iterationSnapshot);
+            }
+        }
+
+        SwRuntimeCountersSnapshot snapshot;
+        snapshot.busyMicroseconds = iterationSnapshot.busyMicroseconds;
+        snapshot.totalMicroseconds = iterationSnapshot.totalMicroseconds;
+        snapshot.loadPercentage = iterationSnapshot.loadPercentage;
+        snapshot.lastSecondLoadPercentage = iterationSnapshot.lastSecondLoadPercentage;
+        snapshot.postedEventCount = iterationSnapshot.postedEventCount;
+        snapshot.priorityPostedEventCount = iterationSnapshot.priorityPostedEventCount;
+        snapshot.timerCount = iterationSnapshot.timerCount;
+        snapshot.fiberPoolStats = iterationSnapshot.fiberPoolStats;
+        snapshot.droppedRecords = 0;
+        for (size_t i = 0; i < profilerSessions.size(); ++i) {
+            if (profilerSessions[i]) {
+                profilerSessions[i]->updateCounters(snapshot);
+            }
+        }
     }
 
 private:
     bool runFiberPoolWork_() {
-        (void)profilerSessionForCurrentThread_();
-        auto startBusy = std::chrono::steady_clock::now();
-        const bool ranWork = fiberPool_.runNextWorkItem();
-        if (ranWork) {
-            auto endBusy = std::chrono::steady_clock::now();
-            busyElapsedIteration += static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::microseconds>(endBusy - startBusy).count());
-        }
-        return ranWork;
+        (void)profilerSessionsForCurrentThread_();
+        return fiberPool_.runNextWorkItem();
     }
 
     static bool routeYieldWakeAcrossInstances_(int id, SwFiberLane lane) {
@@ -1371,45 +1756,6 @@ public:
 
     const SwIoDispatcher& ioDispatcher() const {
         return ioDispatcher_;
-    }
-
-#if defined(_WIN32)
-    /**
-     * @brief Adds the specified wait Handle.
-     * @param h Height value.
-     * @param onSignaled Value passed to the method.
-     * @return The requested wait Handle.
-     */
-    size_t addWaitHandle(HANDLE h, std::function<void()> onSignaled) {
-        return ioDispatcher_.watchHandle(h,
-                                         SwIoDispatcher::AffinityPoster(),
-                                         [this, onSignaled]() {
-            postEventOnLane(onSignaled, SwFiberLane::Control);
-        });
-    }
-#else
-    /**
-     * @brief Adds the specified wait Fd.
-     * @param fd Value passed to the method.
-     * @param onReadable Value passed to the method.
-     * @return The requested wait Fd.
-     */
-    size_t addWaitFd(int fd, std::function<void()> onReadable) {
-        return ioDispatcher_.watchFd(fd,
-                                     SwIoDispatcher::Readable,
-                                     SwIoDispatcher::AffinityPoster(),
-                                     [this, onReadable](uint32_t) {
-                                         postEventOnLane(onReadable, SwFiberLane::Control);
-                                     });
-    }
-#endif
-
-    /**
-     * @brief Removes the specified waitable.
-     * @param id Value passed to the method.
-     */
-    void removeWaitable(size_t id) {
-        ioDispatcher_.remove(id);
     }
 
     /**
@@ -1663,22 +2009,76 @@ private:
         return registry;
     }
 
+    static std::mutex& instanceRegistryObserversMutex_() {
+        static std::mutex observersMutex;
+        return observersMutex;
+    }
+
+    static std::vector<SwCoreApplicationRegistryObserver*>& instanceRegistryObservers_() {
+        static std::vector<SwCoreApplicationRegistryObserver*> observers;
+        return observers;
+    }
+
+    static unsigned long long currentRuntimeThreadId_() {
+        return static_cast<unsigned long long>(std::hash<std::thread::id>()(std::this_thread::get_id()));
+    }
+
+    static unsigned long long nextRuntimeApplicationId_() {
+        static std::atomic<unsigned long long> s_nextId{1};
+        return s_nextId.fetch_add(1, std::memory_order_acq_rel);
+    }
+
+    void announceRuntimeApplicationRegistered_() {
+        const SwRuntimeApplicationDescriptor descriptor = runtimeApplicationDescriptor();
+        std::vector<SwCoreApplicationRegistryObserver*> observers;
+        {
+            std::lock_guard<std::mutex> lock(instanceRegistryObserversMutex_());
+            observers = instanceRegistryObservers_();
+        }
+        for (std::size_t i = 0; i < observers.size(); ++i) {
+            if (observers[i]) {
+                observers[i]->onRuntimeApplicationRegistered(this, descriptor);
+            }
+        }
+    }
+
+    static void announceRuntimeApplicationUnregistered_(const SwRuntimeApplicationDescriptor& descriptor) {
+        std::vector<SwCoreApplicationRegistryObserver*> observers;
+        {
+            std::lock_guard<std::mutex> lock(instanceRegistryObserversMutex_());
+            observers = instanceRegistryObservers_();
+        }
+        for (std::size_t i = 0; i < observers.size(); ++i) {
+            if (observers[i]) {
+                observers[i]->onRuntimeApplicationUnregistered(descriptor);
+            }
+        }
+    }
+
     static void bindInstanceToCurrentThread(SwCoreApplication* app) {
         setThreadLocalInstance_(app);
-        std::lock_guard<std::mutex> lock(instanceRegistryMutex());
-        instanceRegistry()[std::this_thread::get_id()] = app;
+        {
+            std::lock_guard<std::mutex> lock(instanceRegistryMutex());
+            instanceRegistry()[std::this_thread::get_id()] = app;
+        }
     }
 
     static void unbindInstanceFromCurrentThread(SwCoreApplication* app) {
+        const SwRuntimeApplicationDescriptor descriptor =
+            app ? app->runtimeApplicationDescriptor() : SwRuntimeApplicationDescriptor();
         if (getThreadLocalInstance_() == app) {
             setThreadLocalInstance_(nullptr);
         }
 
-        std::lock_guard<std::mutex> lock(instanceRegistryMutex());
-        auto it = instanceRegistry().find(std::this_thread::get_id());
-        if (it != instanceRegistry().end() && it->second == app) {
-            instanceRegistry().erase(it);
+        {
+            std::lock_guard<std::mutex> lock(instanceRegistryMutex());
+            std::map<std::thread::id, SwCoreApplication*>::iterator it =
+                instanceRegistry().find(std::this_thread::get_id());
+            if (it != instanceRegistry().end() && it->second == app) {
+                instanceRegistry().erase(it);
+            }
         }
+        announceRuntimeApplicationUnregistered_(descriptor);
     }
 
 protected:
@@ -1954,13 +2354,18 @@ protected:
         // Timer callbacks can start/stop other timers, which mutates `timers`.
         // Build a snapshot of ready timers under a single lock, then execute
         // callbacks outside the lock to avoid holding it during user code.
-        struct ReadyTimer { _T* timer; bool singleShot; };
+        struct ReadyTimer {
+            int timerId;
+            _T* timer;
+            bool singleShot;
+        };
         std::vector<ReadyTimer> readyTimers;
         int minTimeUntilNext = (std::numeric_limits<int>::max)();
 
         {
             std::lock_guard<std::mutex> lock(eventQueueMutex);
             for (auto it = timers.begin(); it != timers.end(); ) {
+                const int currentTimerId = it.key();
                 _T* currentTimer = it->second;
                 if (!currentTimer) {
                     ++it;
@@ -1973,7 +2378,7 @@ protected:
                     }
                     currentTimer->dispatchPending = true;
                     bool isSingleShot = currentTimer->singleShot;
-                    readyTimers.push_back({currentTimer, isSingleShot});
+                    readyTimers.push_back({currentTimerId, currentTimer, isSingleShot});
                     if (isSingleShot) {
                         it = timers.erase(it);
                         continue;
@@ -1986,48 +2391,48 @@ protected:
         // Execute callbacks outside the lock.
         for (auto& rt : readyTimers) {
             const SwFiberLane timerLane = rt.timer->lane;
-            std::shared_ptr<SwRuntimeProfilerSession> timerProfilerSession = profilerSession_;
+            const SwList<std::shared_ptr<SwRuntimeProfilerSession>> timerProfilerSessions =
+                autoRuntimeProfilerSessionsSnapshot_();
             if (rt.singleShot) {
                 _T* toDelete = rt.timer;
-                std::function<void()> timerEvent = [toDelete, timerProfilerSession, timerLane]() {
-                    if (timerProfilerSession) {
-                        timerProfilerSession->bindToCurrentThread();
-                    }
-                    SwRuntimeScopedSpan timerScope(timerProfilerSession &&
-                                                       timerProfilerSession->autoRuntimeScopesEnabled()
-                                                       ? timerProfilerSession.get()
-                                                       : nullptr,
-                                                   SwRuntimeTimingKind::Timer,
-                                                   "timer",
-                                                   timerLane,
-                                                   true);
+                std::function<void()> timerEvent = [this, toDelete, timerProfilerSessions, timerLane]() {
+                    bindTelemetrySessionsToCurrentThread_();
+                    bindProfilerSessionsToCurrentThread_(timerProfilerSessions);
+                    MultiRuntimeScopedSpan_ timerScope(timerProfilerSessions,
+                                                       SwRuntimeTimingKind::Timer,
+                                                       "timer",
+                                                       timerLane,
+                                                       true);
                     toDelete->dispatchPending = false;
                     if (!toDelete->cancelled) {
                         toDelete->execute();
                     }
                     delete toDelete;
                 };
-                postEventOnLaneImpl_(std::move(timerEvent), timerLane, false);
+                if (!postEventOnLaneImpl_(std::move(timerEvent), timerLane, false)) {
+                    std::lock_guard<std::mutex> lock(eventQueueMutex);
+                    toDelete->dispatchPending = false;
+                    timers.insert(rt.timerId, toDelete);
+                }
             } else {
                 _T* t = rt.timer;
-                std::function<void()> timerEvent = [t, timerProfilerSession, timerLane]() {
-                    if (timerProfilerSession) {
-                        timerProfilerSession->bindToCurrentThread();
-                    }
-                    SwRuntimeScopedSpan timerScope(timerProfilerSession &&
-                                                       timerProfilerSession->autoRuntimeScopesEnabled()
-                                                       ? timerProfilerSession.get()
-                                                       : nullptr,
-                                                   SwRuntimeTimingKind::Timer,
-                                                   "timer",
-                                                   timerLane,
-                                                   true);
+                std::function<void()> timerEvent = [this, t, timerProfilerSessions, timerLane]() {
+                    bindTelemetrySessionsToCurrentThread_();
+                    bindProfilerSessionsToCurrentThread_(timerProfilerSessions);
+                    MultiRuntimeScopedSpan_ timerScope(timerProfilerSessions,
+                                                       SwRuntimeTimingKind::Timer,
+                                                       "timer",
+                                                       timerLane,
+                                                       true);
                     t->dispatchPending = false;
                     if (!t->cancelled) {
                         t->execute();
                     }
                 };
-                postEventOnLaneImpl_(std::move(timerEvent), timerLane, false);
+                if (!postEventOnLaneImpl_(std::move(timerEvent), timerLane, false)) {
+                    std::lock_guard<std::mutex> lock(eventQueueMutex);
+                    t->dispatchPending = false;
+                }
             }
         }
 
@@ -2077,6 +2482,8 @@ protected:
 protected:
     std::atomic<bool> running; ///< Indicates if the event loop is running.
     std::atomic<int> exitCode; ///< Exit code of the application.
+    const unsigned long long runtimeApplicationId_;
+    const unsigned long long runtimeThreadId_;
 #if defined(_WIN32)
     HANDLE mainThreadHandle;
     DWORD mainThreadId;
@@ -2136,7 +2543,15 @@ protected:
     int processingTimersDepth_ = 0;
     SwList<_T*> pendingTimerDeletes_;
     SwMap<SwString, SwString> parsedArguments; ///< Parsed command-line arguments.
-    std::shared_ptr<SwRuntimeProfilerSession> profilerSession_;
+    mutable std::mutex runtimeDescriptorMutex_;
+    SwString runtimeKind_{"core"};
+    SwString runtimeLabel_{};
+    bool runtimeIsGui_{false};
+    mutable std::mutex profilerSessionsMutex_;
+    SwList<std::shared_ptr<SwRuntimeProfilerSession>> profilerSessions_;
+    ProfilerRelay_ profilerRelay_;
+    mutable std::mutex telemetrySessionsMutex_;
+    SwList<std::shared_ptr<SwRuntimeTelemetrySession>> telemetrySessions_;
 
     std::atomic<LPVOID> m_runningFiber{nullptr}; ///< Pointer to the currently running fiber.
     LPVOID mainFiber = nullptr; ///< Pointer to the main fiber.

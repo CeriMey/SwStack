@@ -55,6 +55,7 @@
 #include "SwFrame.h"
 #include "SwGroupBox.h"
 #include "SwLabel.h"
+#include "SwLoadingOverlay.h"
 #include "SwLineEdit.h"
 #include "SwPlainTextEdit.h"
 #include "SwProgressBar.h"
@@ -526,6 +527,7 @@ private:
         registerWidget("SwFrame", [](SwWidget* p) { return new SwFrame(p); });
         registerWidget("Line", [](SwWidget* p) { return new SwFrame(p); }); // Designer "Line" separator
         registerWidget("SwLabel", [](SwWidget* p) { return new SwLabel(p); });
+        registerWidget("SwLoadingOverlay", [](SwWidget* p) { return new SwLoadingOverlay(p); });
         registerWidget("SwPushButton", [](SwWidget* p) { return new SwPushButton("PushButton", p); });
         registerWidget("SwLineEdit", [](SwWidget* p) { return new SwLineEdit(p); });
         registerWidget("SwCheckBox", [](SwWidget* p) { return new SwCheckBox(p); });

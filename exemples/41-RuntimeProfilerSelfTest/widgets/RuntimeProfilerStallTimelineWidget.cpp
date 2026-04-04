@@ -3,15 +3,49 @@
 #include <algorithm>
 #include <cmath>
 
+namespace {
+
+struct RuntimeProfilerLoadSeriesDescriptor_ {
+    unsigned long long applicationId{0};
+    unsigned long long threadId{0};
+    SwString label;
+};
+
+static bool runtimeProfilerMatchesLoadSeries_(
+    const RuntimeProfilerDashboardLoadSample& sample,
+    const RuntimeProfilerLoadSeriesDescriptor_& series) {
+    return sample.applicationId == series.applicationId &&
+           sample.threadId == series.threadId;
+}
+
+static SwColor runtimeProfilerLoadSeriesColor_(int index) {
+    static const SwColor palette[] = {
+        SwColor{78, 201, 176},
+        SwColor{97, 218, 251},
+        SwColor{255, 203, 107},
+        SwColor{206, 145, 120},
+        SwColor{197, 134, 192},
+        SwColor{220, 220, 170}
+    };
+    const int paletteCount = static_cast<int>(sizeof(palette) / sizeof(palette[0]));
+    if (paletteCount <= 0) {
+        return SwColor{78, 201, 176};
+    }
+    const int safeIndex = index < 0 ? 0 : (index % paletteCount);
+    return palette[safeIndex];
+}
+
+} // namespace
+
 RuntimeProfilerStallTimelineWidget::RuntimeProfilerStallTimelineWidget(SwWidget* parent)
     : SwFrame(parent) {}
 
 SwSize RuntimeProfilerStallTimelineWidget::sizeHint() const {
-    return SwSize{320, 100};
+    return SwSize{320, 200};
 }
 
 SwSize RuntimeProfilerStallTimelineWidget::minimumSizeHint() const {
-    return SwSize{160, 58};
+    return SwSize{160, 200};
 }
 
 void RuntimeProfilerStallTimelineWidget::setLaunchTimeNs(long long launchTimeNs) {
@@ -77,7 +111,7 @@ void RuntimeProfilerStallTimelineWidget::paintEvent(PaintEvent* event) {
     const int leftMargin = 38;
     const int rightMargin = 36;
     const int topMargin = 8;
-    const int bottomMargin = 18;
+    const int bottomMargin = 24;
     const SwRect plot{bounds.x + leftMargin,
                       bounds.y + topMargin,
                       std::max(1, bounds.width - leftMargin - rightMargin),
@@ -107,7 +141,7 @@ void RuntimeProfilerStallTimelineWidget::paintEvent(PaintEvent* event) {
                       axisFont);
 
     painter->pushClipRect(plot);
-    drawLoadSeries_(painter, plot, SwColor{78, 201, 176});
+    drawLoadSeries_(painter, plot);
     if (stalls_ && !stalls_->isEmpty()) {
         for (size_t i = 0; i < stalls_->size(); ++i) {
             const RuntimeProfilerDashboardStallEntry& entry = (*stalls_)[i];
@@ -138,7 +172,7 @@ void RuntimeProfilerStallTimelineWidget::paintEvent(PaintEvent* event) {
                               overThreshold ? thresholdBorder : stallBorder,
                               1);
         }
-    } else {
+    } else if (!loadSamples_ || loadSamples_->size() < 2) {
         painter->drawText(plot,
                           "No stalls captured in the current window.",
                           DrawTextFormats(DrawTextFormat::Center | DrawTextFormat::VCenter | DrawTextFormat::SingleLine),
@@ -225,30 +259,57 @@ void RuntimeProfilerStallTimelineWidget::drawOccupancyAxisLabels_(SwPainter* pai
 }
 
 void RuntimeProfilerStallTimelineWidget::drawLoadSeries_(SwPainter* painter,
-                                                         const SwRect& plot,
-                                                         const SwColor& color) const {
+                                                         const SwRect& plot) const {
     if (!painter || !loadSamples_ || loadSamples_->size() < 2) {
         return;
     }
 
-    bool hasPrevious = false;
-    int previousX = 0;
-    int previousY = 0;
+    SwList<RuntimeProfilerLoadSeriesDescriptor_> seriesList;
     for (size_t i = 0; i < loadSamples_->size(); ++i) {
         const RuntimeProfilerDashboardLoadSample& sample = (*loadSamples_)[i];
-        const double seconds = secondsSinceLaunch_(sample.sampleTimeNs);
-        if (seconds < xMinSeconds_ || seconds > xMaxSeconds_) {
+        bool found = false;
+        for (size_t j = 0; j < seriesList.size(); ++j) {
+            if (runtimeProfilerMatchesLoadSeries_(sample, seriesList[j])) {
+                found = true;
+                break;
+            }
+        }
+        if (found) {
             continue;
         }
 
-        const int x = xForSeconds_(seconds, plot);
-        const int y = yForOccupancy_(sample.loadPercentage, plot);
-        if (hasPrevious) {
-            painter->drawLine(previousX, previousY, x, y, color, 2);
+        RuntimeProfilerLoadSeriesDescriptor_ series;
+        series.applicationId = sample.applicationId;
+        series.threadId = sample.threadId;
+        series.label = sample.seriesLabel;
+        seriesList.append(series);
+    }
+
+    for (size_t seriesIndex = 0; seriesIndex < seriesList.size(); ++seriesIndex) {
+        const SwColor color = runtimeProfilerLoadSeriesColor_(static_cast<int>(seriesIndex));
+        bool hasPrevious = false;
+        int previousX = 0;
+        int previousY = 0;
+        for (size_t sampleIndex = 0; sampleIndex < loadSamples_->size(); ++sampleIndex) {
+            const RuntimeProfilerDashboardLoadSample& sample = (*loadSamples_)[sampleIndex];
+            if (!runtimeProfilerMatchesLoadSeries_(sample, seriesList[seriesIndex])) {
+                continue;
+            }
+
+            const double seconds = secondsSinceLaunch_(sample.sampleTimeNs);
+            if (seconds < xMinSeconds_ || seconds > xMaxSeconds_) {
+                continue;
+            }
+
+            const int x = xForSeconds_(seconds, plot);
+            const int y = yForOccupancy_(sample.loadPercentage, plot);
+            if (hasPrevious) {
+                painter->drawLine(previousX, previousY, x, y, color, 2);
+            }
+            previousX = x;
+            previousY = y;
+            hasPrevious = true;
         }
-        previousX = x;
-        previousY = y;
-        hasPrevious = true;
     }
 }
 
@@ -266,13 +327,17 @@ int RuntimeProfilerStallTimelineWidget::xForSeconds_(double seconds, const SwRec
 }
 
 int RuntimeProfilerStallTimelineWidget::yForDuration_(double durationMs, const SwRect& plot) const {
+    const int inset = plot.height > 12 ? 3 : 1;
+    const int innerHeight = std::max(1, plot.height - (inset * 2));
     const double clamped = std::max(0.0, std::min(yMaxMs_, durationMs));
     const double t = 1.0 - (clamped / std::max(1.0, yMaxMs_));
-    return plot.y + static_cast<int>(std::round(t * plot.height));
+    return plot.y + inset + static_cast<int>(std::round(t * innerHeight));
 }
 
 int RuntimeProfilerStallTimelineWidget::yForOccupancy_(double occupancy, const SwRect& plot) const {
+    const int inset = plot.height > 12 ? 3 : 1;
+    const int innerHeight = std::max(1, plot.height - (inset * 2));
     const double clamped = std::max(0.0, std::min(loadMaxPercent_, occupancy));
     const double t = 1.0 - (clamped / std::max(1.0, loadMaxPercent_));
-    return plot.y + static_cast<int>(std::round(t * plot.height));
+    return plot.y + inset + static_cast<int>(std::round(t * innerHeight));
 }

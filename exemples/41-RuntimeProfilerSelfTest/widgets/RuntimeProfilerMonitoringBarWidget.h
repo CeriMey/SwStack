@@ -17,6 +17,7 @@ public:
     void setMonitoringEnabled(bool enabled);
     void setThresholdUs(long long thresholdUs);
     void setStallCount(unsigned long long stallCount);
+    void setLoadSummary(const SwString& summary);
 
 signals:
     DECLARE_SIGNAL(monitoringToggleRequested, bool)
@@ -30,10 +31,12 @@ private:
     SwPushButton* toggleButton_{nullptr};
     SwSpinBox* thresholdSpinBox_{nullptr};
     SwLabel* stackCaptureLabel_{nullptr};
+    SwLabel* loadSummaryLabel_{nullptr};
     SwWidget* statusLed_{nullptr};
     SwLabel* stallLabel_{nullptr};
     long long thresholdUs_{10000};
     unsigned long long stallCount_{0};
+    SwString loadSummary_;
     bool monitoringEnabled_{false};
     bool syncingState_{false};
     bool syncingThreshold_{false};

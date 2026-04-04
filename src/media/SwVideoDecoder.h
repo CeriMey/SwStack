@@ -63,6 +63,19 @@ class SwVideoDecoder {
 public:
     using FrameCallback = std::function<void(const SwVideoFrame&)>;
 
+    enum class RuntimeHealthEventKind {
+        None,
+        RecoverableOutputFailure,
+        FatalBackendFailure
+    };
+
+    struct RuntimeHealthEvent {
+        RuntimeHealthEventKind kind{RuntimeHealthEventKind::None};
+        SwString reason{};
+
+        bool isValid() const { return kind != RuntimeHealthEventKind::None; }
+    };
+
     /**
      * @brief Destroys the `SwVideoDecoder` instance.
      *
@@ -94,6 +107,7 @@ public:
      * @return The requested feed.
      */
     virtual bool feed(const SwVideoPacket& packet) = 0;
+    virtual RuntimeHealthEvent takeRuntimeHealthEvent() { return RuntimeHealthEvent(); }
     /**
      * @brief Returns the current flush.
      * @return The current flush.
@@ -429,3 +443,7 @@ private:
     std::map<SwVideoPacket::Codec, std::vector<Entry>> m_decoders;
     std::map<SwVideoPacket::Codec, int> m_anonymousIds;
 };
+
+#if defined(_WIN32)
+#include "media/SwMediaFoundationVideoDecoder.h"
+#endif

@@ -15,6 +15,10 @@
 #include "SwLineEdit.h"
 #include "SwTimer.h"
 #include "SwString.h"
+#include "SwRuntimeApplicationMonitor.h"
+
+#include <memory>
+#include <mutex>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -92,11 +96,78 @@ static SwString exampleDialogInitialPath() {
 #endif
 }
 
+namespace {
+
+class SimpleWindowRuntimeMonitorSink : public SwRuntimeApplicationMonitorSink {
+public:
+    void setSelectedApplicationId(unsigned long long applicationId) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        selectedApplicationId_ = applicationId;
+        hasSnapshot_ = false;
+    }
+
+    void onRuntimeApplicationDetached(const SwRuntimeApplicationDescriptor& descriptor) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (descriptor.applicationId == selectedApplicationId_) {
+            hasSnapshot_ = false;
+        }
+    }
+
+    void onRuntimeApplicationIterationSample(const SwRuntimeApplicationIterationSample& sample) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (sample.application.applicationId != selectedApplicationId_) {
+            return;
+        }
+        latestSnapshot_ = sample.snapshot;
+        hasSnapshot_ = true;
+    }
+
+    bool hasSnapshot() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return hasSnapshot_;
+    }
+
+    SwRuntimeIterationSnapshot latestSnapshot() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return latestSnapshot_;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    unsigned long long selectedApplicationId_{0};
+    SwRuntimeIterationSnapshot latestSnapshot_{};
+    bool hasSnapshot_{false};
+};
+
+static SwString threadLoadLabelText_(const SwRuntimeIterationSnapshot& snapshot) {
+    const double load = snapshot.lastSecondLoadPercentage > 0.0
+                            ? snapshot.lastSecondLoadPercentage
+                            : snapshot.loadPercentage;
+    return "UI thread load: " + SwString::number(load, 'f', load >= 10.0 ? 1 : 2) + " %";
+}
+
+} // namespace
+
 int main() {
 #if defined(_WIN32)
     SetUnhandledExceptionFilter(crashHandler);
 #endif
     SwGuiApplication app;
+    app.setRuntimeApplicationLabel("Simple Window Demo");
+
+    SimpleWindowRuntimeMonitorSink runtimeMonitorSink;
+    runtimeMonitorSink.setSelectedApplicationId(app.runtimeApplicationId());
+
+    SwRuntimeApplicationMonitorConfig runtimeMonitorConfig;
+    runtimeMonitorConfig.captureIterationSamples = true;
+    runtimeMonitorConfig.captureTimingBatches = false;
+    runtimeMonitorConfig.captureStalls = false;
+
+    SwRuntimeApplicationMonitor runtimeMonitor(&runtimeMonitorSink, runtimeMonitorConfig);
+    if (!runtimeMonitor.start()) {
+        return 10;
+    }
+
     SwMainWindow mainWindow("SwStack Demo");
     mainWindow.resize(640, 400);
 
@@ -409,7 +480,28 @@ int main() {
     // Status bar
     SwStatusBar* statusBar = mainWindow.statusBar();
     statusBar->showMessage("Ready  |  SwStack Demo  |  12 dialogs available");
+    SwLabel* threadLoadLabel = new SwLabel("UI thread load: --", statusBar);
+    threadLoadLabel->setStyleSheet(R"(
+        SwLabel {
+            background-color: rgba(0,0,0,0);
+            border-width: 0px;
+            color: rgb(51, 65, 85);
+            font-size: 12px;
+        }
+    )");
+    statusBar->addPermanentWidget(threadLoadLabel);
+
+    SwTimer* threadLoadTimer = new SwTimer(250, &mainWindow);
+    SwObject::connect(threadLoadTimer, &SwTimer::timeout, &mainWindow, [&runtimeMonitorSink, threadLoadLabel]() {
+        if (!threadLoadLabel || !runtimeMonitorSink.hasSnapshot()) {
+            return;
+        }
+        threadLoadLabel->setText(threadLoadLabelText_(runtimeMonitorSink.latestSnapshot()));
+    });
+    threadLoadTimer->start();
 
     mainWindow.show();
-    return app.exec();
+    const int exitCode = app.exec();
+    runtimeMonitor.stop();
+    return exitCode;
 }

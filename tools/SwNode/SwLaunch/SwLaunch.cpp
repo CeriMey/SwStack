@@ -1,8 +1,12 @@
 #include "SwCoreApplication.h"
 #include "SwDebug.h"
 #include "SwDir.h"
+#include "SwEventLoop.h"
 #include "SwFile.h"
+#include "SwHttpContext.h"
+#include "SwHttpServer.h"
 #include "SwJsonDocument.h"
+#include "SwLaunchDeploySupport.h"
 #include "SwLaunchTraceConfig.h"
 #include "SwProcess.h"
 #include "SwSharedMemorySignal.h"
@@ -10,6 +14,8 @@
 #include "SwTimer.h"
 
 #include <cctype>
+#include <iostream>
+#include <memory>
 #if !defined(_WIN32)
 #include <unistd.h>
 #endif
@@ -22,6 +28,415 @@ static uint64_t nowMonotonicMs_() {
     if (::clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
     return static_cast<uint64_t>(ts.tv_sec) * 1000ull + static_cast<uint64_t>(ts.tv_nsec) / 1000000ull;
 #endif
+}
+
+static SwString swLaunchHelpTopics_() {
+    return "config, nodes, containers, supervision, control_api, state_api, deploy, checksum, rollback, paths";
+}
+
+static SwString normalizeHelpTopic_(SwString topic) {
+    topic = topic.trimmed().toLower();
+    topic.replace("-", "_");
+    topic.replace(" ", "_");
+
+    if (topic == "control" || topic == "api" || topic == "http" || topic == "controlapi") {
+        return "control_api";
+    }
+    if (topic == "state" || topic == "state_put" || topic == "put_state") {
+        return "state_api";
+    }
+    if (topic == "checksums" || topic == "sha256") {
+        return "checksum";
+    }
+    if (topic == "rollbacks") {
+        return "rollback";
+    }
+    if (topic == "path" || topic == "files") {
+        return "paths";
+    }
+    return topic;
+}
+
+static SwString swLaunchHelpOverview_() {
+    return SwString(
+R"(SwLaunch
+
+SwLaunch is a local orchestrator for nodes and containers.
+It can:
+- load a desired state from JSON,
+- start and supervise child processes,
+- expose a protected control API,
+- apply desired-state changes at runtime,
+- deploy binaries and payload files with SHA-256 verification,
+- persist the resulting launch.json,
+- rollback files and runtime if a deployment fails.
+
+Basic usage:
+  SwLaunch --config_file=<path>
+  SwLaunch --config_json=<json>
+  SwLaunch -h
+
+Global arguments:
+  --config_file=<path>       Read launch state from disk.
+  --config_json=<json>       Read launch state from inline JSON.
+  --sys=<domain>             Override default system id.
+  --duration_ms=<ms>         Stop all children after this delay. 0 = run forever.
+
+Control API arguments:
+  --control_port=<port>      Enable the HTTP control API on this port.
+  --control_bind=<ipv4>      Bind address. Default: 127.0.0.1
+  --control_token=<secret>   Required bearer token for /api/* routes.
+
+Control API routes:
+  GET  /api/launch/state
+  PUT  /api/launch/state
+  POST /api/launch/deploy
+  GET  /api/launch/deploy/:jobId
+
+Important behavior:
+  - Runtime mutations require startup with --config_file.
+  - The control token is never persisted into launch.json.
+  - Deployments are serialized. A concurrent mutation gets HTTP 409.
+  - File replacement is limited to the target unit root:
+      workingDirectory if defined, otherwise executable directory.
+  - A file already identical by SHA-256 is skipped and does not trigger a restart by itself.
+  - Node/container spec changes trigger a targeted restart of that owner unit.
+  - Container internal composition changes are normalized as a restart of the owning container.
+
+Detailed help:
+  SwLaunch --help=config
+  SwLaunch -h deploy
+  SwLaunch --help=deploy
+  SwLaunch --help=control_api
+  SwLaunch --help=rollback
+
+Accepted help topics:
+  )") + swLaunchHelpTopics_() + "\n";
+}
+
+static SwString swLaunchHelpForTopic_(const SwString& rawTopic) {
+    const SwString topic = normalizeHelpTopic_(rawTopic);
+
+    if (topic.isEmpty() || topic == "overview" || topic == "general") {
+        return swLaunchHelpOverview_();
+    }
+
+    if (topic == "config") {
+        return SwString(
+R"(SwLaunch help: config
+
+Goal:
+  Start SwLaunch from a reproducible desired state.
+
+What SwLaunch expects:
+  - --config_file=<path> or --config_json=<json>
+  - root JSON must be an object
+  - root may contain sys, duration_ms, control_api, nodes, containers
+
+Key rules:
+  - baseDir = directory of --config_file when present, otherwise current directory
+  - executable, workingDirectory and config_file child paths are resolved from baseDir
+  - desired state is full-state oriented, not patch oriented
+
+What to verify:
+  - JSON parses cleanly
+  - child executables resolve to real files
+  - workingDirectory is correct for plugins and relative payload files
+)");
+    }
+
+    if (topic == "nodes") {
+        return SwString(
+R"(SwLaunch help: nodes
+
+Goal:
+  Launch a standalone executable under SwLaunch supervision.
+
+Required fields per node:
+  - ns
+  - name
+  - executable
+
+Useful optional fields:
+  - workingDirectory
+  - duration_ms
+  - config_file
+  - config_root
+  - params
+  - options
+
+What SwLaunch does:
+  - resolves the executable path
+  - generates a temporary child config file when params/options/config_root are provided
+  - starts the process with --sys --ns --name and child config arguments
+  - supervises restart and disconnect behavior if enabled
+)");
+    }
+
+    if (topic == "containers") {
+        return SwString(
+R"(SwLaunch help: containers
+
+Goal:
+  Launch a process such as SwComponentContainer and manage it like a single owner unit.
+
+Required fields per container:
+  - ns
+  - name
+  - executable
+
+Useful optional fields:
+  - workingDirectory
+  - duration_ms
+  - config_file
+  - composition
+  - options
+
+What SwLaunch does:
+  - resolves the executable path
+  - generates a temporary config_file when composition/options are provided
+  - starts the container process
+  - treats internal composition changes as a restart of the owning container in deploy V1
+
+Operational note:
+  Plugin loading depends on the container process workingDirectory.
+)");
+    }
+
+    if (topic == "supervision") {
+        return SwString(
+R"(SwLaunch help: supervision
+
+Crash restart:
+  - enable options.reloadOnCrash=true
+  - if exitCode != 0, SwLaunch restarts the unit after restartDelayMs
+
+Disconnect restart:
+  - enable options.reloadOnDisconnect=true
+  - SwLaunch scans the SHM registry for the expected object presence marker
+  - if the object stays absent longer than disconnectTimeoutMs, the unit is restarted
+
+Important:
+  - clean exitCode 0 does not count as a crash restart
+  - disconnect supervision only makes sense if the child publishes presence normally
+)");
+    }
+
+    if (topic == "control_api") {
+        return SwString(
+R"(SwLaunch help: control_api
+
+Goal:
+  Control the launcher at runtime through a protected local HTTP API.
+
+How to enable it:
+  --control_port=<port>
+  --control_bind=<ipv4>      default: 127.0.0.1
+  --control_token=<secret>
+
+Auth model:
+  Authorization: Bearer <token>
+
+Routes:
+  GET  /api/launch/state
+  PUT  /api/launch/state
+  POST /api/launch/deploy
+  GET  /api/launch/deploy/:jobId
+
+Important:
+  - mutations are refused unless SwLaunch was started with --config_file
+  - the bearer token is not returned by the API and is not written into launch.json
+)");
+    }
+
+    if (topic == "state_api") {
+        return SwString(
+R"(SwLaunch help: state_api
+
+GET /api/launch/state
+  Returns:
+  - current desiredState
+  - runtime summary of managed units
+  - control API bind/port summary
+
+PUT /api/launch/state
+  Accepts:
+  - a full desired state object
+
+Behavior:
+  - removed unit: stop it
+  - added unit: start it
+  - changed unit spec: restart that unit
+  - unchanged unit: keep it running
+
+Important:
+  - this is a full-state replacement flow, not a partial patch flow
+  - successful mutation persists launch.json when --config_file is in use
+)");
+    }
+
+    if (topic == "deploy") {
+        return SwString(
+R"(SwLaunch help: deploy
+
+Goal:
+  Replace binaries and payload files at runtime in a controlled, rollback-safe flow.
+
+Request format:
+  POST /api/launch/deploy
+  Content-Type: multipart/form-data
+
+Parts:
+  - manifest
+  - one file part for each declared artifact
+
+Manifest fields:
+  - formatVersion
+  - deploymentId (optional)
+  - desiredState
+  - artifacts[]
+
+Per artifact:
+  - partName
+  - ownerKey            node:<ns>/<name> or container:<ns>/<name>
+  - relativePath
+  - sha256
+
+Apply flow:
+  1. authenticate request
+  2. parse multipart into staging
+  3. verify artifact SHA-256
+  4. compare against current deployed files
+  5. compute impacted owner units
+  6. stop only impacted units
+  7. replace only non-identical files
+  8. persist launch.json
+  9. restart target state
+ 10. rollback files and runtime if a failure occurs
+)");
+    }
+
+    if (topic == "checksum") {
+        return SwString(
+R"(SwLaunch help: checksum
+
+SwLaunch uses SHA-256 for two reasons:
+  1. validate uploaded artifact integrity
+  2. avoid replacing a file that is already identical on disk
+
+Outcomes:
+  - upload SHA-256 != manifest SHA-256:
+      deployment is rejected before stopping units
+  - upload SHA-256 == current deployed file SHA-256:
+      artifact is skipped
+
+Practical effect:
+  - skippedFiles contains already-identical artifacts
+  - a skipped artifact does not trigger a restart by itself
+  - replaying the same bundle is idempotent from the file-replacement point of view
+)");
+    }
+
+    if (topic == "rollback") {
+        return SwString(
+R"(SwLaunch help: rollback
+
+Goal:
+  Avoid leaving the launcher in a half-applied state.
+
+Rollback scope:
+  - replaced files
+  - persisted launch.json
+  - runtime state of managed units as far as possible
+
+When rollback is triggered:
+  - artifact replacement failure
+  - config persistence failure
+  - runtime restart/apply failure after file replacement
+
+Operational expectation:
+  - a failed job should converge back toward the previous state
+  - deployment jobs expose errors, replacedFiles and skippedFiles for diagnosis
+)");
+    }
+
+    if (topic == "paths") {
+        return SwString(
+R"(SwLaunch help: paths
+
+Resolution rules:
+  - baseDir = config_file directory, or current directory if using config_json
+  - child executable path is resolved from baseDir
+  - child workingDirectory is resolved from baseDir
+  - if workingDirectory is absent, executable directory is used
+
+Deployment write root:
+  - workingDirectory if defined
+  - otherwise executable directory
+
+Security rules for deployment artifacts:
+  - relativePath must stay relative
+  - absolute paths are rejected
+  - paths containing .. are rejected
+
+Practical consequence:
+  SwLaunch can replace files owned by a managed unit, but it is not a generic remote file writer.
+)");
+    }
+
+    if (topic == "all") {
+        return swLaunchHelpOverview_() +
+               "\n" + swLaunchHelpForTopic_("config") +
+               "\n" + swLaunchHelpForTopic_("nodes") +
+               "\n" + swLaunchHelpForTopic_("containers") +
+               "\n" + swLaunchHelpForTopic_("supervision") +
+               "\n" + swLaunchHelpForTopic_("control_api") +
+               "\n" + swLaunchHelpForTopic_("state_api") +
+               "\n" + swLaunchHelpForTopic_("deploy") +
+               "\n" + swLaunchHelpForTopic_("checksum") +
+               "\n" + swLaunchHelpForTopic_("rollback") +
+               "\n" + swLaunchHelpForTopic_("paths");
+    }
+
+    return SwString();
+}
+
+static bool tryPrintHelp_(const SwCoreApplication& app, int& exitCodeOut) {
+    exitCodeOut = 0;
+
+    SwString topic;
+    if (app.hasArgument("h")) {
+        topic = app.getArgument("h", SwString());
+    } else if (app.hasArgument("?")) {
+        topic = app.getArgument("?", SwString());
+    } else if (app.hasArgument("help_topic")) {
+        topic = app.getArgument("help_topic", SwString());
+    } else if (app.hasArgument("help_feature")) {
+        topic = app.getArgument("help_feature", SwString());
+    } else if (app.hasArgument("help-topic")) {
+        topic = app.getArgument("help-topic", SwString());
+    } else if (app.hasArgument("help-feature")) {
+        topic = app.getArgument("help-feature", SwString());
+    } else if (app.hasArgument("help")) {
+        topic = app.getArgument("help", SwString());
+    } else {
+        return false;
+    }
+
+    const SwString helpText = swLaunchHelpForTopic_(topic);
+    if (!helpText.isEmpty()) {
+        std::cout << helpText.toStdString();
+        if (!helpText.endsWith("\n")) {
+            std::cout << std::endl;
+        }
+        exitCodeOut = 0;
+        return true;
+    }
+
+    std::cout << "Unknown SwLaunch help topic: " << topic.toStdString() << "\n\n";
+    std::cout << swLaunchHelpOverview_().toStdString();
+    exitCodeOut = 2;
+    return true;
 }
 
 static bool loadJsonObject_(const SwCoreApplication& app,
@@ -290,7 +705,9 @@ static ProcessFlags processFlagsFromOptions_(const SwJsonObject& opts) {
     const bool createNewConsole = opts.contains("createNewConsole") ? opts["createNewConsole"].toBool() : false;
     const bool detached = opts.contains("detached") ? opts["detached"].toBool() : false;
     const bool suspended = opts.contains("suspended") ? opts["suspended"].toBool() : false;
+    const bool runAsAdmin = opts.contains("runAsAdmin") ? opts["runAsAdmin"].toBool() : false;
 
+    if (runAsAdmin) flags |= ProcessFlags::RunAsAdmin;
     if (suspended) flags |= ProcessFlags::Suspended;
 
     if (detached) {
@@ -311,6 +728,14 @@ static ProcessFlags processFlagsFromOptions_(const SwJsonObject& opts) {
 #endif
 
     return flags;
+}
+
+static bool hasProcessFlag_(ProcessFlags flags, ProcessFlags bit) {
+#if defined(_WIN32)
+    return (static_cast<DWORD>(flags) & static_cast<DWORD>(bit)) != 0;
+#else
+    return (static_cast<int>(flags) & static_cast<int>(bit)) != 0;
+#endif
 }
 
 static uint64_t remoteObjectLastSeenMs_(const SwString& domain, const SwString& objectFqn) {
@@ -434,6 +859,42 @@ static void forwardChildChunk_(const SwString& id, bool fromStdErr, const SwStri
     }
 }
 
+#if defined(_WIN32)
+static HANDLE createLauncherLifetimeJob_() {
+    HANDLE job = ::CreateJobObjectW(NULL, NULL);
+    if (!job) {
+        swError() << "[launcher] CreateJobObjectW failed: " << ::GetLastError();
+        return NULL;
+    }
+
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE |
+                                            JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+    if (!::SetInformationJobObject(job,
+                                   JobObjectExtendedLimitInformation,
+                                   &info,
+                                   static_cast<DWORD>(sizeof(info)))) {
+        swError() << "[launcher] SetInformationJobObject failed: " << ::GetLastError();
+        ::CloseHandle(job);
+        return NULL;
+    }
+
+    BOOL inJob = FALSE;
+    if (::IsProcessInJob(::GetCurrentProcess(), NULL, &inJob) && inJob) {
+        swWarning() << "[launcher] current process is already inside a job; attached-child ownership may be limited";
+        return job;
+    }
+
+    if (!::AssignProcessToJobObject(job, ::GetCurrentProcess())) {
+        swError() << "[launcher] AssignProcessToJobObject(self) failed: " << ::GetLastError();
+        ::CloseHandle(job);
+        return NULL;
+    }
+
+    return job;
+}
+#endif
+
 class LaunchContainerProcess : public SwObject {
  public:
     LaunchContainerProcess(const SwJsonObject& spec,
@@ -503,8 +964,32 @@ class LaunchContainerProcess : public SwObject {
         stopping_ = true;
         if (onlineTimer_) onlineTimer_->stop();
         if (process_ && process_->isOpen()) {
-            process_->terminate();
+            if (hasProcessFlag_(processFlags_, ProcessFlags::Detached)) {
+                process_->release();
+            } else {
+                process_->terminate();
+            }
         }
+    }
+
+    void forceKill() {
+        stopping_ = true;
+        if (onlineTimer_) onlineTimer_->stop();
+        if (process_ && process_->isOpen()) {
+            process_->kill();
+        }
+    }
+
+    void setShutdownOnCleanExitHandler(const std::function<void(const SwString&, int)>& handler) {
+        shutdownOnCleanExitHandler_ = handler;
+    }
+
+    bool isRunning() const {
+        return process_ && process_->isOpen();
+    }
+
+    SwString runtimeId() const {
+        return id_;
     }
 
  private:
@@ -554,6 +1039,8 @@ class LaunchContainerProcess : public SwObject {
 
         const SwJsonObject opts = spec_.contains("options") ? getObjectOrEmpty_(spec_["options"]) : SwJsonObject();
         reloadOnCrash_ = opts.contains("reloadOnCrash") ? opts["reloadOnCrash"].toBool() : false;
+        shutdownLauncherOnCleanExit_ =
+            opts.contains("shutdownLauncherOnCleanExit") ? opts["shutdownLauncherOnCleanExit"].toBool() : false;
         restartDelayMs_ = opts.contains("restartDelayMs") ? opts["restartDelayMs"].toInt() : 1000;
         reloadOnDisconnect_ = opts.contains("reloadOnDisconnect") ? opts["reloadOnDisconnect"].toBool() : false;
         disconnectTimeoutMs_ = opts.contains("disconnectTimeoutMs") ? opts["disconnectTimeoutMs"].toInt() : 5000;
@@ -679,6 +1166,12 @@ class LaunchContainerProcess : public SwObject {
         swWarning() << "[launcher] container terminated=" << id_ << " exitCode=" << exitCode;
         if (process_ && process_->isOpen()) process_->close();
         if (stopping_) return;
+        if (exitCode == 0 && shutdownLauncherOnCleanExit_) {
+            if (shutdownOnCleanExitHandler_) {
+                shutdownOnCleanExitHandler_(id_, exitCode);
+            }
+            return;
+        }
         if (!reloadOnCrash_) return;
         if (exitCode == 0) return;
 
@@ -705,6 +1198,7 @@ class LaunchContainerProcess : public SwObject {
     SwString workingDir_{};
     SwString configFilePath_{};
     bool reloadOnCrash_{false};
+    bool shutdownLauncherOnCleanExit_{false};
     int restartDelayMs_{1000};
     bool reloadOnDisconnect_{false};
     int disconnectTimeoutMs_{5000};
@@ -716,6 +1210,7 @@ class LaunchContainerProcess : public SwObject {
     uint64_t startMs_{0};
     uint64_t lastSeenMs_{0};
     bool everOnline_{false};
+    std::function<void(const SwString&, int)> shutdownOnCleanExitHandler_{};
 };
 
 class LaunchNodeProcess : public SwObject {
@@ -792,8 +1287,32 @@ class LaunchNodeProcess : public SwObject {
         stopping_ = true;
         if (onlineTimer_) onlineTimer_->stop();
         if (process_ && process_->isOpen()) {
-            process_->terminate();
+            if (hasProcessFlag_(processFlags_, ProcessFlags::Detached)) {
+                process_->release();
+            } else {
+                process_->terminate();
+            }
         }
+    }
+
+    void forceKill() {
+        stopping_ = true;
+        if (onlineTimer_) onlineTimer_->stop();
+        if (process_ && process_->isOpen()) {
+            process_->kill();
+        }
+    }
+
+    void setShutdownOnCleanExitHandler(const std::function<void(const SwString&, int)>& handler) {
+        shutdownOnCleanExitHandler_ = handler;
+    }
+
+    bool isRunning() const {
+        return process_ && process_->isOpen();
+    }
+
+    SwString runtimeId() const {
+        return id_;
     }
 
  private:
@@ -844,6 +1363,8 @@ class LaunchNodeProcess : public SwObject {
 
         const SwJsonObject opts = spec_.contains("options") ? getObjectOrEmpty_(spec_["options"]) : SwJsonObject();
         reloadOnCrash_ = opts.contains("reloadOnCrash") ? opts["reloadOnCrash"].toBool() : false;
+        shutdownLauncherOnCleanExit_ =
+            opts.contains("shutdownLauncherOnCleanExit") ? opts["shutdownLauncherOnCleanExit"].toBool() : false;
         restartDelayMs_ = opts.contains("restartDelayMs") ? opts["restartDelayMs"].toInt() : 1000;
         reloadOnDisconnect_ = opts.contains("reloadOnDisconnect") ? opts["reloadOnDisconnect"].toBool() : false;
         disconnectTimeoutMs_ = opts.contains("disconnectTimeoutMs") ? opts["disconnectTimeoutMs"].toInt() : 5000;
@@ -946,6 +1467,12 @@ class LaunchNodeProcess : public SwObject {
         swWarning() << "[launcher] node terminated=" << id_ << " exitCode=" << exitCode;
         if (process_ && process_->isOpen()) process_->close();
         if (stopping_) return;
+        if (exitCode == 0 && shutdownLauncherOnCleanExit_) {
+            if (shutdownOnCleanExitHandler_) {
+                shutdownOnCleanExitHandler_(id_, exitCode);
+            }
+            return;
+        }
         if (!reloadOnCrash_) return;
         if (exitCode == 0) return;
 
@@ -973,6 +1500,7 @@ class LaunchNodeProcess : public SwObject {
     SwString configFilePath_{};
     SwString configRoot_{};
     bool reloadOnCrash_{false};
+    bool shutdownLauncherOnCleanExit_{false};
     int restartDelayMs_{1000};
     bool reloadOnDisconnect_{false};
     int disconnectTimeoutMs_{5000};
@@ -984,10 +1512,18 @@ class LaunchNodeProcess : public SwObject {
     uint64_t startMs_{0};
     uint64_t lastSeenMs_{0};
     bool everOnline_{false};
+    std::function<void(const SwString&, int)> shutdownOnCleanExitHandler_{};
 };
+
+#include "SwLaunchController.h"
 
 int main(int argc, char** argv) {
     SwCoreApplication app(argc, argv);
+
+    int helpExitCode = 0;
+    if (tryPrintHelp_(app, helpExitCode)) {
+        return helpExitCode;
+    }
 
     SwJsonObject root;
     SwString err;
@@ -1015,57 +1551,73 @@ int main(int argc, char** argv) {
         durationMs = app.getArgument("duration_ms", "0").toInt();
     }
 
+    if (root.contains("control_api") && !root["control_api"].isObject()) {
+        swError() << "field 'control_api' must be an object when present";
+        return 2;
+    }
+
+    const SwJsonObject controlApi = getObjectOrEmpty_(root["control_api"]);
+    SwString controlBind = controlApi.contains("bind") ? SwString(controlApi["bind"].toString()) : SwString("127.0.0.1");
+    if (controlBind.isEmpty()) {
+        controlBind = "127.0.0.1";
+    }
+    if (app.hasArgument("control_bind")) {
+        controlBind = app.getArgument("control_bind", controlBind);
+    }
+
+    int controlPort = controlApi.contains("port") ? controlApi["port"].toInt() : 0;
+    if (app.hasArgument("control_port")) {
+        controlPort = app.getArgument("control_port", SwString::number(controlPort)).toInt();
+    }
+    if (controlPort < 0 || controlPort > 65535) {
+        swError() << "control_port must be between 0 and 65535";
+        return 2;
+    }
+    const SwString controlToken = app.getArgument("control_token", SwString());
+
     const bool preferWindowsExe = guessPreferWindowsExe_(root, baseDir);
+
+#if defined(_WIN32)
+    HANDLE launcherLifetimeJob = createLauncherLifetimeJob_();
+#endif
 
     SwObject manager;
     auto* traceConfig = new SwLaunchTraceConfig(sys, resolvePath_(baseDir, "systemConfig"), baseDir, &manager);
     (void)traceConfig;
-    SwList<LaunchContainerProcess*> containers;
-    SwList<LaunchNodeProcess*> nodes;
 
-    const SwJsonArray containersArr = getArrayOrEmpty_(root["containers"]);
-    const SwJsonArray nodesArr = getArrayOrEmpty_(root["nodes"]);
-    if (containersArr.size() == 0 && nodesArr.size() == 0) {
-        swError() << "launch json must contain 'containers' and/or 'nodes' arrays";
-        return 2;
-    }
+    auto* controller = new SwLaunchController(app,
+                                              root,
+                                              baseDir,
+                                              configFileUsed,
+                                              sys,
+                                              durationMs,
+                                              preferWindowsExe,
+                                              controlBind,
+                                              static_cast<uint16_t>(controlPort),
+                                              controlToken,
+                                              &manager);
 
-    for (size_t i = 0; i < containersArr.size(); ++i) {
-        const SwJsonValue v = containersArr[i];
-        if (!v.isObject()) continue;
-        const SwJsonObject spec(v.toObject());
-        auto* c = new LaunchContainerProcess(spec, baseDir, sys, preferWindowsExe, &manager);
-        containers.append(c);
-        if (!c->start()) {
-            swError() << "[launcher] failed to start a container, stopping";
-            for (int k = 0; k < containers.size(); ++k) containers[k]->stop();
-            for (int k = 0; k < nodes.size(); ++k) nodes[k]->stop();
-            return 3;
-        }
-    }
-
-    for (size_t i = 0; i < nodesArr.size(); ++i) {
-        const SwJsonValue v = nodesArr[i];
-        if (!v.isObject()) continue;
-        const SwJsonObject spec(v.toObject());
-        auto* n = new LaunchNodeProcess(spec, baseDir, sys, preferWindowsExe, &manager);
-        nodes.append(n);
-        if (!n->start()) {
-            swError() << "[launcher] failed to start a node, stopping";
-            for (int k = 0; k < containers.size(); ++k) containers[k]->stop();
-            for (int k = 0; k < nodes.size(); ++k) nodes[k]->stop();
-            return 3;
-        }
+    if (!controller->start(err)) {
+        swError() << err;
+        return 3;
     }
 
     if (durationMs > 0) {
-        SwTimer::singleShot(durationMs, [&]() {
+        SwTimer::singleShot(durationMs, [controller, &app]() {
             swWarning() << "[launcher] stopping all processes";
-            for (int i = 0; i < containers.size(); ++i) containers[i]->stop();
-            for (int i = 0; i < nodes.size(); ++i) nodes[i]->stop();
+            controller->stopAll();
             app.quit();
         });
     }
 
-    return app.exec();
+    const int exitCode = app.exec();
+
+#if defined(_WIN32)
+    if (launcherLifetimeJob) {
+        ::CloseHandle(launcherLifetimeJob);
+        launcherLifetimeJob = NULL;
+    }
+#endif
+
+    return exitCode;
 }

@@ -95,7 +95,6 @@ protected:
      * @details The returned value reflects the state currently stored by the instance.
      */
     static bool registerAllType() {
-        swCWarning(kSwLogCategory_SwAny) << "********************CALL ONCE NOT TWICE********************";
         registerMetaType<SwString>();
         registerMetaType<SwJsonValue>();
         registerMetaType<SwJsonObject>();
@@ -1029,42 +1028,52 @@ public:
      * @param other Value passed to the method.
      */
     void copyFrom(const SwAny& other) {
-        // Copier le type du nom
-        typeNameStr = other.typeNameStr;
+        // Repartir d'un stockage vide avant de recopier la valeur.
+        clear();
+        const std::string otherTypeName = other.typeNameStr;
 
-        if (typeNameStr.empty()) {
+        if (otherTypeName.empty()) {
             return; // Aucun type à copier
         }
 
         // Gestion des types natifs
-        if (typeNameStr == typeid(bool).name()) {
-            store(other.storage.b);
-        } else if (typeNameStr == typeid(int).name()) {
-            store(other.storage.i);
-        } else if (typeNameStr == typeid(long long).name()) {
-            store(other.storage.i64);
-        } else if (typeNameStr == typeid(float).name()) {
-            store(other.storage.f);
-        } else if (typeNameStr == typeid(double).name()) {
-            store(other.storage.d);
-        } else if (typeNameStr == typeid(uint32_t).name() ||
-                   typeNameStr == typeid(unsigned int).name()) {
-            store(other.storage.u32);
-        } else if (typeNameStr == typeid(std::string).name()) {
-            store(other.storage.str);
-        } else if (typeNameStr == typeid(std::vector<uint8_t>).name()) {
-            store(other.storage.byteArray);
+        if (otherTypeName == typeid(bool).name()) {
+            storage.b = other.storage.b;
+            typeNameStr = otherTypeName;
+        } else if (otherTypeName == typeid(int).name()) {
+            storage.i = other.storage.i;
+            typeNameStr = otherTypeName;
+        } else if (otherTypeName == typeid(long long).name()) {
+            storage.i64 = other.storage.i64;
+            typeNameStr = otherTypeName;
+        } else if (otherTypeName == typeid(float).name()) {
+            storage.f = other.storage.f;
+            typeNameStr = otherTypeName;
+        } else if (otherTypeName == typeid(double).name()) {
+            storage.d = other.storage.d;
+            typeNameStr = otherTypeName;
+        } else if (otherTypeName == typeid(uint32_t).name() ||
+                   otherTypeName == typeid(unsigned int).name()) {
+            storage.u32 = other.storage.u32;
+            typeNameStr = otherTypeName;
+        } else if (otherTypeName == typeid(std::string).name()) {
+            new (&storage.str) std::string(other.storage.str);
+            typeNameStr = otherTypeName;
+        } else if (otherTypeName == typeid(std::vector<uint8_t>).name()) {
+            new (&storage.byteArray) std::vector<uint8_t>(other.storage.byteArray);
+            typeNameStr = otherTypeName;
         }
         // Gestion des types dynamiques
         else {
             auto& dynamicCopyMap = getDynamicCopyFromMap();
-            auto it = dynamicCopyMap.find(typeNameStr);
+            auto it = dynamicCopyMap.find(otherTypeName);
             if (it != dynamicCopyMap.end()) {
                 it->second(*this, other); // Appel de la fonction dynamique pour copier
             }
             // Copie générique des données dynamiques si aucune fonction n'est définie
             else if (other.storage.dynamic) {
                 storage.dynamic = other.storage.dynamic; // Copie directe
+                typeNameStr = otherTypeName;
             }
         }
     }

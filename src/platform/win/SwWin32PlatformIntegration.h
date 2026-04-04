@@ -359,6 +359,8 @@ struct SwWin32WindowCallbacks {
      * @return The requested function<void.
      */
     std::function<void(int width, int height)> resizeHandler;
+    /** @brief Called on WM_CLOSE. Return true to allow close, false to prevent it. */
+    std::function<bool()> closeHandler;
 };
 
 class SwWin32PlatformWindow;
@@ -626,6 +628,7 @@ public:
                 runPaintHandler(callbacks.paintHandler, hwnd, hdc, ps.rcPaint);
             }
             EndPaint(hwnd, &ps);
+            SwWidgetPlatformAdapter::notePainted(SwWidgetPlatformAdapter::fromNativeHandle(hwnd));
             return 0;
         }
         case WM_ERASEBKGND: {
@@ -640,7 +643,7 @@ public:
                 // return to SwGuiApplication::exec() until the mouse is released.
                 // Flush batched widget invalidations here so live resize repaints
                 // are not deferred until the end of the drag.
-                SwWidgetPlatformAdapter::flushDamage();
+                SwWidgetPlatformAdapter::flushDamage(true);
                 if (!IsIconic(hwnd)) {
                     UpdateWindow(hwnd);
                 }
@@ -717,11 +720,7 @@ public:
             return 0;
         }
         case WM_MOUSEMOVE: {
-            TRACKMOUSEEVENT tracking{};
-            tracking.cbSize = sizeof(TRACKMOUSEEVENT);
-            tracking.dwFlags = TME_LEAVE;
-            tracking.hwndTrack = hwnd;
-            TrackMouseEvent(&tracking);
+            swWidgetEnsureMouseLeaveTracking_(hwnd);
             int x = GET_X_LPARAM(lParam);
             int y = GET_Y_LPARAM(lParam);
             if (callbacks.mouseMoveHandler) {
@@ -734,6 +733,7 @@ public:
             return 0;
         }
         case WM_MOUSELEAVE: {
+            swWidgetClearMouseLeaveTracking_(hwnd);
             if (callbacks.mouseLeaveHandler) {
                 runMouseLeaveHandler(callbacks.mouseLeaveHandler);
             }
@@ -909,6 +909,14 @@ public:
                                      L'\0',
                                      /*textProvided=*/false);
             }
+            return 0;
+        }
+        case WM_CLOSE: {
+            if (callbacks.closeHandler) {
+                bool allowClose = callbacks.closeHandler();
+                if (!allowClose) return 0; // prevent close
+            }
+            DestroyWindow(hwnd);
             return 0;
         }
         case WM_DESTROY: {
@@ -1536,6 +1544,7 @@ private:
             };
         }
         nativeCallbacks.deleteHandler = callbacks.deleteHandler;
+        nativeCallbacks.closeHandler = callbacks.closeHandler;
         nativeCallbacks.mousePressHandler = [handler = callbacks.mousePressHandler](int x,
                                                                                     int y,
                                                                                     SwMouseButton button,

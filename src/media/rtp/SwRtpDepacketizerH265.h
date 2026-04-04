@@ -13,6 +13,7 @@
 #include <cctype>
 #include <functional>
 #include <string>
+#include <utility>
 static constexpr const char* kSwLogCategory_SwRtpDepacketizerH265 = "sw.media.swrtpdepacketizerh265";
 
 class SwRtpDepacketizerH265 {
@@ -28,6 +29,7 @@ public:
         m_haveTimestamp = false;
         m_currentTimestamp = 0;
         m_currentKeyFrame = false;
+        m_currentRecoveryIdr = false;
         m_waitingForKeyFrame = true;
         m_currentAccessUnitHasHeaders = false;
         m_currentAccessUnitInjectedHeaders = false;
@@ -69,15 +71,18 @@ public:
 
     void onSequenceGap(bool forceWaitForKeyFrame = false) {
         const bool hadDecoderSync = !m_waitingForKeyFrame;
+        const bool enteringKeyFrameRecovery = forceWaitForKeyFrame || !hadDecoderSync;
         m_accessUnit.clear();
         m_currentKeyFrame = false;
+        m_currentRecoveryIdr = false;
         m_currentAccessUnitHasHeaders = false;
         m_currentAccessUnitInjectedHeaders = false;
         m_dropCurrentAccessUnit = true;
         m_loggedWaitingForKeyFrame = false;
         m_emitDiscontinuityOnNextFrame = true;
-        if (forceWaitForKeyFrame || !hadDecoderSync) {
+        if (enteringKeyFrameRecovery) {
             m_waitingForKeyFrame = true;
+            m_headersInserted = false;
         }
     }
 
@@ -116,14 +121,19 @@ public:
             if (isParameterSet_(nalType)) {
                 m_currentAccessUnitHasHeaders = true;
             }
-            if (isKeyNal_(nalType) && !m_headersInserted && !m_currentAccessUnitHasHeaders) {
+            if (isKeyNal_(nalType) && !m_headersInserted && !m_currentAccessUnitHasHeaders &&
+                hasCompleteParameterSetCache_()) {
                 appendParameterSets_();
                 m_currentAccessUnitInjectedHeaders = true;
             }
-            appendStartCode_();
+            reserveAccessUnitBytes_(4U + size);
+            appendStartCodeUnchecked_();
             m_accessUnit.append(reinterpret_cast<const char*>(payload), size);
             if (isKeyNal_(nalType)) {
                 m_currentKeyFrame = true;
+            }
+            if (isRecoveryIdrNal_(nalType)) {
+                m_currentRecoveryIdr = true;
             }
         } else if (nalType == 48) {
             size_t offset = 2;
@@ -139,14 +149,19 @@ public:
                 if (isParameterSet_(innerType)) {
                     m_currentAccessUnitHasHeaders = true;
                 }
-                if (isKeyNal_(innerType) && !m_headersInserted && !m_currentAccessUnitHasHeaders) {
+                if (isKeyNal_(innerType) && !m_headersInserted && !m_currentAccessUnitHasHeaders &&
+                    hasCompleteParameterSetCache_()) {
                     appendParameterSets_();
                     m_currentAccessUnitInjectedHeaders = true;
                 }
-                appendStartCode_();
+                reserveAccessUnitBytes_(4U + nalSize);
+                appendStartCodeUnchecked_();
                 m_accessUnit.append(reinterpret_cast<const char*>(payload + offset), nalSize);
                 if (isKeyNal_(innerType)) {
                     m_currentKeyFrame = true;
+                }
+                if (isRecoveryIdrNal_(innerType)) {
+                    m_currentRecoveryIdr = true;
                 }
                 offset += nalSize;
             }
@@ -158,14 +173,17 @@ public:
             const bool start = (fuHeader & 0x80) != 0;
             const bool end = (fuHeader & 0x40) != 0;
             const uint8_t fuNalType = fuHeader & 0x3F;
+            const size_t fuPayloadSize = size > 3U ? (size - 3U) : 0U;
             if (start) {
-                if (isKeyNal_(fuNalType) && !m_headersInserted && !m_currentAccessUnitHasHeaders) {
+                if (isKeyNal_(fuNalType) && !m_headersInserted && !m_currentAccessUnitHasHeaders &&
+                    hasCompleteParameterSetCache_()) {
                     appendParameterSets_();
                     m_currentAccessUnitInjectedHeaders = true;
                 }
                 const uint8_t reconstructed0 =
                     static_cast<uint8_t>((payload[0] & 0x81) | (fuNalType << 1));
-                appendStartCode_();
+                reserveAccessUnitBytes_(4U + 2U + fuPayloadSize);
+                appendStartCodeUnchecked_();
                 m_accessUnit.append(reinterpret_cast<const char*>(&reconstructed0), 1);
                 m_accessUnit.append(reinterpret_cast<const char*>(payload + 1), 1);
                 if (isParameterSet_(fuNalType)) {
@@ -174,9 +192,14 @@ public:
                 if (isKeyNal_(fuNalType)) {
                     m_currentKeyFrame = true;
                 }
+                if (isRecoveryIdrNal_(fuNalType)) {
+                    m_currentRecoveryIdr = true;
+                }
+            } else if (fuPayloadSize > 0U) {
+                reserveAccessUnitBytes_(fuPayloadSize);
             }
-            if (size > 3) {
-                m_accessUnit.append(reinterpret_cast<const char*>(payload + 3), size - 3);
+            if (fuPayloadSize > 0U) {
+                m_accessUnit.append(reinterpret_cast<const char*>(payload + 3), fuPayloadSize);
             }
             if (end && packet.marker) {
                 flushFrame_(packet.timestamp);
@@ -194,28 +217,72 @@ public:
 private:
     static bool isKeyNal_(uint8_t nalType) { return nalType >= 16 && nalType <= 21; }
 
+    static bool isRecoveryIdrNal_(uint8_t nalType) { return nalType == 19 || nalType == 20; }
+
     static bool isParameterSet_(uint8_t nalType) {
         return nalType == 32 || nalType == 33 || nalType == 34;
     }
 
+    bool hasCompleteParameterSetCache_() const {
+        return !m_vps.isEmpty() && !m_sps.isEmpty() && !m_pps.isEmpty();
+    }
+
     void appendStartCode_() {
+        reserveAccessUnitBytes_(4U);
+        appendStartCodeUnchecked_();
+    }
+
+    void appendStartCodeUnchecked_() {
         static const char kStartCode[] = {0x00, 0x00, 0x00, 0x01};
         m_accessUnit.append(kStartCode, sizeof(kStartCode));
     }
 
     void appendParameterSets_() {
+        if (!hasCompleteParameterSetCache_()) {
+            return;
+        }
+        reserveAccessUnitBytes_(parameterSetBytes_());
         if (!m_vps.isEmpty()) {
-            appendStartCode_();
+            appendStartCodeUnchecked_();
             m_accessUnit.append(m_vps);
         }
         if (!m_sps.isEmpty()) {
-            appendStartCode_();
+            appendStartCodeUnchecked_();
             m_accessUnit.append(m_sps);
         }
         if (!m_pps.isEmpty()) {
-            appendStartCode_();
+            appendStartCodeUnchecked_();
             m_accessUnit.append(m_pps);
         }
+    }
+
+    void reserveAccessUnitBytes_(size_t additionalBytes) {
+        const size_t requiredSize = m_accessUnit.size() + additionalBytes;
+        if (requiredSize <= m_accessUnit.capacity()) {
+            return;
+        }
+        size_t newCapacity = m_accessUnit.capacity();
+        if (newCapacity < 1024U) {
+            newCapacity = 1024U;
+        }
+        while (newCapacity < requiredSize) {
+            newCapacity *= 2U;
+        }
+        m_accessUnit.reserve(newCapacity);
+    }
+
+    size_t parameterSetBytes_() const {
+        size_t total = 0U;
+        if (!m_vps.isEmpty()) {
+            total += 4U + m_vps.size();
+        }
+        if (!m_sps.isEmpty()) {
+            total += 4U + m_sps.size();
+        }
+        if (!m_pps.isEmpty()) {
+            total += 4U + m_pps.size();
+        }
+        return total;
     }
 
     void flushFrame_(uint32_t timestamp) {
@@ -223,28 +290,31 @@ private:
             return;
         }
         const bool carriesHeaders = m_currentAccessUnitHasHeaders || m_currentAccessUnitInjectedHeaders;
-        if (m_waitingForKeyFrame && !m_currentKeyFrame && !carriesHeaders) {
+        const bool recoveryReady = m_currentRecoveryIdr && carriesHeaders;
+        if (m_waitingForKeyFrame && !recoveryReady) {
             if (!m_loggedWaitingForKeyFrame) {
                 m_loggedWaitingForKeyFrame = true;
                 swCWarning(kSwLogCategory_SwRtpDepacketizerH265)
-                    << "[SwRtpDepacketizerH265] Dropping non-key frame while waiting for a decodable keyframe";
+                    << "[SwRtpDepacketizerH265] Dropping AU while waiting for a recovery IDR with guaranteed headers";
             }
             clearFrameState_();
             return;
         }
-        if (m_waitingForKeyFrame && m_currentKeyFrame) {
+        const bool recoveryAccepted = m_waitingForKeyFrame && recoveryReady;
+        if (recoveryAccepted) {
             m_waitingForKeyFrame = false;
             m_loggedWaitingForKeyFrame = false;
             swCWarning(kSwLogCategory_SwRtpDepacketizerH265)
-                << "[SwRtpDepacketizerH265] Received decodable keyframe";
+                << "[SwRtpDepacketizerH265] Received recovery IDR headers="
+                << (m_currentAccessUnitHasHeaders ? "in-band" : "injected");
         }
         if (m_packetCallback) {
             SwVideoPacket packet(SwVideoPacket::Codec::H265,
-                                 m_accessUnit,
+                                 std::move(m_accessUnit),
                                  static_cast<std::int64_t>(timestamp),
                                  static_cast<std::int64_t>(timestamp),
-                                 m_currentKeyFrame);
-            if (m_emitDiscontinuityOnNextFrame) {
+                                  m_currentKeyFrame);
+            if (recoveryAccepted || m_emitDiscontinuityOnNextFrame) {
                 packet.setDiscontinuity(true);
                 m_emitDiscontinuityOnNextFrame = false;
             }
@@ -259,6 +329,7 @@ private:
     void clearFrameState_() {
         m_accessUnit.clear();
         m_currentKeyFrame = false;
+        m_currentRecoveryIdr = false;
         m_currentAccessUnitHasHeaders = false;
         m_currentAccessUnitInjectedHeaders = false;
     }
@@ -287,6 +358,7 @@ private:
     bool m_haveTimestamp{false};
     uint32_t m_currentTimestamp{0};
     bool m_currentKeyFrame{false};
+    bool m_currentRecoveryIdr{false};
     bool m_waitingForKeyFrame{true};
     bool m_loggedWaitingForKeyFrame{false};
     bool m_currentAccessUnitHasHeaders{false};

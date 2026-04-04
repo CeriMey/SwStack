@@ -1,5 +1,6 @@
 ﻿#include "SwCoreApplication.h"
 #include "SwHttpServer.h"
+#include "SwThreadPool.h"
 #include "SwTcpSocket.h"
 #include "SwTimer.h"
 #include "SwString.h"
@@ -226,7 +227,7 @@ private slots:
 
 private:
     void runNextCase_() {
-        if (m_caseIndex >= 11) {
+        if (m_caseIndex >= 13) {
             swDebug() << "[HttpServerSelfTest] PASS all cases";
             m_server->close();
             m_app->exit(0);
@@ -306,6 +307,14 @@ private:
         }
         if (index == 10) {
             partsOut.append("GET /uuid/not-a-uuid HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+            return true;
+        }
+        if (index == 11) {
+            partsOut.append("GET /transport HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+            return true;
+        }
+        if (index == 12) {
+            partsOut.append("GET /.well-known/acme-challenge/http-selftest-token HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
             return true;
         }
         return false;
@@ -485,6 +494,26 @@ private:
             }
             return true;
         }
+        if (m_caseIndex == 11) {
+            const SwString expected = "http:" + SwString::number(static_cast<int>(m_port));
+            if (parsed.statusCode != 200 || parsed.body != SwByteArray(expected.toStdString())) {
+                swError() << "[HttpServerSelfTest] case11 expected status=200 body=" << expected
+                          << " got status=" << parsed.statusCode
+                          << " body=" << SwString(parsed.body.toStdString());
+                fail_("case 11 failed");
+                return false;
+            }
+            return true;
+        }
+        if (m_caseIndex == 12) {
+            if (parsed.statusCode != 200 || parsed.body != SwByteArray("pre-route-ok")) {
+                swError() << "[HttpServerSelfTest] case12 expected status=200 body=pre-route-ok got status="
+                          << parsed.statusCode << " body=" << SwString(parsed.body.toStdString());
+                fail_("case 12 failed");
+                return false;
+            }
+            return true;
+        }
         return false;
     }
 
@@ -568,6 +597,7 @@ int main(int argc, char* argv[]) {
     SwCoreApplication app(argc, argv);
 
     SwHttpServer server(nullptr);
+    SwThreadPool threadPool(nullptr);
     SwHttpLimits limits;
     limits.maxBodyBytes = 12 * 1024 * 1024;
     limits.maxChunkSize = 4 * 1024 * 1024;
@@ -575,8 +605,13 @@ int main(int argc, char* argv[]) {
     limits.maxMultipartPartHeadersBytes = 8 * 1024;
     limits.enableMultipartFileStreaming = true;
     limits.multipartTempDirectory = SW_HTTP_SERVER_SELFTEST_TEMP_ROOT;
+    limits.maxThreadPoolQueuedDispatches = 256;
     server.setLimits(limits);
     server.setTrailingSlashPolicy(SwHttpRouter::TrailingSlashPolicy::RedirectToNoSlash);
+    threadPool.setMaxThreadCount(4);
+    threadPool.setMaxQueuedTaskCount(256);
+    server.setThreadPool(&threadPool);
+    server.setDispatchMode(SwHttpServer::DispatchMode::ThreadPool);
 
     uint16_t port = 0;
     for (uint16_t p = 19500; p < 19600; ++p) {
@@ -605,6 +640,13 @@ int main(int argc, char* argv[]) {
 
     server.addRoute("GET", "/uuid/:id(uuid)", [](const SwHttpRequest& request) {
         SwHttpResponse response = swHttpTextResponse(200, "uuid-ok");
+        response.closeConnection = !request.keepAlive;
+        return response;
+    });
+
+    server.addRoute("GET", "/transport", [port](const SwHttpRequest& request) {
+        const SwString scheme = request.isTls ? "https:" : "http:";
+        SwHttpResponse response = swHttpTextResponse(200, scheme + SwString::number(static_cast<int>(request.localPort)));
         response.closeConnection = !request.keepAlive;
         return response;
     });
@@ -667,6 +709,21 @@ int main(int argc, char* argv[]) {
         SwHttpResponse response = swHttpTextResponse(200, "multipart-ok:" + SwString::number(fileBytes) + ":" + meta);
         response.closeConnection = !request.keepAlive;
         return response;
+    });
+
+    server.addRoute("GET", "/.well-known/acme-challenge/:token", [](const SwHttpRequest& request) {
+        SwHttpResponse response = swHttpTextResponse(200, "route-should-not-win");
+        response.closeConnection = !request.keepAlive;
+        return response;
+    });
+
+    server.addPreRouteHandler([](const SwHttpRequest& request, SwHttpResponse& response) {
+        if (request.path == "/.well-known/acme-challenge/http-selftest-token") {
+            response = swHttpTextResponse(200, "pre-route-ok");
+            response.closeConnection = !request.keepAlive;
+            return true;
+        }
+        return false;
     });
 
     SwHttpStaticOptions staticOptions;

@@ -665,6 +665,7 @@ SwLaunch starts each node as a child process and supervises it:
 - **reloadOnCrash**: restart the node if the process crashes (`exit code != 0`)
 - **reloadOnDisconnect**: restart if the node disappears from the IPC registry
 - **disconnectTimeoutMs**: delay before considering a node offline
+- **detached**: let the child outlive `SwLaunch`; when omitted or `false`, killing `SwLaunch` also kills the child
 - **duration_ms**: execution time (`0` = infinite)
 
 ---

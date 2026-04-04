@@ -189,6 +189,30 @@ public:
         return m_state;
     }
 
+    /**
+     * @brief Returns whether the peer has already closed its write side.
+     * @return `true` when the remote endpoint is known to be closed; otherwise `false`.
+     *
+     * @details
+     * The default implementation returns `false`. Stream socket implementations override this so
+     * higher protocol layers can finalize responses correctly after EOF.
+     */
+    virtual bool isRemoteClosed() const {
+        return false;
+    }
+
+    /**
+     * @brief Returns whether the socket still has buffered outbound data waiting to be flushed.
+     * @return `true` when one or more bytes are still pending in the write buffer.
+     *
+     * @details
+     * The default implementation returns `false`. Stream socket implementations override this so
+     * upper protocol layers can defer teardown until the last response bytes are actually flushed.
+     */
+    virtual bool hasPendingWrites() const {
+        return false;
+    }
+
 signals:
     DECLARE_SIGNAL_VOID(connected)            ///< Emitted when the socket successfully establishes a connection.
     DECLARE_SIGNAL_VOID(disconnected)         ///< Emitted when the socket is disconnected.

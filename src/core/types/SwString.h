@@ -1383,10 +1383,15 @@ public:
     void resize(int newSize) { data_.resize(static_cast<size_t>(newSize)); }
 
     /**
+     * @brief Performs the `constData` operation.
+     * @return The requested const Data.
+     */
+    const char* constData() const { return data_.c_str(); }
+    /**
      * @brief Performs the `data` operation.
      * @return The requested data.
      */
-    const char* data() const { return data_.data(); }
+    const char* data() const { return constData(); }
     /**
      * @brief Performs the `data` operation.
      * @return The requested data.

@@ -17,7 +17,7 @@ Ce dossier documente le dépôt **tel qu’il est implémenté dans le code** (s
 - Vue d’ensemble: `docs/ARCHITECTURE.md`
 - Cartographie code: `docs/CODEMAP.md`
 - Index des fonctionnalités: `docs/features/00_feature_index.md`
-- Nodes/outils: `docs/nodes/SwLaunch.md`, `docs/nodes/SwComponentContainer.md`
+- Nodes/outils: `docs/nodes/SwLaunch.md`, `docs/nodes/SwLaunch_FunctionalDetails.md`, `docs/nodes/SwComponentContainer.md`
 - Référence API: `docs/PUBLIC_API.md`
 - Build & run: `docs/BUILD_AND_RUN.md`
 - Debug: `docs/DEBUGGING.md`

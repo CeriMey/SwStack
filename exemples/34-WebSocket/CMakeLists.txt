@@ -23,3 +23,13 @@ target_include_directories(WebSocketAdvancedSelfTest PRIVATE ${CMAKE_SOURCE_DIR}
 if(WIN32)
     target_link_libraries(WebSocketAdvancedSelfTest PRIVATE ws2_32)
 endif()
+
+add_executable(HttpAppWebSocketSelfTest
+    HttpAppWebSocketSelfTest.cpp
+)
+
+target_include_directories(HttpAppWebSocketSelfTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+if(WIN32)
+    target_link_libraries(HttpAppWebSocketSelfTest PRIVATE ws2_32 secur32)
+endif()

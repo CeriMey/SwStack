@@ -135,9 +135,9 @@ public:
         m_shouldQuit = true;
         auto app = application();
         if (app) {
-            app->postEvent([app]() {
+            app->postEventOnLane([app]() {
                 app->quit();
-            });
+            }, SwFiberLane::Control);
         }
     }
 
@@ -183,14 +183,29 @@ public:
      *         for delivery once the event loop becomes available.
      */
     bool postTask(std::function<void()> task) {
+        return postTaskOnLane(std::move(task), SwFiberLane::Normal);
+    }
+
+    /**
+     * @brief Posts a task to the internal event loop on the requested fiber lane.
+     *
+     * @param task Functor to execute inside the thread's SwCoreApplication event loop.
+     * @param lane Fiber lane used when the owning application is already available.
+     * @return true if the task was delivered immediately, false if it was queued
+     *         for delivery once the event loop becomes available.
+     */
+    bool postTaskOnLane(std::function<void()> task, SwFiberLane lane) {
         auto app = application();
         if (app) {
-            app->postEvent(std::move(task));
+            app->postEventOnLane(std::move(task), lane);
             return true;
         }
         {
             std::lock_guard<std::mutex> lock(m_pendingMutex);
-            m_pendingTasks.push_back(std::move(task));
+            PendingTask_ pending;
+            pending.task = std::move(task);
+            pending.lane = lane;
+            m_pendingTasks.push_back(std::move(pending));
         }
         return false;
     }
@@ -376,15 +391,15 @@ private:
     }
 
     void flushPendingTasks() {
-        std::vector<std::function<void()>> pending;
+        std::vector<PendingTask_> pending;
         {
             std::lock_guard<std::mutex> lock(m_pendingMutex);
             pending.swap(m_pendingTasks);
         }
-        for (auto& task : pending) {
+        for (size_t i = 0; i < pending.size(); ++i) {
             auto app = application();
             if (app) {
-                app->postEvent(task);
+                app->postEventOnLane(std::move(pending[i].task), pending[i].lane);
             }
         }
     }
@@ -495,8 +510,13 @@ private:
     std::mutex m_objectsMutex;
     std::set<SwObject*> m_objects;
 
+    struct PendingTask_ {
+        std::function<void()> task;
+        SwFiberLane lane = SwFiberLane::Normal;
+    };
+
     std::mutex m_pendingMutex;
-    std::vector<std::function<void()>> m_pendingTasks;
+    std::vector<PendingTask_> m_pendingTasks;
 
     std::mutex m_callbackMutex;
     std::function<void()> m_onStarted;

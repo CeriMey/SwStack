@@ -15,6 +15,7 @@
 #include "media/rtp/SwTsProgramDemux.h"
 #include "SwDebug.h"
 
+#include <atomic>
 #include <chrono>
 #include <memory>
 static constexpr const char* kSwLogCategory_SwRtpVideoSource = "sw.media.swrtpvideosource";
@@ -32,8 +33,7 @@ public:
         m_session->setGapCallback([this](uint16_t expected, uint16_t actual) {
             const int lostPackets = static_cast<int>(static_cast<uint16_t>(actual - expected));
             const bool forceKeyFrameRecovery =
-                (m_descriptor.codec == SwVideoPacket::Codec::H265) ? (lostPackets > 2)
-                                                                   : (lostPackets > 4);
+                forceKeyFrameRecoveryForGap_(m_descriptor.codec, lostPackets);
             swCWarning(kSwLogCategory_SwRtpVideoSource)
                 << "[SwRtpVideoSource] RTP gap expected=" << expected << " got=" << actual;
             emitStatus(StreamState::Recovering, "Recovering from RTP loss...");
@@ -43,21 +43,29 @@ public:
                 m_h264Depacketizer.onSequenceGap(forceKeyFrameRecovery);
             }
             if (forceKeyFrameRecovery || lostPackets > 1) {
+                emitRecovery(SwMediaSource::RecoveryEvent::Kind::LiveCut,
+                             "Recovering from RTP loss...");
                 m_session->requestKeyFrame("rtp loss");
             }
         });
         m_session->setTimeoutCallback([this](int secondsWithoutData) {
-            emitStatus(StreamState::Recovering,
-                       SwString("No RTP received for ") +
-                           SwString::number(secondsWithoutData) + SwString(" s"));
+            const SwString reason =
+                SwString("No RTP received for ") +
+                SwString::number(secondsWithoutData) + SwString(" s");
+            emitStatus(StreamState::Recovering, reason);
+            emitRecovery(SwMediaSource::RecoveryEvent::Kind::Timeout, reason);
         });
 
         m_h264Depacketizer.setPacketCallback([this](const SwVideoPacket& packet) {
             emitStatus(StreamState::Streaming, "Streaming");
+            m_framesEmitted.fetch_add(1);
+            m_waitingForKeyFrameRecovery.store(false);
             emitPacket(packet);
         });
         m_h265Depacketizer.setPacketCallback([this](const SwVideoPacket& packet) {
             emitStatus(StreamState::Streaming, "Streaming");
+            m_framesEmitted.fetch_add(1);
+            m_waitingForKeyFrameRecovery.store(false);
             emitPacket(packet);
         });
         m_tsDemux.setPacketCallback([this](const SwMediaPacket& packet) {
@@ -80,6 +88,8 @@ public:
             return;
         }
         emitStatus(StreamState::Connecting, "Opening RTP session...");
+        m_framesEmitted.store(0);
+        m_waitingForKeyFrameRecovery.store(false);
         if (!m_session->start()) {
             emitStatus(StreamState::Recovering, "Failed to bind RTP session");
             return;
@@ -94,11 +104,22 @@ public:
         m_h264Depacketizer.reset();
         m_h265Depacketizer.reset();
         m_tsDemux.reset();
+        m_framesEmitted.store(0);
+        m_waitingForKeyFrameRecovery.store(false);
         setRunning(false);
         emitStatus(StreamState::Stopped, "Stream stopped");
     }
 
 private:
+    static bool forceKeyFrameRecoveryForGap_(SwVideoPacket::Codec codec,
+                                             int lostPackets) {
+        if (codec == SwVideoPacket::Codec::H264 ||
+            codec == SwVideoPacket::Codec::H265) {
+            return lostPackets > 2;
+        }
+        return lostPackets > 4;
+    }
+
     static SwVideoPacket::Codec videoCodecFromName_(const SwString& codec) {
         if (codec == "h265" || codec == "hevc") {
             return SwVideoPacket::Codec::H265;
@@ -111,6 +132,8 @@ private:
             return;
         }
         emitStatus(StreamState::Streaming, "Streaming");
+        m_framesEmitted.fetch_add(1);
+        m_waitingForKeyFrameRecovery.store(false);
         SwVideoPacket videoPacket(videoCodecFromName_(packet.codec()),
                                   packet.payload(),
                                   packet.pts(),
@@ -142,7 +165,13 @@ private:
                                                                : m_h264Depacketizer.isWaitingForKeyFrame();
         if (!waitingForKeyFrame || !m_session) {
             m_lastWaitingKeyFrameRequestTime = {};
+            m_waitingForKeyFrameRecovery.store(false);
             return;
+        }
+        if (m_framesEmitted.load() > 0 &&
+            !m_waitingForKeyFrameRecovery.exchange(true)) {
+            emitRecovery(SwMediaSource::RecoveryEvent::Kind::LiveCut,
+                         "Waiting for keyframe...");
         }
         const auto now = std::chrono::steady_clock::now();
         if (m_lastWaitingKeyFrameRequestTime.time_since_epoch().count() != 0) {
@@ -163,4 +192,6 @@ private:
     SwRtpDepacketizerH265 m_h265Depacketizer{};
     SwTsProgramDemux m_tsDemux{};
     std::chrono::steady_clock::time_point m_lastWaitingKeyFrameRequestTime{};
+    std::atomic<uint64_t> m_framesEmitted{0};
+    std::atomic<bool> m_waitingForKeyFrameRecovery{false};
 };

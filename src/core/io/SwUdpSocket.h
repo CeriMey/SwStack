@@ -51,6 +51,7 @@
 #include "SwMutex.h"
 #include "SwList.h"
 #include "SwPair.h"
+#include "SwSocketTrafficTelemetry.h"
 
 #include <atomic>
 #include <cstring>
@@ -113,6 +114,7 @@ public:
     SwUdpSocket(SwObject* parent = nullptr)
         : SwIODevice(parent)
     {
+        socketTrafficState_ = swSocketTrafficRegisterSocket(this, SwSocketTrafficTransportKind::Udp);
 #if defined(_WIN32)
         WORD version = MAKEWORD(2, 2);
         WSAStartup(version, &m_wsaData);
@@ -132,6 +134,8 @@ public:
      */
     ~SwUdpSocket() override {
         close();
+        swSocketTrafficUnregisterSocket(this);
+        socketTrafficState_.reset();
 #if defined(_WIN32)
         WSACleanup();
 #endif
@@ -208,6 +212,8 @@ public:
         m_boundAddress = localAddress.isEmpty() ? SwString("0.0.0.0") : localAddress;
         m_boundPort = port;
         m_state = SocketState::BoundState;
+        swSocketTrafficSetOpenState(socketTrafficState_, true);
+        refreshTrafficMonitorEndpoints_(true);
         return true;
     }
 
@@ -239,6 +245,8 @@ public:
         if (m_state == SocketState::UnconnectedState) {
             m_state = SocketState::ConnectedState;
         }
+        swSocketTrafficSetOpenState(socketTrafficState_, true);
+        refreshTrafficMonitorEndpoints_(true);
         return true;
     }
 
@@ -252,6 +260,7 @@ public:
         if (m_state == SocketState::ConnectedState) {
             m_state = isSocketValid() ? SocketState::BoundState : SocketState::UnconnectedState;
         }
+        refreshTrafficMonitorEndpoints_(true);
     }
 
     /**
@@ -361,6 +370,7 @@ public:
 
         auto packet = std::move(m_pending.firstRef());
         m_pending.removeAt(0);
+        m_pendingDatagramCount.store(static_cast<uint64_t>(m_pending.size()), std::memory_order_relaxed);
 
         SwString sourceAddress;
         uint16_t sourcePort = 0;
@@ -399,6 +409,7 @@ public:
 
         auto packet = std::move(m_pending.firstRef());
         m_pending.removeAt(0);
+        m_pendingDatagramCount.store(static_cast<uint64_t>(m_pending.size()), std::memory_order_relaxed);
 
         if (sender && !m_senderQueue.isEmpty()) {
             *sender = m_senderQueue.firstRef().first;
@@ -442,8 +453,7 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     size_t pendingDatagramCount() const {
-        SwMutexLocker lock(m_queueMutex);
-        return static_cast<size_t>(m_pending.size());
+        return static_cast<size_t>(m_pendingDatagramCount.load(std::memory_order_relaxed));
     }
 
     /**
@@ -452,6 +462,18 @@ public:
      */
     uint64_t totalReceivedDatagrams() const {
         return m_totalReceivedDatagrams.load();
+    }
+
+    uint64_t totalReceivedBytes() const {
+        return m_totalReceivedBytes.load(std::memory_order_relaxed);
+    }
+
+    uint64_t totalSentBytes() const {
+        return m_totalSentBytes.load(std::memory_order_relaxed);
+    }
+
+    uint64_t totalSentDatagrams() const {
+        return m_totalSentDatagrams.load(std::memory_order_relaxed);
     }
 
     /**
@@ -547,6 +569,13 @@ public:
         m_maxPendingDatagrams = maxPackets;
     }
 
+    void setMaxReadBatchDatagrams(size_t maxPackets) {
+        if (maxPackets == 0) {
+            return;
+        }
+        m_maxReadBatchDatagrams = maxPackets;
+    }
+
     /**
      * @brief Closes the underlying resource and stops active work.
      *
@@ -554,8 +583,11 @@ public:
      */
     void close() override {
         unregisterDispatcher_();
+        swSocketTrafficSetOpenState(socketTrafficState_, false);
         if (!isSocketValid()) {
             m_readyReadPosted.store(false);
+            m_pendingDatagramCount.store(0, std::memory_order_relaxed);
+            publishTrafficMonitorUdpStats_(0);
             return;
         }
 #if defined(_WIN32)
@@ -574,6 +606,8 @@ public:
             m_pending.clear();
             m_senderQueue.clear();
         }
+        m_pendingDatagramCount.store(0, std::memory_order_relaxed);
+        publishTrafficMonitorUdpStats_(0);
         m_totalReceivedDatagrams.store(0);
         m_totalQueueDrops.store(0);
         m_queueHighWatermark.store(0);
@@ -625,7 +659,10 @@ private:
         m_totalReceivedDatagrams.store(0);
         m_totalQueueDrops.store(0);
         m_queueHighWatermark.store(0);
+        m_pendingDatagramCount.store(0, std::memory_order_relaxed);
         registerDispatcher_();
+        swSocketTrafficSetOpenState(socketTrafficState_, true);
+        refreshTrafficMonitorEndpoints_(true);
     }
 
     bool isSocketValid() const {
@@ -634,6 +671,59 @@ private:
 #else
         return m_socket >= 0;
 #endif
+    }
+
+    bool refreshLocalEndpoint_() {
+        if (!isSocketValid()) {
+            return false;
+        }
+        sockaddr_in address {};
+#if defined(_WIN32)
+        int length = sizeof(address);
+        if (::getsockname(m_socket, reinterpret_cast<sockaddr*>(&address), &length) != 0) {
+            return false;
+        }
+#else
+        socklen_t length = sizeof(address);
+        if (::getsockname(m_socket, reinterpret_cast<sockaddr*>(&address), &length) != 0) {
+            return false;
+        }
+#endif
+        const SwString nextBoundAddress = senderToString(address);
+        const uint16_t nextBoundPort = ntohs(address.sin_port);
+        const bool changed = (m_boundAddress != nextBoundAddress) || (m_boundPort != nextBoundPort);
+        m_boundAddr = address;
+        m_boundAddress = nextBoundAddress;
+        m_boundPort = nextBoundPort;
+        return changed;
+    }
+
+    void refreshTrafficMonitorEndpoints_(bool force = false) {
+        if (!force &&
+            m_publishedBoundAddress == m_boundAddress &&
+            m_publishedBoundPort == m_boundPort &&
+            m_publishedRemoteAddress == m_remoteAddress &&
+            m_publishedRemotePort == m_remotePort) {
+            return;
+        }
+        swSocketTrafficUpdateEndpoints(socketTrafficState_,
+                                       m_boundAddress,
+                                       m_boundPort,
+                                       m_remoteAddress,
+                                       m_remotePort);
+        m_publishedBoundAddress = m_boundAddress;
+        m_publishedBoundPort = m_boundPort;
+        m_publishedRemoteAddress = m_remoteAddress;
+        m_publishedRemotePort = m_remotePort;
+    }
+
+    void publishTrafficMonitorUdpStats_(unsigned long long pendingDatagramCount) {
+        swSocketTrafficUpdateUdpStats(socketTrafficState_,
+                                      m_totalReceivedDatagrams.load(std::memory_order_relaxed),
+                                      m_totalSentDatagrams.load(std::memory_order_relaxed),
+                                      m_totalQueueDrops.load(std::memory_order_relaxed),
+                                      m_queueHighWatermark.load(std::memory_order_relaxed),
+                                      pendingDatagramCount);
     }
 
     void applyBindMode(BindMode mode) {
@@ -680,6 +770,16 @@ private:
             setSocketError(SocketError::OperationError, SwString("sendto failed"));
             return -1;
         }
+        if (sent > 0) {
+            const bool localEndpointChanged = refreshLocalEndpoint_();
+            m_totalSentBytes.fetch_add(static_cast<uint64_t>(sent), std::memory_order_relaxed);
+            m_totalSentDatagrams.fetch_add(1, std::memory_order_relaxed);
+            swSocketTrafficAddSentBytes(socketTrafficState_, static_cast<unsigned long long>(sent));
+            publishTrafficMonitorUdpStats_(m_pendingDatagramCount.load(std::memory_order_relaxed));
+            if (localEndpointChanged) {
+                refreshTrafficMonitorEndpoints_();
+            }
+        }
         return static_cast<int64_t>(sent);
     }
 
@@ -700,6 +800,7 @@ private:
         SW_UNUSED(timeoutMs)
 
         bool receivedAny = false;
+        size_t batchCount = 0;
         while (true) {
             sockaddr_in sender{};
 #if defined(_WIN32)
@@ -724,11 +825,14 @@ private:
             }
             receivedAny = true;
             ++m_totalReceivedDatagrams;
+            m_totalReceivedBytes.fetch_add(static_cast<uint64_t>(bytes), std::memory_order_relaxed);
+            swSocketTrafficAddReceivedBytes(socketTrafficState_, static_cast<unsigned long long>(bytes));
+            uint64_t pendingDatagramCount = 0;
             {
                 SwMutexLocker lock(m_queueMutex);
                 m_pending.append(SwByteArray(m_readBuffer.data(), static_cast<size_t>(bytes)));
                 m_senderQueue.append(SwPair<SwString, uint16_t>(senderToString(sender), ntohs(sender.sin_port)));
-                const uint64_t queueDepth = static_cast<uint64_t>(m_pending.size());
+                uint64_t queueDepth = static_cast<uint64_t>(m_pending.size());
                 if (queueDepth > m_queueHighWatermark.load()) {
                     m_queueHighWatermark.store(queueDepth);
                 }
@@ -741,13 +845,26 @@ private:
                     ++m_totalQueueDrops;
                     swCWarning(kSwLogCategory_SwUdpSocket) << "[SwUdpSocket] Dropping oldest datagram (" << droppedBytes
                                 << " bytes) due to queue pressure (limit=" << m_maxPendingDatagrams << ")";
+                    queueDepth = static_cast<uint64_t>(m_pending.size());
                 }
+                pendingDatagramCount = queueDepth;
+                m_pendingDatagramCount.store(queueDepth, std::memory_order_relaxed);
             }
             auto rx = ++m_debugRxCount;
             if (rx <= 5 || (rx % 100) == 0) {
                 swCDebug(kSwLogCategory_SwUdpSocket) << "[SwUdpSocket] rx bytes=" << bytes
                           << " from=" << senderToString(sender).toStdString()
                           << ":" << ntohs(sender.sin_port);
+            }
+            const bool localEndpointChanged = refreshLocalEndpoint_();
+            publishTrafficMonitorUdpStats_(pendingDatagramCount);
+            if (localEndpointChanged) {
+                refreshTrafficMonitorEndpoints_();
+            }
+
+            ++batchCount;
+            if (batchCount >= m_maxReadBatchDatagrams) {
+                break;
             }
         }
         if (receivedAny) {
@@ -941,12 +1058,22 @@ private:
     SwString m_errorString;
     int m_lastSystemError{0};
     std::atomic<uint64_t> m_debugRxCount{0};
+    std::atomic<uint64_t> m_totalReceivedBytes{0};
+    std::atomic<uint64_t> m_totalSentBytes{0};
+    std::atomic<uint64_t> m_totalSentDatagrams{0};
     std::atomic<uint64_t> m_totalReceivedDatagrams{0};
     std::atomic<uint64_t> m_totalQueueDrops{0};
     std::atomic<uint64_t> m_queueHighWatermark{0};
+    std::atomic<uint64_t> m_pendingDatagramCount{0};
     std::atomic<bool> m_readyReadPosted{false};
     int m_receiveBufferSize{0};
     size_t m_maxDatagramSize{2048};
     size_t m_maxPendingDatagrams{512};
+    size_t m_maxReadBatchDatagrams{128};
     SwByteArray m_readBuffer;
+    SwSocketTrafficStateHandle socketTrafficState_;
+    SwString m_publishedBoundAddress;
+    uint16_t m_publishedBoundPort{0};
+    SwString m_publishedRemoteAddress;
+    uint16_t m_publishedRemotePort{0};
 };

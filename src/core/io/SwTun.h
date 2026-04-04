@@ -440,6 +440,55 @@ private:
         return LoadLibraryW(path.c_str());
     }
 
+    static bool runNetshCommand_(const std::wstring& arguments,
+                                 DWORD timeoutMs,
+                                 DWORD* exitCodeOut = nullptr) {
+        wchar_t systemDir[MAX_PATH] = {0};
+        const UINT systemDirLen = GetSystemDirectoryW(systemDir, MAX_PATH);
+        if (systemDirLen == 0 || systemDirLen >= MAX_PATH) {
+            return false;
+        }
+
+        const std::wstring netshPath = std::wstring(systemDir) + L"\\netsh.exe";
+        std::wstring commandLine = L"\"" + netshPath + L"\" " + arguments;
+
+        STARTUPINFOW startupInfo {};
+        startupInfo.cb = sizeof(startupInfo);
+        PROCESS_INFORMATION processInfo {};
+        if (!CreateProcessW(netshPath.c_str(),
+                            commandLine.empty() ? nullptr : &commandLine[0],
+                            nullptr,
+                            nullptr,
+                            FALSE,
+                            CREATE_NO_WINDOW,
+                            nullptr,
+                            nullptr,
+                            &startupInfo,
+                            &processInfo)) {
+            return false;
+        }
+
+        const DWORD waitResult = WaitForSingleObject(processInfo.hProcess, timeoutMs);
+        if (waitResult == WAIT_TIMEOUT) {
+            (void)TerminateProcess(processInfo.hProcess, 1);
+            (void)WaitForSingleObject(processInfo.hProcess, 1000);
+        }
+
+        DWORD exitCode = STILL_ACTIVE;
+        (void)GetExitCodeProcess(processInfo.hProcess, &exitCode);
+        CloseHandle(processInfo.hThread);
+        CloseHandle(processInfo.hProcess);
+
+        if (exitCodeOut) {
+            *exitCodeOut = exitCode;
+        }
+        if (waitResult != WAIT_OBJECT_0 || exitCode != 0) {
+            SetLastError(waitResult == WAIT_TIMEOUT ? WAIT_TIMEOUT : exitCode);
+            return false;
+        }
+        return true;
+    }
+
     bool openWindows_(const SwString& name, const SwString& address, int prefix) {
         // Load DLL (embedded or from PATH)
         m_wintunDll = loadEmbeddedWintun_();
@@ -486,6 +535,48 @@ private:
         // Configure IP via netsh (inputs already validated above)
         {
             uint32_t mask = ~0u << (32 - prefix);
+            const SwString maskString = SwString::number((mask >> 24) & 0xFF) + "." +
+                                        SwString::number((mask >> 16) & 0xFF) + "." +
+                                        SwString::number((mask >> 8) & 0xFF) + "." +
+                                        SwString::number(mask & 0xFF);
+            std::string addressUtf8 = address.toStdString();
+            std::string maskUtf8 = maskString.toStdString();
+            const int addressWideLen = MultiByteToWideChar(CP_UTF8, 0, addressUtf8.c_str(), -1, nullptr, 0);
+            const int maskWideLen = MultiByteToWideChar(CP_UTF8, 0, maskUtf8.c_str(), -1, nullptr, 0);
+            if (addressWideLen <= 0 || maskWideLen <= 0) {
+                swCError(kSwLogCategory_SwTun) << "[SwTun] Failed to convert netsh arguments to UTF-16";
+                m_fnClose(m_adapter);
+                m_adapter = nullptr;
+                FreeLibrary(m_wintunDll);
+                m_wintunDll = nullptr;
+                return false;
+            }
+
+            std::wstring wAddress(static_cast<size_t>(addressWideLen), L'\0');
+            std::wstring wMask(static_cast<size_t>(maskWideLen), L'\0');
+            MultiByteToWideChar(CP_UTF8, 0, addressUtf8.c_str(), -1, &wAddress[0], addressWideLen);
+            MultiByteToWideChar(CP_UTF8, 0, maskUtf8.c_str(), -1, &wMask[0], maskWideLen);
+
+            const std::wstring arguments = std::wstring(L"interface ip set address name=\"") +
+                                           std::wstring(wName.c_str()) +
+                                           L"\" static " +
+                                           std::wstring(wAddress.c_str()) +
+                                           L" " +
+                                           std::wstring(wMask.c_str());
+            DWORD netshExitCode = 0;
+            if (!runNetshCommand_(arguments, 5000, &netshExitCode)) {
+                swCWarning(kSwLogCategory_SwTun)
+                    << "[SwTun] netsh interface setup failed or timed out (code="
+                    << static_cast<long long>(netshExitCode)
+                    << ", err=" << static_cast<long long>(GetLastError())
+                    << ")";
+                m_fnClose(m_adapter);
+                m_adapter = nullptr;
+                FreeLibrary(m_wintunDll);
+                m_wintunDll = nullptr;
+                return false;
+            }
+            if (false) {
             char cmd[512];
             snprintf(cmd, sizeof(cmd),
                      "netsh interface ip set address name=\"%s\" static %s %u.%u.%u.%u",
@@ -499,6 +590,8 @@ private:
                 swCWarning(kSwLogCategory_SwTun) << "[SwTun] netsh returned " << ret
                     << " — IP configuration may have failed";
             }
+        }
+
         }
 
         // Start session (4 MB ring)

@@ -324,9 +324,17 @@ private:
     }
 
     bool parseTarget_(const SwString& target) {
-        int queryPos = target.indexOf("?");
-        SwString rawPath = (queryPos >= 0) ? target.left(queryPos) : target;
-        SwString query = (queryPos >= 0) ? target.mid(queryPos + 1) : SwString();
+        SwString effectiveTarget = target.trimmed();
+        const SwString lowerTarget = effectiveTarget.toLower();
+        if (lowerTarget.startsWith("http://") || lowerTarget.startsWith("https://")) {
+            const int authorityPos = effectiveTarget.indexOf("://");
+            const int pathPos = (authorityPos >= 0) ? effectiveTarget.indexOf("/", authorityPos + 3) : -1;
+            effectiveTarget = (pathPos >= 0) ? effectiveTarget.mid(pathPos) : SwString("/");
+        }
+
+        int queryPos = effectiveTarget.indexOf("?");
+        SwString rawPath = (queryPos >= 0) ? effectiveTarget.left(queryPos) : effectiveTarget;
+        SwString query = (queryPos >= 0) ? effectiveTarget.mid(queryPos + 1) : SwString();
         if (rawPath.isEmpty()) {
             rawPath = "/";
         }

@@ -4,10 +4,18 @@ build-*/
 install/
 log/
 bin/
+sandbox/
+android/
+tmp/
+.claude/
+.coreSw/
+dist/
+skills/
+
 ProjectDev/
 exemples/37-HttpAppQuickstart/runtime/
 exemples/35-HttpServerSelfTest/runtime/
-
+exemples/43-TunWebSocketVpn/
 # Secrets (Firebase, env files)
 *firebase-adminsdk-*.json
 *service-account*.json

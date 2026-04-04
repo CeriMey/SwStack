@@ -517,6 +517,47 @@ public:
     }
 
     /**
+     * @brief Attempts to enqueue a runnable, allowing bounded worker queueing.
+     * @param runnable Value passed to the method.
+     * @param priority Value passed to the method.
+     * @param rejectedByBackpressure Optional flag set when the bounded queue rejected the task.
+     * @return `true` when the runnable was accepted for execution; otherwise `false`.
+     */
+    bool tryStartQueued(SwRunnable* runnable,
+                        int priority = 0,
+                        bool* rejectedByBackpressure = nullptr) {
+        if (rejectedByBackpressure) {
+            *rejectedByBackpressure = false;
+        }
+        if (!runnable) {
+            return false;
+        }
+
+        bool started = false;
+        {
+            SwMutexLocker locker(&m_mutex);
+            cleanupRetiredWorkersLocked_(locker);
+            if (!m_stopping && !m_waitingForDone) {
+                started = assignTaskLocked_(runnable,
+                                            priority,
+                                            false,
+                                            false,
+                                            rejectedByBackpressure);
+                if (!started &&
+                    rejectedByBackpressure &&
+                    *rejectedByBackpressure) {
+                    ++m_rejectedTaskCount;
+                }
+            }
+        }
+
+        if (started) {
+            notifyStateChanged_();
+        }
+        return started;
+    }
+
+    /**
      * @brief Performs the `tryStart` operation.
      * @return `true` on success; otherwise `false`.
      */
@@ -533,6 +574,28 @@ public:
         return started;
     }
 
+    /**
+     * @brief Attempts to enqueue a plain function, allowing bounded worker queueing.
+     * @param function Value passed to the method.
+     * @param priority Value passed to the method.
+     * @param rejectedByBackpressure Optional flag set when the bounded queue rejected the task.
+     * @return `true` when the function was accepted for execution; otherwise `false`.
+     */
+    bool tryStartQueued(void (*function)(),
+                        int priority = 0,
+                        bool* rejectedByBackpressure = nullptr) {
+        SwRunnable* runnable = SwRunnable::create(function);
+        if (!runnable) {
+            return false;
+        }
+
+        const bool started = tryStartQueued(runnable, priority, rejectedByBackpressure);
+        if (!started && runnable->autoDelete()) {
+            delete runnable;
+        }
+        return started;
+    }
+
     template<typename TRunnable>
     typename SwThreadPoolEnableIf<SwThreadPoolIsRunnablePointer<TRunnable>::Value, bool>::Type
     /**
@@ -541,6 +604,21 @@ public:
      */
     tryStart(TRunnable* runnable) {
         return tryStart(static_cast<SwRunnable*>(runnable));
+    }
+
+    template<typename TRunnable>
+    typename SwThreadPoolEnableIf<SwThreadPoolIsRunnablePointer<TRunnable>::Value, bool>::Type
+    /**
+     * @brief Attempts to enqueue a runnable pointer, allowing bounded worker queueing.
+     * @param runnable Value passed to the method.
+     * @param priority Value passed to the method.
+     * @param rejectedByBackpressure Optional flag set when the bounded queue rejected the task.
+     * @return `true` when the runnable was accepted for execution; otherwise `false`.
+     */
+    tryStartQueued(TRunnable* runnable,
+                   int priority = 0,
+                   bool* rejectedByBackpressure = nullptr) {
+        return tryStartQueued(static_cast<SwRunnable*>(runnable), priority, rejectedByBackpressure);
     }
 
     template<typename Callable>
@@ -553,6 +631,26 @@ public:
         typedef typename SwThreadPoolRemoveReference<Callable>::Type CallableType;
         SwRunnable* runnable = new SwCallableRunnable<CallableType>(swThreadPoolForward_<Callable>(functionToRun));
         const bool started = tryStart(runnable);
+        if (!started && runnable->autoDelete()) {
+            delete runnable;
+        }
+        return started;
+    }
+
+    template<typename Callable>
+    /**
+     * @brief Attempts to enqueue a callable, allowing bounded worker queueing.
+     * @param functionToRun Value passed to the method.
+     * @param priority Value passed to the method.
+     * @param rejectedByBackpressure Optional flag set when the bounded queue rejected the task.
+     * @return `true` when the callable was accepted for execution; otherwise `false`.
+     */
+    bool tryStartQueued(Callable&& functionToRun,
+                        int priority = 0,
+                        bool* rejectedByBackpressure = nullptr) {
+        typedef typename SwThreadPoolRemoveReference<Callable>::Type CallableType;
+        SwRunnable* runnable = new SwCallableRunnable<CallableType>(swThreadPoolForward_<Callable>(functionToRun));
+        const bool started = tryStartQueued(runnable, priority, rejectedByBackpressure);
         if (!started && runnable->autoDelete()) {
             delete runnable;
         }
@@ -1333,13 +1431,13 @@ private:
         const int workerId = worker->id;
         SwThreadPool* pool = this;
         std::weak_ptr<std::atomic<bool>> aliveGuard(m_alive);
-        worker->thread->postTask([pool, workerId, aliveGuard]() {
+        worker->thread->postTaskOnLane([pool, workerId, aliveGuard]() {
             auto alive = aliveGuard.lock();
             if (!alive || !alive->load(std::memory_order_acquire)) {
                 return;
             }
             pool->drainOneTaskOnWorker_(workerId);
-        });
+        }, SwFiberLane::Input);
     }
 
     void scheduleWorkerExpiryCheckLocked_(WorkerEntry* worker) {
@@ -1357,7 +1455,7 @@ private:
         const unsigned int token = worker->idleToken;
         SwThreadPool* pool = this;
         std::weak_ptr<std::atomic<bool>> aliveGuard(m_alive);
-        worker->thread->postTask([pool, workerId, token, timeout, aliveGuard]() {
+        worker->thread->postTaskOnLane([pool, workerId, token, timeout, aliveGuard]() {
             SwTimer::singleShot(timeout, [pool, workerId, token, aliveGuard]() {
                 auto alive = aliveGuard.lock();
                 if (!alive || !alive->load(std::memory_order_acquire)) {
@@ -1365,7 +1463,7 @@ private:
                 }
                 pool->onWorkerExpiryTimeout_(workerId, token);
             });
-        });
+        }, SwFiberLane::Control);
     }
 
     WorkerEntry* createWorkerLocked_() {
@@ -1391,9 +1489,9 @@ private:
             return nullptr;
         }
 
-        worker->thread->postTask([workerStackSize, workerPriority, workerQos]() {
+        worker->thread->postTaskOnLane([workerStackSize, workerPriority, workerQos]() {
             applyCurrentThreadSettings_(workerStackSize, workerPriority, workerQos);
-        });
+        }, SwFiberLane::Control);
         std::weak_ptr<std::atomic<bool>> aliveGuard(m_alive);
         SwObject::connect(worker->thread, &SwThread::finished, [this, aliveGuard]() {
             auto alive = aliveGuard.lock();

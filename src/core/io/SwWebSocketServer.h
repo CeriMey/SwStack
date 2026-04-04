@@ -46,6 +46,8 @@
  ***************************************************************************************************/
 
 #include "SwObject.h"
+#include "SwAbstractSocket.h"
+#include "SwSslServer.h"
 #include "SwTcpServer.h"
 #include "SwWebSocket.h"
 #include "SwList.h"
@@ -72,7 +74,9 @@ public:
     explicit SwWebSocketServer(SwObject* parent = nullptr)
         : SwObject(parent) {
         m_tcpServer = new SwTcpServer(this);
+        m_sslServer = new SwSslServer(this);
         connect(m_tcpServer, &SwTcpServer::newConnection, this, &SwWebSocketServer::onNewTcpConnection_);
+        connect(m_sslServer, &SwTcpServer::newConnection, this, &SwWebSocketServer::onNewTcpConnection_);
     }
 
     /**
@@ -95,7 +99,23 @@ public:
         if (!m_tcpServer) {
             return false;
         }
+        if (m_sslServer) {
+            m_sslServer->close();
+        }
         return m_tcpServer->listen(port);
+    }
+
+    bool listen(uint16_t port, const SwString& certPath, const SwString& keyPath) {
+        if (!m_sslServer) {
+            return false;
+        }
+        if (m_tcpServer) {
+            m_tcpServer->close();
+        }
+        if (!m_sslServer->setLocalCredentials(certPath, keyPath)) {
+            return false;
+        }
+        return m_sslServer->listen(port);
     }
 
     /**
@@ -106,6 +126,9 @@ public:
     void close() {
         if (m_tcpServer) {
             m_tcpServer->close();
+        }
+        if (m_sslServer) {
+            m_sslServer->close();
         }
     }
 
@@ -156,37 +179,52 @@ private slots:
             return;
         }
 
-        while (SwTcpSocket* tcp = m_tcpServer->nextPendingConnection()) {
-            auto* ws = new SwWebSocket(SwWebSocket::ServerRole, this);
-            ws->setSupportedSubprotocols(m_supportedSubprotocols);
-            m_handshakeComplete[ws] = false;
-
-            connect(ws, &SwWebSocket::connected, this, [this, ws]() {
-                m_handshakeComplete[ws] = true;
-                m_pendingSockets.append(ws);
-                emit newConnection();
-            });
-
-            connect(ws, &SwWebSocket::errorOccurred, this, [this, ws](int) {
-                if (!m_handshakeComplete.value(ws, false)) {
-                    m_handshakeComplete.remove(ws);
-                    ws->deleteLater();
-                }
-            });
-
-            connect(ws, &SwWebSocket::disconnected, this, [this, ws]() {
-                if (!m_handshakeComplete.value(ws, false)) {
-                    m_handshakeComplete.remove(ws);
-                    ws->deleteLater();
-                }
-            });
-
-            ws->accept(tcp);
+        while (SwAbstractSocket* tcp = m_tcpServer->nextPendingConnection()) {
+            acceptSocket_(tcp, false);
+        }
+        if (!m_sslServer) {
+            return;
+        }
+        while (SwAbstractSocket* tcp = m_sslServer->nextPendingConnection()) {
+            acceptSocket_(tcp, true);
         }
     }
 
 private:
+    void acceptSocket_(SwAbstractSocket* socket, bool secure) {
+        if (!socket) {
+            return;
+        }
+
+        auto* ws = new SwWebSocket(SwWebSocket::ServerRole, this);
+        ws->setSupportedSubprotocols(m_supportedSubprotocols);
+        m_handshakeComplete[ws] = false;
+
+        SwObject::connect(ws, &SwWebSocket::connected, [this, ws]() {
+            m_handshakeComplete[ws] = true;
+            m_pendingSockets.append(ws);
+            emit newConnection();
+        });
+
+        SwObject::connect(ws, &SwWebSocket::errorOccurred, [this, ws](int) {
+            if (!m_handshakeComplete.value(ws, false)) {
+                m_handshakeComplete.remove(ws);
+                ws->deleteLater();
+            }
+        });
+
+        SwObject::connect(ws, &SwWebSocket::disconnected, [this, ws]() {
+            if (!m_handshakeComplete.value(ws, false)) {
+                m_handshakeComplete.remove(ws);
+                ws->deleteLater();
+            }
+        });
+
+        ws->accept(socket, secure);
+    }
+
     SwTcpServer* m_tcpServer = nullptr;
+    SwSslServer* m_sslServer = nullptr;
     SwList<SwString> m_supportedSubprotocols;
     SwList<SwWebSocket*> m_pendingSockets;
     SwMap<SwWebSocket*, bool> m_handshakeComplete;

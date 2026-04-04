@@ -183,7 +183,7 @@ public:
          *
          * @details The instance is initialized and prepared for immediate use.
          */
-        const_iterator(const iterator& other) : it_(other.it_) {}
+        const_iterator(const iterator& other) : it_(other.base()) {}
 
         /**
          * @brief Returns the current operator ++.

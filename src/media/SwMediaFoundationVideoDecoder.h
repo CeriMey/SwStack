@@ -158,6 +158,9 @@ public:
             return false;
         }
         cacheSequenceHeader(packet);
+        if (shouldRecreateDecoderForUpdatedInput_()) {
+            recreateDecoderForUpdatedInput_();
+        }
         if (!ensureInitialized()) {
             if (!m_loggedInitializationFailure.exchange(true)) {
                 swCWarning(kSwLogCategory_SwMediaFoundationH264Decoder)
@@ -174,6 +177,13 @@ public:
         }
         drainOutput();
         return true;
+    }
+
+    RuntimeHealthEvent takeRuntimeHealthEvent() override {
+        SwMutexLocker lock(m_runtimeHealthMutex);
+        RuntimeHealthEvent event = m_pendingRuntimeHealthEvent;
+        m_pendingRuntimeHealthEvent = RuntimeHealthEvent();
+        return event;
     }
 
     /**
@@ -626,6 +636,74 @@ private:
         }
     }
 
+    bool shouldRecreateDecoderForUpdatedInput_() const {
+        if (!m_ready || !m_decoder || !m_haveConfiguredInputType) {
+            return false;
+        }
+        if (!m_sequenceHeader.isEmpty() && m_configuredSequenceHeaderSize == 0) {
+            return true;
+        }
+        if (m_inputWidth > 0 && m_inputHeight > 0 &&
+            (m_configuredInputWidth <= 0 || m_configuredInputHeight <= 0)) {
+            return true;
+        }
+        if (!m_sequenceHeader.isEmpty() && m_configuredSequenceHeaderSize > 0 &&
+            static_cast<size_t>(m_sequenceHeader.size()) != m_configuredSequenceHeaderSize) {
+            return true;
+        }
+        if (m_inputWidth > 0 && m_inputHeight > 0 &&
+            m_configuredInputWidth > 0 && m_configuredInputHeight > 0 &&
+            (m_inputWidth != m_configuredInputWidth ||
+             m_inputHeight != m_configuredInputHeight)) {
+            return true;
+        }
+        return false;
+    }
+
+    void resetDecoderState_(bool keepRuntimeActive) {
+        m_dxgiDeviceManager.Reset();
+        m_decoder.Reset();
+        if (!keepRuntimeActive) {
+            if (m_mfStarted) {
+                MFShutdown();
+                m_mfStarted = false;
+            }
+            if (m_comInit) {
+                CoUninitialize();
+                m_comInit = false;
+            }
+        }
+        m_ready = false;
+        m_width = 0;
+        m_height = 0;
+        m_outputTypeReady = false;
+        m_outputSubtype = GUID_NULL;
+        m_streamingStarted = false;
+        m_hardwareInteropActive = false;
+        m_haveConfiguredInputType = false;
+        m_configuredInputWidth = 0;
+        m_configuredInputHeight = 0;
+        m_configuredSequenceHeaderSize = 0;
+        m_loggedFirstOutputFrame.store(false);
+        m_loggedOutputTypeFailure.store(false);
+        m_nextInputDiscontinuity.store(true);
+        m_needMoreInputCount.store(0);
+        m_decodedFrameCount.store(0);
+        clearRuntimeHealthEvent_();
+    }
+
+    void recreateDecoderForUpdatedInput_() {
+        swCWarning(kSwLogCategory_SwMediaFoundationH264Decoder)
+            << "[" << m_name << "] Recreating decoder for updated input configuration"
+            << " width=" << m_inputWidth
+            << " height=" << m_inputHeight
+            << " seqhdr=" << m_sequenceHeader.size();
+        if (m_decoder) {
+            m_decoder->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
+        }
+        resetDecoderState_(true);
+    }
+
     virtual int outputSubtypeRank(const GUID& subtype) const {
         if (m_hardwareInteropActive) {
             if (subtype == MFVideoFormat_NV12) {
@@ -664,6 +742,9 @@ private:
     }
 
     const char* outputSubtypeName(const GUID& subtype) const {
+        if (subtype == GUID_NULL) {
+            return "none";
+        }
         if (subtype == MFVideoFormat_RGB32) {
             return "RGB32";
         }
@@ -680,6 +761,66 @@ private:
             return "YUY2";
         }
         return "other";
+    }
+
+    const char* codecName_() const {
+        switch (m_targetCodec) {
+        case SwVideoPacket::Codec::H264:
+            return "H264";
+        case SwVideoPacket::Codec::H265:
+            return "H265";
+        case SwVideoPacket::Codec::AV1:
+            return "AV1";
+        default:
+            return "Unknown";
+        }
+    }
+
+    void setRuntimeHealthEvent_(RuntimeHealthEventKind kind,
+                                const char* reason,
+                                HRESULT hr = S_OK,
+                                bool includeHr = false) {
+        if (!reason || reason[0] == '\0') {
+            return;
+        }
+        const SwString reasonText(reason);
+        bool shouldLog = false;
+        {
+            SwMutexLocker lock(m_runtimeHealthMutex);
+            shouldLog =
+                (m_activeRuntimeHealthEvent.kind != kind) ||
+                (m_activeRuntimeHealthEvent.reason != reasonText);
+            m_activeRuntimeHealthEvent.kind = kind;
+            m_activeRuntimeHealthEvent.reason = reasonText;
+            m_pendingRuntimeHealthEvent = m_activeRuntimeHealthEvent;
+        }
+        if (!shouldLog) {
+            return;
+        }
+
+        if (kind == RuntimeHealthEventKind::RecoverableOutputFailure) {
+            swCWarning(kSwLogCategory_SwMediaFoundationH264Decoder)
+                << "[" << m_name << "] Output sample produced no usable frame"
+                << " codec=" << codecName_()
+                << " interop=" << (m_hardwareInteropActive ? 1 : 0)
+                << " subtype=" << outputSubtypeName(m_outputSubtype)
+                << " reason=" << reason;
+            return;
+        }
+
+        swCWarning(kSwLogCategory_SwMediaFoundationH264Decoder)
+            << "[" << m_name << "] Decoder backend failure"
+            << " codec=" << codecName_()
+            << " interop=" << (m_hardwareInteropActive ? 1 : 0)
+            << " subtype=" << outputSubtypeName(m_outputSubtype)
+            << " reason=" << reason
+            << (includeHr ? SwString(" hr=0x") + SwString::number(static_cast<unsigned int>(hr), 16) : SwString());
+    }
+
+    void clearRuntimeHealthEvent_() {
+        SwMutexLocker lock(m_runtimeHealthMutex);
+        m_activeRuntimeHealthEvent = RuntimeHealthEvent();
+        m_pendingRuntimeHealthEvent = RuntimeHealthEvent();
     }
 
     bool ensureInitialized() {
@@ -756,10 +897,18 @@ private:
         configureInputType(type.Get());
         hr = m_decoder->SetInputType(0, type.Get(), 0);
         if (FAILED(hr)) {
+            m_haveConfiguredInputType = false;
+            m_configuredInputWidth = 0;
+            m_configuredInputHeight = 0;
+            m_configuredSequenceHeaderSize = 0;
             swCWarning(kSwLogCategory_SwMediaFoundationH264Decoder)
                 << "[" << m_name << "] SetInputType failed hr=0x"
                 << std::hex << hr << std::dec;
         } else {
+            m_haveConfiguredInputType = true;
+            m_configuredInputWidth = m_inputWidth;
+            m_configuredInputHeight = m_inputHeight;
+            m_configuredSequenceHeaderSize = static_cast<size_t>(m_sequenceHeader.size());
             swCWarning(kSwLogCategory_SwMediaFoundationH264Decoder)
                 << "[" << m_name << "] Input type configured subtype="
                 << (inputSubtype() == MFVideoFormat_HEVC ? "HEVC" :
@@ -942,8 +1091,10 @@ private:
             }
         }
         if (FAILED(hr)) {
-            swCWarning(kSwLogCategory_SwMediaFoundationH264Decoder) << "[" << m_name << "] ProcessInput failed hr=0x"
-                        << std::hex << hr << std::dec;
+            setRuntimeHealthEvent_(RuntimeHealthEventKind::FatalBackendFailure,
+                                   "process-input-failed",
+                                   hr,
+                                   true);
         }
         if (SUCCEEDED(hr) && !m_outputTypeReady) {
             setOutputType(false);
@@ -1123,8 +1274,10 @@ private:
                 if (output.pSample && output.pSample != sample.Get()) {
                     output.pSample->Release();
                 }
-                swCWarning(kSwLogCategory_SwMediaFoundationH264Decoder) << "[" << m_name << "] ProcessOutput failed hr=0x"
-                            << std::hex << hr << std::dec;
+                setRuntimeHealthEvent_(RuntimeHealthEventKind::FatalBackendFailure,
+                                       "process-output-failed",
+                                       hr,
+                                       true);
                 return;
             }
             m_needMoreInputCount.store(0);
@@ -1145,12 +1298,19 @@ private:
             return;
         }
         SwVideoFrame frame;
+        SwString failureReason;
         if (m_hardwareInteropActive) {
-            frame = wrapNativeFrame(sample);
+            frame = wrapNativeFrame(sample, failureReason);
         }
         if (!frame.isValid()) {
             Microsoft::WRL::ComPtr<IMFMediaBuffer> buffer;
             if (FAILED(sample->GetBufferByIndex(0, &buffer))) {
+                if (failureReason.isEmpty()) {
+                    failureReason = m_hardwareInteropActive ? SwString("sample-buffer-missing")
+                                                            : SwString("cpu-buffer-missing");
+                }
+                setRuntimeHealthEvent_(RuntimeHealthEventKind::RecoverableOutputFailure,
+                                       failureReason.constData());
                 return;
             }
             if (m_outputSubtype == MFVideoFormat_NV12) {
@@ -1161,11 +1321,19 @@ private:
                 frame = convertYUY2(buffer.Get());
             } else if (m_outputSubtype == MFVideoFormat_RGB32) {
                 frame = copyBGRA(buffer.Get());
+            } else {
+                failureReason = "unsupported-output-subtype";
             }
         }
         if (!frame.isValid()) {
+            if (failureReason.isEmpty()) {
+                failureReason = "cpu-convert-invalid";
+            }
+            setRuntimeHealthEvent_(RuntimeHealthEventKind::RecoverableOutputFailure,
+                                   failureReason.constData());
             return;
         }
+        clearRuntimeHealthEvent_();
         auto decoded = ++m_decodedFrameCount;
         LONGLONG ts = 0;
         if (SUCCEEDED(sample->GetSampleTime(&ts))) {
@@ -1203,20 +1371,23 @@ private:
         return SwVideoPixelFormat::Unknown;
     }
 
-    SwVideoFrame wrapNativeFrame(IMFSample* sample) {
+    SwVideoFrame wrapNativeFrame(IMFSample* sample, SwString& failureReason) {
         if (!sample || !m_hardwareInteropActive) {
             return {};
         }
         Microsoft::WRL::ComPtr<IMFMediaBuffer> buffer;
         if (FAILED(sample->GetBufferByIndex(0, &buffer))) {
+            failureReason = "sample-buffer-missing";
             return {};
         }
         Microsoft::WRL::ComPtr<IMFDXGIBuffer> dxgiBuffer;
         if (FAILED(buffer.As(&dxgiBuffer)) || !dxgiBuffer) {
+            failureReason = "sample-not-dxgi";
             return {};
         }
         Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
         if (FAILED(dxgiBuffer->GetResource(IID_PPV_ARGS(texture.GetAddressOf()))) || !texture) {
+            failureReason = "dxgi-resource-missing";
             return {};
         }
         UINT subresourceIndex = 0;
@@ -1227,12 +1398,14 @@ private:
         texture->GetDesc(&desc);
         SwVideoPixelFormat pixelFormat = outputPixelFormatForSubtype(m_outputSubtype);
         if (pixelFormat == SwVideoPixelFormat::Unknown) {
+            failureReason = "unsupported-output-subtype";
             return {};
         }
         SwVideoFormatInfo info =
             SwDescribeVideoFormat(pixelFormat, m_width > 0 ? m_width : static_cast<int>(desc.Width),
                                   m_height > 0 ? m_height : static_cast<int>(desc.Height));
         if (!info.isValid()) {
+            failureReason = "native-wrap-invalid";
             return {};
         }
         Microsoft::WRL::ComPtr<ID3D11Device> device;
@@ -1243,6 +1416,10 @@ private:
                                           texture.Get(),
                                           desc.Format,
                                           subresourceIndex);
+        if (!frame.isValid()) {
+            failureReason = "native-wrap-invalid";
+            return {};
+        }
         frame.setAspectRatio(1.0);
         return frame;
     }
@@ -1537,21 +1714,7 @@ private:
     }
 
     void shutdown() {
-        m_dxgiDeviceManager.Reset();
-        m_decoder.Reset();
-        if (m_mfStarted) {
-            MFShutdown();
-            m_mfStarted = false;
-        }
-        if (m_comInit) {
-            CoUninitialize();
-            m_comInit = false;
-        }
-        m_ready = false;
-        m_outputTypeReady = false;
-        m_outputSubtype = GUID_NULL;
-        m_streamingStarted = false;
-        m_hardwareInteropActive = false;
+        resetDecoderState_(false);
     }
 
     SwVideoPacket::Codec m_targetCodec;
@@ -1574,10 +1737,17 @@ private:
     bool m_outputTypeReady{false};
     bool m_streamingStarted{false};
     bool m_hardwareInteropActive{false};
+    bool m_haveConfiguredInputType{false};
     SwByteArray m_sequenceHeader;
     int m_inputWidth{0};
     int m_inputHeight{0};
+    int m_configuredInputWidth{0};
+    int m_configuredInputHeight{0};
+    size_t m_configuredSequenceHeaderSize{0};
     Microsoft::WRL::ComPtr<IMFDXGIDeviceManager> m_dxgiDeviceManager;
+    mutable SwMutex m_runtimeHealthMutex;
+    RuntimeHealthEvent m_activeRuntimeHealthEvent{};
+    RuntimeHealthEvent m_pendingRuntimeHealthEvent{};
 };
 
 class SwMediaFoundationH264Decoder : public SwMediaFoundationDecoderBase {

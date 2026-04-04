@@ -14,6 +14,7 @@
 #include "media/SwMetadataTrackPipeline.h"
 #include "media/SwVideoSink.h"
 
+#include <atomic>
 #include <memory>
 #include <thread>
 
@@ -67,9 +68,10 @@ public:
     }
 
     ~SwMediaPlayer() override {
+        m_sourceCallbacksActive.store(false);
+        m_callbackGuard.reset();
         if (m_source) {
-            m_source->setMediaPacketCallback(SwMediaSource::MediaPacketCallback());
-            m_source->setTracksChangedCallback(SwMediaSource::TracksChangedCallback());
+            clearSourceCallbacks_(m_source);
         }
         stop();
     }
@@ -80,8 +82,7 @@ public:
         }
         stop();
         if (m_source) {
-            m_source->setMediaPacketCallback(SwMediaSource::MediaPacketCallback());
-            m_source->setTracksChangedCallback(SwMediaSource::TracksChangedCallback());
+            clearSourceCallbacks_(m_source);
         }
         m_source = source;
         m_tracks = source ? source->tracks() : SwList<SwMediaTrack>();
@@ -89,24 +90,7 @@ public:
         m_activeVideoTrackId.clear();
         m_activeMetadataTrackId.clear();
         m_activeSubtitleTrackId.clear();
-        if (m_source) {
-            SwMediaSource* sourcePtr = m_source.get();
-            m_source->setMediaPacketCallback([this](const SwMediaPacket& packet) {
-                handleMediaPacket_(packet);
-            });
-            m_source->setTracksChangedCallback([this, sourcePtr](const SwList<SwMediaTrack>& tracks) {
-                dispatchToAffinity_([this, sourcePtr, tracks]() {
-                    if (!m_source || m_source.get() != sourcePtr) {
-                        return;
-                    }
-                    m_tracks = tracks;
-                    updateDefaultTrackSelection_();
-                    if (m_tracksChangedCallback) {
-                        m_tracksChangedCallback(m_tracks);
-                    }
-                });
-            });
-        }
+        bindSourceCallbacks_(m_source);
 
         auto videoSource = std::dynamic_pointer_cast<SwVideoSource>(source);
         if (m_videoSink) {
@@ -295,6 +279,8 @@ public:
         if (!m_source) {
             return;
         }
+        m_sourceCallbacksActive.store(true);
+        bindSourceCallbacks_(m_source);
         m_audioTrackPipeline.start();
         m_metadataTrackPipeline.start();
         auto videoSource = std::dynamic_pointer_cast<SwVideoSource>(m_source);
@@ -312,6 +298,9 @@ public:
     }
 
     void stop() {
+        m_sourceCallbacksActive.store(false);
+        clearSourceCallbacks_(m_source);
+        m_playbackState = PlaybackState::StoppedState;
         if (m_videoSink) {
             m_videoSink->stop();
         } else if (m_source) {
@@ -322,7 +311,6 @@ public:
         if (m_audioOutput) {
             m_audioOutput->stop();
         }
-        m_playbackState = PlaybackState::StoppedState;
     }
 
     PlaybackState playbackState() const { return m_playbackState; }
@@ -446,6 +434,67 @@ private:
         });
     }
 
+    void clearSourceCallbacks_(const std::shared_ptr<SwMediaSource>& source) {
+        if (!source) {
+            return;
+        }
+        source->setMediaPacketCallback(SwMediaSource::MediaPacketCallback());
+        source->setTracksChangedCallback(SwMediaSource::TracksChangedCallback());
+        source->setRecoveryCallback(SwMediaSource::RecoveryCallback());
+    }
+
+    void bindSourceCallbacks_(const std::shared_ptr<SwMediaSource>& source) {
+        if (!source) {
+            return;
+        }
+        std::weak_ptr<int> weakGuard = m_callbackGuard;
+        SwMediaSource* sourcePtr = source.get();
+        source->setMediaPacketCallback([this, weakGuard, sourcePtr](const SwMediaPacket& packet) {
+            if (weakGuard.expired() ||
+                !m_sourceCallbacksActive.load() ||
+                !m_source ||
+                m_source.get() != sourcePtr) {
+                return;
+            }
+            handleMediaPacket_(packet);
+        });
+        source->setTracksChangedCallback([this, weakGuard, sourcePtr](const SwList<SwMediaTrack>& tracks) {
+            dispatchToAffinity_([this, weakGuard, sourcePtr, tracks]() {
+                if (weakGuard.expired() ||
+                    !m_sourceCallbacksActive.load() ||
+                    !m_source ||
+                    m_source.get() != sourcePtr) {
+                    return;
+                }
+                m_tracks = tracks;
+                updateDefaultTrackSelection_();
+                if (m_tracksChangedCallback) {
+                    m_tracksChangedCallback(m_tracks);
+                }
+            });
+        });
+        source->setRecoveryCallback([this, weakGuard, sourcePtr](const SwMediaSource::RecoveryEvent& event) {
+            dispatchToAffinity_([this, weakGuard, sourcePtr, event]() {
+                if (weakGuard.expired() ||
+                    !m_sourceCallbacksActive.load() ||
+                    !m_source ||
+                    m_source.get() != sourcePtr ||
+                    m_playbackState != PlaybackState::PlayingState) {
+                    return;
+                }
+                handleRecovery_(event);
+            });
+        });
+    }
+
+    void handleRecovery_(const SwMediaSource::RecoveryEvent& event) {
+        if (m_videoSink) {
+            m_videoSink->recoverLiveEdge(event);
+        }
+        m_audioTrackPipeline.recoverLiveEdge(event);
+        m_metadataTrackPipeline.recoverLiveEdge(event);
+    }
+
     void dispatchToAffinity_(std::function<void()> task) {
         if (!task) {
             return;
@@ -493,4 +542,6 @@ private:
     bool m_metadataEnabled{false};
     PlaybackState m_playbackState{PlaybackState::StoppedState};
     MetadataPacketCallback m_metadataPacketCallback{};
+    std::shared_ptr<int> m_callbackGuard{std::make_shared<int>(0)};
+    std::atomic<bool> m_sourceCallbacksActive{false};
 };

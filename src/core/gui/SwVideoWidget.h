@@ -48,6 +48,7 @@
 
 #include "SwWidget.h"
 #include "SwPainter.h"
+#include "core/object/SwPointer.h"
 
 #include "media/SwVideoFrame.h"
 #include "media/SwVideoSink.h"
@@ -661,6 +662,9 @@ public:
      * @details Use this hook to release any resources that remain associated with the instance.
      */
     ~SwVideoWidget() override {
+        m_callbackGuard.reset();
+        clearPendingFrameDispatch_();
+        setRealtimePresentationActive_(false);
         detachVideoSink(m_videoSink);
         m_videoSink.reset();
         stop();
@@ -670,6 +674,7 @@ public:
         if (m_videoSink == sink) {
             return;
         }
+        setRealtimePresentationActive_(false);
         detachVideoSink(m_videoSink);
         m_videoSink = sink ? sink : std::make_shared<SwVideoSink>();
         attachVideoSink(m_videoSink);
@@ -814,6 +819,7 @@ public:
         if (m_videoSink) {
             m_videoSink->stop();
         }
+        setRealtimePresentationActive_(false);
     }
 
     /**
@@ -1000,13 +1006,15 @@ private:
             if (weakGuard.expired()) {
                 return;
             }
-            handleIncomingFrame(frame);
+            queueIncomingFrame_(frame);
         });
         sink->setStatusCallback([this, weakGuard](const SwVideoSource::StreamStatus& status) {
             if (weakGuard.expired()) {
                 return;
             }
-            setStreamStatus(status);
+            postGuardedUiAction_([status](SwVideoWidget* self) {
+                self->setStreamStatus(status);
+            });
         });
         setStreamStatus(sink->streamStatus());
     }
@@ -1017,6 +1025,74 @@ private:
         }
         sink->setFrameCallback(FrameCallback());
         sink->setStatusCallback(SwVideoSink::StatusCallback());
+        clearPendingFrameDispatch_();
+    }
+
+    void postGuardedUiAction_(std::function<void(SwVideoWidget*)> fn) {
+        if (!fn) {
+            return;
+        }
+        if (auto* app = SwCoreApplication::instance(false)) {
+            const SwPointer<SwVideoWidget> self(this);
+            std::weak_ptr<int> weakGuard = m_callbackGuard;
+            std::function<void(SwVideoWidget*)> fnCopy = std::move(fn);
+            app->postEventOnLane([self, weakGuard, fnCopy]() mutable {
+                if (weakGuard.expired() || !self) {
+                    return;
+                }
+                SwVideoWidget* liveSelf = self.data();
+                if (!SwObject::isLive(liveSelf)) {
+                    return;
+                }
+                fnCopy(liveSelf);
+            }, SwFiberLane::Input);
+            return;
+        }
+        fn(this);
+    }
+
+    void queueIncomingFrame_(const SwVideoFrame& frame) {
+        bool shouldPost = false;
+        {
+            std::lock_guard<std::mutex> lock(m_pendingFrameMutex);
+            m_pendingFrame = frame;
+            m_hasPendingFrame = frame.isValid();
+            if (!m_frameDispatchPending) {
+                m_frameDispatchPending = true;
+                shouldPost = true;
+            }
+        }
+        if (!shouldPost) {
+            return;
+        }
+        postGuardedUiAction_([](SwVideoWidget* self) {
+            self->dispatchPendingFrameOnUiThread_();
+        });
+    }
+
+    void dispatchPendingFrameOnUiThread_() {
+        SwVideoFrame frame;
+        {
+            std::lock_guard<std::mutex> lock(m_pendingFrameMutex);
+            if (!m_hasPendingFrame) {
+                m_frameDispatchPending = false;
+                return;
+            }
+            frame = m_pendingFrame;
+            m_pendingFrame = SwVideoFrame();
+            m_hasPendingFrame = false;
+            m_frameDispatchPending = false;
+        }
+        if (frame.isValid()) {
+            handleIncomingFrame(frame);
+        }
+    }
+
+    void clearPendingFrameDispatch_() {
+        std::lock_guard<std::mutex> lock(m_pendingFrameMutex);
+        m_pendingFrame = SwVideoFrame();
+        m_hasPendingFrame = false;
+        m_frameDispatchPending = false;
     }
 
     void setStreamStatus(const SwVideoSource::StreamStatus& status) {
@@ -1024,6 +1100,7 @@ private:
             std::lock_guard<std::mutex> lock(m_streamStatusMutex);
             m_streamStatus = status;
         }
+        setRealtimePresentationActive_(status.state == SwVideoSource::StreamState::Streaming);
         if (!m_repaintPending.exchange(true)) {
             update();
         }
@@ -1435,10 +1512,15 @@ private:
     SwVideoFrame m_currentFrame;
     std::chrono::steady_clock::time_point m_lastFrameTime{};
     std::function<void(const SwVideoFrame&)> m_frameArrived;
+    mutable std::mutex m_pendingFrameMutex;
+    SwVideoFrame m_pendingFrame;
+    bool m_hasPendingFrame{false};
+    bool m_frameDispatchPending{false};
     mutable std::mutex m_streamStatusMutex;
     SwVideoSource::StreamStatus m_streamStatus{};
     std::shared_ptr<int> m_callbackGuard{std::make_shared<int>(0)};
     std::atomic<bool> m_repaintPending{false};
+    std::atomic<bool> m_realtimePresentationActive{false};
     std::atomic<bool> m_loggedFirstPresentedFrame{false};
     std::atomic<uint64_t> m_presentedFrameCount{0};
 #if defined(_WIN32)
@@ -1460,6 +1542,7 @@ private:
             m_currentFrame = frame;
             m_lastFrameTime = std::chrono::steady_clock::now();
         }
+        setRealtimePresentationActive_(true);
         if (!m_loggedFirstPresentedFrame.exchange(true)) {
             swCWarning(kSwLogCategory_SwVideoWidget) << "[SwVideoWidget] First frame presented "
                         << frame.width() << "x" << frame.height()
@@ -1477,6 +1560,14 @@ private:
         if (!m_repaintPending.exchange(true)) {
             update();
         }
+    }
+
+    void setRealtimePresentationActive_(bool active) {
+        const bool previous = m_realtimePresentationActive.exchange(active);
+        if (previous == active) {
+            return;
+        }
+        SwWidgetPlatformAdapter::setDamageThrottleSuppressed(nativeWindowHandle(), active);
     }
 
 };

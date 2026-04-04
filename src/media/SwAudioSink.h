@@ -16,6 +16,7 @@ public:
     virtual const char* name() const = 0;
     virtual bool open(int sampleRate, int channelCount) = 0;
     virtual void close() = 0;
+    virtual void flush() {}
     virtual bool pushFrame(const SwAudioFrame& frame) = 0;
     virtual std::int64_t playedTimestamp() const { return -1; }
 };
@@ -31,6 +32,10 @@ public:
     }
 
     void close() override {}
+
+    void flush() override {
+        m_lastTimestamp = -1;
+    }
 
     bool pushFrame(const SwAudioFrame& frame) override {
         m_lastTimestamp = frame.timestamp();

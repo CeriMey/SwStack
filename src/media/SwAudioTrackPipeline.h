@@ -9,6 +9,7 @@
 #include "media/SwAudioOutput.h"
 #include "media/SwAudioPipeline.h"
 #include "media/SwMediaPacket.h"
+#include "media/SwMediaSource.h"
 #include "media/SwMediaTrackQueue.h"
 
 #include <atomic>
@@ -18,9 +19,14 @@
 
 class SwAudioTrackPipeline {
 public:
+    struct QueuedPacket {
+        SwMediaPacket packet{};
+        uint64_t recoveryEpoch{0};
+    };
+
     SwAudioTrackPipeline()
-        : m_queue([](const SwMediaPacket& packet) {
-              return static_cast<std::size_t>(packet.payload().size()) + 64U;
+        : m_queue([](const QueuedPacket& item) {
+              return static_cast<std::size_t>(item.packet.payload().size()) + 80U;
           }) {
         m_queue.setLimits(128, 2 * 1024 * 1024);
     }
@@ -78,19 +84,34 @@ public:
         if (!m_running.load()) {
             return;
         }
-        auto result = m_queue.push(packet);
+        QueuedPacket item;
+        item.packet = packet;
+        item.recoveryEpoch = m_recoveryEpoch.load();
+        auto result = m_queue.push(item);
         if (result.droppedOldest) {
             m_forceDiscontinuity.store(true);
         }
     }
 
+    void recoverLiveEdge(const SwMediaSource::RecoveryEvent& event) {
+        m_recoveryEpoch.store(event.epoch);
+        m_queue.clear();
+        m_forceDiscontinuity.store(true);
+        std::lock_guard<std::mutex> lock(m_pipelineMutex);
+        m_pipeline.flush();
+    }
+
 private:
     void workerLoop_() {
         while (!m_stopRequested.load()) {
-            SwMediaPacket packet;
-            if (!m_queue.popWait(packet, 50)) {
+            QueuedPacket item;
+            if (!m_queue.popWait(item, 50)) {
                 continue;
             }
+            if (item.recoveryEpoch != m_recoveryEpoch.load()) {
+                continue;
+            }
+            SwMediaPacket packet = item.packet;
             if (m_forceDiscontinuity.exchange(false)) {
                 packet.setDiscontinuity(true);
             }
@@ -102,9 +123,10 @@ private:
     mutable std::mutex m_pipelineMutex;
     std::shared_ptr<SwAudioOutput> m_audioOutput;
     SwAudioPipeline m_pipeline{};
-    SwMediaTrackQueue<SwMediaPacket> m_queue;
+    SwMediaTrackQueue<QueuedPacket> m_queue;
     std::thread m_worker{};
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_stopRequested{false};
     std::atomic<bool> m_forceDiscontinuity{true};
+    std::atomic<uint64_t> m_recoveryEpoch{1};
 };

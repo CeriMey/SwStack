@@ -2503,10 +2503,10 @@ private:
             if (!attached_.load(std::memory_order_relaxed)) return;
 
             SwCoreApplication* app = SwCoreApplication::instance(false);
-            if (app && waitableId_ != 0) {
-                app->removeWaitable(waitableId_);
+            if (app && watchToken_ != 0) {
+                app->ioDispatcher().remove(watchToken_);
             }
-            waitableId_ = 0;
+            watchToken_ = 0;
 
 #ifdef _WIN32
             if (event_) {
@@ -2582,16 +2582,26 @@ private:
         void attachLocked_() {
             SwCoreApplication* app = SwCoreApplication::instance(false);
             if (!app) return;
+            const auto controlPoster = [app](std::function<void()> task) {
+                if (app) {
+                    app->postEventOnLane(std::move(task), SwFiberLane::Control);
+                    return;
+                }
+                task();
+            };
 
             const uint32_t pid = currentPid();
 #ifdef _WIN32
             const std::string name = std::string("Local\\sw_ipc_notify_") + std::to_string(pid);
             event_ = ::CreateEventA(NULL, FALSE, FALSE, name.c_str());
             if (!event_) return;
-            waitableId_ = app->addWaitHandle(event_, []() {
-                // Coalesced wakeups: a single dispatch handles all pending signals.
-                LoopPollerDispatchRegistry::dispatchAll();
-            });
+            watchToken_ = app->ioDispatcher().watchHandle(
+                event_,
+                controlPoster,
+                []() {
+                    // Coalesced wakeups: a single dispatch handles all pending signals.
+                    LoopPollerDispatchRegistry::dispatchAll();
+                });
 #else
             sock_ = ::socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
             if (sock_ < 0) return;
@@ -2605,27 +2615,34 @@ private:
             }
 
             const int fdCopy = sock_;
-            waitableId_ = app->addWaitFd(sock_, [fdCopy]() {
-                // Drain datagrams (best-effort) then dispatch.
-                uint8_t buf[64];
-                while (true) {
-                    const ssize_t n = ::recv(fdCopy, buf, sizeof(buf), MSG_DONTWAIT);
-                    if (n > 0) continue;
-                    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
-                    break;
-                }
-                LoopPollerDispatchRegistry::dispatchAll();
-            });
+            watchToken_ = app->ioDispatcher().watchFd(
+                sock_,
+                SwIoDispatcher::Readable,
+                controlPoster,
+                [fdCopy](uint32_t events) {
+                    if ((events & SwIoDispatcher::Readable) == 0) {
+                        return;
+                    }
+                    // Drain datagrams (best-effort) then dispatch.
+                    uint8_t buf[64];
+                    while (true) {
+                        const ssize_t n = ::recv(fdCopy, buf, sizeof(buf), MSG_DONTWAIT);
+                        if (n > 0) continue;
+                        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
+                        break;
+                    }
+                    LoopPollerDispatchRegistry::dispatchAll();
+                });
 #endif
 
-            if (waitableId_ != 0) {
+            if (watchToken_ != 0) {
                 attached_.store(true, std::memory_order_release);
             }
         }
 
         std::mutex mtx_;
         std::atomic_bool attached_{false};
-        size_t waitableId_{0};
+        SwIoDispatcher::Token watchToken_{0};
 
 #ifdef _WIN32
         HANDLE event_{NULL};
@@ -3249,13 +3266,13 @@ public:
          * @details The instance is initialized and prepared for immediate use.
          */
         Subscription(SwCoreApplication* app,
-                     size_t waitableId,
+                     SwIoDispatcher::Token watchToken,
                      const SwString& domain,
                      const SwString& object,
                      const SwString& signal,
                      uint32_t subPid,
                      const SwString& subscriberObject)
-            : waitableId_(waitableId),
+            : watchToken_(watchToken),
               app_(app),
               domain_(domain),
               object_(object),
@@ -3295,8 +3312,8 @@ public:
             pollerId_ = o.pollerId_;
             o.pollerId_ = 0;
 #ifdef _WIN32
-            waitableId_ = o.waitableId_;
-            o.waitableId_ = 0;
+            watchToken_ = o.watchToken_;
+            o.watchToken_ = 0;
             app_ = o.app_;
             o.app_ = nullptr;
 #endif
@@ -3326,7 +3343,7 @@ public:
         void stop() {
             if (!pollerId_
 #ifdef _WIN32
-                && !waitableId_
+                && !watchToken_
 #endif
             ) {
                 return;
@@ -3338,9 +3355,9 @@ public:
             }
 
 #ifdef _WIN32
-            if (waitableId_ && app_) {
-                app_->removeWaitable(waitableId_);
-                waitableId_ = 0;
+            if (watchToken_ && app_) {
+                app_->ioDispatcher().remove(watchToken_);
+                watchToken_ = 0;
             }
 #endif
 
@@ -3353,7 +3370,7 @@ public:
     private:
         size_t pollerId_{0};
 #ifdef _WIN32
-        size_t waitableId_{0};
+        SwIoDispatcher::Token watchToken_{0};
         SwCoreApplication* app_{nullptr};
 #endif
         SwString domain_;
@@ -3661,7 +3678,15 @@ public:
                 st->inCallback.store(false, std::memory_order_release);
             };
 
-            const size_t waitableId = app->addWaitHandle(st->evt, drain);
+            const auto controlPoster = [app](std::function<void()> task) {
+                if (app) {
+                    app->postEventOnLane(std::move(task), SwFiberLane::Control);
+                    return;
+                }
+                task();
+            };
+            const SwIoDispatcher::Token watchToken =
+                app->ioDispatcher().watchHandle(st->evt, controlPoster, drain);
             detail::SubscribersRegistryTable<>::registerSubscription(domCopy, objCopy, sigCopy, subPid, subObjCopy);
 
             if (fireInitial) {
@@ -3669,13 +3694,13 @@ public:
             }
 
             if (timeoutMs > 0) {
-                SwTimer::singleShot(timeoutMs, [app, waitableId, domCopy, objCopy, sigCopy, subPid, subObjCopy]() {
+                SwTimer::singleShot(timeoutMs, [app, watchToken, domCopy, objCopy, sigCopy, subPid, subObjCopy]() {
                     detail::SubscribersRegistryTable<>::unregisterSubscription(domCopy, objCopy, sigCopy, subPid, subObjCopy);
-                    if (app) app->removeWaitable(waitableId);
+                    if (app) app->ioDispatcher().remove(watchToken);
                 });
             }
 
-            return Subscription(app, waitableId, domCopy, objCopy, sigCopy, subPid, subObjCopy);
+            return Subscription(app, watchToken, domCopy, objCopy, sigCopy, subPid, subObjCopy);
         }
 #endif
 

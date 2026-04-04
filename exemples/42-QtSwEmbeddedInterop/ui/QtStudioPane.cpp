@@ -59,7 +59,7 @@ public:
         : QWidget(parent) {
         setMouseTracking(true);
         setCursor(Qt::CrossCursor);
-        setMinimumHeight(260);
+        setMinimumSize(example42CanvasMinimumWidth(), example42CanvasMinimumHeight());
     }
 
     void setInkColor(int paletteIndex) {
@@ -155,7 +155,7 @@ protected:
             painter.setPen(QColor(148, 163, 184));
             painter.drawText(bounds.adjusted(22, 0, -22, -20),
                              Qt::AlignCenter,
-                             QStringLiteral("Hold the mouse and sketch here"));
+                             example42TextQt(example42PaneTexts().emptyCanvasHint));
         }
     }
 
@@ -188,29 +188,41 @@ class QtStudioPane::Impl {
 public:
     explicit Impl(QtStudioPane* owner)
         : owner_(owner) {
-        titleLabel_ = new QLabel(QStringLiteral("Qt Sketch Studio"), owner_);
-        subtitleLabel_ = new QLabel(QStringLiteral("Qt Widgets + QPainter"), owner_);
-        statusLabel_ = new QLabel(QStringLiteral("Qt side ready"), owner_);
-        runtimeLabel_ = new QLabel(QStringLiteral("SwThread idle"), owner_);
-        bridgeButton_ = new QPushButton(QStringLiteral("Send to Sw"), owner_);
-        fiberButton_ = new QPushButton(QStringLiteral("Run SwThread Fiber"), owner_);
+        const Example42PaneTextSet& texts = example42PaneTexts();
+
+        titleLabel_ = new QLabel(example42TextQt(texts.title), owner_);
+        subtitleLabel_ = new QLabel(example42TextQt(texts.subtitle), owner_);
+        statusLabel_ = new QLabel(example42TextQt(texts.readyStatus), owner_);
+        runtimeLabel_ = new QLabel(example42TextQt(texts.runtimeIdle), owner_);
+        bridgeButton_ = new QPushButton(example42TextQt(texts.bridgeButton), owner_);
+        fiberButton_ = new QPushButton(example42TextQt(texts.fiberButton), owner_);
         lineEdit_ = new QLineEdit(owner_);
-        paletteLabel_ = new QLabel(QStringLiteral("Palette"), owner_);
+        paletteLabel_ = new QLabel(example42TextQt(texts.paletteLabel), owner_);
         currentInkLabel_ = new QLabel(inkLabelText(0), owner_);
-        clearButton_ = new QPushButton(QStringLiteral("Clear canvas"), owner_);
+        clearButton_ = new QPushButton(example42TextQt(texts.clearButton), owner_);
         canvas_ = new QtSketchCanvas(owner_);
 
-        titleLabel_->setStyleSheet(QStringLiteral("QLabel { color: rgb(15, 23, 42); font-size: 20px; font-weight: 700; }"));
+        titleLabel_->setStyleSheet(QStringLiteral("QLabel { color: rgb(15, 23, 42); font-size: 20px; }"));
         subtitleLabel_->setStyleSheet(QStringLiteral("QLabel { color: rgb(100, 116, 139); font-size: 12px; }"));
         statusLabel_->setStyleSheet(QStringLiteral("QLabel { color: rgb(37, 99, 235); font-size: 13px; }"));
         runtimeLabel_->setStyleSheet(QStringLiteral("QLabel { color: rgb(71, 85, 105); font-size: 12px; }"));
-        paletteLabel_->setStyleSheet(QStringLiteral("QLabel { color: rgb(71, 85, 105); font-size: 12px; font-weight: 600; }"));
+        paletteLabel_->setStyleSheet(QStringLiteral("QLabel { color: rgb(71, 85, 105); font-size: 12px; }"));
         currentInkLabel_->setStyleSheet(QStringLiteral("QLabel { color: rgb(100, 116, 139); font-size: 12px; }"));
         bridgeButton_->setStyleSheet(qtPrimaryButtonStyleSheet());
         fiberButton_->setStyleSheet(qtSecondaryButtonStyleSheet());
         clearButton_->setStyleSheet(qtSecondaryButtonStyleSheet());
         lineEdit_->setStyleSheet(qtLineEditStyleSheet());
-        lineEdit_->setPlaceholderText(QStringLiteral("Write a message for Sw"));
+        lineEdit_->setPlaceholderText(example42TextQt(texts.placeholder));
+        titleLabel_->setMinimumHeight(example42TitleHeight());
+        subtitleLabel_->setMinimumHeight(example42SubtitleHeight());
+        statusLabel_->setMinimumHeight(example42StatusHeight());
+        runtimeLabel_->setMinimumHeight(example42RuntimeHeight());
+        bridgeButton_->setMinimumSize(example42ContentMinimumWidth(), example42BridgeButtonHeight());
+        fiberButton_->setMinimumSize(example42ContentMinimumWidth(), example42FiberButtonHeight());
+        lineEdit_->setMinimumSize(example42ContentMinimumWidth(), example42LineEditHeight());
+        paletteLabel_->setMinimumSize(example42PaletteLabelWidth(), example42PaletteRowHeight());
+        currentInkLabel_->setMinimumSize(example42CurrentInkLabelWidth(), example42PaletteRowHeight());
+        clearButton_->setMinimumSize(example42ClearButtonWidth(), example42ClearButtonHeight());
 
         for (int index = 0; index < kInkPaletteCount; ++index) {
             QtColorChipButton* swatch = new QtColorChipButton(index, owner_);
@@ -250,49 +262,29 @@ public:
     }
 
     void layoutWidgets() {
-        const int outerMargin = 24;
-        const int spacing = 12;
-        const int availableWidth = std::max(180, owner_->width() - outerMargin * 2);
-        int y = outerMargin;
+        const Example42PaneLayout layout = computeExample42PaneLayout(owner_->width(), owner_->height());
 
-        titleLabel_->setGeometry(outerMargin, y, availableWidth, 28);
-        y += 28;
+        titleLabel_->setGeometry(layout.title.x, layout.title.y, layout.title.width, layout.title.height);
+        subtitleLabel_->setGeometry(layout.subtitle.x, layout.subtitle.y, layout.subtitle.width, layout.subtitle.height);
+        statusLabel_->setGeometry(layout.status.x, layout.status.y, layout.status.width, layout.status.height);
+        runtimeLabel_->setGeometry(layout.runtime.x, layout.runtime.y, layout.runtime.width, layout.runtime.height);
+        bridgeButton_->setGeometry(layout.bridgeButton.x, layout.bridgeButton.y, layout.bridgeButton.width, layout.bridgeButton.height);
+        fiberButton_->setGeometry(layout.fiberButton.x, layout.fiberButton.y, layout.fiberButton.width, layout.fiberButton.height);
+        lineEdit_->setGeometry(layout.lineEdit.x, layout.lineEdit.y, layout.lineEdit.width, layout.lineEdit.height);
+        paletteLabel_->setGeometry(layout.paletteLabel.x, layout.paletteLabel.y, layout.paletteLabel.width, layout.paletteLabel.height);
+        currentInkLabel_->setGeometry(layout.currentInkLabel.x,
+                                      layout.currentInkLabel.y,
+                                      layout.currentInkLabel.width,
+                                      layout.currentInkLabel.height);
 
-        subtitleLabel_->setGeometry(outerMargin, y, availableWidth, 20);
-        y += 20 + 6;
-
-        statusLabel_->setGeometry(outerMargin, y, availableWidth, 22);
-        y += 22 + spacing;
-
-        runtimeLabel_->setGeometry(outerMargin, y, availableWidth, 20);
-        y += 20 + spacing;
-
-        bridgeButton_->setGeometry(outerMargin, y, availableWidth, 42);
-        y += 42 + spacing;
-
-        fiberButton_->setGeometry(outerMargin, y, availableWidth, 34);
-        y += 34 + spacing;
-
-        lineEdit_->setGeometry(outerMargin, y, availableWidth, 38);
-        y += 38 + spacing;
-
-        paletteLabel_->setGeometry(outerMargin, y, 100, 22);
-        currentInkLabel_->setGeometry(owner_->width() - outerMargin - 160, y, 160, 22);
-        y += 22 + 10;
-
-        int x = outerMargin;
+        int x = layout.paletteLabel.x;
         for (QtColorChipButton* swatch : swatches_) {
-            swatch->setGeometry(x, y, 30, 30);
-            x += 38;
+            swatch->setGeometry(x, layout.clearButton.y + 2, example42SwatchSize(), example42SwatchSize());
+            x += example42SwatchStep();
         }
 
-        clearButton_->setGeometry(owner_->width() - outerMargin - 124, y - 2, 124, 34);
-        y += 30 + spacing;
-
-        canvas_->setGeometry(outerMargin,
-                             y,
-                             availableWidth,
-                             std::max(220, owner_->height() - y - outerMargin));
+        clearButton_->setGeometry(layout.clearButton.x, layout.clearButton.y, layout.clearButton.width, layout.clearButton.height);
+        canvas_->setGeometry(layout.canvas.x, layout.canvas.y, layout.canvas.width, layout.canvas.height);
     }
 
 private:
@@ -325,6 +317,7 @@ QtStudioPane::QtStudioPane(QWidget* parent)
     : QWidget(parent)
     , impl_(new Impl(this)) {
     setAutoFillBackground(true);
+    setMinimumSize(example42PaneMinimumWidth(), example42PaneMinimumHeight());
 }
 
 QtStudioPane::~QtStudioPane() = default;
@@ -347,6 +340,14 @@ void QtStudioPane::setStatusText(const QString& text) {
 
 void QtStudioPane::setRuntimeStatusText(const QString& text) {
     impl_->setRuntimeStatusText(text);
+}
+
+QSize QtStudioPane::minimumSizeHint() const {
+    return QSize(example42PaneMinimumWidth(), example42PaneMinimumHeight());
+}
+
+QSize QtStudioPane::sizeHint() const {
+    return QSize(example42PanePreferredWidth(), example42PanePreferredHeight());
 }
 
 void QtStudioPane::resizeEvent(QResizeEvent* event) {
