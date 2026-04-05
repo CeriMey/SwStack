@@ -75,6 +75,29 @@ public:
         currentIdChangedHandler_ = std::move(handler);
     }
 
+    void setAbortVisible(bool visible) {
+        if (abortBtn_) {
+            abortBtn_->setVisible(visible);
+            if (visible) {
+                nextBtn_->setVisible(false);
+            }
+            layoutShell_();
+        }
+    }
+
+    void setNextButtonText(const SwString& text) {
+        if (nextBtn_) {
+            nextBtn_->setText(text);
+        }
+    }
+
+    void setNextButtonVisible(bool visible) {
+        if (nextBtn_) {
+            nextBtn_->setVisible(visible);
+            layoutShell_();
+        }
+    }
+
 protected:
     void resizeEvent(ResizeEvent* event) override {
         SwDialog::resizeEvent(event);
@@ -262,21 +285,26 @@ private:
         backBtn_ = new SwPushButton("Back", bar);
         nextBtn_ = new SwPushButton("Next", bar);
         finishBtn_ = new SwPushButton("Finish", bar);
+        abortBtn_ = new SwPushButton("Abort", bar);
 
         styleSecondary_(cancelBtn_);
         styleSecondary_(backBtn_);
         stylePrimary_(nextBtn_);
         stylePrimary_(finishBtn_);
+        styleDanger_(abortBtn_);
 
         cancelBtn_->resize(90, 32);
         backBtn_->resize(90, 32);
         nextBtn_->resize(90, 32);
         finishBtn_->resize(90, 32);
+        abortBtn_->resize(90, 32);
+        abortBtn_->setVisible(false);
 
         SwObject::connect(cancelBtn_, &SwPushButton::clicked, this, [this]() { reject(); });
         SwObject::connect(backBtn_,   &SwPushButton::clicked, this, [this]() { back(); });
         SwObject::connect(nextBtn_,   &SwPushButton::clicked, this, [this]() { next(); });
         SwObject::connect(finishBtn_, &SwPushButton::clicked, this, [this]() { accept(); });
+        SwObject::connect(abortBtn_,  &SwPushButton::clicked, this, [this]() { reject(); });
 
         updateUi_();
         layoutShell_();
@@ -291,6 +319,15 @@ private:
                           "color: rgb(255, 255, 255); font-size: 13px; font-weight: bold; } "
                           "SwPushButton:hover { background-color: rgb(16, 132, 220); } "
                           "SwPushButton:pressed { background-color: rgb(14, 99, 156); }");
+    }
+
+    static void styleDanger_(SwPushButton* b) {
+        if (!b) return;
+        b->setStyleSheet("SwPushButton { background-color: rgb(50, 20, 20); "
+                          "border-color: rgb(200, 50, 50); border-width: 1px; border-radius: 6px; "
+                          "color: rgb(240, 80, 80); font-size: 13px; font-weight: bold; } "
+                          "SwPushButton:hover { background-color: rgb(70, 25, 25); } "
+                          "SwPushButton:pressed { background-color: rgb(90, 30, 30); }");
     }
 
     static void styleSecondary_(SwPushButton* b) {
@@ -413,6 +450,11 @@ private:
         cancelBtn_->move(20, by);
 
         int bx = bar->width() - 20;
+        if (abortBtn_->getVisible()) {
+            bx -= abortBtn_->width();
+            abortBtn_->move(bx, by);
+            bx -= 8;
+        }
         if (finishBtn_->getVisible()) {
             bx -= finishBtn_->width();
             finishBtn_->move(bx, by);
@@ -452,6 +494,7 @@ private:
     SwPushButton* backBtn_{nullptr};
     SwPushButton* nextBtn_{nullptr};
     SwPushButton* finishBtn_{nullptr};
+    SwPushButton* abortBtn_{nullptr};
 
     SwList<SwWizardPage*> pages_;
     int currentIndex_{0};

@@ -21,6 +21,8 @@ if(NOT TARGET Qt${QT_VERSION_MAJOR}::Widgets)
     return()
 endif()
 
+file(TO_CMAKE_PATH "${CMAKE_CURRENT_SOURCE_DIR}" EXAMPLE42_SOURCE_DIR_CMAKE)
+
 add_executable(QtSwEmbeddedInterop
     QtSwEmbeddedInterop.cpp
     ui/QtStudioPane.cpp
@@ -38,4 +40,8 @@ target_link_libraries(QtSwEmbeddedInterop PRIVATE
     ws2_32
     user32
     gdi32
+)
+
+target_compile_definitions(QtSwEmbeddedInterop PRIVATE
+    EXAMPLE42_SOURCE_DIR="${EXAMPLE42_SOURCE_DIR_CMAKE}"
 )

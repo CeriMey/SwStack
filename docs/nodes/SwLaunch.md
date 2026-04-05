@@ -167,6 +167,8 @@ L'API de controle est volontairement etroite. Elle n'est pas une API generique d
 
 Routes disponibles:
 
+- `GET /api/launch/help`
+- `GET /api/launch/help/:topic`
 - `GET /api/launch/state`
 - `PUT /api/launch/state`
 - `POST /api/launch/deploy`
@@ -175,6 +177,99 @@ Routes disponibles:
 Toutes les routes `/api/*` exigent:
 
 - `Authorization: Bearer <token>`
+
+Exception:
+
+- les routes de help HTTP sont lisibles sans token:
+  - `GET /api/launch/help`
+  - `GET /api/launch/help/:topic`
+
+## Help distant HTTP
+
+Le help distant permet de demander a `SwLaunch` de decrire lui-meme son API, sa version et ses capacites, sans se connecter au terminal du serveur.
+
+Il faut le voir comme une porte d'entree de decouverte. Avant d'utiliser le launcher a distance, vous pouvez d'abord appeler le help HTTP pour savoir:
+
+- quelle version de `SwLaunch` tourne,
+- quelles routes sont exposees,
+- quelles fonctions sont supportees,
+- quels topics de documentation sont disponibles,
+- si le flux de logs et le deploiement a chaud sont presents sur cette instance.
+
+### `GET /api/launch/help`
+
+Cette route retourne une vue d'ensemble en JSON avec:
+
+- `product`
+- `version`
+- `apiVersion`
+- `buildStamp`
+- `helpTopics`
+- `capabilities`
+- `routes`
+- `auth`
+- `features`
+- `text`
+
+Exemple d'usage:
+
+```bash
+curl http://<ip>:7777/api/launch/help
+```
+
+Cette route est utile pour:
+
+- inventorier une instance en cours d'execution,
+- verifier qu'un binaire a bien ete mis a jour,
+- confirmer que les capacites attendues existent avant d'appeler une route sensible.
+
+### `GET /api/launch/help/:topic`
+
+Cette route retourne le detail d'un sujet precis.
+
+Exemples de topics:
+
+- `control_api`
+- `logs`
+- `deploy`
+- `checksum`
+- `rollback`
+
+Exemple d'usage:
+
+```bash
+curl http://<ip>:7777/api/launch/help/logs
+```
+
+### Exemples operateur
+
+Verifier la version et les capacites:
+
+```bash
+curl http://<ip>:7777/api/launch/help
+```
+
+Verifier comment fonctionne le flux de logs:
+
+```bash
+curl http://<ip>:7777/api/launch/help/logs
+```
+
+Verifier la procedure de deploiement:
+
+```bash
+curl http://<ip>:7777/api/launch/help/deploy
+```
+
+### Ce qu'il faut retenir
+
+Le help distant n'execute aucune action sur le runtime. Il sert uniquement a decrire l'instance `SwLaunch` en cours.
+
+En pratique:
+
+- utilisez `help` pour decouvrir,
+- utilisez `state` pour observer,
+- utilisez `deploy` ou `PUT /state` pour agir.
 
 ### `GET /api/launch/state`
 

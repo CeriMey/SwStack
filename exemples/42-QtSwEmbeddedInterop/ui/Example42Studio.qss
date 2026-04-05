@@ -1,0 +1,139 @@
+QWidget {
+    font-family: "Segoe UI";
+}
+
+QWidget#centralWidget {
+    background: rgb(244, 247, 251);
+}
+
+QWidget#paletteHeaderRow,
+QWidget#paletteActionRow,
+QWidget#swatchStrip,
+QWidget#canvasHost {
+    background: rgba(0, 0, 0, 0);
+    border: 0;
+}
+
+QLabel {
+    background: rgba(0, 0, 0, 0);
+    border: none;
+    color: rgb(24, 28, 36);
+}
+
+QLabel#titleLabel {
+    color: rgb(15, 23, 42);
+    font-size: 20px;
+    font-weight: 700;
+    min-height: 28px;
+}
+
+QLabel#subtitleLabel {
+    color: rgb(100, 116, 139);
+    font-size: 12px;
+    min-height: 20px;
+}
+
+QLabel#statusLabel {
+    color: rgb(37, 99, 235);
+    font-size: 13px;
+    min-height: 22px;
+}
+
+QLabel#runtimeLabel,
+QLabel#paletteLabel,
+QLabel#currentInkLabel {
+    color: rgb(71, 85, 105);
+    font-size: 12px;
+}
+
+QLabel#currentInkLabel {
+    color: rgb(100, 116, 139);
+    min-width: 160px;
+    min-height: 22px;
+}
+
+QLabel#paletteLabel {
+    min-width: 100px;
+    min-height: 22px;
+}
+
+QPushButton {
+    border-radius: 12px;
+    border: 1px solid rgb(220, 224, 232);
+    color: rgb(24, 28, 36);
+    background: rgb(255, 255, 255);
+}
+
+QPushButton#bridgeButton {
+    min-height: 42px;
+    background: rgb(30, 102, 255);
+    border: 1px solid rgb(22, 84, 220);
+    color: rgb(255, 255, 255);
+    padding: 10px 14px;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+QPushButton#bridgeButton:hover {
+    background: rgb(44, 114, 255);
+    border-color: rgb(30, 102, 255);
+}
+
+QPushButton#bridgeButton:pressed {
+    background: rgb(20, 76, 206);
+    border-color: rgb(15, 62, 176);
+}
+
+QPushButton#fiberButton,
+QPushButton#clearButton {
+    min-height: 34px;
+    font-size: 13px;
+    padding: 9px 14px;
+}
+
+QPushButton#fiberButton:hover,
+QPushButton#clearButton:hover {
+    background: rgb(248, 250, 252);
+    border-color: rgb(203, 213, 225);
+}
+
+QPushButton#fiberButton:pressed,
+QPushButton#clearButton:pressed {
+    background: rgb(241, 245, 249);
+    border-color: rgb(203, 213, 225);
+}
+
+QPushButton#clearButton {
+    min-width: 124px;
+}
+
+QLineEdit#messageEdit {
+    min-height: 38px;
+    background: rgb(255, 255, 255);
+    border: 1px solid rgb(220, 224, 232);
+    border-radius: 12px;
+    padding: 6px 10px;
+    color: rgb(24, 28, 36);
+    font-size: 14px;
+}
+
+QLineEdit#messageEdit:focus {
+    border-color: rgb(59, 130, 246);
+}
+
+QWidget#swatchStrip {
+    min-width: 182px;
+    min-height: 30px;
+}
+
+QWidget#canvasHost,
+QWidget#canvasSurface {
+    min-width: 220px;
+    min-height: 220px;
+}
+
+QWidget#canvasSurface {
+    background: rgb(255, 255, 255);
+    border: 1px solid rgb(220, 224, 232);
+    border-radius: 18px;
+}

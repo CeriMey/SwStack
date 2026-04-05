@@ -88,6 +88,7 @@ public:
             return SwDbStatus(SwDbStatus::IoError, "Unable to hash password");
         }
         account.emailVerifiedAt.clear();
+        account.passwordResetRequired = false;
         account.suspended = false;
         account.createdAt = swHttpAuthDetail::currentIsoTimestamp();
         account.updatedAt = account.createdAt;
@@ -131,6 +132,7 @@ public:
         account.email = normalizedEmail;
         account.passwordHash = importedAccount.passwordHash.trimmed();
         account.emailVerifiedAt = importedAccount.emailVerifiedAt.trimmed();
+        account.passwordResetRequired = importedAccount.passwordResetRequired;
         account.createdAt = importedAccount.createdAt.trimmed().isEmpty()
                                 ? swHttpAuthDetail::currentIsoTimestamp()
                                 : importedAccount.createdAt.trimmed();
@@ -201,6 +203,21 @@ public:
         if (account.passwordHash.isEmpty()) {
             return SwDbStatus(SwDbStatus::IoError, "Unable to hash password");
         }
+        account.passwordResetRequired = false;
+        account.updatedAt = swHttpAuthDetail::currentIsoTimestamp();
+        return writeAccountLocked_(account);
+    }
+
+    SwDbStatus setAccountPasswordResetRequired(const SwString& accountId, bool passwordResetRequired) {
+        SwMutexLocker locker(&m_mutex);
+        SW_HTTP_AUTH_RETURN_IF_NOT_OPEN_();
+
+        SwHttpAuthAccount account;
+        const SwDbStatus status = loadAccountByIdLocked_(accountId.trimmed(), account);
+        if (!status.ok()) {
+            return status;
+        }
+        account.passwordResetRequired = passwordResetRequired;
         account.updatedAt = swHttpAuthDetail::currentIsoTimestamp();
         return writeAccountLocked_(account);
     }
@@ -672,6 +689,7 @@ private:
         object["email"] = account.email.toStdString();
         object["passwordHash"] = account.passwordHash.toStdString();
         object["emailVerifiedAt"] = account.emailVerifiedAt.toStdString();
+        object["passwordResetRequired"] = account.passwordResetRequired;
         object["suspended"] = account.suspended;
         object["createdAt"] = account.createdAt.toStdString();
         object["updatedAt"] = account.updatedAt.toStdString();
@@ -685,6 +703,7 @@ private:
         account.email = object.value("email").toString().c_str();
         account.passwordHash = object.value("passwordHash").toString().c_str();
         account.emailVerifiedAt = object.value("emailVerifiedAt").toString().c_str();
+        account.passwordResetRequired = object.value("passwordResetRequired").toBool(false);
         account.suspended = object.value("suspended").toBool(false);
         account.createdAt = object.value("createdAt").toString().c_str();
         account.updatedAt = object.value("updatedAt").toString().c_str();

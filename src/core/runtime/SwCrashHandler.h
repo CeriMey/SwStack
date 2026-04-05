@@ -92,6 +92,22 @@ struct SwCrashReport {
 class SwCrashHandler {
 public:
     /**
+     * @brief Forces crash dumping on for the current process environment.
+     *
+     * @details
+     * Some applications want crash capture enabled regardless of how the parent shell configured
+     * `SW_CRASH_DUMPS`. This helper updates the current process environment so a subsequent
+     * `install()` call always proceeds with handler registration.
+     */
+    static void forceEnable() {
+#if defined(_WIN32)
+        (void)_putenv_s("SW_CRASH_DUMPS", "1");
+#else
+        (void)setenv("SW_CRASH_DUMPS", "1", 1);
+#endif
+    }
+
+    /**
      * @brief Returns whether crash dumping is enabled through the environment.
      * @return `true` when `SW_CRASH_DUMPS` contains an enabled value such as `1` or `true`.
      *

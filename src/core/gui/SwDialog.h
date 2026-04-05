@@ -216,6 +216,9 @@ public:
      */
     bool useNativeWindow() const { return m_useNativeWindow; }
 
+    void setFrameless(bool on) { m_frameless = on; }
+    bool isFrameless() const { return m_frameless; }
+
     /**
      * @brief Returns the current content Widget.
      * @return The current content Widget.
@@ -1135,6 +1138,7 @@ private:
         options.minimizable = false;
         options.maximizable = false;
         options.showInTaskbar = false;
+        options.frameless = m_frameless;
 
         const std::string title = toUtf8_(m_title);
         m_nativePlatformWindow = guiApp->platformIntegration()->createWindow(title.empty() ? "Dialog" : title,
@@ -1588,6 +1592,7 @@ private:
 
     SwString m_title;
     bool m_modal{true};
+    bool m_frameless{false};
 #if SW_PLATFORM_WIN32 || SW_PLATFORM_X11
     bool m_useNativeWindow{true};
 #else

@@ -212,6 +212,14 @@ public:
     DECLARE_SIGNAL(currentChanged, int);
 
 protected:
+    SwSize sizeHint() const override {
+        return stackedSizeHint_(false);
+    }
+
+    SwSize minimumSizeHint() const override {
+        return stackedSizeHint_(true);
+    }
+
     /**
      * @brief Handles the resize Event forwarded by the framework.
      * @param event Event object forwarded by the framework.
@@ -253,6 +261,40 @@ private:
             w->move(innerX, innerY);
             w->resize(innerW, innerH);
         }
+    }
+
+    SwSize stackedSizeHint_(bool minimum) const {
+        SwSize pageHint{0, 0};
+        auto pageSizeHint = [minimum](SwWidget* page) -> SwSize {
+            if (!page) {
+                return SwSize{0, 0};
+            }
+            return minimum ? page->minimumSizeHint() : page->sizeHint();
+        };
+
+        if (SwWidget* current = currentWidget()) {
+            pageHint = pageSizeHint(current);
+        } else {
+            for (int i = 0; i < m_widgets.size(); ++i) {
+                const SwSize childHint = pageSizeHint(m_widgets[i]);
+                pageHint.width = std::max(pageHint.width, childHint.width);
+                pageHint.height = std::max(pageHint.height, childHint.height);
+            }
+        }
+
+        const SwSize minSize = minimumSize();
+        const SwSize maxSize = maximumSize();
+        const SwSize styleMin = resolvedStyleMinimumSize_();
+        const SwSize styleMax = resolvedStyleMaximumSize_();
+        SwSize hint{
+            pageHint.width + (m_padding * 2),
+            pageHint.height + (m_padding * 2)
+        };
+        hint.width = std::max(hint.width, std::max(minSize.width, styleMin.width));
+        hint.height = std::max(hint.height, std::max(minSize.height, styleMin.height));
+        hint.width = std::min(hint.width, std::min(maxSize.width, styleMax.width));
+        hint.height = std::min(hint.height, std::min(maxSize.height, styleMax.height));
+        return hint;
     }
 
     SwVector<SwWidget*> m_widgets;

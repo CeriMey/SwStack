@@ -29,8 +29,17 @@
  ***************************************************************************************************/
 
 #include "SwBackendSsl.h"
+#include "SwList.h"
 #include "SwSslSocket.h"
+#include "SwString.h"
 #include "SwTcpServer.h"
+
+struct SwTlsCredentialEntry {
+    SwString host;
+    SwString certPath;
+    SwString keyPath;
+    bool isDefault = false;
+};
 
 class SwSslServer : public SwTcpServer {
     SW_OBJECT(SwSslServer, SwTcpServer)
@@ -49,9 +58,36 @@ public:
         return reloadLocalCredentials(certPath, keyPath);
     }
 
+    bool setLocalCredentials(const SwList<SwTlsCredentialEntry>& credentials) {
+        return reloadLocalCredentials(credentials);
+    }
+
     bool reloadLocalCredentials(const SwString& certPath, const SwString& keyPath) {
+        return reloadLocalCredentials(singleCredentialList_(certPath, keyPath));
+    }
+
+    bool reloadLocalCredentials(const SwList<SwTlsCredentialEntry>& credentials) {
+        std::vector<SwBackendSsl::ServerCertificateConfig> configs;
+        configs.reserve(credentials.size());
+        for (std::size_t i = 0; i < credentials.size(); ++i) {
+            const SwTlsCredentialEntry& entry = credentials[i];
+            if (entry.certPath.trimmed().isEmpty() || entry.keyPath.trimmed().isEmpty()) {
+                continue;
+            }
+            SwBackendSsl::ServerCertificateConfig config;
+            config.host = entry.host.trimmed().toStdString();
+            config.certPath = entry.certPath.trimmed().toStdString();
+            config.keyPath = entry.keyPath.trimmed().toStdString();
+            config.isDefault = entry.isDefault;
+            configs.push_back(config);
+        }
+        if (configs.empty()) {
+            swCError(kSwLogCategory_SwTcpServer) << "TLS init failed: no certificate configured";
+            return false;
+        }
+
         std::string error;
-        void* nextCtx = SwBackendSsl::createServerContext(certPath.toStdString(), keyPath.toStdString(), error);
+        void* nextCtx = SwBackendSsl::createServerContextSet(configs, error);
         if (!nextCtx) {
             swCError(kSwLogCategory_SwTcpServer) << "TLS init failed: " << error;
             return false;
@@ -129,6 +165,18 @@ protected:
 
 private:
     void* m_sslCtx = nullptr;
+
+    static SwList<SwTlsCredentialEntry> singleCredentialList_(const SwString& certPath, const SwString& keyPath) {
+        SwList<SwTlsCredentialEntry> credentials;
+        if (!certPath.trimmed().isEmpty() && !keyPath.trimmed().isEmpty()) {
+            SwTlsCredentialEntry entry;
+            entry.certPath = certPath.trimmed();
+            entry.keyPath = keyPath.trimmed();
+            entry.isDefault = true;
+            credentials.append(entry);
+        }
+        return credentials;
+    }
 
     void clearCredentials_() {
         if (!m_sslCtx) {

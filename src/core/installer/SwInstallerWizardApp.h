@@ -16,7 +16,9 @@
 #include "SwMap.h"
 #include "SwMessageBox.h"
 #include "SwPathDialog.h"
+#include "SwCodeEditor.h"
 #include "SwPlainTextEdit.h"
+#include "SwThread.h"
 #include "SwProgressBar.h"
 #include "SwPushButton.h"
 #include "SwWidgetSnapshot.h"
@@ -97,6 +99,7 @@ private:
         void setStatus(const SwString& value);
         void setProgress(int value);
         void appendLog(const SwString& value);
+        void showProgressWidgets();
 
     protected:
         void resizeEvent(ResizeEvent* event) override;
@@ -104,7 +107,7 @@ private:
     private:
         SwLabel* status_{nullptr};
         SwProgressBar* progress_{nullptr};
-        SwPlainTextEdit* log_{nullptr};
+        SwCodeEditor* log_{nullptr};
     };
 
     class FinishPage_ : public SwWizardPage {
@@ -163,7 +166,6 @@ private:
     static void styleActionButton_(SwPushButton* button);
     static void styleCheckBox_(SwCheckBox* box);
     static void styleProgress_(SwProgressBar* bar);
-    static void styleLog_(SwPlainTextEdit* edit);
 
     SwInstallerProduct product_;
     SwString setupSelfPath_;
@@ -269,13 +271,7 @@ inline void SwInstallerWizardApp::styleProgress_(SwProgressBar* bar) {
                        "border-radius: 4px; color: rgb(200, 200, 200); }");
 }
 
-inline void SwInstallerWizardApp::styleLog_(SwPlainTextEdit* edit) {
-    if (!edit) return;
-    edit->setStyleSheet("SwPlainTextEdit { background-color: rgb(24, 24, 26); "
-                        "border-color: rgb(50, 50, 54); border-width: 1px; "
-                        "border-radius: 6px; color: rgb(190, 190, 190); "
-                        "font-family: Consolas; font-size: 12px; }");
-}
+
 
 inline SwString SwInstallerWizardApp::normalizePath_(SwString path) {
     return SwPathDialog::normalizePath(path.trimmed());
@@ -451,25 +447,56 @@ inline void SwInstallerWizardApp::ComponentsPage_::resizeEvent(ResizeEvent* even
 inline SwInstallerWizardApp::ProgressPage_::ProgressPage_(SwWidget* parent)
     : SwWizardPage(parent) {
     setTitle("Installing");
-    setSubTitle("Please wait while the installation completes");
+    setSubTitle("Review your choices, then click Install");
 
     status_ = new SwLabel("Waiting to start...", this);
     progress_ = new SwProgressBar(this);
     progress_->setRange(0, 100);
     progress_->setValue(0);
     progress_->setFormat("%p%");
-    log_ = new SwPlainTextEdit(this);
+    log_ = new SwCodeEditor(this);
     log_->setReadOnly(true);
+    log_->setLineNumbersVisible(false);
+    log_->setHighlightCurrentLine(false);
+    log_->setWordWrapEnabled(true);
+    log_->setFont(SwFont(L"Consolas", 11, Medium));
+    {
+        SwCodeEditorTheme theme;
+        theme.backgroundColor = SwColor{24, 24, 26};
+        theme.borderColor = SwColor{50, 50, 54};
+        theme.focusBorderColor = SwColor{50, 50, 54};
+        theme.textColor = SwColor{190, 190, 190};
+        theme.disabledTextColor = SwColor{120, 120, 120};
+        theme.gutterBackgroundColor = SwColor{24, 24, 26};
+        theme.gutterTextColor = SwColor{100, 100, 100};
+        theme.currentLineNumberColor = SwColor{150, 150, 150};
+        theme.gutterSeparatorColor = SwColor{24, 24, 26};
+        theme.currentLineBackgroundColor = SwColor{24, 24, 26};
+        theme.selectionBackgroundColor = SwColor{40, 60, 90};
+        theme.placeholderColor = SwColor{100, 100, 100};
+        theme.scrollBarTrackColor = SwColor{24, 24, 26};
+        theme.scrollBarThumbColor = SwColor{60, 60, 64};
+        theme.scrollBarThumbHoverColor = SwColor{80, 80, 84};
+        theme.borderRadius = 6;
+        theme.scrollBarWidth = 10;
+        log_->setTheme(theme);
+    }
 
     SwInstallerWizardApp::styleTitleText_(status_, 13, false);
     SwInstallerWizardApp::styleProgress_(progress_);
-    SwInstallerWizardApp::styleLog_(log_);
+    progress_->setVisible(false);
+    log_->setVisible(false);
 }
 
 inline void SwInstallerWizardApp::ProgressPage_::reset() {
-    if (status_) status_->setText("Waiting to start...");
-    if (progress_) progress_->setValue(0);
-    if (log_) log_->clear();
+    if (status_) status_->setText("Ready to install.");
+    if (progress_) { progress_->setValue(0); progress_->setVisible(false); }
+    if (log_) { log_->clear(); log_->setVisible(false); }
+}
+
+inline void SwInstallerWizardApp::ProgressPage_::showProgressWidgets() {
+    if (progress_) progress_->setVisible(true);
+    if (log_) log_->setVisible(true);
 }
 
 inline void SwInstallerWizardApp::ProgressPage_::setStatus(const SwString& value) {
@@ -908,6 +935,7 @@ inline int SwInstallerWizardApp::runWizard_(SwWidget* parent) {
         onWizardPageChanged_(currentId);
     });
 
+
     const int res = wizard.exec();
     if (res == SwDialog::Accepted && lastResult_.ok && finishPage_ && finishPage_->launchAfterFinish()) {
         SwString launchErr;
@@ -929,18 +957,32 @@ inline int SwInstallerWizardApp::runWizard_(SwWidget* parent) {
 }
 
 inline void SwInstallerWizardApp::onWizardPageChanged_(int currentId) {
-    if (currentId != 3) {
-        progressTaskPosted_ = false;
+    if (!wizard_) {
         return;
     }
 
-    if (!wizard_ || !progressPage_) {
+    /* On the Components page (page 2), rename Next -> Install */
+    if (currentId == 2) {
+        wizard_->setNextButtonText("Install");
+    } else {
+        wizard_->setNextButtonText("Next");
+    }
+
+    if (currentId != 3) {
         return;
     }
+
+    if (!progressPage_) {
+        return;
+    }
+
+    /* Hide Next on progress page - Abort will appear on failure */
+    wizard_->setNextButtonVisible(false);
 
     if (installInProgress_) {
         return;
     }
+
     if (lastResult_.ok) {
         if (auto* app = SwCoreApplication::instance(false)) {
             app->postEvent([this]() {
@@ -953,16 +995,11 @@ inline void SwInstallerWizardApp::onWizardPageChanged_(int currentId) {
         }
         return;
     }
-    if (progressTaskPosted_) {
-        return;
-    }
 
-    progressTaskPosted_ = true;
+    wizard_->setAbortVisible(false);
     progressPage_->reset();
-    progressPage_->setStatus("Preparing installer plan...");
-    progressPage_->setProgress(8);
-    progressPage_->appendLog("Collecting selected components and target paths.");
 
+    /* Auto-start installation */
     if (auto* app = SwCoreApplication::instance(false)) {
         app->postEvent([this]() { runWizardInstall_(); });
     } else {
@@ -971,8 +1008,10 @@ inline void SwInstallerWizardApp::onWizardPageChanged_(int currentId) {
 }
 
 inline void SwInstallerWizardApp::runWizardInstall_() {
-    progressTaskPosted_ = false;
     if (!wizard_ || !progressPage_ || !targetPage_ || !componentsPage_ || !finishPage_) {
+        return;
+    }
+    if (installInProgress_) {
         return;
     }
 
@@ -997,48 +1036,70 @@ inline void SwInstallerWizardApp::runWizardInstall_() {
     lastResult_ = SwInstallerExecutionResult();
     activePlan_ = SwInstallerPlan();
 
+    progressPage_->showProgressWidgets();
     progressPage_->setStatus("Building declarative installer plan...");
-    progressPage_->setProgress(18);
-    progressPage_->appendLog("Creating the serialized install or repair plan.");
+    progressPage_->setProgress(8);
+    progressPage_->appendLog("Collecting selected components and target paths.");
 
     activePlan_ = engine_.planInstall(installRoot, componentIds, false);
 
-    progressPage_->setStatus("Executing installer runtime...");
-    progressPage_->setProgress(36);
-    progressPage_->appendLog(SwInstallerWindows::isProcessElevated()
-                                 ? SwString("Already elevated; executing the plan in-process.")
-                                 : SwString("Requesting elevation and executing the serialized plan."));
+    progressPage_->setStatus("Installing...");
+    progressPage_->setProgress(18);
+    progressPage_->appendLog("Creating the serialized install or repair plan.");
 
-    SwString err;
-    if (!runPlanWithElevation_(activePlan_, false, lastResult_, &err)) {
-        lastResult_.ok = false;
-        if (lastResult_.message.isEmpty()) {
-            lastResult_.message = err.isEmpty() ? SwString("Installer execution failed") : err;
-        }
-    }
-
-    installInProgress_ = false;
-    progressPage_->setProgress(100);
-
-    if (!lastResult_.ok) {
-        progressPage_->setStatus("Installation failed.");
-        progressPage_->appendLog(lastResult_.message.isEmpty() ? SwString("Unknown installer error.")
-                                                               : lastResult_.message);
-        finishPage_->setSummary("The installer failed. Use Back to review the target folder or "
-                                "component selection, then run the plan again.");
+    auto* guiApp = SwCoreApplication::instance(false);
+    if (!guiApp) {
         return;
     }
 
-    progressPage_->setStatus("Installation completed.");
-    progressPage_->appendLog(lastResult_.message.isEmpty() ? SwString("Installer completed successfully.")
-                                                           : lastResult_.message);
+    SwThread* worker = new SwThread("InstallerWorker");
+    worker->start();
+    worker->postTask([this, guiApp, worker]() {
+        auto postGui = [guiApp](std::function<void()> fn) {
+            guiApp->postEvent(std::move(fn));
+        };
 
-    finishPage_->setSummary(SwString("Installed ") + product_.effectiveDisplayName() +
-                            SwString(" to:\n") + activePlan_.installRoot);
-    finishPage_->setLaunchVisible(!activePlan_.finalLaunches.isEmpty());
-    finishPage_->setLaunchChecked(true);
+        postGui([this]() {
+            progressPage_->appendLog("Executing the plan in-process.");
+            progressPage_->setProgress(36);
+        });
 
-    wizard_->next();
+        SwString err;
+        SwInstallerExecutionResult result = engine_.execute(activePlan_, false, &err);
+        if (!result.ok && result.message.isEmpty()) {
+            result.message = err.isEmpty() ? SwString("Installer execution failed") : err;
+        }
+
+        postGui([this, result, worker]() {
+            lastResult_ = result;
+            installInProgress_ = false;
+            progressPage_->setProgress(100);
+
+            if (!lastResult_.ok) {
+                progressPage_->setStatus("Installation failed.");
+                progressPage_->appendLog(lastResult_.message.isEmpty()
+                                             ? SwString("Unknown installer error.")
+                                             : lastResult_.message);
+                finishPage_->setSummary("The installer failed. Use Back to review the target folder or "
+                                        "component selection, then run the plan again.");
+                wizard_->setAbortVisible(true);
+            } else {
+                progressPage_->setStatus("Installation completed.");
+                progressPage_->appendLog(lastResult_.message.isEmpty()
+                                             ? SwString("Installer completed successfully.")
+                                             : lastResult_.message);
+                finishPage_->setSummary(SwString("Installed ") + product_.effectiveDisplayName() +
+                                        SwString(" to:\n") + activePlan_.installRoot);
+                finishPage_->setLaunchVisible(!activePlan_.finalLaunches.isEmpty());
+                finishPage_->setLaunchChecked(true);
+                wizard_->next();
+            }
+
+            worker->quit();
+            worker->wait();
+            delete worker;
+        });
+    });
 }
 
 inline int SwInstallerWizardApp::runRepairInteractive_(SwWidget* parent, bool allowPostInstallLaunch) {

@@ -49,6 +49,8 @@
 #include "SwFrame.h"
 #include "Sw.h"
 #include "SwGuiApplication.h"
+#include "SwVector.h"
+#include "graphics/SwFontMetrics.h"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -56,7 +58,6 @@
 #include <cwctype>
 #include <limits>
 #include <sstream>
-#include <vector>
 #include "SwTimer.h"
 
 // echo mode â—â—â—â—â—â—â—â—â—â—
@@ -118,23 +119,16 @@ public:
           selectionStart(0), selectionEnd(0), isSelecting(false) {
         resize(300, 30);
         setCursor(CursorType::IBeam);
+        setFrameShape(Shape::Box);
+        SwFont font(L"Segoe UI", 10, Medium);
+        font.setPixelSize(14);
+        setFont(font);
         const SwString effectivePlaceholder = placeholderText.isEmpty() ? SwString("Enter text...") : placeholderText;
         setPlaceholder(effectivePlaceholder);
         connect(this, &SwLineEdit::TextChanged, [this](const SwString& text) {
             setDisplayText(text);
         });
         this->setFocusPolicy(FocusPolicyEnum::Strong);
-        SwString css = R"(
-            SwLineEdit {
-                background-color: rgb(255, 255, 255);
-                border-color: rgb(220, 224, 232);
-                border-width: 1px;
-                border-radius: 12px;
-                padding: 6px 10px;
-                color: rgb(24, 28, 36);
-            }
-        )";
-        this->setStyleSheet(css);
 
         monitorTimer = new SwTimer(500, this);
         connect(monitorTimer, &SwTimer::timeout, this, [this]() {
@@ -169,21 +163,13 @@ public:
     SwLineEdit(SwWidget* parent = nullptr)
         : SwFrame(parent), cursorPos(0),
         selectionStart(0), selectionEnd(0), isSelecting(false) {
-
-        SwString css = R"(
-            SwLineEdit {
-                background-color: rgb(255, 255, 255);
-                border-color: rgb(220, 224, 232);
-                border-width: 1px;
-                border-radius: 12px;
-                padding: 6px 10px;
-                color: rgb(24, 28, 36);
-            }
-        )";
-        this->setStyleSheet(css);
-
         resize(300, 30);
         setCursor(CursorType::IBeam);
+        setFrameShape(Shape::Box);
+        SwFont font(L"Segoe UI", 10, Medium);
+        font.setPixelSize(14);
+        setFont(font);
+        this->setFocusPolicy(FocusPolicyEnum::Strong);
         setPlaceholder("Enter text...");
         connect(this, &SwLineEdit::TextChanged, [this](const SwString& text) {
             setDisplayText(text);
@@ -222,6 +208,46 @@ public:
         }
     }
 
+    SwSize sizeHint() const override {
+        StyleSheet* sheet = const_cast<SwLineEdit*>(this)->getToolSheet();
+        const SwFont font = resolvedStyledFont_(sheet);
+        const SwFontMetrics metrics(font);
+        const Padding padding = const_cast<SwLineEdit*>(this)->resolvePadding();
+        const int borderWidth = const_cast<SwLineEdit*>(this)->resolvedBorderWidth();
+        const SwSize minSize = minimumSize();
+        const SwSize maxSize = maximumSize();
+        const SwSize styleMin = resolvedStyleMinimumSize_();
+        const SwSize styleMax = resolvedStyleMaximumSize_();
+
+        const SwString sample = getDisplayText().isEmpty() ? (getPlaceholder().isEmpty() ? SwString("M") : getPlaceholder()) : getDisplayText();
+        SwSize hint{
+            metrics.horizontalAdvance(sample) + padding.left + padding.right + (borderWidth * 2),
+            metrics.height() + padding.top + padding.bottom + (borderWidth * 2)
+        };
+        hint.width = std::max(hint.width, std::max(minSize.width, styleMin.width));
+        hint.height = std::max(hint.height, std::max(minSize.height, styleMin.height));
+        hint.width = std::min(hint.width, std::min(maxSize.width, styleMax.width));
+        hint.height = std::min(hint.height, std::min(maxSize.height, styleMax.height));
+        return hint;
+    }
+
+    SwSize minimumSizeHint() const override {
+        return sizeHint();
+    }
+
+    void selectAll() {
+        selectAllText_();
+        update();
+    }
+
+    void selectAllFromStart() {
+        selectionStart = 0;
+        selectionEnd = m_Text.length();
+        cursorPos = 0;
+        firstVisibleCharacter = 0;
+        update();
+    }
+
 
     // RedÃ©finir la mÃ©thode paintEvent pour dessiner le champ de texte
     /**
@@ -252,8 +278,22 @@ public:
         int borderWidth = 1;
         int radius = 12;
 
+        if (frameShape() == Shape::NoFrame) {
+            paintBackground = false;
+            bgAlpha = 0.0f;
+            borderWidth = 0;
+            radius = 0;
+        }
+
         resolveBackground(sheet, bg, bgAlpha, paintBackground);
         resolveBorder(sheet, border, borderWidth, radius);
+
+        const bool explicitHoverBackground =
+            hasExplicitStyledStateProperty(StyleSheet::StateHovered, "background-color");
+        const bool explicitHoverBorder =
+            hasExplicitStyledStateProperty(StyleSheet::StateHovered, "border-color");
+        const bool explicitFocusBorder =
+            hasExplicitStyledStateProperty(StyleSheet::StateFocused, "border-color");
 
         if (!getEnable()) {
             // Derive disabled colors from the resolved bg (dark vs light aware)
@@ -266,8 +306,23 @@ public:
                                       (uint8_t)std::max(0, border.g - 15),
                                       (uint8_t)std::max(0, border.b - 15)}
                             : SwColor{210, 210, 210};
-        } else if (getFocus()) {
-            border = m_focusAccent;
+        } else {
+            const bool isDark = (bg.r + bg.g + bg.b) < 384;
+            if (getHover()) {
+                if (!explicitHoverBackground) {
+                    bg = isDark
+                             ? SwColor{(uint8_t)std::min(255, bg.r + 5),
+                                       (uint8_t)std::min(255, bg.g + 5),
+                                       (uint8_t)std::min(255, bg.b + 5)}
+                             : SwColor{250, 251, 253};
+                }
+                if (!explicitHoverBorder) {
+                    border = isDark ? SwColor{85, 85, 85} : SwColor{150, 150, 150};
+                }
+            }
+            if (getFocus() && !explicitFocusBorder) {
+                border = m_focusAccent;
+            }
         }
 
         if (paintBackground && bgAlpha > 0.0f) {
@@ -290,7 +345,12 @@ public:
             firstVisibleCharacter = 0;
         }
 
-        SwFont font = getFont();
+        SwFont font = resolvedStyledFont_(sheet);
+        const SwFontMetrics metrics(font);
+        const int fontPixelHeight = font.getPixelSize() > 0
+                                        ? font.getPixelSize()
+                                        : static_cast<int>(std::max(1, font.getPointSize()) * 96.0 / 72.0 + 0.5);
+        const int textVisualHeight = std::max(1, std::min(textRect.height, fontPixelHeight + 4));
         SwColor textColor = showingPlaceholder ? SwColor{160, 160, 160} : resolveTextColor(sheet, SwColor{24, 28, 36});
         if (!getEnable()) {
             textColor = SwColor{150, 150, 150};
@@ -313,7 +373,9 @@ public:
 
         painter->pushClipRect(textRect);
 
-        if (!showingPlaceholder && selectionStart != selectionEnd && textToDraw.length() > 0) {
+        const bool hasSelection = !showingPlaceholder && selectionStart != selectionEnd && textToDraw.length() > 0;
+        SwRect selectionRect{};
+        if (hasSelection) {
             size_t selStart = (std::min)(selectionStart, selectionEnd);
             size_t selEnd = (std::max)(selectionStart, selectionEnd);
             int selStartPx = SwWidgetPlatformAdapter::textWidthUntil(handle, textToDraw, font, selStart, textAreaWidth);
@@ -325,12 +387,12 @@ public:
             selectionX1 = (std::max)(selectionX1, clipLeft);
             selectionX2 = (std::min)(selectionX2, clipRight);
             if (selectionX2 > selectionX1) {
-                SwRect selectionRect;
+                const int selectionInsetY = std::max(0, (textRect.height - textVisualHeight) / 2);
                 selectionRect.x = selectionX1;
-                selectionRect.y = textRect.y;
+                selectionRect.y = textRect.y + selectionInsetY;
                 selectionRect.width = selectionX2 - selectionX1;
-                selectionRect.height = textRect.height;
-                const SwColor selFill{219, 234, 254};
+                selectionRect.height = textVisualHeight;
+                const SwColor selFill = getFocus() ? m_focusAccent : SwColor{191, 219, 254};
                 painter->fillRect(selectionRect, selFill, selFill, 0);
             }
         }
@@ -341,11 +403,23 @@ public:
                           textColor,
                           font);
 
-        if (!showingPlaceholder && getFocus() && m_caretVisible && selectionStart == selectionEnd) {
+        if (selectionRect.width > 0 && selectionRect.height > 0) {
+            painter->pushClipRect(selectionRect);
+            painter->drawText(textRect,
+                              visibleText,
+                              DrawTextFormats(DrawTextFormat::Left | DrawTextFormat::VCenter | DrawTextFormat::SingleLine),
+                              SwColor{255, 255, 255},
+                              font);
+            painter->popClipRect();
+        }
+
+        if (!showingPlaceholder && getFocus() && m_caretVisible) {
             int caretPx = SwWidgetPlatformAdapter::textWidthUntil(handle, textToDraw, font, cursorPos, textAreaWidth);
             int caretOffset = caretPx - viewStartPx;
             caretOffset = (std::max)(0, (std::min)(caretOffset, textRect.width));
-            SwRect caretRect{textRect.x + caretOffset, textRect.y, 1, textRect.height};
+            const int caretHeight = std::max(1, std::min(textRect.height, textVisualHeight));
+            const int caretY = textRect.y + std::max(0, (textRect.height - caretHeight) / 2);
+            SwRect caretRect{textRect.x + caretOffset, caretY, 1, caretHeight};
             const SwColor caret{24, 28, 36};
             painter->fillRect(caretRect, caret, caret, 0);
         }
@@ -706,8 +780,8 @@ private:
         return true;
     }
 
-    static std::vector<Utf8CodePoint_> utf8CodePoints_(const SwString& text) {
-        std::vector<Utf8CodePoint_> codePoints;
+    static SwVector<Utf8CodePoint_> utf8CodePoints_(const SwString& text) {
+        SwVector<Utf8CodePoint_> codePoints;
         const std::string utf8 = text.toStdString();
         size_t offset = 0;
         while (offset < utf8.size()) {
@@ -751,7 +825,7 @@ private:
             relativeX = 0;
         }
         auto handle = nativeWindowHandle();
-        SwFont font = getFont();
+        SwFont font = resolvedStyledFont_(getToolSheet());
         const SwString& display = m_DisplayText;
         size_t clampedVisible = clampUtf8Boundary_(display, (std::min)(firstVisibleCharacter, display.length()));
         int viewStartPx = SwWidgetPlatformAdapter::textWidthUntil(handle,
@@ -859,8 +933,8 @@ private:
             return;
         }
 
-        const std::vector<Utf8CodePoint_> codePoints = utf8CodePoints_(m_Text);
-        if (codePoints.empty()) {
+        const SwVector<Utf8CodePoint_> codePoints = utf8CodePoints_(m_Text);
+        if (codePoints.isEmpty()) {
             cursorPos = length;
             clearSelection_();
             return;
@@ -914,57 +988,35 @@ private:
     }
 
     Padding resolvePadding() {
-        Padding padding;
+        Padding padding = intrinsicPadding_();
         StyleSheet* sheet = getToolSheet();
         if (!sheet) {
             return padding;
         }
 
-        SwString paddingValue;
-        SwString paddingTopValue;
-        SwString paddingRightValue;
-        SwString paddingBottomValue;
-        SwString paddingLeftValue;
+        const unsigned int stateFlags = styleStateFlags_();
+        const bool hasShorthandPadding = hasExplicitPaddingProperty_(sheet, stateFlags, "padding");
+        const bool hasPaddingTop = hasExplicitPaddingProperty_(sheet, stateFlags, "padding-top");
+        const bool hasPaddingRight = hasExplicitPaddingProperty_(sheet, stateFlags, "padding-right");
+        const bool hasPaddingBottom = hasExplicitPaddingProperty_(sheet, stateFlags, "padding-bottom");
+        const bool hasPaddingLeft = hasExplicitPaddingProperty_(sheet, stateFlags, "padding-left");
 
-        auto hierarchy = classHierarchy();
-        for (int i = static_cast<int>(hierarchy.size()) - 1; i >= 0; --i) {
-            const SwString& selector = hierarchy[i];
-            SwString pad = sheet->getStyleProperty(selector, "padding");
-            if (!pad.isEmpty()) {
-                paddingValue = pad;
-            }
-            SwString padTop = sheet->getStyleProperty(selector, "padding-top");
-            if (!padTop.isEmpty()) {
-                paddingTopValue = padTop;
-            }
-            SwString padRight = sheet->getStyleProperty(selector, "padding-right");
-            if (!padRight.isEmpty()) {
-                paddingRightValue = padRight;
-            }
-            SwString padBottom = sheet->getStyleProperty(selector, "padding-bottom");
-            if (!padBottom.isEmpty()) {
-                paddingBottomValue = padBottom;
-            }
-            SwString padLeft = sheet->getStyleProperty(selector, "padding-left");
-            if (!padLeft.isEmpty()) {
-                paddingLeftValue = padLeft;
-            }
+        if (!hasShorthandPadding && !hasPaddingTop && !hasPaddingRight && !hasPaddingBottom && !hasPaddingLeft) {
+            return padding;
         }
 
-        if (!paddingValue.isEmpty()) {
-            padding = parsePaddingShorthand(paddingValue, padding);
+        const StyleSheet::BoxEdges edges = resolvePaddingEdges_(sheet, stateFlags);
+        if (hasShorthandPadding || hasPaddingTop) {
+            padding.top = edges.top;
         }
-        if (!paddingTopValue.isEmpty()) {
-            padding.top = parsePixelValue(paddingTopValue, padding.top);
+        if (hasShorthandPadding || hasPaddingRight) {
+            padding.right = edges.right;
         }
-        if (!paddingRightValue.isEmpty()) {
-            padding.right = parsePixelValue(paddingRightValue, padding.right);
+        if (hasShorthandPadding || hasPaddingBottom) {
+            padding.bottom = edges.bottom;
         }
-        if (!paddingBottomValue.isEmpty()) {
-            padding.bottom = parsePixelValue(paddingBottomValue, padding.bottom);
-        }
-        if (!paddingLeftValue.isEmpty()) {
-            padding.left = parsePixelValue(paddingLeftValue, padding.left);
+        if (hasShorthandPadding || hasPaddingLeft) {
+            padding.left = edges.left;
         }
         return padding;
     }
@@ -973,14 +1025,14 @@ private:
         if (value.isEmpty()) {
             return current;
         }
-        std::vector<std::string> tokens;
+        SwVector<SwString> tokens;
         std::istringstream ss(value.toStdString());
         std::string token;
         while (ss >> token) {
-            tokens.push_back(token);
+            tokens.push_back(SwString(token));
         }
-        auto toPx = [&](const std::string& str, int fallback) -> int {
-            return parsePixelValue(SwString(str), fallback);
+        auto toPx = [&](const SwString& str, int fallback) -> int {
+            return parsePixelValue(str, fallback);
         };
         if (tokens.size() == 1) {
             int v = toPx(tokens[0], current.top);
@@ -1006,10 +1058,29 @@ private:
         return current;
     }
 
+    Padding intrinsicPadding_() const {
+        Padding padding;
+        padding.top = 6;
+        padding.right = 10;
+        padding.bottom = 6;
+        padding.left = 10;
+        return padding;
+    }
+
+    bool hasExplicitPaddingProperty_(StyleSheet* sheet, unsigned int stateFlags, const SwString& propertyName) const {
+        if (!sheet) {
+            return false;
+        }
+        return !sheet->resolveStyleProperty(styleSelectors_(), getObjectName(), stateFlags, propertyName).isEmpty();
+    }
+
     int resolvedBorderWidth() const {
+        if (frameShape() == Shape::NoFrame) {
+            return 0;
+        }
         StyleSheet* sheet = const_cast<SwLineEdit*>(this)->getToolSheet();
         if (!sheet) {
-            return 0;
+            return std::max(1, frameWidth());
         }
         SwColor border{0, 0, 0};
         int borderWidth = 1;
@@ -1044,7 +1115,7 @@ private:
         }
         firstVisibleCharacter = clampUtf8Boundary_(textToDraw, firstVisibleCharacter);
         auto handle = nativeWindowHandle();
-        SwFont font = getFont();
+        SwFont font = resolvedStyledFont_(getToolSheet());
         areaWidth = std::max(1, areaWidth);
         auto widthUntil = [&](size_t index) {
             return SwWidgetPlatformAdapter::textWidthUntil(handle, textToDraw, font, index, areaWidth);

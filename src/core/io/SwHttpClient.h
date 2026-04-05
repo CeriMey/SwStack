@@ -52,7 +52,8 @@ public:
         Post,
         Put,
         Patch,
-        Delete
+        Delete,
+        Options
     };
 
     explicit SwHttpClient(SwObject* parent = nullptr)
@@ -116,6 +117,10 @@ public:
 
     bool del(const SwString& url) {
         return request(Method::Delete, url);
+    }
+
+    bool options(const SwString& url) {
+        return request(Method::Options, url);
     }
 
     bool post(const SwString& url,
@@ -262,27 +267,25 @@ private:
         case Method::Put: return "PUT";
         case Method::Patch: return "PATCH";
         case Method::Delete: return "DELETE";
+        case Method::Options: return "OPTIONS";
         default: return "GET";
         }
     }
 
     SwString buildRequest_() const {
         SwString requestText;
-        requestText += methodToString_(m_method);
-        requestText += " ";
-        requestText += (m_path.isEmpty() ? SwString("/") : m_path);
-        requestText += " HTTP/1.1\r\n";
-        requestText += "Host: " + hostHeaderValue_() + "\r\n";
-
         bool hasConnection = false;
         bool hasAccept = false;
         bool hasUserAgent = false;
         bool hasContentType = false;
         bool hasContentLength = false;
+        bool hasHost = false;
         for (auto it = m_headerMap.begin(); it != m_headerMap.end(); ++it) {
             const SwString key = it.key();
             const SwString lower = key.toLower();
-            if (lower == "connection") {
+            if (lower == "host") {
+                hasHost = true;
+            } else if (lower == "connection") {
                 hasConnection = true;
             } else if (lower == "accept") {
                 hasAccept = true;
@@ -293,6 +296,18 @@ private:
             } else if (lower == "content-length") {
                 hasContentLength = true;
             }
+        }
+
+        requestText += methodToString_(m_method);
+        requestText += " ";
+        requestText += (m_path.isEmpty() ? SwString("/") : m_path);
+        requestText += " HTTP/1.1\r\n";
+        if (!hasHost) {
+            requestText += "Host: " + hostHeaderValue_() + "\r\n";
+        }
+
+        for (auto it = m_headerMap.begin(); it != m_headerMap.end(); ++it) {
+            const SwString key = it.key();
             requestText += key + ": " + it.value() + "\r\n";
         }
 

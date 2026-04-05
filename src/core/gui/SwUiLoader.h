@@ -149,6 +149,7 @@ private:
     static SwString textValue_(const XmlNode& propNode);
     static SwString attributeValue_(const XmlNode& widgetNode, const char* attributeName);
     static SwMap<SwString, SwString> parseCustomWidgets_(const XmlNode& uiRoot);
+    static DrawTextFormats alignmentFromQtSet_(SwString value);
 
     static void applyCommonProperty_(SwWidget* w, const SwString& rawName, const XmlNode& propNode);
 
@@ -304,6 +305,33 @@ inline SwString UiLoader::propertyNameToSw_(const SwString& name) {
     return name;
 }
 
+inline DrawTextFormats UiLoader::alignmentFromQtSet_(SwString value) {
+    value = value.trimmed().toLower();
+
+    DrawTextFormats formats(DrawTextFormat::SingleLine);
+    if (value.indexOf("alignright") >= 0) {
+        formats |= DrawTextFormat::Right;
+    } else if (value.indexOf("alignhcenter") >= 0 || value.indexOf("aligncenter") >= 0) {
+        formats |= DrawTextFormat::Center;
+    } else {
+        formats |= DrawTextFormat::Left;
+    }
+
+    if (value.indexOf("alignbottom") >= 0) {
+        formats |= DrawTextFormat::Bottom;
+    } else if (value.indexOf("alignvcenter") >= 0 || value.indexOf("aligncenter") >= 0) {
+        formats |= DrawTextFormat::VCenter;
+    } else {
+        formats |= DrawTextFormat::Top;
+    }
+
+    if (value.indexOf("textwordwrap") >= 0 || value.indexOf("wordbreak") >= 0) {
+        formats |= DrawTextFormat::WordBreak;
+    }
+
+    return formats;
+}
+
 inline SwString UiLoader::childText_(const XmlNode& node, const char* childName) {
     const XmlNode* c = node.firstChild(childName);
     if (!c) {
@@ -418,6 +446,23 @@ inline void UiLoader::applyCommonProperty_(SwWidget* w, const SwString& rawName,
         const int wpx = toInt_(childText_(*size, "width"));
         const int hpx = toInt_(childText_(*size, "height"));
         w->setMaximumSize(wpx, hpx);
+        return;
+    }
+
+    if (rawName == "sizePolicy") {
+        const XmlNode* sizePolicy = propNode.firstChild("sizepolicy");
+        if (!sizePolicy) {
+            return;
+        }
+
+        const SwString hPolicy = sizePolicy->attr("hsizetype").trimmed();
+        const SwString vPolicy = sizePolicy->attr("vsizetype").trimmed();
+        if (!hPolicy.isEmpty()) {
+            w->setProperty("HorizontalPolicy", SwAny(hPolicy));
+        }
+        if (!vPolicy.isEmpty()) {
+            w->setProperty("VerticalPolicy", SwAny(vPolicy));
+        }
         return;
     }
 
@@ -597,6 +642,31 @@ inline void UiLoader::applyCommonProperty_(SwWidget* w, const SwString& rawName,
     if (rawName == "widgetResizable") {
         if (auto* scroll = dynamic_cast<SwScrollArea*>(w)) {
             scroll->setWidgetResizable(toBool_(valueText, scroll->widgetResizable()));
+            return;
+        }
+    }
+
+    if (rawName == "plainText") {
+        if (auto* textEdit = dynamic_cast<SwTextEdit*>(w)) {
+            textEdit->setPlainText(valueText);
+            return;
+        }
+        if (auto* plainTextEdit = dynamic_cast<SwPlainTextEdit*>(w)) {
+            plainTextEdit->setPlainText(valueText);
+            return;
+        }
+    }
+
+    if (rawName == "html") {
+        if (auto* textEdit = dynamic_cast<SwTextEdit*>(w)) {
+            textEdit->setHtml(valueText);
+            return;
+        }
+    }
+
+    if (rawName == "alignment") {
+        if (w->propertyExist("Alignment")) {
+            w->setProperty("Alignment", SwAny::fromValue(alignmentFromQtSet_(valueText)));
             return;
         }
     }
@@ -810,8 +880,20 @@ inline bool UiLoader::applyLayout_(SwWidget* parentWidget,
         } else if (rawName == "margin") {
             layout->setMargin(toInt_(textValue_(*prop), layout->margin()));
         } else if (rawName == "leftMargin" || rawName == "topMargin" || rawName == "rightMargin" || rawName == "bottomMargin") {
-            // The source format has per-side margins; SwLayout has a single margin for now -> pick the first one we see.
-            layout->setMargin(toInt_(textValue_(*prop), layout->margin()));
+            const int value = toInt_(textValue_(*prop),
+                                     rawName == "leftMargin"   ? layout->leftMargin() :
+                                     rawName == "topMargin"    ? layout->topMargin() :
+                                     rawName == "rightMargin"  ? layout->rightMargin() :
+                                                                  layout->bottomMargin());
+            if (rawName == "leftMargin") {
+                layout->setLeftMargin(value);
+            } else if (rawName == "topMargin") {
+                layout->setTopMargin(value);
+            } else if (rawName == "rightMargin") {
+                layout->setRightMargin(value);
+            } else {
+                layout->setBottomMargin(value);
+            }
         }
     }
 
@@ -938,7 +1020,8 @@ inline SwWidget* UiLoader::loadWidget_(const XmlNode& widgetNode,
         }
 
         if (rawName == "currentIndex") {
-            if (dynamic_cast<SwTabWidget*>(w) || dynamic_cast<SwStackedWidget*>(w) || dynamic_cast<SwToolBox*>(w)) {
+            if (dynamic_cast<SwTabWidget*>(w) || dynamic_cast<SwStackedWidget*>(w) ||
+                dynamic_cast<SwToolBox*>(w) || dynamic_cast<SwComboBox*>(w)) {
                 deferredCurrentIndex = toInt_(textValue_(*prop), -1);
                 continue;
             }
@@ -953,6 +1036,28 @@ inline SwWidget* UiLoader::loadWidget_(const XmlNode& widgetNode,
             delete w;
         }
         return nullptr;
+    }
+
+    if (auto* combo = dynamic_cast<SwComboBox*>(w)) {
+        bool hasXmlItems = false;
+        for (const auto* itemNode : widgetNode.childrenNamed("item")) {
+            if (!itemNode) {
+                continue;
+            }
+            hasXmlItems = true;
+            SwString itemText;
+            for (const auto* prop : itemNode->childrenNamed("property")) {
+                if (!prop || prop->attr("name") != "text") {
+                    continue;
+                }
+                itemText = textValue_(*prop);
+                break;
+            }
+            combo->addItem(itemText);
+        }
+        if (hasXmlItems && deferredCurrentIndex >= 0) {
+            combo->setCurrentIndex(deferredCurrentIndex);
+        }
     }
 
     // Create direct child widgets (absolute positioning) if no layout is present.
@@ -984,6 +1089,8 @@ inline SwWidget* UiLoader::loadWidget_(const XmlNode& widgetNode,
             stack->setCurrentIndex(deferredCurrentIndex);
         } else if (auto* toolbox = dynamic_cast<SwToolBox*>(w)) {
             toolbox->setCurrentIndex(deferredCurrentIndex);
+        } else if (auto* combo = dynamic_cast<SwComboBox*>(w)) {
+            combo->setCurrentIndex(deferredCurrentIndex);
         }
     }
 
@@ -1016,7 +1123,8 @@ inline bool UiLoader::loadIntoExistingWidget_(SwWidget* target,
         }
 
         if (rawName == "currentIndex") {
-            if (dynamic_cast<SwTabWidget*>(target) || dynamic_cast<SwStackedWidget*>(target) || dynamic_cast<SwToolBox*>(target)) {
+            if (dynamic_cast<SwTabWidget*>(target) || dynamic_cast<SwStackedWidget*>(target) ||
+                dynamic_cast<SwToolBox*>(target) || dynamic_cast<SwComboBox*>(target)) {
                 deferredCurrentIndex = toInt_(textValue_(*prop), -1);
                 continue;
             }
@@ -1032,6 +1140,31 @@ inline bool UiLoader::loadIntoExistingWidget_(SwWidget* target,
 
     if (!applyLayout_(target, widgetNode, outError, customWidgetExtends)) {
         return false;
+    }
+
+    if (auto* combo = dynamic_cast<SwComboBox*>(target)) {
+        bool hasXmlItems = false;
+        for (const auto* itemNode : widgetNode.childrenNamed("item")) {
+            if (!itemNode) {
+                continue;
+            }
+            if (!hasXmlItems) {
+                combo->clear();
+            }
+            hasXmlItems = true;
+            SwString itemText;
+            for (const auto* prop : itemNode->childrenNamed("property")) {
+                if (!prop || prop->attr("name") != "text") {
+                    continue;
+                }
+                itemText = textValue_(*prop);
+                break;
+            }
+            combo->addItem(itemText);
+        }
+        if (hasXmlItems && deferredCurrentIndex >= 0) {
+            combo->setCurrentIndex(deferredCurrentIndex);
+        }
     }
 
     if (!widgetNode.firstChild("layout")) {
@@ -1056,6 +1189,8 @@ inline bool UiLoader::loadIntoExistingWidget_(SwWidget* target,
             stack->setCurrentIndex(deferredCurrentIndex);
         } else if (auto* toolbox = dynamic_cast<SwToolBox*>(target)) {
             toolbox->setCurrentIndex(deferredCurrentIndex);
+        } else if (auto* combo = dynamic_cast<SwComboBox*>(target)) {
+            combo->setCurrentIndex(deferredCurrentIndex);
         }
     }
 

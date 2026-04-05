@@ -11,7 +11,7 @@ tmp/
 .coreSw/
 dist/
 skills/
-
+visual_*/
 ProjectDev/
 exemples/37-HttpAppQuickstart/runtime/
 exemples/35-HttpServerSelfTest/runtime/
@@ -22,3 +22,4 @@ exemples/43-TunWebSocketVpn/
 *.secrets.json
 .env
 .env.*
+*.obj

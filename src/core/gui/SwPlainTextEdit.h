@@ -186,6 +186,71 @@ public:
         update();
     }
 
+    SwSize sizeHint() const override {
+        StyleSheet* sheet = const_cast<SwPlainTextEdit*>(this)->getToolSheet();
+        const Padding pad = resolvePadding(sheet);
+        const SwFont font = resolvedStyledFont_(sheet);
+        const SwFontMetrics metrics(font);
+
+        SwColor border{220, 224, 232};
+        int borderWidth = 1;
+        int radius = 12;
+        const_cast<SwPlainTextEdit*>(this)->resolveBorder(sheet, border, borderWidth, radius);
+
+        const int frameWidth = std::max(0, borderWidth) * 2 + pad.left + pad.right;
+        const int frameHeight = std::max(0, borderWidth) * 2 + pad.top + pad.bottom;
+        const int lineHeight = std::max(lineHeightPx(), metrics.height());
+
+        const SwSize minSize = minimumSize();
+        const SwSize maxSize = maximumSize();
+        const SwSize styleMin = resolvedStyleMinimumSize_();
+        const SwSize styleMax = resolvedStyleMaximumSize_();
+
+        const SwString sample("MMMMMMMMMMMMMMMMMMMMMMMM");
+        SwSize hint{
+            std::max(256, metrics.horizontalAdvance(sample) + frameWidth),
+            std::max(192, lineHeight * 8 + frameHeight)
+        };
+
+        hint.width = std::max(hint.width, std::max(minSize.width, styleMin.width));
+        hint.height = std::max(hint.height, std::max(minSize.height, styleMin.height));
+        hint.width = std::min(hint.width, std::min(maxSize.width, styleMax.width));
+        hint.height = std::min(hint.height, std::min(maxSize.height, styleMax.height));
+        return hint;
+    }
+
+    SwSize minimumSizeHint() const override {
+        StyleSheet* sheet = const_cast<SwPlainTextEdit*>(this)->getToolSheet();
+        const Padding pad = resolvePadding(sheet);
+        const SwFont font = resolvedStyledFont_(sheet);
+        const SwFontMetrics metrics(font);
+
+        SwColor border{220, 224, 232};
+        int borderWidth = 1;
+        int radius = 12;
+        const_cast<SwPlainTextEdit*>(this)->resolveBorder(sheet, border, borderWidth, radius);
+
+        const int frameWidth = std::max(0, borderWidth) * 2 + pad.left + pad.right;
+        const int frameHeight = std::max(0, borderWidth) * 2 + pad.top + pad.bottom;
+        const int lineHeight = std::max(lineHeightPx(), metrics.height());
+
+        const SwSize minSize = minimumSize();
+        const SwSize maxSize = maximumSize();
+        const SwSize styleMin = resolvedStyleMinimumSize_();
+        const SwSize styleMax = resolvedStyleMaximumSize_();
+
+        SwSize hint{
+            std::max(160, frameWidth + metrics.horizontalAdvance(SwString("MMMMMMMMMMMM"))),
+            std::max(96, lineHeight * 4 + frameHeight)
+        };
+
+        hint.width = std::max(hint.width, std::max(minSize.width, styleMin.width));
+        hint.height = std::max(hint.height, std::max(minSize.height, styleMin.height));
+        hint.width = std::min(hint.width, std::min(maxSize.width, styleMax.width));
+        hint.height = std::min(hint.height, std::min(maxSize.height, styleMax.height));
+        return hint;
+    }
+
     void setUndoRedoEnabled(bool on) {
         m_undoRedoEnabled = on;
         if (!m_undoRedoEnabled) {
@@ -800,7 +865,7 @@ protected:
     }
 
     Padding resolvePadding(StyleSheet* sheet) const {
-        Padding padding{};
+        Padding padding = intrinsicPadding_();
         if (!sheet) {
             return padding;
         }
@@ -843,6 +908,14 @@ protected:
             }
         }
 
+        if (paddingValue.isEmpty() &&
+            paddingTopValue.isEmpty() &&
+            paddingRightValue.isEmpty() &&
+            paddingBottomValue.isEmpty() &&
+            paddingLeftValue.isEmpty()) {
+            return padding;
+        }
+
         if (!paddingValue.isEmpty()) {
             padding = parsePaddingShorthand(paddingValue, padding);
         }
@@ -864,6 +937,15 @@ protected:
         padding.bottom = std::max(0, padding.bottom);
         padding.left = std::max(0, padding.left);
 
+        return padding;
+    }
+
+    Padding intrinsicPadding_() const {
+        Padding padding;
+        padding.top = 10;
+        padding.right = 12;
+        padding.bottom = 10;
+        padding.left = 12;
         return padding;
     }
 
@@ -1296,18 +1378,9 @@ protected:
         setCursor(CursorType::IBeam);
         setFocusPolicy(FocusPolicyEnum::Strong);
         setFrameShape(Shape::Box);
-        setFont(SwFont(L"Segoe UI", 10, Medium));
-        setStyleSheet(R"(
-            SwPlainTextEdit {
-                background-color: rgb(255, 255, 255);
-                border-color: rgb(220, 224, 232);
-                border-width: 1px;
-                border-radius: 12px;
-                padding: 10px 12px;
-                color: rgb(24, 28, 36);
-                font-size: 14px;
-            }
-        )");
+        SwFont font(L"Segoe UI", 10, Medium);
+        font.setPixelSize(14);
+        setFont(font);
     }
 
     size_t selectionMin_() const { return (std::min)(m_selectionStart, m_selectionEnd); }

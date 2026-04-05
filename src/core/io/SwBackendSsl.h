@@ -47,12 +47,16 @@
 
 #include <string>
 #include <vector>
+#include <map>
 #include <functional>
 #include <iostream>
 #include <memory>
 #include <cstdlib>
 #include <limits>
 #include <array>
+#include <atomic>
+#include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <cstring>
 
@@ -82,6 +86,15 @@
  *   ssl.shutdown();
  */
 class SwBackendSsl {
+    struct Loader;
+    struct ServerContextBundle {
+        Loader* loader = nullptr;
+        std::atomic<int> refCount{0};
+        void* defaultCtx = nullptr;
+        std::vector<void*> contexts;
+        std::map<std::string, void*> namedContexts;
+    };
+
 public:
     enum class IoResult {
         Ok,
@@ -126,6 +139,13 @@ public:
         fallbackTrustedCaDirectory_() = path;
     }
 
+    struct ServerCertificateConfig {
+        std::string host;
+        std::string certPath;
+        std::string keyPath;
+        bool isDefault = false;
+    };
+
     /**
      * @brief Creates a shared SSL_CTX configured for server-side TLS.
      * @param certPath Path to the PEM certificate file.
@@ -136,6 +156,22 @@ public:
     static void* createServerContext(const std::string& certPath,
                                      const std::string& keyPath,
                                      std::string& outError) {
+        std::vector<ServerCertificateConfig> configs;
+        ServerCertificateConfig config;
+        config.certPath = certPath;
+        config.keyPath = keyPath;
+        config.isDefault = true;
+        configs.push_back(config);
+        return createServerContextSet(configs, outError);
+    }
+
+    static void* createServerContextSet(const std::vector<ServerCertificateConfig>& configs,
+                                        std::string& outError) {
+        if (configs.empty()) {
+            outError = "No TLS certificate configured";
+            return nullptr;
+        }
+
         SwBackendSsl tmp;
         if (!tmp.ensureLoaded()) {
             outError = "OpenSSL libraries not found";
@@ -146,46 +182,66 @@ public:
             outError = "TLS_server_method not available";
             return nullptr;
         }
-        void* ctx = loader->SSL_CTX_new(loader->TLS_server_method());
-        if (!ctx) {
-            outError = "SSL_CTX_new (server) failed";
-            return nullptr;
-        }
-        bool certificateLoaded = false;
-        if (loader->SSL_CTX_use_certificate_chain_file) {
-            certificateLoaded = (loader->SSL_CTX_use_certificate_chain_file(ctx, certPath.c_str()) == 1);
-            if (!certificateLoaded && loader->ERR_clear_error) {
-                loader->ERR_clear_error();
+
+        std::unique_ptr<ServerContextBundle> bundle(new ServerContextBundle());
+        bundle->loader = loader;
+        bundle->refCount.store(1);
+
+        for (std::size_t i = 0; i < configs.size(); ++i) {
+            const ServerCertificateConfig& config = configs[i];
+            if (config.certPath.empty() || config.keyPath.empty()) {
+                continue;
+            }
+
+            void* ctx = createServerSslContext_(loader, config.certPath, config.keyPath, outError);
+            if (!ctx) {
+                releaseServerContextBundle_(bundle.release());
+                return nullptr;
+            }
+
+            bundle->contexts.push_back(ctx);
+            const std::string host = normalizeServerName_(config.host);
+            if (!host.empty()) {
+                bundle->namedContexts[host] = ctx;
+            }
+            if (!bundle->defaultCtx || config.isDefault) {
+                bundle->defaultCtx = ctx;
             }
         }
-        if (!certificateLoaded) {
-            // SSL_FILETYPE_PEM = 1
-            if (!loader->SSL_CTX_use_certificate_file ||
-                loader->SSL_CTX_use_certificate_file(ctx, certPath.c_str(), 1) != 1) {
-                outError = "Failed to load certificate: " + certPath;
-                loader->SSL_CTX_free(ctx);
+
+        if (!bundle->defaultCtx && !bundle->contexts.empty()) {
+            bundle->defaultCtx = bundle->contexts.front();
+        }
+        if (!bundle->defaultCtx) {
+            outError = "No valid TLS certificate configured";
+            releaseServerContextBundle_(bundle.release());
+            return nullptr;
+        }
+
+        if (!bundle->namedContexts.empty()) {
+            if (!loader->SSL_CTX_callback_ctrl || !loader->SSL_get_servername || !loader->SSL_set_SSL_CTX) {
+                outError = "OpenSSL SNI symbols are not available";
+                releaseServerContextBundle_(bundle.release());
+                return nullptr;
+            }
+            if (!loader->SSL_CTX_callback_ctrl(bundle->defaultCtx,
+                                               kSslCtrlSetTlsextServernameCallback,
+                                               reinterpret_cast<void (*)()>(serverNameCallback_))) {
+                outError = "Unable to install TLS SNI callback";
+                releaseServerContextBundle_(bundle.release());
+                return nullptr;
+            }
+            if (!loader->SSL_CTX_ctrl(bundle->defaultCtx,
+                                      kSslCtrlSetTlsextServernameArg,
+                                      0,
+                                      bundle.get())) {
+                outError = "Unable to install TLS SNI callback context";
+                releaseServerContextBundle_(bundle.release());
                 return nullptr;
             }
         }
-        if (!loader->SSL_CTX_use_PrivateKey_file ||
-            loader->SSL_CTX_use_PrivateKey_file(ctx, keyPath.c_str(), 1) != 1) {
-            outError = "Failed to load private key: " + keyPath;
-            loader->SSL_CTX_free(ctx);
-            return nullptr;
-        }
-        if (loader->SSL_CTX_check_private_key &&
-            loader->SSL_CTX_check_private_key(ctx) != 1) {
-            outError = "Private key does not match certificate";
-            loader->SSL_CTX_free(ctx);
-            return nullptr;
-        }
-        // Enable partial writes so SSL_write on a non-blocking socket does not
-        // fail fatally when the underlying send() returns EWOULDBLOCK.
-        // SSL_CTRL_MODE=33, SSL_MODE_ENABLE_PARTIAL_WRITE=0x01, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER=0x02
-        if (loader->SSL_CTX_ctrl) {
-            loader->SSL_CTX_ctrl(ctx, 33, 0x01 | 0x02, nullptr);
-        }
-        return ctx;
+
+        return bundle.release();
     }
 
     /**
@@ -193,13 +249,7 @@ public:
      * @param ctx The context to free.
      */
     static void freeServerContext(void* ctx) {
-        if (!ctx) {
-            return;
-        }
-        SwBackendSsl tmp;
-        if (tmp.ensureLoaded() && tmp.m_loader->SSL_CTX_free) {
-            tmp.m_loader->SSL_CTX_free(ctx);
-        }
+        releaseServerContextBundle_(static_cast<ServerContextBundle*>(ctx));
     }
 
     /**
@@ -209,7 +259,8 @@ public:
      * @return true on success.
      */
     bool initServer(void* sharedCtx, intptr_t fd) {
-        if (!sharedCtx) {
+        ServerContextBundle* bundle = static_cast<ServerContextBundle*>(sharedCtx);
+        if (!bundle || !bundle->defaultCtx) {
             m_lastError = "Null server SSL_CTX";
             return false;
         }
@@ -222,10 +273,18 @@ public:
         }
 
         // We do NOT own the CTX — it is shared. Store nullptr so cleanup() won't free it.
+        retainServerContextBundle_(bundle);
+        m_serverContextBundle = bundle;
+        if (bundle->loader) {
+            m_loader = bundle->loader;
+        }
+
         m_ctx = nullptr;
-        m_ssl = m_loader->SSL_new(sharedCtx);
+        m_ssl = m_loader->SSL_new(bundle->defaultCtx);
         if (!m_ssl) {
             m_lastError = "SSL_new (server) failed";
+            releaseServerContextBundle_(m_serverContextBundle);
+            m_serverContextBundle = nullptr;
             return false;
         }
         if (fd > std::numeric_limits<int>::max()) {
@@ -425,6 +484,113 @@ private:
             return false;
         }
         return true;
+    }
+
+    static std::string normalizeServerName_(const std::string& host) {
+        std::string out = host;
+        while (!out.empty() &&
+               (out.back() == '.' || out.back() == ' ' || out.back() == '\t' || out.back() == '\r' || out.back() == '\n')) {
+            out.pop_back();
+        }
+        std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        return out;
+    }
+
+    static void retainServerContextBundle_(ServerContextBundle* bundle) {
+        if (!bundle) {
+            return;
+        }
+        ++bundle->refCount;
+    }
+
+    static void releaseServerContextBundle_(ServerContextBundle* bundle) {
+        if (!bundle) {
+            return;
+        }
+        if (--bundle->refCount > 0) {
+            return;
+        }
+        Loader* loader = bundle->loader;
+        if (loader && loader->SSL_CTX_free) {
+            for (std::size_t i = 0; i < bundle->contexts.size(); ++i) {
+                if (bundle->contexts[i]) {
+                    loader->SSL_CTX_free(bundle->contexts[i]);
+                }
+            }
+        }
+        delete bundle;
+    }
+
+    static void* createServerSslContext_(Loader* loader,
+                                         const std::string& certPath,
+                                         const std::string& keyPath,
+                                         std::string& outError) {
+        if (!loader || !loader->TLS_server_method) {
+            outError = "TLS_server_method not available";
+            return nullptr;
+        }
+
+        void* ctx = loader->SSL_CTX_new(loader->TLS_server_method());
+        if (!ctx) {
+            outError = "SSL_CTX_new (server) failed";
+            return nullptr;
+        }
+
+        bool certificateLoaded = false;
+        if (loader->SSL_CTX_use_certificate_chain_file) {
+            certificateLoaded = (loader->SSL_CTX_use_certificate_chain_file(ctx, certPath.c_str()) == 1);
+            if (!certificateLoaded && loader->ERR_clear_error) {
+                loader->ERR_clear_error();
+            }
+        }
+        if (!certificateLoaded) {
+            if (!loader->SSL_CTX_use_certificate_file ||
+                loader->SSL_CTX_use_certificate_file(ctx, certPath.c_str(), 1) != 1) {
+                outError = "Failed to load certificate: " + certPath;
+                loader->SSL_CTX_free(ctx);
+                return nullptr;
+            }
+        }
+        if (!loader->SSL_CTX_use_PrivateKey_file ||
+            loader->SSL_CTX_use_PrivateKey_file(ctx, keyPath.c_str(), 1) != 1) {
+            outError = "Failed to load private key: " + keyPath;
+            loader->SSL_CTX_free(ctx);
+            return nullptr;
+        }
+        if (loader->SSL_CTX_check_private_key &&
+            loader->SSL_CTX_check_private_key(ctx) != 1) {
+            outError = "Private key does not match certificate";
+            loader->SSL_CTX_free(ctx);
+            return nullptr;
+        }
+        if (loader->SSL_CTX_ctrl) {
+            loader->SSL_CTX_ctrl(ctx,
+                                 kSslCtrlMode,
+                                 kSslModeEnablePartialWrite | kSslModeAcceptMovingWriteBuffer,
+                                 nullptr);
+        }
+        return ctx;
+    }
+
+    static int serverNameCallback_(void* ssl, int*, void* arg) {
+        ServerContextBundle* bundle = static_cast<ServerContextBundle*>(arg);
+        if (!bundle || !bundle->loader || !bundle->loader->SSL_get_servername || !bundle->loader->SSL_set_SSL_CTX) {
+            return kSslTlsextErrOk;
+        }
+
+        const char* requestedName = bundle->loader->SSL_get_servername(ssl, kTlsExtNameTypeHostName);
+        if (!requestedName || !*requestedName) {
+            return kSslTlsextErrOk;
+        }
+
+        const std::string normalizedName = normalizeServerName_(requestedName);
+        std::map<std::string, void*>::const_iterator it = bundle->namedContexts.find(normalizedName);
+        if (it != bundle->namedContexts.end() && it->second) {
+            bundle->loader->SSL_set_SSL_CTX(ssl, it->second);
+        }
+        return kSslTlsextErrOk;
     }
 
     bool loadDefaultVerifyPaths_(std::string& trustSummary) {
@@ -763,6 +929,7 @@ private:
         using FnSetFd = int (*)(void*, int);
         using FnSet1Host = int (*)(void*, const char*);
         using FnCtrl = long (*)(void*, int, long, void*);
+        using FnCTXCallbackCtrl = long (*)(void*, int, void (*)());
         using FnSetConnectState = void (*)(void*);
         using FnSetAcceptState = void (*)(void*);
         using FnDoHandshake = int (*)(void*);
@@ -784,6 +951,8 @@ private:
         using FnD2IX509 = void* (*)(void**, const unsigned char**, long);
         using FnX509StoreAddCert = int (*)(void*, void*);
         using FnX509Free = void (*)(void*);
+        using FnSSLGetServername = const char* (*)(const void*, int);
+        using FnSSLSetSSLCTX = void* (*)(void*, void*);
 
         FnOpenSSLInit OPENSSL_init_ssl = nullptr;
         FnTLSClientMethod TLS_client_method = nullptr;
@@ -797,6 +966,7 @@ private:
         FnSetFd SSL_set_fd = nullptr;
         FnSet1Host SSL_set1_host = nullptr;
         FnCtrl SSL_ctrl = nullptr;
+        FnCTXCallbackCtrl SSL_CTX_callback_ctrl = nullptr;
         FnSetConnectState SSL_set_connect_state = nullptr;
         FnSetAcceptState SSL_set_accept_state = nullptr;
         FnDoHandshake SSL_do_handshake = nullptr;
@@ -820,6 +990,8 @@ private:
         FnD2IX509 d2i_X509 = nullptr;
         FnX509StoreAddCert X509_STORE_add_cert = nullptr;
         FnX509Free X509_free = nullptr;
+        FnSSLGetServername SSL_get_servername = nullptr;
+        FnSSLSetSSLCTX SSL_set_SSL_CTX = nullptr;
 
         /**
          * @brief Performs the `load` operation on the associated resource.
@@ -868,6 +1040,7 @@ private:
             SSL_set_fd = (FnSetFd)sym(ssl, "SSL_set_fd");
             SSL_set1_host = (FnSet1Host)sym(ssl, "SSL_set1_host");
             SSL_ctrl = (FnCtrl)sym(ssl, "SSL_ctrl");
+            SSL_CTX_callback_ctrl = (FnCTXCallbackCtrl)sym(ssl, "SSL_CTX_callback_ctrl");
             SSL_set_connect_state = (FnSetConnectState)sym(ssl, "SSL_set_connect_state");
             SSL_set_accept_state = (FnSetAcceptState)sym(ssl, "SSL_set_accept_state");
             SSL_do_handshake = (FnDoHandshake)sym(ssl, "SSL_do_handshake");
@@ -892,6 +1065,8 @@ private:
             d2i_X509 = (FnD2IX509)sym(crypto, "d2i_X509");
             X509_STORE_add_cert = (FnX509StoreAddCert)sym(crypto, "X509_STORE_add_cert");
             X509_free = (FnX509Free)sym(crypto, "X509_free");
+            SSL_get_servername = (FnSSLGetServername)sym(ssl, "SSL_get_servername");
+            SSL_set_SSL_CTX = (FnSSLSetSSLCTX)sym(ssl, "SSL_set_SSL_CTX");
 
             if (!TLS_client_method || !SSL_CTX_new || !SSL_new || !SSL_set_fd || !SSL_do_handshake ||
                 !SSL_get_error || !SSL_read || !SSL_write || !SSL_shutdown) {
@@ -1028,8 +1203,12 @@ private:
         if (m_ctx && m_loader && m_loader->SSL_CTX_free) {
             m_loader->SSL_CTX_free(m_ctx);
         }
+        if (m_serverContextBundle) {
+            releaseServerContextBundle_(m_serverContextBundle);
+        }
         m_ssl = nullptr;
         m_ctx = nullptr;
+        m_serverContextBundle = nullptr;
     }
 
     bool ensureLoaded() {
@@ -1049,6 +1228,13 @@ private:
     static constexpr int kSSL_ERROR_ZERO_RETURN = 6;
     static constexpr int SSL_VERIFY_PEER = 0x01;
     static constexpr long X509_V_OK = 0;
+    static constexpr int kSslCtrlMode = 33;
+    static constexpr long kSslModeEnablePartialWrite = 0x01;
+    static constexpr long kSslModeAcceptMovingWriteBuffer = 0x02;
+    static constexpr int kSslCtrlSetTlsextServernameCallback = 53;
+    static constexpr int kSslCtrlSetTlsextServernameArg = 54;
+    static constexpr int kTlsExtNameTypeHostName = 0;
+    static constexpr int kSslTlsextErrOk = 0;
 
 #if defined(_WIN32)
     bool loadWindowsSystemStores_(std::string& trustSummary) {
@@ -1136,5 +1322,6 @@ private:
     Loader* m_loader = nullptr;
     void* m_ctx = nullptr;
     void* m_ssl = nullptr;
+    ServerContextBundle* m_serverContextBundle = nullptr;
     std::string m_lastError;
 };

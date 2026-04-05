@@ -5,6 +5,8 @@
 #include "SwJsonObject.h"
 #include "SwTimer.h"
 
+#include <iostream>
+
 #ifndef SWLAUNCH_FIXTURE_VERSION
 #define SWLAUNCH_FIXTURE_VERSION "unknown"
 #endif
@@ -141,6 +143,8 @@ int main(int argc, char** argv) {
         swError() << "[fixture-node]" << err;
         return 3;
     }
+    std::cout << marker.toStdString();
+    std::cout.flush();
     if (!writeTextFixture_(readyPath, marker, err)) {
         swError() << "[fixture-node]" << err;
         return 4;

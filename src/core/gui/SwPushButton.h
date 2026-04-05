@@ -36,6 +36,7 @@
 
 
 #include "SwWidget.h"
+#include "graphics/SwFontMetrics.h"
 #include <iostream>
 
 
@@ -74,25 +75,35 @@ public:
 
         SwString css = R"(
             SwPushButton {
-                background-color: rgb(236, 236, 236);
-                border-color: rgb(172, 172, 172);
-                color: rgb(30, 30, 30);
-                border-radius: 6px;
+                background-color: rgb(243, 243, 243);
+                border-color: rgb(173, 173, 173);
+                color: rgb(18, 18, 18);
+                border-radius: 4px;
                 padding: 8px 14px;
                 border-width: 1px;
                 font-size: 14px;
             }
             SwPushButton:hover {
-                background-color: rgb(224, 224, 224);
-                border-color: rgb(160, 160, 160);
+                background-color: rgb(229, 241, 251);
+                border-color: rgb(0, 120, 215);
             }
             SwPushButton:pressed {
-                background-color: rgb(210, 210, 210);
-                border-color: rgb(140, 140, 140);
-                color: rgb(20, 20, 20);
+                background-color: rgb(204, 228, 247);
+                border-color: rgb(0, 84, 153);
+                color: rgb(18, 18, 18);
+            }
+            SwPushButton:checked {
+                background-color: rgb(214, 231, 248);
+                border-color: rgb(0, 120, 215);
+                color: rgb(18, 18, 18);
+            }
+            SwPushButton:disabled {
+                background-color: rgb(244, 244, 244);
+                border-color: rgb(205, 205, 205);
+                color: rgb(122, 122, 122);
             }
         )";
-        this->setStyleSheet(css);
+        setDefaultStyleSheet(css);
     }
 
     /**
@@ -143,12 +154,12 @@ public:
      * @details Override this hook when the default framework behavior needs to be extended or replaced.
      */
     virtual void paintEvent(PaintEvent* event) override {
-        SwPainter* painter = event->painter();
+        SwPainter* painter = event ? event->painter() : nullptr;
         if (!painter) {
             return;
         }
 
-        SwRect rect = this->rect();
+        const SwRect rect = this->rect();
 
         WidgetState state = WidgetState::Normal;
         if (getPressed()) {
@@ -160,12 +171,12 @@ public:
         if (getCheckable() && m_checked) {
             state = WidgetStateHelper::setState(state, WidgetState::Checked);
         }
-        //if (getEnable()) {
-        //    state = WidgetStateHelper::setState(state, WidgetState::Disabled);
-        //}
-        //if (getFocus()) {
-        //    state = WidgetStateHelper::setState(state, WidgetState::Focused);
-        //}
+        if (!getEnable()) {
+            state = WidgetStateHelper::setState(state, WidgetState::Disabled);
+        }
+        if (getFocus()) {
+            state = WidgetStateHelper::setState(state, WidgetState::Focused);
+        }
 
         m_style->drawControl(WidgetStyle::PushButtonStyle, rect, painter, this, state);
 
@@ -229,7 +240,30 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     virtual SwSize sizeHint() const override {
-        return SwSize{width(), height()};
+        StyleSheet* sheet = const_cast<SwPushButton*>(this)->getToolSheet();
+        const SwFont font = resolvedStyledFont_(sheet);
+        const SwFontMetrics metrics(font);
+        const StyleSheet::BoxEdges padding = resolvePaddingEdges_(sheet);
+
+        SwColor borderColor{0, 0, 0};
+        int borderWidth = 1;
+        int borderRadius = 0;
+        resolveBorder(sheet, borderColor, borderWidth, borderRadius);
+
+        const SwSize minSize = minimumSize();
+        const SwSize maxSize = maximumSize();
+        const SwSize styleMin = resolvedStyleMinimumSize_();
+        const SwSize styleMax = resolvedStyleMaximumSize_();
+
+        SwSize hint{
+            metrics.horizontalAdvance(getText()) + padding.left + padding.right + (borderWidth * 2),
+            metrics.height() + padding.top + padding.bottom + (borderWidth * 2)
+        };
+        hint.width = std::max(hint.width, std::max(minSize.width, styleMin.width));
+        hint.height = std::max(hint.height, std::max(minSize.height, styleMin.height));
+        hint.width = std::min(hint.width, std::min(maxSize.width, styleMax.width));
+        hint.height = std::min(hint.height, std::min(maxSize.height, styleMax.height));
+        return hint;
     }
 
     /**

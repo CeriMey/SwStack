@@ -626,11 +626,13 @@ public:
             return;
         }
 
-        // Emoji: prefer DirectWrite/Direct2D for color fonts, fallback to classic GDI when unavailable.
+        // Prefer DirectWrite/Direct2D for parity with Qt text rasterization, then fall back to GDI.
+        if (drawTextD2D_(rect, wText, alignment, color, font)) {
+            return;
+        }
+
+        // Emoji: prefer DirectWrite color paths before classic GDI when the generic D2D path is unavailable.
         if (likelyEmojiText_(wText)) {
-            if (drawTextD2D_(rect, wText, alignment, color, font)) {
-                return;
-            }
             if (drawTextColorEmoji_(rect, wText, alignment, color, font)) {
                 return;
             }
@@ -1649,8 +1651,10 @@ private:
             family = L"Segoe UI";
         }
 
-        const int pt = std::max(1, font.getPointSize());
-        const FLOAT fontSizeDip = static_cast<FLOAT>(pt) * (96.0f / 72.0f);
+        const int pixelSize = font.getPixelSize();
+        const FLOAT fontSizeDip = pixelSize > 0
+                                      ? static_cast<FLOAT>(pixelSize)
+                                      : static_cast<FLOAT>(std::max(1, font.getPointSize())) * (96.0f / 72.0f);
 
         const DWRITE_FONT_WEIGHT weight = static_cast<DWRITE_FONT_WEIGHT>(font.getWeight());
         const DWRITE_FONT_STYLE style = font.isItalic() ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL;

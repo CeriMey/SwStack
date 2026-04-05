@@ -54,6 +54,7 @@
  **************************************************************************************************/
 
 #include "SwWidget.h"
+#include "graphics/SwFontMetrics.h"
 
 class SwRadioButton : public SwWidget {
     SW_OBJECT(SwRadioButton, SwWidget)
@@ -161,6 +162,32 @@ protected:
         update();
     }
 
+    SwSize sizeHint() const override {
+        StyleSheet* sheet = const_cast<SwRadioButton*>(this)->getToolSheet();
+        const SwFont font = resolvedStyledFont_(sheet);
+        const SwFontMetrics metrics(font);
+        const SwString label = getText().isEmpty() ? SwString("RadioButton") : getText();
+        const SwSize minSize = minimumSize();
+        const SwSize maxSize = maximumSize();
+        const SwSize styleMin = resolvedStyleMinimumSize_();
+        const SwSize styleMax = resolvedStyleMaximumSize_();
+        const int indicatorSize = clampInt(m_indicatorSize, 12, 28);
+
+        SwSize hint{
+            indicatorSize + m_textSpacing + metrics.horizontalAdvance(label),
+            std::max(indicatorSize, metrics.height())
+        };
+        hint.width = std::max(hint.width, std::max(minSize.width, styleMin.width));
+        hint.height = std::max(hint.height, std::max(minSize.height, styleMin.height));
+        hint.width = std::min(hint.width, std::min(maxSize.width, styleMax.width));
+        hint.height = std::min(hint.height, std::min(maxSize.height, styleMax.height));
+        return hint;
+    }
+
+    SwSize minimumSizeHint() const override {
+        return sizeHint();
+    }
+
     /**
      * @brief Handles the paint Event forwarded by the framework.
      * @param event Event object forwarded by the framework.
@@ -183,26 +210,46 @@ protected:
                                clampInt(bounds.width - (indicator.width + m_textSpacing), 0, 1000000),
                                bounds.height};
 
-        SwColor border{160, 160, 160};
+        SwColor border{156, 163, 175};
         SwColor indicatorFill{255, 255, 255};
-        SwColor textColor{30, 30, 30};
+        SwColor textColor{24, 28, 36};
 
         if (!getEnable()) {
             border = SwColor{190, 190, 190};
             indicatorFill = SwColor{245, 245, 245};
             textColor = SwColor{150, 150, 150};
-        } else if (getHover()) {
-            border = SwColor{120, 120, 120};
+        } else {
+            if (m_checked) {
+                border = mixColor_(SwColor{255, 255, 255}, m_accent, 16);
+                indicatorFill = mixColor_(SwColor{255, 255, 255}, m_accent, 94);
+            }
+
+            if (getHover()) {
+                border = m_checked ? mixColor_(SwColor{255, 255, 255}, m_accent, 8)
+                                   : SwColor{107, 114, 128};
+                if (!m_checked) {
+                    indicatorFill = SwColor{250, 252, 255};
+                }
+            }
+
+            if (getPressed()) {
+                border = m_checked ? mixColor_(SwColor{15, 23, 42}, m_accent, 12)
+                                   : SwColor{75, 85, 99};
+                if (!m_checked) {
+                    indicatorFill = SwColor{245, 248, 252};
+                }
+            }
         }
 
-        painter->fillRoundedRect(indicator, indicatorSize / 2, indicatorFill, border, 1);
+        painter->fillEllipse(indicator, indicatorFill, border, 1);
 
         if (m_checked) {
-            const int dotSize = clampInt(indicatorSize / 2, 6, indicatorSize - 6);
+            const int dotSize = clampInt((indicatorSize / 2) + (getPressed() ? 1 : 0), 6, indicatorSize - 6);
             const int dotX = indicator.x + (indicator.width - dotSize) / 2;
             const int dotY = indicator.y + (indicator.height - dotSize) / 2;
             const SwRect dot{dotX, dotY, dotSize, dotSize};
-            painter->fillRoundedRect(dot, dotSize / 2, m_accent, m_accent, 0);
+            const SwColor dotColor = getPressed() ? mixColor_(m_accent, SwColor{15, 23, 42}, 18) : m_accent;
+            painter->fillEllipse(dot, dotColor, dotColor, 0);
         }
 
         painter->drawText(labelRect,
@@ -210,11 +257,6 @@ protected:
                           DrawTextFormats(DrawTextFormat::Left | DrawTextFormat::VCenter | DrawTextFormat::SingleLine),
                           textColor,
                           getFont());
-
-        if (getFocus()) {
-            SwRect focusRect{bounds.x, bounds.y, bounds.width - 1, bounds.height - 1};
-            painter->drawRect(focusRect, m_accent, 1);
-        }
     }
 
     /**
@@ -273,19 +315,23 @@ protected:
     }
 
 private:
+    static SwColor mixColor_(const SwColor& lhs, const SwColor& rhs, int rhsWeight0To100) {
+        const int rhsWeight = clampInt(rhsWeight0To100, 0, 100);
+        const int lhsWeight = 100 - rhsWeight;
+        return SwColor{
+            (lhs.r * lhsWeight + rhs.r * rhsWeight) / 100,
+            (lhs.g * lhsWeight + rhs.g * rhsWeight) / 100,
+            (lhs.b * lhsWeight + rhs.b * rhsWeight) / 100
+        };
+    }
+
     void initDefaults() {
         resize(200, 28);
         setCursor(CursorType::Hand);
         setFocusPolicy(FocusPolicyEnum::Strong);
-        setFont(SwFont(L"Segoe UI", 10, Medium));
-        setStyleSheet(R"(
-            SwRadioButton {
-                background-color: rgba(0,0,0,0);
-                border-width: 0px;
-                color: rgb(30, 30, 30);
-                font-size: 14px;
-            }
-        )");
+        SwFont font(L"Segoe UI", 10, Medium);
+        font.setPixelSize(14);
+        setFont(font);
     }
 
     void uncheckSiblings() {

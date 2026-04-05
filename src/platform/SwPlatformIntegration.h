@@ -153,6 +153,7 @@ struct SwPlatformWindowOptions {
     bool minimizable{true};
     bool maximizable{true};
     bool showInTaskbar{true};
+    bool frameless{false};
 };
 
 struct SwPlatformPaintEvent {

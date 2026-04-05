@@ -1,4 +1,5 @@
 #include "SwCoreApplication.h"
+#include "SwLaunchCrash.h"
 #include "SwDebug.h"
 #include "SwDir.h"
 #include "SwEventLoop.h"
@@ -8,6 +9,7 @@
 #include "SwJsonDocument.h"
 #include "SwLaunchDeploySupport.h"
 #include "SwLaunchTraceConfig.h"
+#include "SwLaunchVersion.h"
 #include "SwProcess.h"
 #include "SwSharedMemorySignal.h"
 #include "SwStandardLocation.h"
@@ -30,8 +32,53 @@ static uint64_t nowMonotonicMs_() {
 #endif
 }
 
+static bool hasCrashTestArg_(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i) {
+        const SwString arg = argv[i];
+        if (arg == "-crash_test" || arg == "--crash-test" || arg == "--crash-handler-smoke") {
+            return true;
+        }
+    }
+    return false;
+}
+
 static SwString swLaunchHelpTopics_() {
-    return "config, nodes, containers, supervision, control_api, state_api, deploy, checksum, rollback, paths";
+    return "config, nodes, containers, supervision, control_api, logs, state_api, deploy, checksum, rollback, paths";
+}
+
+static SwList<SwString> swLaunchHelpTopicList_() {
+    SwList<SwString> topics;
+    const SwList<SwString> rawParts = swLaunchHelpTopics_().split(',');
+    for (size_t i = 0; i < rawParts.size(); ++i) {
+        const SwString topic = rawParts[i].trimmed();
+        if (!topic.isEmpty()) {
+            topics.append(topic);
+        }
+    }
+    return topics;
+}
+
+static SwString swLaunchVersion_() {
+    return SWLAUNCH_VERSION_STRING;
+}
+
+static SwString swLaunchGitRevision_() {
+    return SWLAUNCH_GIT_REVISION;
+}
+
+static SwString swLaunchBuildStamp_() {
+    return SwString(__DATE__) + " " + SwString(__TIME__);
+}
+
+static SwString swLaunchVersionLine_() {
+    SwString line = swLaunchVersion_();
+    const SwString gitRevision = swLaunchGitRevision_().trimmed();
+    if (!gitRevision.isEmpty() && gitRevision != "unknown") {
+        line += " (git ";
+        line += gitRevision;
+        line += ")";
+    }
+    return line;
 }
 
 static SwString normalizeHelpTopic_(SwString topic) {
@@ -41,6 +88,9 @@ static SwString normalizeHelpTopic_(SwString topic) {
 
     if (topic == "control" || topic == "api" || topic == "http" || topic == "controlapi") {
         return "control_api";
+    }
+    if (topic == "log" || topic == "stream" || topic == "log_stream" || topic == "sse") {
+        return "logs";
     }
     if (topic == "state" || topic == "state_put" || topic == "put_state") {
         return "state_api";
@@ -58,8 +108,8 @@ static SwString normalizeHelpTopic_(SwString topic) {
 }
 
 static SwString swLaunchHelpOverview_() {
-    return SwString(
-R"(SwLaunch
+    return SwString("SwLaunch\n\nVersion:\n  ") + swLaunchVersionLine_() + SwString(
+R"(
 
 SwLaunch is a local orchestrator for nodes and containers.
 It can:
@@ -74,9 +124,11 @@ It can:
 Basic usage:
   SwLaunch --config_file=<path>
   SwLaunch --config_json=<json>
+  SwLaunch --version
   SwLaunch -h
 
 Global arguments:
+  -v, --version              Print the product version and exit.
   --config_file=<path>       Read launch state from disk.
   --config_json=<json>       Read launch state from inline JSON.
   --sys=<domain>             Override default system id.
@@ -88,7 +140,10 @@ Control API arguments:
   --control_token=<secret>   Required bearer token for /api/* routes.
 
 Control API routes:
+  GET  /api/launch/help
+  GET  /api/launch/help/:topic
   GET  /api/launch/state
+  GET  /api/launch/logs/stream
   PUT  /api/launch/state
   POST /api/launch/deploy
   GET  /api/launch/deploy/:jobId
@@ -108,6 +163,7 @@ Detailed help:
   SwLaunch -h deploy
   SwLaunch --help=deploy
   SwLaunch --help=control_api
+  SwLaunch --help=logs
   SwLaunch --help=rollback
 
 Accepted help topics:
@@ -238,14 +294,44 @@ Auth model:
   Authorization: Bearer <token>
 
 Routes:
+  GET  /api/launch/help
+  GET  /api/launch/help/:topic
   GET  /api/launch/state
+  GET  /api/launch/logs/stream
   PUT  /api/launch/state
   POST /api/launch/deploy
   GET  /api/launch/deploy/:jobId
 
 Important:
+  - help routes expose version, capabilities and help topics in JSON
   - mutations are refused unless SwLaunch was started with --config_file
   - the bearer token is not returned by the API and is not written into launch.json
+)");
+    }
+
+    if (topic == "logs") {
+        return SwString(
+R"(SwLaunch help: logs
+
+Goal:
+  Follow launcher and child logs in real time over a long-lived HTTP stream.
+
+Route:
+  GET /api/launch/logs/stream
+
+Protocol:
+  - Server-Sent Events (text/event-stream)
+  - same bearer token as the rest of /api/*
+  - long-lived HTTP connection with periodic keepalive comments
+
+Behavior:
+  - streams SwLaunch logs
+  - streams child stdout/stderr after they are forwarded by SwLaunch
+  - sends a short backlog on connect
+  - query parameter backlog=<0..200> controls backlog size, default 32
+
+Quick test:
+  curl -N -H "Authorization: Bearer <token>" http://<ip>:7777/api/launch/logs/stream
 )");
     }
 
@@ -391,6 +477,7 @@ Practical consequence:
                "\n" + swLaunchHelpForTopic_("containers") +
                "\n" + swLaunchHelpForTopic_("supervision") +
                "\n" + swLaunchHelpForTopic_("control_api") +
+               "\n" + swLaunchHelpForTopic_("logs") +
                "\n" + swLaunchHelpForTopic_("state_api") +
                "\n" + swLaunchHelpForTopic_("deploy") +
                "\n" + swLaunchHelpForTopic_("checksum") +
@@ -436,6 +523,16 @@ static bool tryPrintHelp_(const SwCoreApplication& app, int& exitCodeOut) {
     std::cout << "Unknown SwLaunch help topic: " << topic.toStdString() << "\n\n";
     std::cout << swLaunchHelpOverview_().toStdString();
     exitCodeOut = 2;
+    return true;
+}
+
+static bool tryPrintVersion_(const SwCoreApplication& app, int& exitCodeOut) {
+    exitCodeOut = 0;
+    if (!app.hasArgument("v") && !app.hasArgument("version")) {
+        return false;
+    }
+
+    std::cout << "SwLaunch " << swLaunchVersionLine_().toStdString() << std::endl;
     return true;
 }
 
@@ -956,6 +1053,9 @@ class LaunchContainerProcess : public SwObject {
             if (onlineTimer_) onlineTimer_->stop();
         } else {
             startOnlineMonitoring_();
+            SwTimer::singleShot(0, [this]() {
+                drainPendingOutput_();
+            });
         }
         return ok;
     }
@@ -1211,6 +1311,12 @@ class LaunchContainerProcess : public SwObject {
     uint64_t lastSeenMs_{0};
     bool everOnline_{false};
     std::function<void(const SwString&, int)> shutdownOnCleanExitHandler_{};
+
+    void drainPendingOutput_() {
+        if (!process_) return;
+        forwardChildChunk_(id_, /*fromStdErr=*/false, process_->read());
+        forwardChildChunk_(id_, /*fromStdErr=*/true, process_->readStdErr());
+    }
 };
 
 class LaunchNodeProcess : public SwObject {
@@ -1279,6 +1385,9 @@ class LaunchNodeProcess : public SwObject {
             if (onlineTimer_) onlineTimer_->stop();
         } else {
             startOnlineMonitoring_();
+            SwTimer::singleShot(0, [this]() {
+                drainPendingOutput_();
+            });
         }
         return ok;
     }
@@ -1513,12 +1622,30 @@ class LaunchNodeProcess : public SwObject {
     uint64_t lastSeenMs_{0};
     bool everOnline_{false};
     std::function<void(const SwString&, int)> shutdownOnCleanExitHandler_{};
+
+    void drainPendingOutput_() {
+        if (!process_) return;
+        forwardChildChunk_(id_, /*fromStdErr=*/false, process_->read());
+        forwardChildChunk_(id_, /*fromStdErr=*/true, process_->readStdErr());
+    }
 };
 
 #include "SwLaunchController.h"
 
 int main(int argc, char** argv) {
+    swLaunchInstallCrashHandling();
+    if (hasCrashTestArg_(argc, argv)) {
+        swLaunchTriggerCrashTest();
+    }
+
     SwCoreApplication app(argc, argv);
+    SwDebug::setAppName("SwLaunch");
+    SwDebug::setVersion(swLaunchVersion_());
+
+    int versionExitCode = 0;
+    if (tryPrintVersion_(app, versionExitCode)) {
+        return versionExitCode;
+    }
 
     int helpExitCode = 0;
     if (tryPrintHelp_(app, helpExitCode)) {

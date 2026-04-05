@@ -207,6 +207,32 @@ public:
     DECLARE_SIGNAL(valueChanged, double);
 
 protected:
+    SwSize sizeHint() const override {
+        int borderWidth = 1;
+        int radiusTopRight = 0;
+        int radiusBottomRight = 0;
+        const_cast<SwDoubleSpinBox*>(this)->resolveFrameMetrics_(borderWidth, radiusTopRight, radiusBottomRight);
+
+        const SwSize editHint = m_edit ? m_edit->sizeHint() : SwSize{64, 28};
+        const SwSize minSize = minimumSize();
+        const SwSize maxSize = maximumSize();
+        const SwSize styleMin = resolvedStyleMinimumSize_();
+        const SwSize styleMax = resolvedStyleMaximumSize_();
+        SwSize hint{
+            editHint.width + arrowColumnWidth() + (borderWidth * 2),
+            editHint.height + (borderWidth * 2)
+        };
+        hint.width = std::max(hint.width, std::max(minSize.width, styleMin.width));
+        hint.height = std::max(hint.height, std::max(minSize.height, styleMin.height));
+        hint.width = std::min(hint.width, std::min(maxSize.width, styleMax.width));
+        hint.height = std::min(hint.height, std::min(maxSize.height, styleMax.height));
+        return hint;
+    }
+
+    SwSize minimumSizeHint() const override {
+        return sizeHint();
+    }
+
     /**
      * @brief Handles the resize Event forwarded by the framework.
      * @param event Event object forwarded by the framework.
@@ -247,8 +273,30 @@ protected:
         resolveBackground(sheet, bg, bgAlpha, paintBackground);
         resolveBorder(sheet, border, borderWidth, radius);
 
-        if (getEnable() && m_edit && m_edit->getFocus()) {
-            border = m_focusAccent;
+        const bool explicitHoverBackground =
+            hasExplicitStyledStateProperty(StyleSheet::StateHovered, "background-color");
+        const bool explicitHoverBorder =
+            hasExplicitStyledStateProperty(StyleSheet::StateHovered, "border-color");
+        const bool explicitFocusBorder =
+            hasExplicitStyledStateProperty(StyleSheet::StateFocused, "border-color");
+
+        if (getEnable()) {
+            const bool isDark = (bg.r + bg.g + bg.b) < 384;
+            if (getHover()) {
+                if (!explicitHoverBackground) {
+                    bg = isDark
+                             ? SwColor{(uint8_t)std::min(255, bg.r + 5),
+                                       (uint8_t)std::min(255, bg.g + 5),
+                                       (uint8_t)std::min(255, bg.b + 5)}
+                             : SwColor{250, 251, 253};
+                }
+                if (!explicitHoverBorder) {
+                    border = isDark ? SwColor{85, 85, 85} : SwColor{150, 150, 150};
+                }
+            }
+            if (m_edit && m_edit->getFocus() && !explicitFocusBorder) {
+                border = m_focusAccent;
+            }
         }
 
         if (paintBackground && bgAlpha > 0.0f) {
@@ -346,7 +394,6 @@ private:
             : SwWidget(parent)
             , m_dir(dir)
             , m_owner(dynamic_cast<SwDoubleSpinBox*>(parent)) {
-            setStyleSheet("SwWidget { background-color: rgba(0,0,0,0); border-width: 0px; }");
             setCursor(CursorType::Hand);
             setFocusPolicy(FocusPolicyEnum::NoFocus);
         }
@@ -461,8 +508,8 @@ private:
                 SwWidget::mousePressEvent(event);
                 return;
             }
-            if (m_owner && m_owner->m_edit) {
-                m_owner->m_edit->setFocus(true);
+            if (m_owner) {
+                m_owner->focusEditorForStepping_();
             }
             setPressed(true);
             event->accept();
@@ -558,15 +605,7 @@ private:
 
     void buildChildren() {
         m_edit = new SwLineEdit(this);
-        m_edit->setStyleSheet(R"(
-            SwLineEdit {
-                background-color: rgba(0,0,0,0);
-                border-width: 0px;
-                border-radius: 0px;
-                padding: 6px 10px;
-                font-size: 14px;
-            }
-        )");
+        m_edit->setFrameShape(Shape::NoFrame);
 
         m_up = new ArrowButton(ArrowButton::Direction::Up, this);
         m_down = new ArrowButton(ArrowButton::Direction::Down, this);
@@ -605,10 +644,11 @@ private:
         const int arrowsY = innerY;
         const int arrowsH = innerH;
         const int half = arrowsH / 2;
+        const int editorOverlap = (arrowW > 0) ? 1 : 0;
 
         if (m_edit) {
             m_edit->move(innerX, innerY);
-            m_edit->resize(std::max(0, innerW - arrowW), innerH);
+            m_edit->resize(std::max(0, innerW - arrowW + editorOverlap), innerH);
         }
         if (m_up) {
             m_up->move(arrowsX, arrowsY);
@@ -620,8 +660,15 @@ private:
         }
     }
 
-    void stepUp() { setValue(m_value + m_singleStep); }
-    void stepDown() { setValue(m_value - m_singleStep); }
+    void stepUp() {
+        setValue(m_value + m_singleStep);
+        refreshStepSelection_();
+    }
+
+    void stepDown() {
+        setValue(m_value - m_singleStep);
+        refreshStepSelection_();
+    }
 
     SwString formatValue(double v) const {
         std::ostringstream os;
@@ -689,27 +736,29 @@ private:
         }
     }
 
+    void focusEditorForStepping_() {
+        if (!m_edit) {
+            return;
+        }
+        m_edit->setFocus(true);
+        m_edit->selectAllFromStart();
+    }
+
+    void refreshStepSelection_() {
+        if (!m_edit || !m_edit->getFocus()) {
+            return;
+        }
+        m_edit->selectAllFromStart();
+    }
+
     void initDefaults() {
         resize(160, 34);
         setCursor(CursorType::IBeam);
         setFocusPolicy(FocusPolicyEnum::NoFocus);
         setFrameShape(Shape::Box);
-        setFont(SwFont(L"Segoe UI", 10, Medium));
-        setStyleSheet(R"(
-            SwDoubleSpinBox {
-                background-color: rgb(255, 255, 255);
-                border-color: rgb(220, 224, 232);
-                border-width: 1px;
-                border-radius: 12px;
-                divider-color: rgb(226, 232, 240);
-                arrow-color: rgb(71, 85, 105);
-                arrow-hover-color: rgb(51, 65, 85);
-                arrow-pressed-color: rgb(30, 41, 59);
-                arrow-disabled-color: rgb(148, 163, 184);
-                arrow-hover-background-color: rgb(241, 245, 249);
-                arrow-pressed-background-color: rgb(226, 232, 240);
-            }
-        )");
+        SwFont font(L"Segoe UI", 10, Medium);
+        font.setPixelSize(14);
+        setFont(font);
     }
 
     SwLineEdit* m_edit{nullptr};

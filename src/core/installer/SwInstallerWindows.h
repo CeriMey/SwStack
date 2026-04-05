@@ -82,9 +82,25 @@ public:
 #endif
     }
 
+    static SwString userDesktopDir() {
+#if defined(_WIN32)
+        return knownFolder_(FOLDERID_Desktop);
+#else
+        return SwString();
+#endif
+    }
+
     static SwString commonProgramsDir() {
 #if defined(_WIN32)
         return knownFolder_(FOLDERID_CommonPrograms);
+#else
+        return SwString();
+#endif
+    }
+
+    static SwString userProgramsDir() {
+#if defined(_WIN32)
+        return knownFolder_(FOLDERID_Programs);
 #else
         return SwString();
 #endif
@@ -335,7 +351,8 @@ public:
         HKEY key = nullptr;
         const std::wstring path = registryKeyPath.toStdWString();
         DWORD disposition = 0;
-        LONG status = ::RegCreateKeyExW(HKEY_LOCAL_MACHINE,
+        const HKEY rootKey = isProcessElevated() ? HKEY_LOCAL_MACHINE : HKEY_CURRENT_USER;
+        LONG status = ::RegCreateKeyExW(rootKey,
                                         path.c_str(),
                                         0,
                                         nullptr,
@@ -383,8 +400,9 @@ public:
 
     static bool removeUninstallEntry(const SwString& registryKeyPath, SwString* errOut = nullptr) {
 #if defined(_WIN32)
+        const HKEY rootKey = isProcessElevated() ? HKEY_LOCAL_MACHINE : HKEY_CURRENT_USER;
         const LONG status =
-            ::RegDeleteTreeW(HKEY_LOCAL_MACHINE, registryKeyPath.toStdWString().c_str());
+            ::RegDeleteTreeW(rootKey, registryKeyPath.toStdWString().c_str());
         if (status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND) {
             return true;
         }

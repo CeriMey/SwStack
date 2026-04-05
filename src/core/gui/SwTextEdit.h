@@ -1678,17 +1678,6 @@ inline size_t SwTextEdit::richCharacterIndexAtPosition(size_t lineStart,
 
 inline SwTextEdit::SwTextEdit(SwWidget* parent)
     : SwPlainTextEdit(parent) {
-    setStyleSheet(R"(
-        SwTextEdit {
-            background-color: rgb(255, 255, 255);
-            border-color: rgb(220, 224, 232);
-            border-width: 1px;
-            border-radius: 12px;
-            padding: 10px 12px;
-            color: rgb(24, 28, 36);
-            font-size: 14px;
-        }
-    )");
 }
 
 inline void SwTextEdit::setPlainText(const SwString& text) {

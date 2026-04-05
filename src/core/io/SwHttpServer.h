@@ -98,6 +98,8 @@ struct SwHttpServerMetrics {
 };
 
 using SwHttpPreRouteHandler = std::function<bool(const SwHttpRequest&, SwHttpResponse&)>;
+using SwHttpPreRouteAsyncResponder = std::function<void(bool, const SwHttpResponse&)>;
+using SwHttpPreRouteAsyncHandler = std::function<void(const SwHttpRequest&, const SwHttpPreRouteAsyncResponder&)>;
 
 class SwHttpServer : public SwObject {
     SW_OBJECT(SwHttpServer, SwObject)
@@ -218,8 +220,30 @@ public:
         return m_sslServer.listen(bindAddress, port);
     }
 
+    bool listenHttps(uint16_t port, const SwList<SwTlsCredentialEntry>& credentials) {
+        return listenHttps(SwString(), port, credentials);
+    }
+
+    bool listenHttps(const SwString& bindAddress, uint16_t port, const SwList<SwTlsCredentialEntry>& credentials) {
+        if (!m_sslServer.setLocalCredentials(credentials)) {
+            return false;
+        }
+        return m_sslServer.listen(bindAddress, port);
+    }
+
     bool reloadHttpsCredentials(uint16_t port, const SwString& certPath, const SwString& keyPath) {
         if (!m_sslServer.reloadLocalCredentials(certPath, keyPath)) {
+            return false;
+        }
+
+        if (m_sslServer.isListening() && m_sslServer.localPort() == port) {
+            return true;
+        }
+        return m_sslServer.listen(port);
+    }
+
+    bool reloadHttpsCredentials(uint16_t port, const SwList<SwTlsCredentialEntry>& credentials) {
+        if (!m_sslServer.reloadLocalCredentials(credentials)) {
             return false;
         }
 
@@ -382,6 +406,17 @@ public:
 
     void clearPreRouteHandlers() {
         m_preRouteHandlers.clear();
+    }
+
+    void addPreRouteHandlerAsync(const SwHttpPreRouteAsyncHandler& handler) {
+        if (!handler) {
+            return;
+        }
+        m_preRouteHandlersAsync.append(handler);
+    }
+
+    void clearPreRouteHandlersAsync() {
+        m_preRouteHandlersAsync.clear();
     }
 
     /**
@@ -627,21 +662,29 @@ private:
             }
             return;
         }
+        tryPreRouteAsync_(request, 0, [this, request, complete](bool handled, const SwHttpResponse& preRouteAsyncResponse) {
+            if (handled) {
+                if (complete) {
+                    complete(preRouteAsyncResponse);
+                }
+                return;
+            }
 
-        const bool handled = m_router.routeAsync(request, [request, complete](const SwHttpResponse& response) {
+            const bool routed = m_router.routeAsync(request, [complete](const SwHttpResponse& response) {
+                if (complete) {
+                    complete(response);
+                }
+            });
+            if (routed) {
+                return;
+            }
+
+            SwHttpResponse response = swHttpTextResponse(404, "Not Found");
+            response.closeConnection = !request.keepAlive;
             if (complete) {
                 complete(response);
             }
         });
-        if (handled) {
-            return;
-        }
-
-        SwHttpResponse response = swHttpTextResponse(404, "Not Found");
-        response.closeConnection = !request.keepAlive;
-        if (complete) {
-            complete(response);
-        }
     }
 
     void completeDispatch_(const SwHttpSession::SwHttpResponseCallback& complete,
@@ -668,7 +711,10 @@ private:
         }
 
 #if SW_HTTPSERVER_HAS_THREADPOOL
-        if (m_dispatchMode == DispatchMode::ThreadPool && m_threadPool && !m_router.willRouteAsync(request)) {
+        if (m_dispatchMode == DispatchMode::ThreadPool &&
+            m_threadPool &&
+            !m_router.willRouteAsync(request) &&
+            m_preRouteHandlersAsync.isEmpty()) {
             if (!tryReserveThreadPoolDispatch_()) {
                 releaseInFlight_();
                 SwHttpResponse response = swHttpTextResponse(503, "ThreadPool saturated");
@@ -792,6 +838,7 @@ private:
     SwHttpRouter m_router;
     SwList<SwHttpSession*> m_sessions;
     SwList<SwHttpPreRouteHandler> m_preRouteHandlers;
+    SwList<SwHttpPreRouteAsyncHandler> m_preRouteHandlersAsync;
     SwList<SwHttpStaticFileHandler*> m_staticHandlers;
     SwHttpLimits m_limits;
     SwHttpTimeouts m_timeouts;
@@ -800,6 +847,33 @@ private:
     mutable SwMutex m_metricsMutex;
     SwHttpServerMetrics m_metrics;
     long long m_threadPoolQueuedDispatches = 0;
+
+    void tryPreRouteAsync_(const SwHttpRequest& request,
+                           std::size_t index,
+                           const std::function<void(bool, const SwHttpResponse&)>& complete) const {
+        if (index >= m_preRouteHandlersAsync.size()) {
+            if (complete) {
+                complete(false, SwHttpResponse());
+            }
+            return;
+        }
+
+        const SwHttpPreRouteAsyncHandler& handler = m_preRouteHandlersAsync[index];
+        if (!handler) {
+            tryPreRouteAsync_(request, index + 1, complete);
+            return;
+        }
+
+        handler(request, [this, request, index, complete](bool handled, const SwHttpResponse& response) {
+            if (handled) {
+                if (complete) {
+                    complete(true, response);
+                }
+                return;
+            }
+            tryPreRouteAsync_(request, index + 1, complete);
+        });
+    }
 };
 
 #undef SW_HTTPSERVER_HAS_THREADPOOL

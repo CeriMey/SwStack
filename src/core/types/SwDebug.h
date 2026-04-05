@@ -33,6 +33,7 @@
 #include <regex>
 #include <sstream>
 #include <string>
+#include <functional>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -147,6 +148,14 @@ public:
         return instance().isCategoryEnabled_(categoryName, level);
     }
 
+    static long long addLineListener(const std::function<void(const std::string&)>& listener) {
+        return instance().addLineListener_(listener);
+    }
+
+    static void removeLineListener(long long listenerId) {
+        instance().removeLineListener_(listenerId);
+    }
+
     void logMessage(const SwDebugContext& ctx, const std::string& msg) {
         if (ctx.category && ctx.category[0] != '\0') {
             if (!isCategoryEnabled_(ctx.category, ctx.level)) {
@@ -154,64 +163,79 @@ public:
             }
         }
 
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::vector<std::function<void(const std::string&)>> lineListeners;
+        std::string line;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
 
-        const std::string cleanedMsg = stripLeadingDecorations_(msg);
-        const std::string timePrefix = formatLocalTimePrefix_(); // HHMMSS.UUUUUU
+            const std::string cleanedMsg = stripLeadingDecorations_(msg);
+            const std::string timePrefix = formatLocalTimePrefix_(); // HHMMSS.UUUUUU
 
-        const std::string payload = formatJsonLine_(ctx, cleanedMsg, timePrefix);
+            const std::string payload = formatJsonLine_(ctx, cleanedMsg, timePrefix);
 
-        std::string content;
-        switch (ctx.level) {
-        case SwDebugLevel::Debug:
-            content += "[DEBUG] ";
-            break;
-        case SwDebugLevel::Warning:
-            content += "[WARNING] ";
-            break;
-        case SwDebugLevel::Error:
-            content += "[ERROR] ";
-            break;
-        }
+            std::string content;
+            switch (ctx.level) {
+            case SwDebugLevel::Debug:
+                content += "[DEBUG] ";
+                break;
+            case SwDebugLevel::Warning:
+                content += "[WARNING] ";
+                break;
+            case SwDebugLevel::Error:
+                content += "[ERROR] ";
+                break;
+            }
 
-        if (ctx.category && ctx.category[0] != '\0') {
-            content += "[";
-            content += ctx.category;
-            content += "] ";
-        }
+            if (ctx.category && ctx.category[0] != '\0') {
+                content += "[";
+                content += ctx.category;
+                content += "] ";
+            }
 
 #ifdef SW_DEBUG_INCLUDE_SOURCE
-        content += std::string(ctx.file ? ctx.file : "") + ":" + std::to_string(ctx.line) + " ("
-                   + std::string(ctx.function ? ctx.function : "") + ") ";
+            content += std::string(ctx.file ? ctx.file : "") + ":" + std::to_string(ctx.line) + " ("
+                       + std::string(ctx.function ? ctx.function : "") + ") ";
 #endif
-        content += cleanedMsg;
+            content += cleanedMsg;
 
-        if (m_filterEnabled) {
-            try {
-                if (!std::regex_search(content, m_filterRe)) {
-                    return;
+            if (m_filterEnabled) {
+                try {
+                    if (!std::regex_search(content, m_filterRe)) {
+                        return;
+                    }
+                } catch (...) {
                 }
-            } catch (...) {
+            }
+
+            line = "[" + timePrefix + "] " + content + "\n";
+
+            if (m_consoleEnabled) {
+                std::FILE* out = (ctx.level == SwDebugLevel::Debug) ? stdout : stderr;
+                (void)std::fwrite(line.data(), 1, line.size(), out);
+                (void)std::fflush(out);
+            }
+
+            if (m_fileEnabled && !m_filePath.empty()) {
+                const std::string dir = directoryOfPath_(m_filePath);
+                if (!dir.empty()) {
+                    (void)mkpath_(dir);
+                }
+                appendFile_(m_filePath, line);
+            }
+
+            sendRemoteIfNeeded_(payload);
+
+            lineListeners.reserve(m_lineListeners.size());
+            for (size_t i = 0; i < m_lineListeners.size(); ++i) {
+                if (m_lineListeners[i].callback) {
+                    lineListeners.push_back(m_lineListeners[i].callback);
+                }
             }
         }
 
-        const std::string line = "[" + timePrefix + "] " + content + "\n";
-
-        if (m_consoleEnabled) {
-            std::FILE* out = (ctx.level == SwDebugLevel::Debug) ? stdout : stderr;
-            (void)std::fwrite(line.data(), 1, line.size(), out);
-            (void)std::fflush(out);
+        for (size_t i = 0; i < lineListeners.size(); ++i) {
+            lineListeners[i](line);
         }
-
-        if (m_fileEnabled && !m_filePath.empty()) {
-            const std::string dir = directoryOfPath_(m_filePath);
-            if (!dir.empty()) {
-                (void)mkpath_(dir);
-            }
-            appendFile_(m_filePath, line);
-        }
-
-        sendRemoteIfNeeded_(payload);
     }
 
 private:
@@ -293,6 +317,12 @@ private:
 
     SocketHandle m_remoteSocket{invalidSocket_()};
     bool m_remoteConnected{false};
+    struct LineListenerEntry {
+        long long id{0};
+        std::function<void(const std::string&)> callback;
+    };
+    std::vector<LineListenerEntry> m_lineListeners;
+    long long m_nextLineListenerId{1};
 
     void setConsoleEnabled_(bool enabled) {
         m_consoleEnabled = enabled;
@@ -346,6 +376,33 @@ private:
     static unsigned char categoryRuleMaskWarning_() { return 0x02; }
     static unsigned char categoryRuleMaskError_() { return 0x04; }
     static unsigned char categoryRuleMaskAll_() { return 0x07; }
+
+    long long addLineListener_(const std::function<void(const std::string&)>& listener) {
+        if (!listener) {
+            return 0;
+        }
+
+        std::lock_guard<std::mutex> lock(m_mutex);
+        LineListenerEntry entry;
+        entry.id = m_nextLineListenerId++;
+        entry.callback = listener;
+        m_lineListeners.push_back(entry);
+        return entry.id;
+    }
+
+    void removeLineListener_(long long listenerId) {
+        if (listenerId <= 0) {
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (std::vector<LineListenerEntry>::iterator it = m_lineListeners.begin(); it != m_lineListeners.end(); ++it) {
+            if (it->id == listenerId) {
+                m_lineListeners.erase(it);
+                return;
+            }
+        }
+    }
 
     static void trimAscii_(std::string& s) {
         size_t start = 0;

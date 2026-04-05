@@ -155,11 +155,37 @@ public:
         return ok;
     }
 
+    bool listenHttps(uint16_t port, const SwList<SwTlsCredentialEntry>& credentials) {
+        const bool ok = m_server.listenHttps(port, credentials);
+        if (ok) {
+            syncMailTlsCredentials_(credentials);
+        }
+        return ok;
+    }
+
+    bool listenHttps(const SwString& bindAddress,
+                     uint16_t port,
+                     const SwList<SwTlsCredentialEntry>& credentials) {
+        const bool ok = m_server.listenHttps(bindAddress, port, credentials);
+        if (ok) {
+            syncMailTlsCredentials_(credentials);
+        }
+        return ok;
+    }
+
     bool reloadHttpsCredentials(uint16_t port, const SwString& certPath, const SwString& keyPath) {
         const bool ok = m_server.reloadHttpsCredentials(port, certPath, keyPath);
         if (ok && m_mailService) {
             SwString ignored;
             (void)m_mailService->reloadTlsCredentials(certPath, keyPath, &ignored);
+        }
+        return ok;
+    }
+
+    bool reloadHttpsCredentials(uint16_t port, const SwList<SwTlsCredentialEntry>& credentials) {
+        const bool ok = m_server.reloadHttpsCredentials(port, credentials);
+        if (ok) {
+            syncMailTlsCredentials_(credentials);
         }
         return ok;
     }
@@ -973,6 +999,14 @@ public:
         m_server.clearPreRouteHandlers();
     }
 
+    void addPreRouteHandlerAsync(const SwHttpPreRouteAsyncHandler& handler) {
+        m_server.addPreRouteHandlerAsync(handler);
+    }
+
+    void clearPreRouteHandlersAsync() {
+        m_server.clearPreRouteHandlersAsync();
+    }
+
     void useAuthContext(const SwString& pathPrefix = SwString("/")) {
         SwHttpAuthService* service = ensureAuthService_();
         use(pathPrefix, [service](SwHttpContext& ctx, const SwHttpNext& next) {
@@ -1104,6 +1138,7 @@ public:
                     return;
                 }
                 SwString rawToken;
+                SwString resetToken;
                 SwHttpAuthIdentity identity;
                 const SwDbStatus status = service->login(document.object().value("email").toString().c_str(),
                                                          document.object().value("password").toString().c_str(),
@@ -1111,8 +1146,19 @@ public:
                                                          ctx.isTls(),
                                                          &rawToken,
                                                          &identity,
+                                                         &resetToken,
                                                          &error);
                 if (!status.ok()) {
+                    if (!resetToken.isEmpty()) {
+                        SwJsonObject object;
+                        object["error"] =
+                            (error.isEmpty() ? SwString("Password reset required") : error).toStdString();
+                        object["passwordResetRequired"] = true;
+                        object["resetToken"] = resetToken.toStdString();
+                        object["email"] = document.object().value("email").toString();
+                        ctx.json(SwJsonValue(object), 403);
+                        return;
+                    }
                     const int httpStatus = status.code() == SwDbStatus::Busy ? 403 : 401;
                     ctx.json(makeMessage("error", error.isEmpty() ? status.message() : error), httpStatus);
                     return;
@@ -1273,9 +1319,17 @@ public:
                     ctx.json(makeMessage("error", "Invalid JSON body"), 400);
                     return;
                 }
-                const SwDbStatus status = service->resetPassword(document.object().value("code").toString().c_str(),
-                                                                 document.object().value("token").toString().c_str(),
-                                                                 document.object().value("newPassword").toString().c_str(),
+                const SwJsonObject object = document.object();
+                const SwString code =
+                    object.contains("code") ? SwString(object.value("code").toString().c_str()) : SwString();
+                const SwString token =
+                    object.contains("token") ? SwString(object.value("token").toString().c_str()) : SwString();
+                const SwString newPassword = object.contains("newPassword")
+                                                 ? SwString(object.value("newPassword").toString().c_str())
+                                                 : SwString();
+                const SwDbStatus status = service->resetPassword(code,
+                                                                 token,
+                                                                 newPassword,
                                                                  &error);
                 if (!status.ok()) {
                     ctx.json(makeMessage("error", error.isEmpty() ? status.message() : error), 400);
@@ -1728,6 +1782,30 @@ private:
             }
         }
         m_domainTlsConfig.subjectAlternativeNames.append(desiredMailHost);
+    }
+
+    void syncMailTlsCredentials_(const SwList<SwTlsCredentialEntry>& credentials) {
+        if (!m_mailService) {
+            return;
+        }
+
+        SwTlsCredentialEntry selected;
+        bool hasSelected = false;
+        for (std::size_t i = 0; i < credentials.size(); ++i) {
+            if (!credentials[i].certPath.trimmed().isEmpty() && !credentials[i].keyPath.trimmed().isEmpty()) {
+                selected = credentials[i];
+                hasSelected = true;
+                if (credentials[i].isDefault || credentials[i].host.trimmed().isEmpty()) {
+                    break;
+                }
+            }
+        }
+        if (!hasSelected) {
+            return;
+        }
+
+        SwString ignored;
+        (void)m_mailService->reloadTlsCredentials(selected.certPath, selected.keyPath, &ignored);
     }
 
     static SwString normalizeRoutePattern_(const SwString& pattern) {

@@ -188,7 +188,42 @@ Le launcher ecoute localement et protege ses routes par bearer token.
 - oublier `--control_token`,
 - exposer l'API trop largement sans comprendre le perimetre de securite.
 
-## 7. Lire l'etat courant
+## 7. Consulter le help distant HTTP
+
+### Objectif
+
+Demander a une instance `SwLaunch` en cours d'execution de decrire son API, sa version et ses capacites, sans acces au terminal local.
+
+### Procedure
+
+1. Appeler `GET /api/launch/help` pour obtenir la vue d'ensemble.
+2. Lire `version`, `apiVersion`, `capabilities`, `routes` et `helpTopics`.
+3. Appeler ensuite `GET /api/launch/help/:topic` pour demander le detail d'une fonction precise.
+
+### Effet attendu
+
+Le launcher retourne un JSON lisible contenant:
+
+- l'identite du produit,
+- la version du binaire,
+- la liste des routes exposees,
+- les capacites presentes sur cette instance,
+- un texte d'aide correspondant au topic demande.
+
+### Verification
+
+- `GET /api/launch/help` retourne `200`,
+- le champ `product` vaut `SwLaunch`,
+- le champ `version` est renseigne,
+- le champ `capabilities` mentionne par exemple `logs.sse_stream` si le flux logs est disponible.
+
+### Erreurs frequentes
+
+- confondre help distant et route d'action: le help decrit, il ne modifie rien,
+- supposer qu'un serveur a les memes capacites qu'un autre sans verifier `version` et `capabilities`,
+- oublier que le help detaille se lit par topic, par exemple `logs` ou `deploy`.
+
+## 8. Lire l'etat courant
 
 ### Objectif
 
@@ -219,7 +254,7 @@ Vous obtenez:
 - confondre etat desire et etat runtime,
 - croire qu'un process hors ligne a deja ete retire de `desiredState`.
 
-## 8. Modifier l'etat desire par `PUT /api/launch/state`
+## 9. Modifier l'etat desire par `PUT /api/launch/state`
 
 ### Objectif
 
@@ -252,7 +287,7 @@ Changer la configuration cible sans upload de binaire.
 - envoyer un patch partiel au lieu d'un etat complet,
 - attendre une mutation alors que `SwLaunch` a ete lance via `--config_json`.
 
-## 9. Deployer un bundle multipart
+## 10. Deployer un bundle multipart
 
 ### Objectif
 
@@ -281,7 +316,7 @@ Mettre a jour un binaire ou un fichier metier en une seule operation transaction
 - part manquante par rapport au manifeste,
 - checksum faux.
 
-## 10. Controle du checksum
+## 11. Controle du checksum
 
 ### Objectif
 
@@ -310,7 +345,7 @@ Deux cas:
 - confondre checksum manifeste et checksum du fichier deja sur disque,
 - croire qu'un skip est une erreur alors que c'est un resultat normal.
 
-## 11. Choisir les unites impactees
+## 12. Choisir les unites impactees
 
 ### Objectif
 
@@ -337,7 +372,7 @@ Seules les unites liees a des changements de spec ou de fichiers sont arretees p
 - mauvais `ownerKey`,
 - penser qu'un changement interne de composant redemarre seulement ce composant: en V1, c'est le container proprietaire qui redemarre.
 
-## 12. Rollback en cas d'echec
+## 13. Rollback en cas d'echec
 
 ### Objectif
 
@@ -366,7 +401,7 @@ Le systeme revient vers l'etat precedent plutot que de rester dans un entre-deux
 - supposer qu'un echec laisse automatiquement les nouveaux fichiers en place,
 - oublier que le rollback est borne au perimetre gere par le launcher.
 
-## 13. Suivre un job de deploiement
+## 14. Suivre un job de deploiement
 
 ### Objectif
 
@@ -398,7 +433,7 @@ Le job indique:
 - ne verifier que le `202` initial sans suivre le job,
 - ne pas exploiter `skippedFiles` pour comprendre un redeploiement idempotent.
 
-## 14. Persister la configuration
+## 15. Persister la configuration
 
 ### Objectif
 
@@ -425,7 +460,7 @@ Le prochain demarrage repart sur le bon etat desire.
 - attendre une persistance alors que le launcher a ete demarre en `--config_json`,
 - injecter des secrets dans le JSON alors qu'ils doivent rester en CLI.
 
-## 15. Savoir ou `SwLaunch` ecrit sur disque
+## 16. Savoir ou `SwLaunch` ecrit sur disque
 
 ### Objectif
 
@@ -458,7 +493,7 @@ Vous savez differencier:
 - prendre un fichier temporaire pour une source metier,
 - oublier de verifier le `workingDirectory` d'une unite avant de diagnostiquer un deploiement.
 
-## 16. Lecture rapide des routes utiles
+## 17. Lecture rapide des routes utiles
 
 Pour l'exploitation quotidienne:
 
@@ -467,7 +502,7 @@ Pour l'exploitation quotidienne:
 - deploiement avec fichiers: `POST /api/launch/deploy`
 - suivi d'un deploiement: `GET /api/launch/deploy/:jobId`
 
-## 17. Tests deja en place
+## 18. Tests deja en place
 
 Le comportement est maintenant couvre par:
 

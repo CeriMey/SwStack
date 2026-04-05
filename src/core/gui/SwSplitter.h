@@ -237,6 +237,14 @@ public:
     DECLARE_SIGNAL(splitterMoved, int, int);
 
 protected:
+    SwSize sizeHint() const override {
+        return splitterSizeHint_(false);
+    }
+
+    SwSize minimumSizeHint() const override {
+        return splitterSizeHint_(true);
+    }
+
     /**
      * @brief Handles the resize Event forwarded by the framework.
      * @param event Event object forwarded by the framework.
@@ -867,10 +875,22 @@ private:
         const int leftStart = startAxis + prefixSize(handleIdx) + handleIdx * m_handleWidth;
 
         const int pairTotal = std::max(0, m_sizes[handleIdx]) + std::max(0, m_sizes[handleIdx + 1]);
+        const int leftMinSize = childMinimumPrimarySize_(handleIdx);
+        const int rightMinSize = childMinimumPrimarySize_(handleIdx + 1);
 
         int newHandleStart = axisPos - m_dragOffset;
         int newLeftSize = newHandleStart - leftStart;
-        newLeftSize = clampInt(newLeftSize, minSize, std::max(minSize, pairTotal - minSize));
+        int minLeft = std::max(minSize, leftMinSize);
+        int minRight = std::max(minSize, rightMinSize);
+
+        if (pairTotal < (minLeft + minRight)) {
+            const int scaledLeft =
+                static_cast<int>((static_cast<long long>(minLeft) * pairTotal) / std::max(1, minLeft + minRight));
+            minLeft = std::max(0, scaledLeft);
+            minRight = std::max(0, pairTotal - minLeft);
+        }
+
+        newLeftSize = clampInt(newLeftSize, minLeft, std::max(minLeft, pairTotal - minRight));
         int newRightSize = pairTotal - newLeftSize;
 
         if (newLeftSize == m_sizes[handleIdx] && newRightSize == m_sizes[handleIdx + 1]) {
@@ -890,6 +910,58 @@ private:
         setFocusPolicy(FocusPolicyEnum::NoFocus);
         m_handleWidth = 10;
         resize(520, 280);
+    }
+
+    int childMinimumPrimarySize_(int index) const {
+        if (index < 0 || index >= m_widgets.size()) {
+            return 0;
+        }
+
+        const SwWidget* widget = m_widgets[index];
+        if (!widget || !widget->getVisible()) {
+            return 0;
+        }
+
+        const SwSize hint = widget->minimumSizeHint();
+        return std::max(0, (m_orientation == Orientation::Horizontal) ? hint.width : hint.height);
+    }
+
+    SwSize splitterSizeHint_(bool minimum) const {
+        int primary = 0;
+        int cross = 0;
+        int visibleCount = 0;
+        for (int i = 0; i < m_widgets.size(); ++i) {
+            const SwWidget* widget = m_widgets[i];
+            if (!widget) {
+                continue;
+            }
+            const SwSize childHint = minimum ? widget->minimumSizeHint() : widget->sizeHint();
+            if (m_orientation == Orientation::Horizontal) {
+                primary += std::max(0, childHint.width);
+                cross = std::max(cross, std::max(0, childHint.height));
+            } else {
+                primary += std::max(0, childHint.height);
+                cross = std::max(cross, std::max(0, childHint.width));
+            }
+            ++visibleCount;
+        }
+
+        if (visibleCount > 1) {
+            primary += (visibleCount - 1) * m_handleWidth;
+        }
+
+        const SwSize minSize = minimumSize();
+        const SwSize maxSize = maximumSize();
+        const SwSize styleMin = resolvedStyleMinimumSize_();
+        const SwSize styleMax = resolvedStyleMaximumSize_();
+        SwSize hint = (m_orientation == Orientation::Horizontal)
+                          ? SwSize{primary, cross}
+                          : SwSize{cross, primary};
+        hint.width = std::max(hint.width, std::max(minSize.width, styleMin.width));
+        hint.height = std::max(hint.height, std::max(minSize.height, styleMin.height));
+        hint.width = std::min(hint.width, std::min(maxSize.width, styleMax.width));
+        hint.height = std::min(hint.height, std::min(maxSize.height, styleMax.height));
+        return hint;
     }
 
     static SwString styleValue_(const StyleSheet* sheet,

@@ -199,8 +199,15 @@ private:
         if (!startLauncher_(errOut)) return false;
         std::cout << "[SwLaunchDeployIntegrationTest] wait control API" << std::endl;
         if (!waitForControlApi_(errOut)) return false;
+        if (!checkVersionCommand_(errOut)) return false;
+        if (!checkHelpApi_(errOut)) return false;
         std::cout << "[SwLaunchDeployIntegrationTest] wait initial fixture" << std::endl;
         if (!waitForLogLineCount_(1, 10000, errOut)) return false;
+
+        std::cout << "[SwLaunchDeployIntegrationTest] open live log stream" << std::endl;
+        if (!openLogStream_(errOut)) return false;
+        if (!waitForStreamLogContaining_("start node=tests/fixture", 5000, errOut)) return false;
+        if (!waitForStreamLogContaining_("version=V1;payload=alpha", 5000, errOut)) return false;
 
         SwList<SwString> lines = readNonEmptyLines_(eventLogPath_);
         if (lines.size() != 1 || !lines[0].contains("version=V1;payload=alpha")) {
@@ -215,6 +222,7 @@ private:
         SwJsonObject firstJob;
         std::cout << "[SwLaunchDeployIntegrationTest] first deploy" << std::endl;
         if (!postDeployAndWait_(fixtureV2Path_, "bravo", firstJob, errOut)) return false;
+        if (!waitForStreamLogContaining_("version=V2;payload=bravo", 10000, errOut)) return false;
         if (!waitForLogLineCount_(2, 10000, errOut)) return false;
 
         lines = readNonEmptyLines_(eventLogPath_);
@@ -284,8 +292,10 @@ private:
         };
 
         launchExePath_ = firstExisting({
+            joinTestPath_(selfDir, SwString("../../Release/SwLaunch") + exeSuffix),
             joinTestPath_(selfDir, SwString("../../Debug/SwLaunch") + exeSuffix),
             joinTestPath_(selfDir, SwString("../../SwLaunch") + exeSuffix),
+            joinTestPath_(selfDir, SwString("../Release/SwLaunch") + exeSuffix),
             joinTestPath_(selfDir, SwString("../Debug/SwLaunch") + exeSuffix),
             joinTestPath_(selfDir, SwString("../SwLaunch") + exeSuffix)
         });
@@ -445,6 +455,70 @@ private:
         }
     }
 
+    bool checkVersionCommand_(SwString& errOut) {
+        errOut.clear();
+
+        SwProcess versionProcess;
+        bool versionProcessExited = false;
+        int versionExitCode = -1;
+        SwString stdoutText;
+        SwString stderrText;
+        SwObject::connect(&versionProcess, SIGNAL(readyReadStdOut), std::function<void()>([&versionProcess, &stdoutText]() {
+            stdoutText += versionProcess.read();
+        }));
+        SwObject::connect(&versionProcess, SIGNAL(readyReadStdErr), std::function<void()>([&versionProcess, &stderrText]() {
+            stderrText += versionProcess.readStdErr();
+        }));
+        SwObject::connect(&versionProcess, SIGNAL(processTerminated), std::function<void(int)>(
+            [&versionProcess, &versionProcessExited, &versionExitCode, &stdoutText, &stderrText](int exitCode) {
+                stdoutText += versionProcess.read();
+                stderrText += versionProcess.readStdErr();
+                versionProcessExited = true;
+                versionExitCode = exitCode;
+                if (versionProcess.isOpen()) {
+                    versionProcess.close();
+                }
+            }));
+
+        if (!versionProcess.start(launchExePath_,
+                                  SwStringList() << "--version",
+                                  ProcessFlags::CreateNoWindow,
+                                  workspaceRoot_)) {
+            errOut = "failed to start SwLaunch --version";
+            return false;
+        }
+
+        const bool exited = waitUntil_([&versionProcessExited]() {
+            return versionProcessExited;
+        }, 4000, 25);
+        if (!exited) {
+            versionProcess.kill();
+            errOut = "SwLaunch --version timed out";
+            return false;
+        }
+
+        stdoutText += versionProcess.read();
+        stderrText += versionProcess.readStdErr();
+        stdoutText = stdoutText.trimmed();
+        stderrText = stderrText.trimmed();
+
+        if (versionExitCode != 0) {
+            errOut = SwString("SwLaunch --version exited with code ") + SwString::number(versionExitCode);
+            return false;
+        }
+        if (!stderrText.isEmpty()) {
+            errOut = SwString("SwLaunch --version wrote to stderr: ") + stderrText;
+            return false;
+        }
+        if (!stdoutText.startsWith("SwLaunch ")) {
+            errOut = SwString("unexpected SwLaunch --version output: ") + stdoutText;
+            return false;
+        }
+
+        versionCommandOutput_ = stdoutText;
+        return true;
+    }
+
     bool waitForLogLineCount_(size_t expectedCount, int timeoutMs, SwString& errOut) {
         errOut.clear();
         const std::chrono::steady_clock::time_point startedAt = std::chrono::steady_clock::now();
@@ -469,6 +543,228 @@ private:
 
         errOut = SwString("timeout while waiting for fixture log line count=") + SwString::number(static_cast<long long>(expectedCount));
         return false;
+    }
+
+    void resetLogStreamState_() {
+        logStreamHeadersReceived_ = false;
+        logStreamDisconnected_ = false;
+        logStreamStatusCode_ = 0;
+        logStreamExitCode_ = 0;
+        logStreamError_.clear();
+        logStreamRawBuffer_.clear();
+        logStreamBodyBuffer_.clear();
+        logStreamCurrentEventName_.clear();
+        logStreamCurrentDataLines_.clear();
+        logStreamReceivedLines_.clear();
+        logStreamStdErr_.clear();
+        logStreamReadySeen_ = false;
+    }
+
+    void bindLogStreamSocket_() {
+        if (logStreamBindingsInstalled_) return;
+        logStreamBindingsInstalled_ = true;
+
+        SwObject::connect(&logStreamProcess_, SIGNAL(readyReadStdOut), std::function<void()>([this]() {
+            drainLogStream_();
+        }));
+        SwObject::connect(&logStreamProcess_, SIGNAL(readyReadStdErr), std::function<void()>([this]() {
+            drainLogStream_();
+        }));
+        SwObject::connect(&logStreamProcess_, SIGNAL(processTerminated), std::function<void(int)>([this](int exitCode) {
+            drainLogStream_();
+            logStreamDisconnected_ = true;
+            logStreamExitCode_ = exitCode;
+            if (logStreamProcess_.isOpen()) {
+                logStreamProcess_.close();
+            }
+        }));
+    }
+
+    void closeLogStream_() {
+        if (logStreamProcess_.isOpen()) {
+            logStreamProcess_.terminate();
+            if (!waitUntil_([this]() { return !logStreamProcess_.isOpen(); }, 1500, 50)) {
+                logStreamProcess_.kill();
+                (void)waitUntil_([this]() { return !logStreamProcess_.isOpen(); }, 1500, 50);
+            }
+        }
+        resetLogStreamState_();
+    }
+
+    void flushLogStreamEvent_() {
+        if (logStreamCurrentDataLines_.isEmpty()) {
+            logStreamCurrentEventName_.clear();
+            logStreamCurrentDataLines_.clear();
+            return;
+        }
+
+        SwString payload;
+        for (size_t i = 0; i < logStreamCurrentDataLines_.size(); ++i) {
+            if (!payload.isEmpty()) payload += "\n";
+            payload += logStreamCurrentDataLines_[i];
+        }
+
+        SwJsonDocument document;
+        SwString parseError;
+        if (logStreamCurrentEventName_ == "ready") {
+            logStreamReadySeen_ = true;
+        } else if (logStreamCurrentEventName_ == "log" &&
+                   document.loadFromJson(payload, parseError) &&
+                   document.isObject()) {
+            const SwJsonObject object = document.object();
+            if (object.contains("line")) {
+                logStreamReceivedLines_.append(SwString(object["line"].toString()));
+            }
+        }
+
+        logStreamCurrentEventName_.clear();
+        logStreamCurrentDataLines_.clear();
+    }
+
+    void drainLogStream_() {
+        while (true) {
+            const SwString chunk = logStreamProcess_.read();
+            if (chunk.isEmpty()) break;
+            logStreamRawBuffer_ += chunk;
+        }
+        const SwString stderrChunk = logStreamProcess_.readStdErr();
+        if (!stderrChunk.isEmpty()) {
+            logStreamStdErr_ += stderrChunk;
+        }
+
+        if (!logStreamHeadersReceived_) {
+            const int headerEnd = logStreamRawBuffer_.indexOf("\r\n\r\n");
+            if (headerEnd < 0) {
+                return;
+            }
+
+            const SwString headerBlock = logStreamRawBuffer_.left(headerEnd);
+            logStreamBodyBuffer_ += logStreamRawBuffer_.mid(headerEnd + 4);
+            logStreamRawBuffer_.clear();
+            logStreamHeadersReceived_ = true;
+
+            const SwList<SwString> headerLines = headerBlock.split('\n');
+            if (!headerLines.isEmpty()) {
+                const SwString statusLine = headerLines[0].trimmed();
+                const SwList<SwString> statusParts = statusLine.split(' ');
+                if (statusParts.size() >= 2) {
+                    logStreamStatusCode_ = statusParts[1].toInt();
+                }
+                if (logStreamStatusCode_ != 200 && logStreamError_.isEmpty()) {
+                    logStreamError_ = SwString("unexpected log stream HTTP status: ") + statusLine;
+                }
+            }
+        } else if (!logStreamRawBuffer_.isEmpty()) {
+            logStreamBodyBuffer_ += logStreamRawBuffer_;
+            logStreamRawBuffer_.clear();
+        }
+
+        while (true) {
+            const int lineEnd = logStreamBodyBuffer_.indexOf('\n');
+            if (lineEnd < 0) break;
+
+            SwString line = logStreamBodyBuffer_.left(lineEnd);
+            logStreamBodyBuffer_ = logStreamBodyBuffer_.mid(lineEnd + 1);
+            if (line.endsWith("\r")) line.chop(1);
+
+            if (line.isEmpty()) {
+                flushLogStreamEvent_();
+                continue;
+            }
+            if (line.startsWith(":")) {
+                continue;
+            }
+            if (line.startsWith("event:")) {
+                logStreamCurrentEventName_ = line.mid(6).trimmed();
+                continue;
+            }
+            if (line.startsWith("data:")) {
+                SwString dataLine = line.mid(5);
+                if (dataLine.startsWith(" ")) dataLine = dataLine.mid(1);
+                logStreamCurrentDataLines_.append(dataLine);
+            }
+        }
+    }
+
+    bool openLogStream_(SwString& errOut) {
+        errOut.clear();
+        closeLogStream_();
+        bindLogStreamSocket_();
+
+        SwStringList args;
+        args.append("-i");
+        args.append("-N");
+        args.append("-sS");
+        args.append("--http1.1");
+        args.append("-H");
+        args.append(SwString("Authorization: Bearer ") + controlToken_);
+        args.append(SwString("http://127.0.0.1:") + SwString::number(controlPort_) + "/api/launch/logs/stream?backlog=64");
+
+        ProcessFlags flags = ProcessFlags::NoFlag;
+#if defined(_WIN32)
+        flags |= ProcessFlags::CreateNoWindow;
+#endif
+        if (!logStreamProcess_.start(curlExecutable_(), args, flags, workspaceRoot_)) {
+            errOut = "failed to start curl log stream process";
+            return false;
+        }
+
+        const bool ready = waitUntil_([this]() {
+            drainLauncherOutput_();
+            if (!logStreamError_.isEmpty()) return true;
+            if (logStreamDisconnected_ && !logStreamHeadersReceived_) return true;
+            return logStreamHeadersReceived_;
+        }, 5000, 25);
+
+        if (!ready) {
+            errOut = "timeout while opening log stream";
+            closeLogStream_();
+            return false;
+        }
+        if (!logStreamError_.isEmpty()) {
+            errOut = logStreamError_;
+            closeLogStream_();
+            return false;
+        }
+        if (logStreamDisconnected_ && !logStreamHeadersReceived_) {
+            errOut = SwString("log stream disconnected during handshake, curl exit=") +
+                     SwString::number(logStreamExitCode_) +
+                     SwString(" stderr=") + logStreamStdErr_;
+            closeLogStream_();
+            return false;
+        }
+        if (logStreamStatusCode_ != 200) {
+            errOut = SwString("unexpected log stream status: ") + SwString::number(logStreamStatusCode_);
+            closeLogStream_();
+            return false;
+        }
+        return true;
+    }
+
+    bool waitForStreamLogContaining_(const SwString& needle, int timeoutMs, SwString& errOut) {
+        errOut.clear();
+        const bool ok = waitUntil_([this, &needle, &errOut]() {
+            if (!logStreamError_.isEmpty()) {
+                errOut = logStreamError_;
+                return true;
+            }
+            if (logStreamDisconnected_) {
+                errOut = "log stream disconnected unexpectedly";
+                return true;
+            }
+
+            for (size_t i = 0; i < logStreamReceivedLines_.size(); ++i) {
+                if (logStreamReceivedLines_[i].contains(needle)) {
+                    return true;
+                }
+            }
+            return false;
+        }, timeoutMs, 50);
+
+        if (!ok && errOut.isEmpty()) {
+            errOut = SwString("timeout while waiting for stream log containing: ") + needle;
+        }
+        return ok && errOut.isEmpty();
     }
 
     bool requestJson_(const SwString& method,
@@ -543,6 +839,67 @@ private:
 
     bool getState_(SwJsonObject& outObject, SwString& errOut) {
         return requestJson_("GET", "/api/launch/state", SwByteArray(), SwString(), 200, outObject, errOut);
+    }
+
+    bool checkHelpApi_(SwString& errOut) {
+        errOut.clear();
+
+        SwJsonObject helpOverview;
+        if (!requestJson_("GET", "/api/launch/help", SwByteArray(), SwString(), 200, helpOverview, errOut)) {
+            return false;
+        }
+        if (SwString(helpOverview["product"].toString()) != "SwLaunch") {
+            errOut = "help overview missing product=SwLaunch";
+            return false;
+        }
+        if (!helpOverview.contains("version") || SwString(helpOverview["version"].toString()).isEmpty()) {
+            errOut = "help overview missing version";
+            return false;
+        }
+        if (!versionCommandOutput_.contains(SwString(helpOverview["version"].toString()))) {
+            errOut = SwString("help overview version does not match --version output: ") + versionCommandOutput_;
+            return false;
+        }
+        if (!helpOverview.contains("gitRevision") || SwString(helpOverview["gitRevision"].toString()).isEmpty()) {
+            errOut = "help overview missing gitRevision";
+            return false;
+        }
+        if (!helpOverview.contains("capabilities") || !helpOverview["capabilities"].isArray()) {
+            errOut = "help overview missing capabilities array";
+            return false;
+        }
+        if (!helpOverview.contains("routes") || !helpOverview["routes"].isArray()) {
+            errOut = "help overview missing routes array";
+            return false;
+        }
+
+        bool foundLogsCapability = false;
+        const SwJsonArray capabilities = helpOverview["capabilities"].toArray();
+        for (size_t i = 0; i < capabilities.size(); ++i) {
+            if (SwString(capabilities[i].toString()) == "logs.sse_stream") {
+                foundLogsCapability = true;
+                break;
+            }
+        }
+        if (!foundLogsCapability) {
+            errOut = "help overview missing logs.sse_stream capability";
+            return false;
+        }
+
+        SwJsonObject logsHelp;
+        if (!requestJson_("GET", "/api/launch/help/logs", SwByteArray(), SwString(), 200, logsHelp, errOut)) {
+            return false;
+        }
+        if (SwString(logsHelp["topic"].toString()) != "logs") {
+            errOut = "help detail did not resolve logs topic";
+            return false;
+        }
+        if (!SwString(logsHelp["text"].toString()).contains("/api/launch/logs/stream")) {
+            errOut = "logs help text does not mention the log stream route";
+            return false;
+        }
+
+        return true;
     }
 
     bool assertFixtureRunning_(const SwJsonObject& stateObject, SwString& errOut) const {
@@ -794,6 +1151,7 @@ private:
 
     void cleanup_(bool success) {
         SwString ignored;
+        closeLogStream_();
         (void)stopLauncher_(ignored);
         if (success && !workspaceRoot_.isEmpty()) {
             (void)SwDir::removeRecursively(workspaceRoot_);
@@ -802,6 +1160,14 @@ private:
     }
 
 private:
+    SwString curlExecutable_() const {
+#if defined(_WIN32)
+        return "curl.exe";
+#else
+        return "curl";
+#endif
+    }
+
     SwCoreApplication* app_{nullptr};
     SwString selfPath_;
     SwString workspaceRoot_;
@@ -816,14 +1182,29 @@ private:
     SwString fixtureV1Path_;
     SwString fixtureV2Path_;
     SwString controlToken_;
+    SwString versionCommandOutput_;
     SwString ownerKey_;
     uint16_t controlPort_{0};
     SwProcess launchProcess_;
+    SwProcess logStreamProcess_;
     bool launcherBindingsInstalled_{false};
+    bool logStreamBindingsInstalled_{false};
     bool launchProcessExited_{false};
+    bool logStreamHeadersReceived_{false};
+    bool logStreamDisconnected_{false};
+    bool logStreamReadySeen_{false};
+    int logStreamStatusCode_{0};
+    int logStreamExitCode_{0};
     int launchProcessExitCode_{0};
     SwString launchStdOut_;
     SwString launchStdErr_;
+    SwString logStreamError_;
+    SwString logStreamRawBuffer_;
+    SwString logStreamBodyBuffer_;
+    SwString logStreamStdErr_;
+    SwString logStreamCurrentEventName_;
+    SwList<SwString> logStreamCurrentDataLines_;
+    SwList<SwString> logStreamReceivedLines_;
 };
 
 int main(int argc, char** argv) {

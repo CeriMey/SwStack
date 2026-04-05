@@ -115,7 +115,7 @@ public:
         }
 
         SwString absoluteRoot = swDirPlatform().absolutePath(m_rootDir);
-        SwString absoluteTarget = buildAbsoluteTarget_(absoluteRoot, relativePath);
+        SwString absoluteTarget = resolveAbsoluteTarget_(absoluteRoot, relativePath);
         if (!isPathInsideRoot_(absoluteRoot, absoluteTarget)) {
             response = swHttpTextResponse(403, "Forbidden");
             response.closeConnection = !request.keepAlive;
@@ -205,6 +205,39 @@ private:
         return relative;
     }
 
+    static SwString normalizeRelativePath_(const SwString& relativePath) {
+        SwString normalized = relativePath;
+        normalized.replace("\\", "/");
+        while (normalized.contains("//")) {
+            normalized.replace("//", "/");
+        }
+        while (normalized.startsWith("/")) {
+            normalized = normalized.mid(1);
+        }
+        return normalized;
+    }
+
+    static SwString trimTrailingSeparators_(const SwString& relativePath) {
+        SwString trimmed = normalizeRelativePath_(relativePath);
+        while (trimmed.size() > 1 && trimmed.endsWith("/")) {
+            trimmed.chop(1);
+        }
+        return trimmed;
+    }
+
+    static bool lastSegmentHasExtension_(const SwString& relativePath) {
+        const std::string text = normalizeRelativePath_(relativePath).toStdString();
+        if (text.empty()) {
+            return false;
+        }
+        const std::size_t slash = text.find_last_of('/');
+        const std::size_t dot = text.find_last_of('.');
+        if (dot == std::string::npos) {
+            return false;
+        }
+        return slash == std::string::npos || dot > slash;
+    }
+
     static bool sanitizeRelativePath_(const SwString& relativePath) {
         if (relativePath.isEmpty()) {
             return true;
@@ -250,6 +283,30 @@ private:
         // Keep a plain absolute path here. Long-path normalization (\\?\ prefix)
         // can break downstream file checks on some Win32 code paths.
         return root + "/" + rel;
+    }
+
+    static SwString resolveAbsoluteTarget_(const SwString& absoluteRoot, const SwString& relativePath) {
+        const SwString exactTarget = buildAbsoluteTarget_(absoluteRoot, relativePath);
+        if (swFilePlatform().isFile(exactTarget)) {
+            return exactTarget;
+        }
+
+        const SwString routePath = trimTrailingSeparators_(relativePath);
+        if (!routePath.isEmpty() && !lastSegmentHasExtension_(routePath)) {
+            const SwString htmlTarget = buildAbsoluteTarget_(absoluteRoot, routePath + ".html");
+            if (swFilePlatform().isFile(htmlTarget)) {
+                return htmlTarget;
+            }
+        }
+
+        const SwString directoryTarget =
+            buildAbsoluteTarget_(absoluteRoot,
+                                 routePath.isEmpty() ? SwString("index.html") : routePath + "/index.html");
+        if (swFilePlatform().isFile(directoryTarget)) {
+            return directoryTarget;
+        }
+
+        return exactTarget;
     }
 
     static bool isPathInsideRoot_(const SwString& absoluteRoot, const SwString& absoluteTarget) {

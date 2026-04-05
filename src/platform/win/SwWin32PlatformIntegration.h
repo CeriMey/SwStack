@@ -1485,6 +1485,9 @@ public:
 
 private:
     static DWORD buildStyle_(const SwPlatformWindowOptions& options) {
+        if (options.frameless) {
+            return WS_POPUP | WS_CLIPCHILDREN;
+        }
         DWORD style = WS_OVERLAPPEDWINDOW;
         if (options.role != SwPlatformWindowRole::MainWindow) {
             style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;

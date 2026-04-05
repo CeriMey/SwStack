@@ -146,11 +146,11 @@ public:
      * @details The instance is initialized and prepared for immediate use.
      */
     SwStyle()
-        : normalColor{70, 130, 180},
-          hoverColor{100, 149, 237},
-          pressedColor{50, 50, 200},
-          borderColor{0, 0, 0},
-          textColor{255, 255, 255} {}
+        : normalColor{243, 243, 243},
+          hoverColor{229, 241, 251},
+          pressedColor{204, 228, 247},
+          borderColor{173, 173, 173},
+          textColor{18, 18, 18} {}
 
     /**
      * @brief Performs the `drawControl` operation.
@@ -169,15 +169,15 @@ public:
             return;
         }
 
-        StyleSheet* sheet = widget->getToolSheet();
         SwColor fill = chooseFillColor(style, state);
         SwColor border = borderColor;
         SwColor text = textColor;
         int borderWidth = 1;
-        int radius = (style == WidgetStyle::PushButtonStyle) ? 10 : 0;
+        int radius = (style == WidgetStyle::PushButtonStyle) ? 4 : 0;
         bool paintBackground = true;
         float backgroundAlpha = 1.0f;
         Padding padding{};
+        SwFont font = widget->getFont();
 
         if (style == WidgetStyle::LabelStyle) {
             // Labels are transparent by default; they only paint a background when styled explicitly.
@@ -185,105 +185,41 @@ public:
             paintBackground = false;
             text = SwColor{32, 32, 32};
         }
-        SwString backgroundValue;
-        SwString boxShadowValue;
-
-        SwString borderWidthValue;
-        SwString radiusValue;
-        SwString paddingValue;
-        SwString paddingTopValue;
-        SwString paddingRightValue;
-        SwString paddingBottomValue;
-        SwString paddingLeftValue;
-
-        auto hierarchy = widget->classHierarchy();
-        for (int i = static_cast<int>(hierarchy.size()) - 1; i >= 0; --i) {
-            const SwString& className = hierarchy[i];
-            SwString bg = sheet->getStyleProperty(className, "background-color");
-            if (!bg.isEmpty()) {
-                backgroundValue = bg;
-                overrideColor(bg, fill, sheet, &backgroundAlpha);
-                if (backgroundAlpha <= 0.0f) {
-                    paintBackground = false;
-                } else {
-                    paintBackground = true;
-                }
-            }
-            overrideColor(sheet->getStyleProperty(className, "border-color"), border, sheet);
-            overrideColor(sheet->getStyleProperty(className, "color"), text, sheet);
-            SwString bw = sheet->getStyleProperty(className, "border-width");
-            if (!bw.isEmpty()) {
-                borderWidthValue = bw;
-            }
-            SwString br = sheet->getStyleProperty(className, "border-radius");
-            if (!br.isEmpty()) {
-                radiusValue = br;
-            }
-            SwString pad = sheet->getStyleProperty(className, "padding");
-            if (!pad.isEmpty()) {
-                paddingValue = pad;
-            }
-            SwString padTop = sheet->getStyleProperty(className, "padding-top");
-            if (!padTop.isEmpty()) {
-                paddingTopValue = padTop;
-            }
-            SwString padRight = sheet->getStyleProperty(className, "padding-right");
-            if (!padRight.isEmpty()) {
-                paddingRightValue = padRight;
-            }
-            SwString padBottom = sheet->getStyleProperty(className, "padding-bottom");
-            if (!padBottom.isEmpty()) {
-                paddingBottomValue = padBottom;
-            }
-            SwString padLeft = sheet->getStyleProperty(className, "padding-left");
-            if (!padLeft.isEmpty()) {
-                paddingLeftValue = padLeft;
-            }
-            SwString shadow = sheet->getStyleProperty(className, "box-shadow");
-            if (!shadow.isEmpty()) {
-                boxShadowValue = shadow;
-            }
-        }
-
-        if (!borderWidthValue.isEmpty()) {
-            borderWidth = parsePixelValue(borderWidthValue, borderWidth);
-        }
-
-        if (!radiusValue.isEmpty()) {
-            radius = parsePixelValue(radiusValue, radius);
-        }
-
+        const unsigned int stateFlags = toStyleSheetStateFlags(state);
+        widget->resolveStyledBackground(stateFlags, fill, backgroundAlpha, paintBackground);
+        widget->resolveStyledBorder(stateFlags, border, borderWidth, radius);
+        text = widget->resolveStyledTextColor(stateFlags, text);
         if (borderWidth == 0) {
             border = fill;
         }
 
-        if (!paddingValue.isEmpty()) {
-            padding = parsePadding(paddingValue);
-        }
-        if (!paddingTopValue.isEmpty()) {
-            padding.top = parsePixelValue(paddingTopValue, padding.top);
-        }
-        if (!paddingRightValue.isEmpty()) {
-            padding.right = parsePixelValue(paddingRightValue, padding.right);
-        }
-        if (!paddingBottomValue.isEmpty()) {
-            padding.bottom = parsePixelValue(paddingBottomValue, padding.bottom);
-        }
-        if (!paddingLeftValue.isEmpty()) {
-            padding.left = parsePixelValue(paddingLeftValue, padding.left);
-        }
+        const StyleSheet::BoxEdges edges = widget->resolveStyledPadding(stateFlags);
+        padding.top = edges.top;
+        padding.right = edges.right;
+        padding.bottom = edges.bottom;
+        padding.left = edges.left;
+        font = widget->resolveStyledFont(stateFlags);
 
-        if (WidgetStateHelper::isState(state, WidgetState::Pressed)) {
-            fill = darkenColor(fill, 30);
-        } else {
-            if (WidgetStateHelper::isState(state, WidgetState::Checked)) {
-                fill = darkenColor(fill, 16);
-            }
-            if (WidgetStateHelper::isState(state, WidgetState::Hovered)) {
-                fill = lightenColor(fill, 20);
+        const bool explicitStateFill = widget->hasExplicitStyledStateProperty(stateFlags, "background-color");
+        const bool explicitStateBorder = widget->hasExplicitStyledStateProperty(stateFlags, "border-color");
+        const bool explicitStateText = widget->hasExplicitStyledStateProperty(stateFlags, "color");
+        if (style == WidgetStyle::PushButtonStyle && !explicitStateFill && !explicitStateBorder && !explicitStateText) {
+            applyNativePushButtonPalette_(state, fill, border, text);
+        } else if (!explicitStateFill) {
+            if (WidgetStateHelper::isState(state, WidgetState::Pressed)) {
+                fill = darkenColor(fill, 30);
+            } else {
+                if (WidgetStateHelper::isState(state, WidgetState::Checked)) {
+                    fill = darkenColor(fill, 16);
+                }
+                if (WidgetStateHelper::isState(state, WidgetState::Hovered)) {
+                    fill = lightenColor(fill, 20);
+                }
             }
         }
 
+        StyleSheet* sheet = widget->getToolSheet();
+        const SwString boxShadowValue = widget->resolveStyledBoxShadow(stateFlags);
         BoxShadow shadow = parseBoxShadow(boxShadowValue, sheet);
         if (shadow.valid) {
             SwRect shadowRect = rect;
@@ -306,19 +242,20 @@ public:
             painter->drawRect(rect, border, borderWidth);
         }
 
+        const int contentBorder = std::max(0, borderWidth);
         SwRect textRect = rect;
-        textRect.x += padding.left;
-        textRect.y += padding.top;
-        textRect.width = std::max(0, textRect.width - padding.left - padding.right);
-        textRect.height = std::max(0, textRect.height - padding.top - padding.bottom);
+        textRect.x += contentBorder + padding.left;
+        textRect.y += contentBorder + padding.top;
+        textRect.width = std::max(0, textRect.width - (contentBorder * 2) - padding.left - padding.right);
+        textRect.height = std::max(0, textRect.height - (contentBorder * 2) - padding.top - padding.bottom);
 
         SwString widgetText;
         if (widget->propertyExist("Text")) {
             widgetText = widget->property("Text").get<SwString>();
         } else if (widget->propertyExist("DisplayText")) {
-            widgetText = SwString(widget->property("DisplayText").get<std::string>());
+            widgetText = widget->property("DisplayText").get<SwString>();
         } else if (widget->propertyExist("Placeholder")) {
-            widgetText = widget->property("Placeholder").get<std::string>();
+            widgetText = widget->property("Placeholder").get<SwString>();
         }
 
         DrawTextFormats alignment(DrawTextFormat::Left | DrawTextFormat::VCenter);
@@ -327,7 +264,7 @@ public:
         }
 
         if (!widgetText.isEmpty()) {
-            painter->drawText(textRect, widgetText, alignment, text, widget->getFont());
+            painter->drawText(textRect, widgetText, alignment, text, font);
         }
 
         painter->finalize();
@@ -349,6 +286,20 @@ public:
     }
 
 private:
+    static unsigned int toStyleSheetStateFlags(WidgetState state) {
+        unsigned int flags = StyleSheet::StateNone;
+        if (WidgetStateHelper::isState(state, WidgetState::Hovered)) flags |= StyleSheet::StateHovered;
+        if (WidgetStateHelper::isState(state, WidgetState::Pressed)) flags |= StyleSheet::StatePressed;
+        if (WidgetStateHelper::isState(state, WidgetState::Disabled)) flags |= StyleSheet::StateDisabled;
+        if (WidgetStateHelper::isState(state, WidgetState::Focused)) flags |= StyleSheet::StateFocused;
+        if (WidgetStateHelper::isState(state, WidgetState::Checked)) flags |= StyleSheet::StateChecked;
+        return flags;
+    }
+
+    static int pixelSizeToPointSize(int pixelSize) {
+        return std::max(1, (pixelSize * 72 + 48) / 96);
+    }
+
     SwColor chooseFillColor(WidgetStyle style, WidgetState state) const {
         if (WidgetStateHelper::isState(state, WidgetState::Pressed)) {
             return pressedColor;
@@ -383,6 +334,36 @@ private:
         result.g = (std::max)(0, result.g - amount);
         result.b = (std::max)(0, result.b - amount);
         return result;
+    }
+
+    static void applyNativePushButtonPalette_(WidgetState state, SwColor& fill, SwColor& border, SwColor& text) {
+        fill = SwColor{243, 243, 243};
+        border = SwColor{173, 173, 173};
+        text = SwColor{18, 18, 18};
+
+        if (WidgetStateHelper::isState(state, WidgetState::Disabled)) {
+            fill = SwColor{244, 244, 244};
+            border = SwColor{205, 205, 205};
+            text = SwColor{122, 122, 122};
+            return;
+        }
+
+        if (WidgetStateHelper::isState(state, WidgetState::Pressed)) {
+            fill = SwColor{204, 228, 247};
+            border = SwColor{0, 84, 153};
+            return;
+        }
+
+        if (WidgetStateHelper::isState(state, WidgetState::Checked)) {
+            fill = SwColor{214, 231, 248};
+            border = SwColor{0, 120, 215};
+            return;
+        }
+
+        if (WidgetStateHelper::isState(state, WidgetState::Hovered)) {
+            fill = SwColor{229, 241, 251};
+            border = SwColor{0, 120, 215};
+        }
     }
 
     struct BoxShadow {

@@ -286,6 +286,37 @@ public:
 protected:
     CUSTOM_PROPERTY(bool, Pressed, false) { update(); }
 
+    SwSize sizeHint() const override {
+        StyleSheet* sheet = const_cast<SwComboBox*>(this)->getToolSheet();
+        const SwFont font = resolvedStyledFont_(sheet);
+        const SwFontMetrics metrics(font);
+        SwString label = currentText();
+        if (label.isEmpty() && !m_items.isEmpty()) {
+            label = m_items[0];
+        }
+        if (label.isEmpty()) {
+            label = SwString("ComboBox");
+        }
+
+        const SwSize minSize = minimumSize();
+        const SwSize maxSize = maximumSize();
+        const SwSize styleMin = resolvedStyleMinimumSize_();
+        const SwSize styleMax = resolvedStyleMaximumSize_();
+        SwSize hint{
+            metrics.horizontalAdvance(label) + 44,
+            metrics.height() + 16
+        };
+        hint.width = std::max(hint.width, std::max(minSize.width, styleMin.width));
+        hint.height = std::max(hint.height, std::max(minSize.height, styleMin.height));
+        hint.width = std::min(hint.width, std::min(maxSize.width, styleMax.width));
+        hint.height = std::min(hint.height, std::min(maxSize.height, styleMax.height));
+        return hint;
+    }
+
+    SwSize minimumSizeHint() const override {
+        return sizeHint();
+    }
+
     /**
      * @brief Handles the paint Event forwarded by the framework.
      * @param event Event object forwarded by the framework.
@@ -647,7 +678,6 @@ private:
             , m_owner(owner)
             , m_root(root) {
             setFocusPolicy(FocusPolicyEnum::NoFocus);
-            setStyleSheet("SwWidget { background-color: rgba(0,0,0,0); border-width: 0px; }");
         }
 
         /**
@@ -723,7 +753,6 @@ private:
             , m_owner(owner) {
             setCursor(CursorType::Hand);
             setFocusPolicy(FocusPolicyEnum::NoFocus);
-            setStyleSheet("SwWidget { background-color: rgba(0,0,0,0); border-width: 0px; }");
         }
 
         /**
@@ -1157,7 +1186,8 @@ private:
         const int w = anchor.width;
 
         int x = anchor.x;
-        int y = anchor.y + anchor.height + 4;
+        const int gap = popupOffset_();
+        int y = anchor.y + anchor.height + gap;
 
         // Clamp to window bounds.
         const int maxX = std::max(0, root->width() - w - 2);
@@ -1175,7 +1205,7 @@ private:
         int defRadius = 10;
         const StyleSheet* sheet = getToolSheet();
         if (!sheet) {
-            return {defRadius, defRadius, defRadius, defRadius};
+            return {0, 0, defRadius, defRadius};
         }
         auto selectors = classHierarchy();
         if (!selectors.contains("SwWidget")) {
@@ -1205,7 +1235,7 @@ private:
     }
 
     int popupOffset_() {
-        int offset = 4;
+        int offset = 0;
         const StyleSheet* sheet = getToolSheet();
         if (sheet) {
             auto selectors = classHierarchy();
@@ -1643,25 +1673,9 @@ private:
         resize(220, 34);
         setCursor(CursorType::Hand);
         setFocusPolicy(FocusPolicyEnum::Strong);
-        setFont(SwFont(L"Segoe UI", 10, Medium));
-        setStyleSheet(R"(
-            SwComboBox {
-                background-color: rgb(255, 255, 255);
-                border-color: rgb(172, 172, 172);
-                color: rgb(30, 30, 30);
-                border-radius: 10px;
-                border-width: 1px;
-                font-size: 14px;
-                padding: 6px 10px;
-                popup-border-top-left-radius: 0px;
-                popup-border-top-right-radius: 0px;
-                popup-border-bottom-left-radius: 10px;
-                popup-border-bottom-right-radius: 10px;
-                popup-offset: 0px;
-                popup-background-color: rgb(255, 255, 255);
-                popup-border-width: 1px;
-            }
-        )");
+        SwFont font(L"Segoe UI", 10, Medium);
+        font.setPixelSize(14);
+        setFont(font);
     }
 
     SwVector<SwString> m_items;
@@ -1687,4 +1701,3 @@ private:
     int m_nativePopupBorderWidth{1};
 #endif
 };
-

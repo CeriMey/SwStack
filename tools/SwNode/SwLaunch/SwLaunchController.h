@@ -74,6 +74,16 @@ struct SwLaunchRollbackFileAction {
     bool destinationExisted{false};
 };
 
+struct SwLaunchLogEntry {
+    long long seq{0};
+    SwString line;
+};
+
+struct SwLaunchLogStreamClient {
+    SwAbstractSocket* socket{nullptr};
+    SwTimer* heartbeatTimer{nullptr};
+};
+
 static void swLaunchAppendUnique_(SwList<SwString>& values, const SwString& value) {
     if (value.isEmpty()) return;
     for (size_t i = 0; i < values.size(); ++i) {
@@ -296,7 +306,15 @@ public:
         , controlPort_(controlPort)
         , controlToken_(controlToken)
         , controlServer_(this) {
+        if (controlPort_ > 0) {
+            installLogListener_();
+        }
         configureControlApi_();
+    }
+
+    ~SwLaunchController() override {
+        cleanupLogListener_();
+        closeAllLogStreams_();
     }
 
     bool start(SwString& errOut) {
@@ -342,9 +360,32 @@ private:
         limits.multipartTempDirectory = joinPath_(baseDir_, "_runlogs/_http_multipart");
         controlServer_.setLimits(limits);
 
+        controlServer_.addRoute("GET", "/api/launch/help", [this](const SwHttpRequest& request) {
+            return handleRoute_(request, [this](SwHttpContext& ctx) {
+                ctx.json(SwJsonValue(buildHelpPayload_(SwString())));
+            });
+        });
+
+        controlServer_.addRoute("GET", "/api/launch/help/:topic", [this](const SwHttpRequest& request) {
+            return handleRoute_(request, [this](SwHttpContext& ctx) {
+                const SwString topic = ctx.pathValue("topic");
+                if (swLaunchHelpForTopic_(topic).isEmpty()) {
+                    ctx.json(SwJsonValue(swLaunchErrorPayload_(SwString("unknown help topic: ") + topic)), 404);
+                    return;
+                }
+                ctx.json(SwJsonValue(buildHelpPayload_(topic)));
+            });
+        });
+
         controlServer_.addRoute("GET", "/api/launch/state", [this](const SwHttpRequest& request) {
             return handleAuthorizedRoute_(request, [this](SwHttpContext& ctx) {
                 ctx.json(SwJsonValue(buildStatePayload_()));
+            });
+        });
+
+        controlServer_.addRoute("GET", "/api/launch/logs/stream", [this](const SwHttpRequest& request) {
+            return handleAuthorizedRoute_(request, [this](SwHttpContext& ctx) {
+                openLogStream_(ctx);
             });
         });
 
@@ -432,6 +473,17 @@ private:
         });
     }
 
+    SwHttpResponse handleRoute_(const SwHttpRequest& request, const SwLaunchContextHandler& handler) {
+        SwHttpContext ctx(request);
+        if (handler) {
+            handler(ctx);
+        }
+        if (!ctx.handled()) {
+            ctx.json(SwJsonValue(swLaunchErrorPayload_("route handler produced no response")), 500);
+        }
+        return ctx.takeResponse();
+    }
+
     SwHttpResponse handleAuthorizedRoute_(const SwHttpRequest& request, const SwLaunchContextHandler& handler) {
         SwHttpContext ctx(request);
         if (!authorizeRequest_(ctx)) {
@@ -470,6 +522,221 @@ private:
         return true;
     }
 
+    static SwString normalizeLogLine_(SwString line) {
+        while (line.endsWith("\n") || line.endsWith("\r")) {
+            line.chop(1);
+        }
+        return line;
+    }
+
+    int parseRequestedBacklog_(const SwHttpContext& ctx) const {
+        int backlog = 32;
+        const SwString requested = ctx.queryValue("backlog").trimmed();
+        if (!requested.isEmpty()) {
+            backlog = requested.toInt();
+        }
+        if (backlog < 0) backlog = 0;
+        if (backlog > maxLogBacklogEntries_) backlog = maxLogBacklogEntries_;
+        return backlog;
+    }
+
+    SwString buildSseEvent_(const SwString& eventName, const SwString& payload, long long eventId = 0) const {
+        SwString out;
+        if (eventId > 0) {
+            out += "id: " + SwString::number(eventId) + "\n";
+        }
+        if (!eventName.isEmpty()) {
+            out += "event: " + eventName + "\n";
+        }
+
+        const SwList<SwString> lines = payload.split('\n');
+        if (lines.isEmpty()) {
+            out += "data:\n\n";
+            return out;
+        }
+
+        for (size_t i = 0; i < lines.size(); ++i) {
+            out += "data: " + lines[i] + "\n";
+        }
+        out += "\n";
+        return out;
+    }
+
+    void sendLogEntryToSocket_(SwAbstractSocket* socket, const SwLaunchLogEntry& entry) {
+        if (!socket) return;
+
+        SwJsonObject payload;
+        payload["seq"] = SwJsonValue(SwString::number(entry.seq));
+        payload["line"] = SwJsonValue(entry.line);
+        const SwString eventText = buildSseEvent_("log",
+                                                  SwJsonDocument(payload).toJson(SwJsonDocument::JsonFormat::Compact),
+                                                  entry.seq);
+        if (!socket->write(eventText)) {
+            removeLogStreamSocket_(socket);
+        }
+    }
+
+    void broadcastLogEntry_(const SwLaunchLogEntry& entry) {
+        const SwList<SwLaunchLogStreamClient> clients = logStreamClients_;
+        for (size_t i = 0; i < clients.size(); ++i) {
+            if (!clients[i].socket) continue;
+            sendLogEntryToSocket_(clients[i].socket, entry);
+        }
+    }
+
+    void appendLogLine_(SwString line) {
+        line = normalizeLogLine_(line);
+        if (line.isEmpty()) return;
+
+        SwLaunchLogEntry entry;
+        entry.seq = nextLogSequence_++;
+        entry.line = line;
+        recentLogEntries_.append(entry);
+        while (static_cast<int>(recentLogEntries_.size()) > maxLogBacklogEntries_) {
+            recentLogEntries_.removeFirst();
+        }
+
+        if (!logStreamClients_.isEmpty()) {
+            broadcastLogEntry_(entry);
+        }
+    }
+
+    void installLogListener_() {
+        if (debugLineListenerId_ > 0) {
+            return;
+        }
+
+        SwPointer<SwLaunchController> self(this);
+        debugLineListenerId_ = SwDebug::addLineListener([self](const std::string& stdLine) {
+            if (!self) return;
+
+            const SwString line(stdLine);
+            self->app_.postEvent([self, line]() {
+                if (!self) return;
+                self->appendLogLine_(line);
+            });
+        });
+    }
+
+    void cleanupLogListener_() {
+        if (debugLineListenerId_ > 0) {
+            SwDebug::removeLineListener(debugLineListenerId_);
+            debugLineListenerId_ = 0;
+        }
+    }
+
+    bool hasLogStreamSocket_(SwAbstractSocket* socket) const {
+        if (!socket) return false;
+        for (size_t i = 0; i < logStreamClients_.size(); ++i) {
+            if (logStreamClients_[i].socket == socket) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void removeLogStreamSocket_(SwAbstractSocket* socket, bool closeSocket = true) {
+        if (!socket) return;
+
+        for (size_t i = 0; i < logStreamClients_.size(); ++i) {
+            if (logStreamClients_[i].socket != socket) continue;
+
+            SwLaunchLogStreamClient client = logStreamClients_[i];
+            logStreamClients_.removeAt(i);
+
+            if (client.heartbeatTimer) {
+                client.heartbeatTimer->stop();
+            }
+
+            socket->disconnectAllSlots();
+            if (closeSocket && socket->isOpen()) {
+                socket->close();
+            }
+            socket->deleteLater();
+            return;
+        }
+    }
+
+    void closeAllLogStreams_() {
+        while (!logStreamClients_.isEmpty()) {
+            SwAbstractSocket* socket = logStreamClients_.first().socket;
+            removeLogStreamSocket_(socket);
+        }
+    }
+
+    void attachLogStreamSocket_(SwAbstractSocket* socket, int backlogCount) {
+        if (!socket) {
+            return;
+        }
+
+        socket->setParent(this);
+        SwObject::connect(socket, &SwAbstractSocket::disconnected, this, [this, socket]() {
+            removeLogStreamSocket_(socket, false);
+        });
+        SwObject::connect(socket, &SwAbstractSocket::errorOccurred, this, [this, socket](int) {
+            removeLogStreamSocket_(socket, false);
+        });
+        SwObject::connect(socket, &SwIODevice::readyRead, this, [socket]() {
+            while (true) {
+                const SwString ignored = socket->read();
+                if (ignored.isEmpty()) break;
+            }
+        });
+
+        SwLaunchLogStreamClient client;
+        client.socket = socket;
+        client.heartbeatTimer = new SwTimer(logHeartbeatIntervalMs_, socket);
+        SwObject::connect(client.heartbeatTimer, &SwTimer::timeout, this, [this, socket]() {
+            if (!hasLogStreamSocket_(socket)) {
+                return;
+            }
+            if (!socket->write(": keepalive\n\n")) {
+                removeLogStreamSocket_(socket);
+            }
+        });
+        client.heartbeatTimer->start();
+        logStreamClients_.append(client);
+
+        SwString responseText;
+        responseText += "HTTP/1.1 200 OK\r\n";
+        responseText += "content-type: text/event-stream; charset=utf-8\r\n";
+        responseText += "cache-control: no-cache\r\n";
+        responseText += "connection: keep-alive\r\n";
+        responseText += "x-accel-buffering: no\r\n";
+        responseText += "\r\n";
+        if (!socket->write(responseText)) {
+            removeLogStreamSocket_(socket);
+            return;
+        }
+
+        SwJsonObject readyPayload;
+        readyPayload["mode"] = SwJsonValue("sse");
+        readyPayload["heartbeatMs"] = SwJsonValue(logHeartbeatIntervalMs_);
+        readyPayload["backlogCount"] = SwJsonValue(backlogCount);
+        const SwString readyEvent = buildSseEvent_("ready",
+                                                   SwJsonDocument(readyPayload).toJson(SwJsonDocument::JsonFormat::Compact));
+        if (!socket->write(readyEvent)) {
+            removeLogStreamSocket_(socket);
+            return;
+        }
+
+        int startIndex = static_cast<int>(recentLogEntries_.size()) - backlogCount;
+        if (startIndex < 0) startIndex = 0;
+        for (int i = startIndex; i < static_cast<int>(recentLogEntries_.size()); ++i) {
+            if (!hasLogStreamSocket_(socket)) {
+                return;
+            }
+            sendLogEntryToSocket_(socket, recentLogEntries_[static_cast<size_t>(i)]);
+        }
+    }
+
+    void openLogStream_(SwHttpContext& ctx) {
+        const int backlogCount = parseRequestedBacklog_(ctx);
+        ctx.switchToRawSocket([this, backlogCount](SwAbstractSocket* socket) {
+            attachLogStreamSocket_(socket, backlogCount);
+        }, false);
+    }
+
     bool startControlListener_(SwString& errOut) {
         errOut.clear();
         if (controlPort_ == 0) {
@@ -495,6 +762,99 @@ private:
         return false;
     }
 
+    SwJsonArray buildHelpTopicsJson_() const {
+        return swLaunchStringListToJsonArray_(swLaunchHelpTopicList_());
+    }
+
+    SwJsonArray buildCapabilitiesJson_() const {
+        SwJsonArray capabilities;
+        capabilities.append(SwJsonValue("help.http"));
+        capabilities.append(SwJsonValue("auth.bearer_token"));
+        capabilities.append(SwJsonValue("state.read"));
+        capabilities.append(SwJsonValue("state.full_replace_write"));
+        capabilities.append(SwJsonValue("deploy.multipart_manifest_bundle"));
+        capabilities.append(SwJsonValue("deploy.sha256_verification"));
+        capabilities.append(SwJsonValue("deploy.skip_identical_artifacts"));
+        capabilities.append(SwJsonValue("deploy.rollback_files_and_runtime"));
+        capabilities.append(SwJsonValue("deploy.serialized_jobs"));
+        capabilities.append(SwJsonValue("logs.sse_stream"));
+        capabilities.append(SwJsonValue("logs.backlog"));
+        capabilities.append(SwJsonValue("logs.heartbeat"));
+        capabilities.append(SwJsonValue("runtime.targeted_restart"));
+        return capabilities;
+    }
+
+    SwJsonArray buildRouteHelpJson_() const {
+        SwJsonArray routes;
+
+        const auto appendRoute = [&routes](const SwString& method,
+                                           const SwString& path,
+                                           bool authRequired,
+                                           const SwString& summary) {
+            SwJsonObject route;
+            route["method"] = SwJsonValue(method);
+            route["path"] = SwJsonValue(path);
+            route["authRequired"] = SwJsonValue(authRequired);
+            route["summary"] = SwJsonValue(summary);
+            routes.append(SwJsonValue(route));
+        };
+
+        appendRoute("GET", "/api/launch/help", false, "HTTP help overview with version, routes and capabilities");
+        appendRoute("GET", "/api/launch/help/:topic", false, "Detailed help for one topic");
+        appendRoute("GET", "/api/launch/state", true, "Read desired state and runtime summary");
+        appendRoute("GET", "/api/launch/logs/stream", true, "Follow launcher and child logs in SSE");
+        appendRoute("PUT", "/api/launch/state", true, "Replace desired state and reconcile runtime");
+        appendRoute("POST", "/api/launch/deploy", true, "Deploy files plus desired state with rollback");
+        appendRoute("GET", "/api/launch/deploy/:jobId", true, "Inspect one deploy job");
+        return routes;
+    }
+
+    SwJsonObject buildHelpPayload_(const SwString& rawTopic) const {
+        const SwString normalizedTopic = normalizeHelpTopic_(rawTopic);
+        const SwString resolvedTopic = normalizedTopic.isEmpty() ? SwString("overview") : normalizedTopic;
+        const SwString helpText = swLaunchHelpForTopic_(rawTopic);
+
+        SwJsonObject payload;
+        payload["ok"] = SwJsonValue(true);
+        payload["product"] = SwJsonValue("SwLaunch");
+        payload["version"] = SwJsonValue(swLaunchVersion_());
+        payload["gitRevision"] = SwJsonValue(swLaunchGitRevision_());
+        payload["apiVersion"] = SwJsonValue("v1");
+        payload["buildStamp"] = SwJsonValue(swLaunchBuildStamp_());
+        payload["topic"] = SwJsonValue(resolvedTopic);
+        payload["text"] = SwJsonValue(helpText.isEmpty() ? swLaunchHelpOverview_() : helpText);
+        payload["helpTopics"] = SwJsonValue(buildHelpTopicsJson_());
+        payload["capabilities"] = SwJsonValue(buildCapabilitiesJson_());
+
+        SwJsonObject auth;
+        auth["scheme"] = SwJsonValue("Bearer");
+        auth["apiRoutesRequireToken"] = SwJsonValue(true);
+        auth["helpRoutesRequireToken"] = SwJsonValue(false);
+        payload["auth"] = SwJsonValue(auth);
+
+        SwJsonObject control;
+        control["enabled"] = SwJsonValue(controlPort_ > 0);
+        control["bind"] = SwJsonValue(controlBind_);
+        control["port"] = SwJsonValue(static_cast<int>(controlServer_.httpPort()));
+        payload["controlApi"] = SwJsonValue(control);
+
+        SwJsonObject features;
+        features["logStreamProtocol"] = SwJsonValue("sse");
+        features["logStreamPath"] = SwJsonValue("/api/launch/logs/stream");
+        features["logHeartbeatMs"] = SwJsonValue(logHeartbeatIntervalMs_);
+        features["maxLogBacklogEntries"] = SwJsonValue(maxLogBacklogEntries_);
+        features["mutationsRequireConfigFile"] = SwJsonValue(true);
+        features["artifactIntegrity"] = SwJsonValue("sha256");
+        features["serializedMutations"] = SwJsonValue(true);
+        payload["features"] = SwJsonValue(features);
+
+        if (rawTopic.trimmed().isEmpty()) {
+            payload["routes"] = SwJsonValue(buildRouteHelpJson_());
+        }
+
+        return payload;
+    }
+
     SwJsonObject buildStatePayload_() const {
         SwJsonObject root;
         root["ok"] = SwJsonValue(true);
@@ -509,6 +869,9 @@ private:
         control["enabled"] = SwJsonValue(controlPort_ > 0);
         control["bind"] = SwJsonValue(controlBind_);
         control["port"] = SwJsonValue(static_cast<int>(controlServer_.httpPort()));
+        control["helpPath"] = SwJsonValue("/api/launch/help");
+        control["logStreamPath"] = SwJsonValue("/api/launch/logs/stream");
+        control["logStreamProtocol"] = SwJsonValue("sse");
         runtime["controlApi"] = SwJsonValue(control);
 
         SwJsonArray units;
@@ -1179,6 +1542,12 @@ private:
     uint16_t controlPort_{0};
     SwString controlToken_;
     SwHttpServer controlServer_;
+    SwList<SwLaunchLogEntry> recentLogEntries_;
+    SwList<SwLaunchLogStreamClient> logStreamClients_;
+    long long nextLogSequence_{1};
+    long long debugLineListenerId_{0};
+    int logHeartbeatIntervalMs_{15000};
+    int maxLogBacklogEntries_{200};
     SwMap<SwString, SwLaunchManagedUnitRuntime> activeUnits_;
     SwMap<SwString, SwLaunchDeployJob> deployJobs_;
     bool mutationInProgress_{false};

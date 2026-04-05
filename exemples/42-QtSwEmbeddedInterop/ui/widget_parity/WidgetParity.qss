@@ -1,0 +1,265 @@
+QWidget {
+    font-family: "Segoe UI";
+}
+
+QWidget#caseRoot {
+    background: rgb(244, 247, 251);
+}
+
+QWidget#surfaceCard {
+    background: rgb(255, 255, 255);
+    border: 1px solid rgb(220, 224, 232);
+    border-radius: 14px;
+}
+
+QWidget#transparentRow {
+    background: rgba(0, 0, 0, 0);
+    border: 0;
+}
+
+QLabel {
+    background: rgba(0, 0, 0, 0);
+    border: none;
+    color: rgb(24, 28, 36);
+}
+
+QLabel#sampleLabel {
+    color: rgb(15, 23, 42);
+    font-size: 20px;
+    font-weight: 700;
+    min-height: 28px;
+}
+
+QLabel#subtitleLabel {
+    color: rgb(71, 85, 105);
+    font-size: 13px;
+    min-height: 20px;
+}
+
+QLabel#leftCaption,
+QLabel#rightCaption {
+    color: rgb(71, 85, 105);
+    font-size: 12px;
+    min-height: 22px;
+}
+
+QLabel#sectionLabel {
+    color: rgb(15, 23, 42);
+    font-size: 14px;
+    font-weight: 600;
+    min-height: 24px;
+}
+
+QPushButton {
+    border-radius: 12px;
+    border: 1px solid rgb(220, 224, 232);
+    color: rgb(24, 28, 36);
+    background: rgb(255, 255, 255);
+}
+
+QPushButton#primaryButton {
+    min-height: 42px;
+    background: rgb(30, 102, 255);
+    border: 1px solid rgb(22, 84, 220);
+    color: rgb(255, 255, 255);
+    padding: 10px 14px;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+QPushButton#secondaryButton {
+    min-height: 34px;
+    font-size: 13px;
+    padding: 9px 14px;
+}
+
+QLineEdit#sampleLineEdit {
+    min-height: 38px;
+    background: rgb(255, 255, 255);
+    border: 1px solid rgb(220, 224, 232);
+    border-radius: 12px;
+    padding: 6px 10px;
+    color: rgb(24, 28, 36);
+    font-size: 14px;
+}
+
+QLineEdit#sampleLineEdit:focus {
+    border-color: rgb(59, 130, 246);
+}
+
+QLineEdit,
+QComboBox,
+QSpinBox,
+QDoubleSpinBox {
+    min-height: 38px;
+    background: rgb(255, 255, 255);
+    border: 1px solid rgb(220, 224, 232);
+    border-radius: 12px;
+    padding: 6px 10px;
+    color: rgb(24, 28, 36);
+    font-size: 14px;
+}
+
+QToolButton {
+    min-height: 38px;
+    background: rgb(255, 255, 255);
+    border: 1px solid rgb(220, 224, 232);
+    border-radius: 12px;
+    padding: 6px 12px;
+    color: rgb(24, 28, 36);
+    font-size: 13px;
+}
+
+QCheckBox,
+QRadioButton {
+    color: rgb(24, 28, 36);
+    font-size: 13px;
+    min-height: 24px;
+}
+
+QPlainTextEdit,
+QTextEdit {
+    min-height: 96px;
+    background: rgb(255, 255, 255);
+    border: 1px solid rgb(220, 224, 232);
+    border-radius: 12px;
+    padding: 8px 10px;
+    color: rgb(24, 28, 36);
+    font-size: 13px;
+}
+
+QProgressBar {
+    min-height: 22px;
+    background: rgb(241, 245, 249);
+    border: 1px solid rgb(220, 224, 232);
+    border-radius: 10px;
+    color: rgb(24, 28, 36);
+    text-align: center;
+    padding: 1px;
+    accent-color: rgb(59, 130, 246);
+}
+
+QProgressBar::chunk {
+    background: rgb(59, 130, 246);
+    border-radius: 9px;
+}
+
+QSlider {
+    min-height: 24px;
+}
+
+QSlider::groove:horizontal {
+    background: rgb(215, 220, 228);
+    height: 4px;
+    border-radius: 2px;
+}
+
+QSlider::sub-page:horizontal {
+    background: rgb(66, 133, 244);
+    border-radius: 2px;
+}
+
+QSlider::add-page:horizontal {
+    background: rgb(215, 220, 228);
+    border-radius: 2px;
+}
+
+QSlider::handle:horizontal {
+    background: rgb(255, 255, 255);
+    border: 1px solid rgb(200, 204, 214);
+    width: 18px;
+    margin: -7px 0;
+    border-radius: 9px;
+}
+
+QWidget#surfaceInset {
+    background: rgb(248, 250, 252);
+    border: 1px solid rgb(226, 232, 240);
+    border-radius: 12px;
+}
+
+QTabWidget {
+    tab-style: segmented;
+    tabs-fill-space: false;
+    tab-bar-full-bleed: false;
+    surface-color: rgb(255, 255, 255);
+    border-color: rgb(220, 224, 232);
+    tab-bar-color: rgba(0, 0, 0, 0);
+    accent-color: rgb(59, 130, 246);
+    text-color: rgb(24, 28, 36);
+    muted-text-color: rgb(71, 85, 105);
+    shadow-color-1: rgb(255, 255, 255);
+    shadow-color-2: rgb(255, 255, 255);
+    outer-padding: 0px;
+    page-padding: 0px;
+    tab-content-gap: 8px;
+    corner-radius: 0px;
+    tab-bar-radius: 0px;
+    tab-item-radius: 8px;
+    indicator-thickness: 0px;
+    tab-bar-height: 34px;
+    bar-padding: 0px;
+    tab-padding-x: 14px;
+    tab-spacing: 4px;
+    tab-item-height: 30px;
+    min-tab-width: 0px;
+    min-tab-height: 30px;
+}
+
+QTabWidget::pane {
+    border: none;
+    background: rgba(0, 0, 0, 0);
+}
+
+QTabBar::tab {
+    background: rgb(248, 250, 252);
+    border: 1px solid rgb(220, 224, 232);
+    border-bottom-color: rgb(203, 213, 225);
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    padding: 6px 14px;
+    min-height: 18px;
+    color: rgb(71, 85, 105);
+    margin-right: 4px;
+}
+
+QTabBar::tab:selected {
+    background: rgb(255, 255, 255);
+    color: rgb(24, 28, 36);
+}
+
+QTabBar::tab:hover:!selected {
+    background: rgb(241, 245, 249);
+}
+
+QToolBox::tab {
+    background: rgb(248, 250, 252);
+    border: 1px solid rgb(226, 232, 240);
+    border-radius: 10px;
+    padding: 8px 10px;
+    color: rgb(15, 23, 42);
+    font-size: 13px;
+    font-weight: 600;
+}
+
+QToolBox::tab:selected {
+    background: rgb(248, 250, 252);
+    border-color: rgb(203, 213, 225);
+}
+
+QGroupBox {
+    border: 1px solid rgb(220, 224, 232);
+    border-radius: 12px;
+    margin-top: 10px;
+    padding-top: 12px;
+    color: rgb(15, 23, 42);
+    font-size: 13px;
+    font-weight: 600;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 12px;
+    padding: 0 4px;
+    background: rgb(255, 255, 255);
+}

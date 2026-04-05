@@ -258,6 +258,32 @@ public:
     DECLARE_SIGNAL(valueChanged, int);
 
 protected:
+    SwSize sizeHint() const override {
+        const SwSize styleMin = resolvedStyleMinimumSize_();
+        const SwSize styleMax = resolvedStyleMaximumSize_();
+        SwSize hint = (m_orientation == Orientation::Horizontal)
+                          ? SwSize{96, 24}
+                          : SwSize{24, 120};
+        hint.width = std::max(hint.width, std::max(minimumSize().width, styleMin.width));
+        hint.height = std::max(hint.height, std::max(minimumSize().height, styleMin.height));
+        hint.width = std::min(hint.width, std::min(maximumSize().width, styleMax.width));
+        hint.height = std::min(hint.height, std::min(maximumSize().height, styleMax.height));
+        return hint;
+    }
+
+    SwSize minimumSizeHint() const override {
+        const SwSize styleMin = resolvedStyleMinimumSize_();
+        const SwSize styleMax = resolvedStyleMaximumSize_();
+        SwSize hint = (m_orientation == Orientation::Horizontal)
+                          ? SwSize{60, 22}
+                          : SwSize{22, 60};
+        hint.width = std::max(hint.width, std::max(minimumSize().width, styleMin.width));
+        hint.height = std::max(hint.height, std::max(minimumSize().height, styleMin.height));
+        hint.width = std::min(hint.width, std::min(maximumSize().width, styleMax.width));
+        hint.height = std::min(hint.height, std::min(maximumSize().height, styleMax.height));
+        return hint;
+    }
+
     /**
      * @brief Handles the paint Event forwarded by the framework.
      * @param event Event object forwarded by the framework.
@@ -271,21 +297,24 @@ protected:
         }
 
         const SwRect bounds = rect();
-        const int radius = clampInt(bounds.height / 3, 4, 10);
+        const int radius = clampInt(bounds.height / 2, 5, 11);
 
-        SwColor frame{172, 172, 172};
-        SwColor background{230, 230, 230};
-        SwColor textColor{30, 30, 30};
+        SwColor frame{224, 231, 240};
+        SwColor background{245, 247, 251};
+        SwColor textColor{46, 56, 70};
         SwColor fillColor = m_accent;
+        SwColor fillHighlight{clampChannel_(fillColor.r + 28),
+                              clampChannel_(fillColor.g + 22),
+                              clampChannel_(fillColor.b + 14)};
 
         if (!getEnable()) {
-            frame = SwColor{200, 200, 200};
-            background = SwColor{245, 245, 245};
-            textColor = SwColor{150, 150, 150};
-            fillColor = SwColor{180, 200, 230};
+            frame = SwColor{226, 232, 240};
+            background = SwColor{248, 250, 252};
+            textColor = SwColor{148, 163, 184};
+            fillColor = SwColor{147, 197, 253};
+            fillHighlight = SwColor{186, 214, 255};
         }
 
-        // Outer trough with subtle inner shadow effect
         painter->fillRoundedRect(bounds, radius, background, frame, 1);
 
         const int padding = 2;
@@ -307,101 +336,55 @@ protected:
         }
 
         if (fillPixels > 0) {
-            const int innerRadius = clampInt(radius - 1, 2, 8);
+            const int innerRadius = clampInt(radius - 2, 2, 8);
             SwRect fill;
             if (m_orientation == Orientation::Horizontal) {
                 fill = SwRect{inner.x, inner.y, fillPixels, inner.height};
             } else {
                 fill = SwRect{inner.x, inner.y + (inner.height - fillPixels), inner.width, fillPixels};
             }
+            painter->fillRoundedRect(fill, innerRadius, fillColor, fillColor, 0);
 
-            // Base fill with a slightly darker border for definition
-            SwColor fillBorder = blendColor(fillColor, SwColor{0, 0, 0}, 20);
-            painter->fillRoundedRect(fill, innerRadius, fillColor, fillBorder, 1);
-
-            // Clip all gloss overlays to the fill rect
-            painter->pushClipRect(fill);
-
-            // Top gloss: lighter band on upper 45%
-            const int glossH = clampInt(fill.height * 45 / 100, 2, fill.height);
-            SwColor glossColor = blendColor(fillColor, SwColor{255, 255, 255}, 35);
-            SwRect glossBand{fill.x, fill.y, fill.width, glossH};
-            painter->fillRect(glossBand, glossColor, glossColor, 0);
-
-            // Specular highlight: narrow bright line at the very top
-            if (fill.height >= 8) {
-                SwColor specular = blendColor(fillColor, SwColor{255, 255, 255}, 55);
-                SwRect specBand{fill.x, fill.y, fill.width, clampInt(fill.height / 5, 1, 3)};
-                painter->fillRect(specBand, specular, specular, 0);
+            if (fill.width > 6 && fill.height > 6) {
+                SwRect sheen = fill;
+                if (m_orientation == Orientation::Horizontal) {
+                    sheen.x += 1;
+                    sheen.y += 1;
+                    sheen.width = std::max(0, sheen.width - 2);
+                    sheen.height = std::max(2, (fill.height / 2) - 1);
+                } else {
+                    sheen.x += 1;
+                    sheen.y += 1;
+                    sheen.width = std::max(2, (fill.width / 2) - 1);
+                    sheen.height = std::max(0, sheen.height - 2);
+                }
+                if (sheen.width > 0 && sheen.height > 0) {
+                    painter->fillRoundedRect(sheen, innerRadius, fillHighlight, fillHighlight, 0);
+                }
             }
-
-            // Bottom shadow for depth
-            const int shadowH = clampInt(fill.height / 4, 1, 4);
-            SwColor shadowColor = blendColor(fillColor, SwColor{0, 0, 0}, 15);
-            SwRect shadowBand{fill.x, fill.y + fill.height - shadowH, fill.width, shadowH};
-            painter->fillRect(shadowBand, shadowColor, shadowColor, 0);
-
-            // Animated shimmer sweep
-            if (getEnable() && fill.width > 10) {
-                paintShimmer(painter, fill);
-            }
-
-            painter->popClipRect();
         }
 
         if (m_textVisible) {
+            const bool textMostlyOnFill = (m_orientation == Orientation::Horizontal)
+                                              ? fillPixels >= (bounds.width / 2)
+                                              : fillPixels >= (bounds.height / 2);
             painter->drawText(bounds,
                               text(),
                               DrawTextFormats(DrawTextFormat::Center | DrawTextFormat::VCenter | DrawTextFormat::SingleLine),
-                              textColor,
+                              textMostlyOnFill ? SwColor{255, 255, 255} : textColor,
                               getFont());
         }
     }
 
 private:
-    static SwColor blendColor(const SwColor& base, const SwColor& overlay, int pct) {
-        const int bp = clampInt(100 - pct, 0, 100);
-        const int op = clampInt(pct, 0, 100);
-        return SwColor{
-            clampInt((base.r * bp + overlay.r * op) / 100, 0, 255),
-            clampInt((base.g * bp + overlay.g * op) / 100, 0, 255),
-            clampInt((base.b * bp + overlay.b * op) / 100, 0, 255)
-        };
-    }
-
-    void paintShimmer(SwPainter* painter, const SwRect& fill) {
-        // Shimmer is a soft bright band that sweeps across the fill area.
-        // m_shimmerPhase goes from -120 to 600 (percentage * 3 of fill width).
-        const int sweepWidth = clampInt(fill.width / 3, 20, 80);
-        const int centerX = fill.x + (m_shimmerPhase * fill.width) / 480;
-
-        // Draw several thin vertical strips with decreasing brightness
-        // to create a soft gaussian-like shimmer band.
-        const int halfW = sweepWidth / 2;
-        for (int i = -halfW; i < halfW; ++i) {
-            const int x = centerX + i;
-            if (x < fill.x || x >= fill.x + fill.width) {
-                continue;
-            }
-            // Intensity: strongest at center, fading to edges (triangle falloff)
-            const int dist = (i < 0) ? -i : i;
-            const int intensity = clampInt(18 - (dist * 18 / halfW), 0, 18);
-            if (intensity <= 0) {
-                continue;
-            }
-            SwColor shimColor = blendColor(SwColor{255, 255, 255}, SwColor{255, 255, 255}, 100);
-            // Blend shimmer with the base fill at the computed intensity
-            // Since we can't do alpha, draw a blended color line
-            SwColor base = m_accent;
-            SwColor lineColor = blendColor(base, shimColor, intensity * 3);
-            painter->drawLine(x, fill.y, x, fill.y + fill.height, lineColor, 1);
-        }
-    }
-
     static long long clampLL(long long value, long long minValue, long long maxValue) {
         if (value < minValue) return minValue;
         if (value > maxValue) return maxValue;
         return value;
+    }
+
+    static uint8_t clampChannel_(int value) {
+        return static_cast<uint8_t>(clampInt(value, 0, 255));
     }
 
     int percent() const {
@@ -426,8 +409,7 @@ private:
     bool m_textVisible{true};
     SwString m_format{"%p%"};
     Orientation m_orientation{Orientation::Horizontal};
-    SwColor m_accent{0, 120, 215};
+    SwColor m_accent{59, 130, 246};
     SwTimer* m_shimmerTimer{nullptr};
     int m_shimmerPhase{-120};
 };
-

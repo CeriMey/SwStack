@@ -155,6 +155,7 @@ sw_add_example_subdirectory(exemples/53-EmbeddedDbQtSqlBench OFF)
 sw_add_example_subdirectory(exemples/54-MailSelfTest OFF)
 sw_add_example_subdirectory(exemples/55-HttpPerfSelfTest OFF)
 sw_add_example_subdirectory(exemples/56-LoadingOverlayDemo OFF)
+sw_add_example_subdirectory(exemples/57-TableDbSelfTest OFF)
 sw_add_example_subdirectory(sandbox/SwMainWindowApplication OFF)
 endif()
 

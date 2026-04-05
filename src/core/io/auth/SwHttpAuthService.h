@@ -57,6 +57,7 @@ public:
                      bool viaTls,
                      SwString* outRawToken,
                      SwHttpAuthIdentity* outIdentity,
+                     SwString* outPasswordResetToken = nullptr,
                      SwString* outError = nullptr);
     SwDbStatus logout(const SwString& rawToken);
     SwDbStatus requestEmailVerification(const SwString& email, SwString* outError = nullptr);
@@ -134,6 +135,7 @@ inline SwJsonObject accountToJson_(const SwHttpAuthAccount& account) {
     object["email"] = account.email.toStdString();
     object["emailVerified"] = !account.emailVerifiedAt.trimmed().isEmpty();
     object["emailVerifiedAt"] = account.emailVerifiedAt.toStdString();
+    object["passwordResetRequired"] = account.passwordResetRequired;
     object["suspended"] = account.suspended;
     object["createdAt"] = account.createdAt.toStdString();
     object["updatedAt"] = account.updatedAt.toStdString();
@@ -413,6 +415,7 @@ inline SwDbStatus SwHttpAuthService::login(const SwString& email,
                                            bool viaTls,
                                            SwString* outRawToken,
                                            SwHttpAuthIdentity* outIdentity,
+                                           SwString* outPasswordResetToken,
                                            SwString* outError) {
     if (outError) {
         outError->clear();
@@ -422,6 +425,9 @@ inline SwDbStatus SwHttpAuthService::login(const SwString& email,
     }
     if (outIdentity) {
         *outIdentity = SwHttpAuthIdentity();
+    }
+    if (outPasswordResetToken) {
+        outPasswordResetToken->clear();
     }
     if (!isStarted()) {
         return SwDbStatus(SwDbStatus::NotOpen, "Auth service not started");
@@ -440,6 +446,32 @@ inline SwDbStatus SwHttpAuthService::login(const SwString& email,
             *outError = "Account suspended";
         }
         return SwDbStatus(SwDbStatus::Busy, "Account suspended");
+    }
+    if (account.passwordResetRequired) {
+        if (!password.trimmed().isEmpty()) {
+            if (outError) {
+                *outError = "Invalid credentials";
+            }
+            return SwDbStatus(SwDbStatus::NotFound, "Invalid credentials");
+        }
+
+        SwString resetToken;
+        const SwDbStatus challengeStatus =
+            m_store.createChallenge("reset_password", account.accountId, m_config.resetCodeTtlMs, &resetToken, nullptr);
+        if (!challengeStatus.ok()) {
+            if (outError) {
+                *outError = challengeStatus.message();
+            }
+            return challengeStatus;
+        }
+
+        if (outPasswordResetToken) {
+            *outPasswordResetToken = resetToken;
+        }
+        if (outError) {
+            *outError = "Password reset required";
+        }
+        return SwDbStatus(SwDbStatus::Busy, "Password reset required");
     }
     if (!m_store.verifyPassword(account, password)) {
         if (outError) {

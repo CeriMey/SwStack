@@ -164,13 +164,17 @@ public:
 
 private:
     int fallbackHeight_() const {
-        const int pt = std::max(1, m_font.getPointSize());
-        return std::max(1, static_cast<int>(pt * 1.4));
+        const int px = m_font.getPixelSize() > 0
+                           ? m_font.getPixelSize()
+                           : static_cast<int>(std::max(1, m_font.getPointSize()) * 96.0 / 72.0 + 0.5);
+        return std::max(1, static_cast<int>(px * 1.4));
     }
 
     int fallbackWidth_(const SwString& text) const {
-        const int pt = std::max(1, m_font.getPointSize());
-        const int avg = std::max(4, static_cast<int>(pt * 0.6));
+        const int px = m_font.getPixelSize() > 0
+                           ? m_font.getPixelSize()
+                           : static_cast<int>(std::max(1, m_font.getPointSize()) * 96.0 / 72.0 + 0.5);
+        const int avg = std::max(4, static_cast<int>(px * 0.6));
         return static_cast<int>(text.length()) * avg;
     }
 

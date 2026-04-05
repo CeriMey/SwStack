@@ -55,6 +55,7 @@
  **************************************************************************************************/
 
 #include "SwWidget.h"
+#include "graphics/SwFontMetrics.h"
 
 class SwCheckBox : public SwWidget {
     SW_OBJECT(SwCheckBox, SwWidget)
@@ -217,6 +218,32 @@ protected:
         update();
     }
 
+    SwSize sizeHint() const override {
+        StyleSheet* sheet = const_cast<SwCheckBox*>(this)->getToolSheet();
+        const SwFont font = resolvedStyledFont_(sheet);
+        const SwFontMetrics metrics(font);
+        const SwString label = getText().isEmpty() ? SwString("CheckBox") : getText();
+        const SwSize minSize = minimumSize();
+        const SwSize maxSize = maximumSize();
+        const SwSize styleMin = resolvedStyleMinimumSize_();
+        const SwSize styleMax = resolvedStyleMaximumSize_();
+        const int indicatorSize = clampInt(m_indicatorSize, 12, 28);
+
+        SwSize hint{
+            indicatorSize + m_textSpacing + metrics.horizontalAdvance(label),
+            std::max(indicatorSize, metrics.height())
+        };
+        hint.width = std::max(hint.width, std::max(minSize.width, styleMin.width));
+        hint.height = std::max(hint.height, std::max(minSize.height, styleMin.height));
+        hint.width = std::min(hint.width, std::min(maxSize.width, styleMax.width));
+        hint.height = std::min(hint.height, std::min(maxSize.height, styleMax.height));
+        return hint;
+    }
+
+    SwSize minimumSizeHint() const override {
+        return sizeHint();
+    }
+
     /**
      * @brief Handles the paint Event forwarded by the framework.
      * @param event Event object forwarded by the framework.
@@ -302,13 +329,6 @@ protected:
                           DrawTextFormats(DrawTextFormat::Left | DrawTextFormat::VCenter | DrawTextFormat::SingleLine),
                           textColor,
                           getFont());
-
-        if (getFocus()) {
-            const SwColor focusColor = m_accent;
-            SwRect focusRect{indicator.x - 2, indicator.y - 2,
-                             indicator.width + 4, indicator.height + 4};
-            painter->drawRect(focusRect, focusColor, 1);
-        }
     }
 
     /**
@@ -385,4 +405,3 @@ private:
     int m_indicatorSize{18};
     int m_textSpacing{10};
 };
-

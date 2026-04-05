@@ -264,6 +264,7 @@ class SwWidget : public SwWidgetInterface {
      * Specifies that `SwWidget` is derived from `SwObject` class.
      */
     SW_OBJECT(SwWidget, SwObject)
+    friend class SwStyle;
 
     /**
      * @brief Property for the SwWidget's focus policy.
@@ -393,6 +394,7 @@ protected:
      * @param Font The new font as an `SwFont` object.
      */
     CUSTOM_OVERRIDE_PROPERTY(SwFont, Font, SwFont()) {
+        invalidateResolvedStyleSnapshot_();
         update();
     }
 
@@ -405,9 +407,9 @@ protected:
      * @param StyleSheet The new style sheet as an `SwString`.
      */
     CUSTOM_PROPERTY(SwString, StyleSheet, "") {
-        m_ComplexSheet.styles.clear();
+        m_ComplexSheet.clear();
         if (m_StyleSheet.isEmpty()) {
-            update();
+            updateStyleTree_();
             return;
         }
         SwString processed = m_StyleSheet;
@@ -415,10 +417,30 @@ protected:
             processed = SwString("%1 { %2 }").arg(className()).arg(processed);
         }
         m_ComplexSheet.parseStyleSheet(processed);
-        update();
+        updateStyleTree_();
     }
 
 public:
+    void setDefaultStyleSheet(const SwString& styleSheet) {
+        if (m_DefaultStyleSheet == styleSheet) {
+            return;
+        }
+
+        m_DefaultStyleSheet = styleSheet;
+        m_DefaultComplexSheet.clear();
+        if (!m_DefaultStyleSheet.isEmpty()) {
+            SwString processed = m_DefaultStyleSheet;
+            if (!processed.contains("{")) {
+                processed = SwString("%1 { %2 }").arg(className()).arg(processed);
+            }
+            m_DefaultComplexSheet.parseStyleSheet(processed);
+        }
+        updateStyleTree_();
+    }
+
+    SwString defaultStyleSheet() const {
+        return m_DefaultStyleSheet;
+    }
 
     /**
      * @brief Constructor for the SwWidget class.
@@ -611,13 +633,7 @@ public:
     // move() takes coordinates relative to the parent's top-left corner.
     // Internally converts to absolute window coordinates and propagates to children.
     virtual void move(int newX, int newY) override {
-        int absX = newX;
-        int absY = newY;
-        if (auto* pw = dynamic_cast<SwWidget*>(SwObject::parent())) {
-            absX += pw->m_absX;
-            absY += pw->m_absY;
-        }
-        setAbsolutePos_(absX, absY);
+        setGeometry(newX, newY, m_width, m_height);
     }
 
     void move(const SwPoint& point) {
@@ -634,30 +650,8 @@ public:
      * @param newHeight The new height of the SwWidget.
      */
     virtual void resize(int newWidth, int newHeight) override {
-        const SwRect oldRect = absoluteRect_();
-        newWidth = std::max(m_minWidth, std::min(m_maxWidth, newWidth));
-        newHeight = std::max(m_minHeight, std::min(m_maxHeight, newHeight));
-        if (m_width == newWidth && m_height == newHeight) {
-            return;
-        }
-        m_width = newWidth;
-        m_height = newHeight;
-        if (isVisibleInHierarchy()) {
-            // When shrinking, the old area must be repainted too.
-            constexpr int kInvalidateMargin = 8;
-            auto inflate = [](SwRect rect, int margin) {
-                rect.x -= margin;
-                rect.y -= margin;
-                rect.width = std::max(0, rect.width + margin * 2);
-                rect.height = std::max(0, rect.height + margin * 2);
-                return rect;
-            };
-            SwWidgetPlatformAdapter::invalidateRect(m_nativeWindowHandle, inflate(oldRect, kInvalidateMargin));
-            SwWidgetPlatformAdapter::invalidateRect(m_nativeWindowHandle, inflate(absoluteRect_(), kInvalidateMargin));
-        }
-        ResizeEvent event(m_width, m_height);
-        SwCoreApplication::sendEvent(this, &event);
-        emit resized(m_width, m_height);
+        const SwPoint localPos = currentLocalPos_();
+        setGeometry(localPos.x, localPos.y, newWidth, newHeight);
     }
 
     void resize(const SwSize& sizeVal) {
@@ -722,9 +716,62 @@ public:
         return SwSize{m_maxWidth, m_maxHeight};
     }
 
-    void setGeometry(int newX, int newY, int newWidth, int newHeight) {
-        move(newX, newY);
-        resize(newWidth, newHeight);
+    void setGeometry(int newX, int newY, int newWidth, int newHeight) override {
+        int absX = newX;
+        int absY = newY;
+        if (auto* pw = dynamic_cast<SwWidget*>(SwObject::parent())) {
+            absX += pw->m_absX;
+            absY += pw->m_absY;
+        }
+
+        const SwSize styleMin = resolvedStyleMinimumSize_();
+        const SwSize styleMax = resolvedStyleMaximumSize_();
+        const int effectiveMinWidth = std::max(m_minWidth, styleMin.width);
+        const int effectiveMinHeight = std::max(m_minHeight, styleMin.height);
+        const int effectiveMaxWidth = std::min(m_maxWidth, styleMax.width);
+        const int effectiveMaxHeight = std::min(m_maxHeight, styleMax.height);
+        newWidth = std::max(effectiveMinWidth, std::min(effectiveMaxWidth, newWidth));
+        newHeight = std::max(effectiveMinHeight, std::min(effectiveMaxHeight, newHeight));
+
+        const bool positionChanged = (m_absX != absX) || (m_absY != absY);
+        const bool sizeChanged = (m_width != newWidth) || (m_height != newHeight);
+        if (!positionChanged && !sizeChanged) {
+            return;
+        }
+
+        const SwRect oldRect = absoluteRect_();
+        if (positionChanged) {
+            const int deltaX = absX - m_absX;
+            const int deltaY = absY - m_absY;
+            m_absX = absX;
+            m_absY = absY;
+            for (SwObject* objChild : children()) {
+                if (auto* childWidget = dynamic_cast<SwWidget*>(objChild)) {
+                    childWidget->translateAbsolutePosRecursive_(deltaX, deltaY);
+                }
+            }
+        }
+        if (sizeChanged) {
+            m_width = newWidth;
+            m_height = newHeight;
+        }
+
+        invalidateGeometryChange_(oldRect);
+
+        if (positionChanged) {
+            const SwPoint newPos = currentLocalPos_();
+            MoveEvent event(newPos.x, newPos.y);
+            SwCoreApplication::sendEvent(this, &event);
+            emit moved(newPos.x, newPos.y);
+        }
+
+        if (sizeChanged) {
+            ResizeEvent event(m_width, m_height);
+            m_SuppressImplicitResizeUpdate_ = true;
+            SwCoreApplication::sendEvent(this, &event);
+            m_SuppressImplicitResizeUpdate_ = false;
+            emit resized(m_width, m_height);
+        }
     }
 
     void setGeometry(const SwRect& geometryRect) {
@@ -753,6 +800,10 @@ public:
      */
     SwSize clientSize() const override {
         return SwSize{m_width, m_height};
+    }
+
+    SwRect clientRect() const override {
+        return rect();
     }
 
     /**
@@ -890,22 +941,26 @@ public:
 
     virtual SwSize sizeHint() const override {
         SwSize hint = m_layout ? m_layout->sizeHint() : SwSize{m_width, m_height};
-        hint.width = std::max(hint.width, m_minWidth);
-        hint.height = std::max(hint.height, m_minHeight);
-        hint.width = std::min(hint.width, m_maxWidth);
-        hint.height = std::min(hint.height, m_maxHeight);
+        const SwSize styleMin = resolvedStyleMinimumSize_();
+        const SwSize styleMax = resolvedStyleMaximumSize_();
+        hint.width = std::max(hint.width, std::max(m_minWidth, styleMin.width));
+        hint.height = std::max(hint.height, std::max(m_minHeight, styleMin.height));
+        hint.width = std::min(hint.width, std::min(m_maxWidth, styleMax.width));
+        hint.height = std::min(hint.height, std::min(m_maxHeight, styleMax.height));
         return hint;
     }
 
     virtual SwSize minimumSizeHint() const override {
-        SwSize hint{m_minWidth, m_minHeight};
+        const SwSize styleMin = resolvedStyleMinimumSize_();
+        const SwSize styleMax = resolvedStyleMaximumSize_();
+        SwSize hint{std::max(m_minWidth, styleMin.width), std::max(m_minHeight, styleMin.height)};
         if (m_layout) {
             const SwSize layoutHint = m_layout->minimumSizeHint();
             hint.width = std::max(hint.width, layoutHint.width);
             hint.height = std::max(hint.height, layoutHint.height);
         }
-        hint.width = std::min(hint.width, m_maxWidth);
-        hint.height = std::min(hint.height, m_maxHeight);
+        hint.width = std::min(hint.width, std::min(m_maxWidth, styleMax.width));
+        hint.height = std::min(hint.height, std::min(m_maxHeight, styleMax.height));
         return hint;
     }
 
@@ -967,7 +1022,93 @@ public:
      * @return A pointer to the `StyleSheet` object.
      */
     StyleSheet* getToolSheet() override {
-        return &m_ComplexSheet;
+        if (m_EffectiveSheetDirty) {
+            m_EffectiveSheet.clear();
+            std::vector<const SwWidget*> chain;
+            const SwWidget* current = this;
+            while (current) {
+                chain.push_back(current);
+                current = dynamic_cast<const SwWidget*>(current->parent());
+            }
+            for (size_t i = chain.size(); i > 0; --i) {
+                m_EffectiveSheet.mergeFrom(chain[i - 1]->m_DefaultComplexSheet);
+            }
+            for (size_t i = chain.size(); i > 0; --i) {
+                m_EffectiveSheet.mergeFrom(chain[i - 1]->m_ComplexSheet);
+            }
+            m_EffectiveSheetDirty = false;
+        }
+        return &m_EffectiveSheet;
+    }
+
+    bool resolveStyledBackground(unsigned int stateFlags, SwColor& color, float& alpha, bool& paint) const override {
+        const ResolvedStyleSnapshot_& snapshot = resolvedStyleSnapshot_(stateFlags);
+        if (!snapshot.hasBackgroundColor) {
+            return false;
+        }
+        color = snapshot.backgroundColor;
+        alpha = snapshot.backgroundAlpha;
+        paint = snapshot.paintBackground;
+        return true;
+    }
+
+    bool resolveStyledBorder(unsigned int stateFlags, SwColor& color, int& width, int& radius) const override {
+        const ResolvedStyleSnapshot_& snapshot = resolvedStyleSnapshot_(stateFlags);
+        bool matched = false;
+        if (snapshot.hasBorderColor) {
+            color = snapshot.borderColor;
+            matched = true;
+        }
+        if (snapshot.hasBorderWidth) {
+            width = snapshot.borderWidth;
+            matched = true;
+        }
+        if (snapshot.borderStyleNone) {
+            width = 0;
+            matched = true;
+        }
+        if (snapshot.hasBorderRadius) {
+            radius = snapshot.borderRadius;
+            matched = true;
+        }
+        return matched;
+    }
+
+    void resolveStyledBorderCorners(unsigned int stateFlags,
+                                    int& topLeft,
+                                    int& topRight,
+                                    int& bottomRight,
+                                    int& bottomLeft) const override {
+        const ResolvedStyleSnapshot_& snapshot = resolvedStyleSnapshot_(stateFlags);
+        if (snapshot.hasBorderTopLeftRadius) topLeft = snapshot.borderTopLeftRadius;
+        if (snapshot.hasBorderTopRightRadius) topRight = snapshot.borderTopRightRadius;
+        if (snapshot.hasBorderBottomRightRadius) bottomRight = snapshot.borderBottomRightRadius;
+        if (snapshot.hasBorderBottomLeftRadius) bottomLeft = snapshot.borderBottomLeftRadius;
+    }
+
+    SwColor resolveStyledTextColor(unsigned int stateFlags, const SwColor& fallback) const override {
+        const ResolvedStyleSnapshot_& snapshot = resolvedStyleSnapshot_(stateFlags);
+        return snapshot.hasTextColor ? snapshot.textColor : fallback;
+    }
+
+    StyleSheet::BoxEdges resolveStyledPadding(unsigned int stateFlags) const override {
+        return resolvedStyleSnapshot_(stateFlags).padding;
+    }
+
+    SwFont resolveStyledFont(unsigned int stateFlags) const override {
+        return resolvedStyleSnapshot_(stateFlags).font;
+    }
+
+    SwString resolveStyledBoxShadow(unsigned int stateFlags) const override {
+        return resolvedStyleSnapshot_(stateFlags).boxShadow;
+    }
+
+    bool hasExplicitStyledStateProperty(unsigned int stateFlags, const SwString& property) const override {
+        if (property == "background-color") {
+            return resolvedStyleSnapshot_(stateFlags).explicitStateBackground;
+        }
+        StyleSheet* sheet = const_cast<SwWidget*>(this)->getToolSheet();
+        return sheet && sheet->hasExplicitStateProperty(styleSelectors_(), getObjectName(), stateFlags, property);
     }
 
 signals:
@@ -1054,6 +1195,7 @@ protected:
      * @param parent Pointer to the new parent object.
      */
     virtual void newParentEvent(SwObject* parent) override {
+        invalidateEffectiveStyleCacheRecursive_();
         SwWidget *ui = dynamic_cast<SwWidget*>(parent);
         if (ui) {
             setNativeWindowHandleRecursive(ui->nativeWindowHandle());
@@ -1106,6 +1248,43 @@ protected:
                 childWidget->setAbsolutePos_(childWidget->m_absX + deltaX, childWidget->m_absY + deltaY);
             }
         }
+    }
+
+    SwPoint currentLocalPos_() const {
+        if (auto* pw = dynamic_cast<SwWidget*>(SwObject::parent())) {
+            return {m_absX - pw->m_absX, m_absY - pw->m_absY};
+        }
+        return {m_absX, m_absY};
+    }
+
+    void translateAbsolutePosRecursive_(int deltaX, int deltaY) {
+        if (deltaX == 0 && deltaY == 0) {
+            return;
+        }
+        m_absX += deltaX;
+        m_absY += deltaY;
+        for (SwObject* objChild : children()) {
+            if (auto* childWidget = dynamic_cast<SwWidget*>(objChild)) {
+                childWidget->translateAbsolutePosRecursive_(deltaX, deltaY);
+            }
+        }
+    }
+
+    static SwRect inflateForGeometryInvalidate_(SwRect rect) {
+        constexpr int kInvalidateMargin = 8;
+        rect.x -= kInvalidateMargin;
+        rect.y -= kInvalidateMargin;
+        rect.width = std::max(0, rect.width + kInvalidateMargin * 2);
+        rect.height = std::max(0, rect.height + kInvalidateMargin * 2);
+        return rect;
+    }
+
+    void invalidateGeometryChange_(const SwRect& oldRect) {
+        if (!isVisibleInHierarchy()) {
+            return;
+        }
+        SwWidgetPlatformAdapter::invalidateRect(m_nativeWindowHandle, inflateForGeometryInvalidate_(oldRect));
+        SwWidgetPlatformAdapter::invalidateRect(m_nativeWindowHandle, inflateForGeometryInvalidate_(absoluteRect_()));
     }
 
     SwPoint rootClientOriginOnScreen_() const {
@@ -1179,37 +1358,48 @@ protected:
 
         const SwRect rect = this->rect();
         SwColor bgColor = {249, 249, 249};  // Windows 11 default surface
+        SwColor borderColor = {0, 0, 0};
+        int borderWidth = 0;
+        int borderRadius = 0;
+        int borderTopLeftRadius = 0;
+        int borderTopRightRadius = 0;
+        int borderBottomRightRadius = 0;
+        int borderBottomLeftRadius = 0;
+        float backgroundAlpha = 1.0f;
         // Top-level widgets (no parent widget) paint background by default, like Qt.
         // Child widgets are transparent by default.
         bool paintBackground = (dynamic_cast<SwWidget*>(SwObject::parent()) == nullptr);
-        auto selectors = classHierarchy();
-        if (!selectors.contains("SwWidget")) {
-            selectors.append("SwWidget");
-        }
-        for (const SwString& selector : selectors) {
-            if (selector.isEmpty()) {
-                continue;
-            }
-            SwString value = m_ComplexSheet.getStyleProperty(selector, "background-color");
-            if (!value.isEmpty()) {
-                float alpha = 1.0f;
-                try {
-                    SwColor resolved = m_ComplexSheet.parseColor(value, &alpha);
-                    if (alpha <= 0.0f) {
-                        paintBackground = false;
-                    } else {
-                        bgColor = resolved;
-                        paintBackground = true;
-                    }
-                } catch (const std::exception&) {
-                    // Ignore invalid colors and keep default background
-                }
-                break;
-            }
+        if (StyleSheet* sheet = getToolSheet()) {
+            resolveBackground(sheet, bgColor, backgroundAlpha, paintBackground);
+            resolveBorder(sheet, borderColor, borderWidth, borderRadius);
+            borderTopLeftRadius = borderRadius;
+            borderTopRightRadius = borderRadius;
+            borderBottomRightRadius = borderRadius;
+            borderBottomLeftRadius = borderRadius;
+            resolveBorderCornerRadii(sheet,
+                                     borderTopLeftRadius,
+                                     borderTopRightRadius,
+                                     borderBottomRightRadius,
+                                     borderBottomLeftRadius);
         }
 
-        if (paintBackground) {
-            this->m_style->drawBackground(rect, painter, bgColor);
+        if (paintBackground || borderWidth > 0) {
+            const bool hasRoundedCorners =
+                borderTopLeftRadius > 0 || borderTopRightRadius > 0 || borderBottomRightRadius > 0 || borderBottomLeftRadius > 0;
+            const SwColor fillColor = paintBackground ? bgColor : SwColor{255, 255, 255};
+
+            if (hasRoundedCorners) {
+                painter->fillRoundedRect(rect,
+                                         borderTopLeftRadius,
+                                         borderTopRightRadius,
+                                         borderBottomRightRadius,
+                                         borderBottomLeftRadius,
+                                         fillColor,
+                                         borderColor,
+                                         borderWidth);
+            } else {
+                painter->fillRect(rect, fillColor, borderColor, borderWidth);
+            }
         }
 
         const SwRect& paintRect = localEvent->paintRect();
@@ -1522,7 +1712,9 @@ protected:
      * @param event Pointer to the `ResizeEvent` containing the new dimensions of the SwWidget.
      */
     virtual void resizeEvent(ResizeEvent* event) {
-        this->update();
+        if (!m_SuppressImplicitResizeUpdate_) {
+            this->update();
+        }
         if (m_layout) {
             m_layout->updateGeometry();
         }
@@ -1644,6 +1836,40 @@ protected:
 
     // ─── Style-resolution utilities (shared by all widgets) ───────────────
 
+    struct ResolvedStyleSnapshot_ {
+        bool valid{false};
+        unsigned int stateFlags{StyleSheet::StateNone};
+        SwFont baseFont{};
+        SwString objectName;
+        bool hasBackgroundColor{false};
+        SwColor backgroundColor{0, 0, 0};
+        float backgroundAlpha{1.0f};
+        bool paintBackground{true};
+        bool hasBorderColor{false};
+        SwColor borderColor{0, 0, 0};
+        bool hasBorderWidth{false};
+        int borderWidth{0};
+        bool borderStyleNone{false};
+        bool hasBorderRadius{false};
+        int borderRadius{0};
+        bool hasBorderTopLeftRadius{false};
+        int borderTopLeftRadius{0};
+        bool hasBorderTopRightRadius{false};
+        int borderTopRightRadius{0};
+        bool hasBorderBottomRightRadius{false};
+        int borderBottomRightRadius{0};
+        bool hasBorderBottomLeftRadius{false};
+        int borderBottomLeftRadius{0};
+        bool hasTextColor{false};
+        SwColor textColor{0, 0, 0};
+        StyleSheet::BoxEdges padding{};
+        SwSize minSize{0, 0};
+        SwSize maxSize{std::numeric_limits<int>::max(), std::numeric_limits<int>::max()};
+        SwFont font{};
+        bool explicitStateBackground{false};
+        SwString boxShadow;
+    };
+
     static int clampInt(int value, int minValue, int maxValue) {
         if (value < minValue) return minValue;
         if (value > maxValue) return maxValue;
@@ -1661,14 +1887,272 @@ protected:
     }
 
     static int parsePixelValue(const SwString& value, int defaultValue) {
-        if (value.isEmpty()) {
-            return defaultValue;
+        return StyleSheet::parsePixelValue(value, defaultValue);
+    }
+
+    const SwList<SwString>& styleSelectors_() const {
+        if (!m_StyleSelectorsCacheInitialized) {
+            m_StyleSelectorsCache = classHierarchy();
+            if (!m_StyleSelectorsCache.contains("SwWidget")) {
+                m_StyleSelectorsCache.append("SwWidget");
+            }
+            m_StyleSelectorsCacheInitialized = true;
         }
-        SwString cleaned = value;
-        cleaned.replace("px", "");
-        bool ok = false;
-        int v = cleaned.toInt(&ok);
-        return ok ? v : defaultValue;
+        return m_StyleSelectorsCache;
+    }
+
+    unsigned int styleStateFlags_() const {
+        unsigned int flags = StyleSheet::StateNone;
+        if (getHover()) {
+            flags |= StyleSheet::StateHovered;
+        }
+        if (getFocus()) {
+            flags |= StyleSheet::StateFocused;
+        }
+        if (!getEnable()) {
+            flags |= StyleSheet::StateDisabled;
+        }
+        if (const_cast<SwWidget*>(this)->propertyExist("Pressed")) {
+            try {
+                if (const_cast<SwWidget*>(this)->property("Pressed").get<bool>()) {
+                    flags |= StyleSheet::StatePressed;
+                }
+            } catch (...) {
+            }
+        }
+        if (const_cast<SwWidget*>(this)->propertyExist("Checked")) {
+            try {
+                if (const_cast<SwWidget*>(this)->property("Checked").get<bool>()) {
+                    flags |= StyleSheet::StateChecked;
+                }
+            } catch (...) {
+            }
+        }
+        return flags;
+    }
+
+    SwString resolveStyleProperty_(const StyleSheet* sheet,
+                                   const SwString& property,
+                                   unsigned int stateFlags) const {
+        if (!sheet) {
+            return SwString();
+        }
+        return sheet->resolveStyleProperty(styleSelectors_(), getObjectName(), stateFlags, property);
+    }
+
+    const ResolvedStyleSnapshot_& resolvedStyleSnapshot_(unsigned int stateFlags = std::numeric_limits<unsigned int>::max()) const {
+        if (stateFlags == std::numeric_limits<unsigned int>::max()) {
+            stateFlags = styleStateFlags_();
+        }
+
+        StyleSheet* effectiveSheet = const_cast<SwWidget*>(this)->getToolSheet();
+        const SwFont baseFont = getFont();
+        const SwString objectName = getObjectName();
+
+        if (m_ResolvedStyleSnapshot.valid &&
+            !m_ResolvedStyleSnapshotDirty &&
+            m_ResolvedStyleSnapshot.stateFlags == stateFlags &&
+            m_ResolvedStyleSnapshot.baseFont == baseFont &&
+            m_ResolvedStyleSnapshot.objectName == objectName) {
+            return m_ResolvedStyleSnapshot;
+        }
+
+        ResolvedStyleSnapshot_ snapshot;
+        snapshot.valid = true;
+        snapshot.stateFlags = stateFlags;
+        snapshot.baseFont = baseFont;
+        snapshot.objectName = objectName;
+        snapshot.font = baseFont;
+
+        if (effectiveSheet) {
+            const SwString backgroundValue = resolveStyleProperty_(effectiveSheet, "background-color", stateFlags);
+            if (!backgroundValue.isEmpty()) {
+                snapshot.hasBackgroundColor = true;
+                snapshot.paintBackground = true;
+                try {
+                    snapshot.backgroundColor = clampColor(const_cast<StyleSheet*>(effectiveSheet)->parseColor(backgroundValue, &snapshot.backgroundAlpha));
+                    snapshot.paintBackground = snapshot.backgroundAlpha > 0.0f;
+                } catch (...) {
+                    snapshot.paintBackground = false;
+                    snapshot.backgroundAlpha = 1.0f;
+                }
+            }
+
+            const SwString borderColorValue = resolveStyleProperty_(effectiveSheet, "border-color", stateFlags);
+            if (!borderColorValue.isEmpty()) {
+                snapshot.hasBorderColor = true;
+                try {
+                    snapshot.borderColor = clampColor(const_cast<StyleSheet*>(effectiveSheet)->parseColor(borderColorValue, nullptr));
+                } catch (...) {
+                }
+            }
+
+            const SwString borderWidthValue = resolveStyleProperty_(effectiveSheet, "border-width", stateFlags);
+            if (!borderWidthValue.isEmpty()) {
+                snapshot.hasBorderWidth = true;
+                snapshot.borderWidth = clampInt(parsePixelValue(borderWidthValue, snapshot.borderWidth), 0, 20);
+            }
+
+            const SwString borderStyleValue = resolveStyleProperty_(effectiveSheet, "border-style", stateFlags);
+            if (!borderStyleValue.isEmpty() && borderStyleValue.toLower() == "none") {
+                snapshot.borderStyleNone = true;
+            }
+
+            const SwString borderRadiusValue = resolveStyleProperty_(effectiveSheet, "border-radius", stateFlags);
+            if (!borderRadiusValue.isEmpty()) {
+                snapshot.hasBorderRadius = true;
+                snapshot.borderRadius = clampInt(parsePixelValue(borderRadiusValue, snapshot.borderRadius), 0, 32);
+            }
+
+            const SwString topLeftRadiusValue = resolveStyleProperty_(effectiveSheet, "border-top-left-radius", stateFlags);
+            if (!topLeftRadiusValue.isEmpty()) {
+                snapshot.hasBorderTopLeftRadius = true;
+                snapshot.borderTopLeftRadius = clampInt(parsePixelValue(topLeftRadiusValue, snapshot.borderTopLeftRadius), 0, 32);
+            }
+
+            const SwString topRightRadiusValue = resolveStyleProperty_(effectiveSheet, "border-top-right-radius", stateFlags);
+            if (!topRightRadiusValue.isEmpty()) {
+                snapshot.hasBorderTopRightRadius = true;
+                snapshot.borderTopRightRadius = clampInt(parsePixelValue(topRightRadiusValue, snapshot.borderTopRightRadius), 0, 32);
+            }
+
+            const SwString bottomRightRadiusValue = resolveStyleProperty_(effectiveSheet, "border-bottom-right-radius", stateFlags);
+            if (!bottomRightRadiusValue.isEmpty()) {
+                snapshot.hasBorderBottomRightRadius = true;
+                snapshot.borderBottomRightRadius = clampInt(parsePixelValue(bottomRightRadiusValue, snapshot.borderBottomRightRadius), 0, 32);
+            }
+
+            const SwString bottomLeftRadiusValue = resolveStyleProperty_(effectiveSheet, "border-bottom-left-radius", stateFlags);
+            if (!bottomLeftRadiusValue.isEmpty()) {
+                snapshot.hasBorderBottomLeftRadius = true;
+                snapshot.borderBottomLeftRadius = clampInt(parsePixelValue(bottomLeftRadiusValue, snapshot.borderBottomLeftRadius), 0, 32);
+            }
+
+            const SwString textColorValue = resolveStyleProperty_(effectiveSheet, "color", stateFlags);
+            if (!textColorValue.isEmpty()) {
+                snapshot.hasTextColor = true;
+                try {
+                    snapshot.textColor = clampColor(const_cast<StyleSheet*>(effectiveSheet)->parseColor(textColorValue, nullptr));
+                } catch (...) {
+                    snapshot.hasTextColor = false;
+                }
+            }
+
+            const SwString paddingValue = resolveStyleProperty_(effectiveSheet, "padding", stateFlags);
+            if (!paddingValue.isEmpty()) {
+                snapshot.padding = StyleSheet::parseBoxEdges(paddingValue);
+            }
+
+            const SwString paddingTopValue = resolveStyleProperty_(effectiveSheet, "padding-top", stateFlags);
+            const SwString paddingRightValue = resolveStyleProperty_(effectiveSheet, "padding-right", stateFlags);
+            const SwString paddingBottomValue = resolveStyleProperty_(effectiveSheet, "padding-bottom", stateFlags);
+            const SwString paddingLeftValue = resolveStyleProperty_(effectiveSheet, "padding-left", stateFlags);
+
+            if (!paddingTopValue.isEmpty()) snapshot.padding.top = parsePixelValue(paddingTopValue, snapshot.padding.top);
+            if (!paddingRightValue.isEmpty()) snapshot.padding.right = parsePixelValue(paddingRightValue, snapshot.padding.right);
+            if (!paddingBottomValue.isEmpty()) snapshot.padding.bottom = parsePixelValue(paddingBottomValue, snapshot.padding.bottom);
+            if (!paddingLeftValue.isEmpty()) snapshot.padding.left = parsePixelValue(paddingLeftValue, snapshot.padding.left);
+
+            snapshot.minSize.width = std::max(0, parsePixelValue(resolveStyleProperty_(effectiveSheet, "min-width", stateFlags), 0));
+            snapshot.minSize.height = std::max(0, parsePixelValue(resolveStyleProperty_(effectiveSheet, "min-height", stateFlags), 0));
+            snapshot.maxSize.width = std::max(0, parsePixelValue(resolveStyleProperty_(effectiveSheet, "max-width", stateFlags), std::numeric_limits<int>::max()));
+            snapshot.maxSize.height = std::max(0, parsePixelValue(resolveStyleProperty_(effectiveSheet, "max-height", stateFlags), std::numeric_limits<int>::max()));
+
+            const SwString familyValue = resolveStyleProperty_(effectiveSheet, "font-family", stateFlags);
+            const SwString sizeValue = resolveStyleProperty_(effectiveSheet, "font-size", stateFlags);
+            const SwString weightValue = resolveStyleProperty_(effectiveSheet, "font-weight", stateFlags);
+
+            const SwString family = StyleSheet::normalizeFontFamily(familyValue);
+            if (!family.isEmpty()) {
+                snapshot.font.setFamily(family.toStdWString());
+            }
+
+            const int px = parsePixelValue(sizeValue, 0);
+            if (px > 0) {
+                snapshot.font.setPixelSize(px);
+            }
+
+            if (!weightValue.isEmpty()) {
+                snapshot.font.setWeight(StyleSheet::parseFontWeightValue(weightValue, snapshot.font.getWeight()));
+            }
+
+            snapshot.boxShadow = resolveStyleProperty_(effectiveSheet, "box-shadow", stateFlags);
+            snapshot.explicitStateBackground = effectiveSheet->hasExplicitStateProperty(styleSelectors_(),
+                                                                                        objectName,
+                                                                                        stateFlags,
+                                                                                        "background-color");
+        }
+
+        m_ResolvedStyleSnapshot = snapshot;
+        m_ResolvedStyleSnapshotDirty = false;
+        return m_ResolvedStyleSnapshot;
+    }
+
+    SwSize resolvedStyleMinimumSize_() const {
+        const ResolvedStyleSnapshot_& snapshot = resolvedStyleSnapshot_();
+        const int borderWidth = snapshot.borderStyleNone ? 0 : std::max(0, snapshot.borderWidth);
+        const int extraWidth = snapshot.padding.left + snapshot.padding.right + (borderWidth * 2);
+        const int extraHeight = snapshot.padding.top + snapshot.padding.bottom + (borderWidth * 2);
+        return SwSize{
+            clampInt(snapshot.minSize.width + extraWidth, 0, std::numeric_limits<int>::max()),
+            clampInt(snapshot.minSize.height + extraHeight, 0, std::numeric_limits<int>::max())
+        };
+    }
+
+    SwSize resolvedStyleMaximumSize_() const {
+        const ResolvedStyleSnapshot_& snapshot = resolvedStyleSnapshot_();
+        const int borderWidth = snapshot.borderStyleNone ? 0 : std::max(0, snapshot.borderWidth);
+        const int extraWidth = snapshot.padding.left + snapshot.padding.right + (borderWidth * 2);
+        const int extraHeight = snapshot.padding.top + snapshot.padding.bottom + (borderWidth * 2);
+        SwSize result = snapshot.maxSize;
+        if (result.width != std::numeric_limits<int>::max()) {
+            result.width = clampInt(result.width + extraWidth, 0, std::numeric_limits<int>::max());
+        }
+        if (result.height != std::numeric_limits<int>::max()) {
+            result.height = clampInt(result.height + extraHeight, 0, std::numeric_limits<int>::max());
+        }
+        return result;
+    }
+
+    SwFont resolvedStyledFont_(const StyleSheet* sheet = nullptr, unsigned int stateFlags = std::numeric_limits<unsigned int>::max()) const {
+        SW_UNUSED(sheet);
+        return resolvedStyleSnapshot_(stateFlags).font;
+    }
+
+    StyleSheet::BoxEdges resolvePaddingEdges_(const StyleSheet* sheet = nullptr,
+                                              unsigned int stateFlags = std::numeric_limits<unsigned int>::max()) const {
+        SW_UNUSED(sheet);
+        return resolvedStyleSnapshot_(stateFlags).padding;
+    }
+
+    void updateStyleTree_() {
+        m_EffectiveSheetDirty = true;
+        invalidateResolvedStyleSnapshot_();
+        update();
+        const auto& directChildren = children();
+        for (SwObject* objChild : directChildren) {
+            auto* child = dynamic_cast<SwWidget*>(objChild);
+            if (child) {
+                child->updateStyleTree_();
+            }
+        }
+    }
+
+    void invalidateEffectiveStyleCacheRecursive_() {
+        m_EffectiveSheetDirty = true;
+        invalidateResolvedStyleSnapshot_();
+        const auto& directChildren = children();
+        for (SwObject* objChild : directChildren) {
+            auto* child = dynamic_cast<SwWidget*>(objChild);
+            if (child) {
+                child->invalidateEffectiveStyleCacheRecursive_();
+            }
+        }
+    }
+
+    void invalidateResolvedStyleSnapshot_() {
+        m_ResolvedStyleSnapshotDirty = true;
+        m_ResolvedStyleSnapshot.valid = false;
     }
 
     void resolveBackground(const StyleSheet* sheet,
@@ -1678,35 +2162,15 @@ protected:
         if (!sheet) {
             return;
         }
-
-        auto selectors = classHierarchy();
-        if (!selectors.contains("SwWidget")) {
-            selectors.append("SwWidget");
-        }
-
-        for (int i = static_cast<int>(selectors.size()) - 1; i >= 0; --i) {
-            const SwString& selector = selectors[i];
-            if (selector.isEmpty()) {
-                continue;
-            }
-            SwString value = sheet->getStyleProperty(selector, "background-color");
-            if (value.isEmpty()) {
-                continue;
-            }
-            float alpha = 1.0f;
-            try {
-                SwColor resolved = const_cast<StyleSheet*>(sheet)->parseColor(value, &alpha);
-                if (alpha <= 0.0f) {
-                    outPaint = false;
-                } else {
-                    outColor = clampColor(resolved);
-                    outPaint = true;
-                }
-                outAlpha = alpha;
-            } catch (...) {
-            }
+        const ResolvedStyleSnapshot_& snapshot = resolvedStyleSnapshot_();
+        if (!snapshot.hasBackgroundColor) {
             return;
         }
+        outPaint = snapshot.paintBackground;
+        if (outPaint) {
+            outColor = snapshot.backgroundColor;
+        }
+        outAlpha = snapshot.backgroundAlpha;
     }
 
     void resolveBorder(const StyleSheet* sheet,
@@ -1716,36 +2180,18 @@ protected:
         if (!sheet) {
             return;
         }
-
-        auto selectors = classHierarchy();
-        if (!selectors.contains("SwWidget")) {
-            selectors.append("SwWidget");
+        const ResolvedStyleSnapshot_& snapshot = resolvedStyleSnapshot_();
+        if (snapshot.hasBorderColor) {
+            outColor = snapshot.borderColor;
         }
-
-        for (int i = static_cast<int>(selectors.size()) - 1; i >= 0; --i) {
-            const SwString& selector = selectors[i];
-            if (selector.isEmpty()) {
-                continue;
-            }
-
-            SwString borderColor = sheet->getStyleProperty(selector, "border-color");
-            if (!borderColor.isEmpty()) {
-                try {
-                    SwColor resolved = const_cast<StyleSheet*>(sheet)->parseColor(borderColor, nullptr);
-                    outColor = clampColor(resolved);
-                } catch (...) {
-                }
-            }
-
-            SwString borderWidth = sheet->getStyleProperty(selector, "border-width");
-            if (!borderWidth.isEmpty()) {
-                outWidth = clampInt(parsePixelValue(borderWidth, outWidth), 0, 20);
-            }
-
-            SwString borderRadius = sheet->getStyleProperty(selector, "border-radius");
-            if (!borderRadius.isEmpty()) {
-                outRadius = clampInt(parsePixelValue(borderRadius, outRadius), 0, 32);
-            }
+        if (snapshot.hasBorderWidth) {
+            outWidth = snapshot.borderWidth;
+        }
+        if (snapshot.borderStyleNone) {
+            outWidth = 0;
+        }
+        if (snapshot.hasBorderRadius) {
+            outRadius = snapshot.borderRadius;
         }
     }
 
@@ -1757,34 +2203,18 @@ protected:
         if (!sheet) {
             return;
         }
-
-        auto selectors = classHierarchy();
-        if (!selectors.contains("SwWidget")) {
-            selectors.append("SwWidget");
+        const ResolvedStyleSnapshot_& snapshot = resolvedStyleSnapshot_();
+        if (snapshot.hasBorderTopLeftRadius) {
+            outTopLeft = snapshot.borderTopLeftRadius;
         }
-
-        for (int i = static_cast<int>(selectors.size()) - 1; i >= 0; --i) {
-            const SwString& selector = selectors[i];
-            if (selector.isEmpty()) {
-                continue;
-            }
-
-            SwString v = sheet->getStyleProperty(selector, "border-top-left-radius");
-            if (!v.isEmpty()) {
-                outTopLeft = clampInt(parsePixelValue(v, outTopLeft), 0, 32);
-            }
-            v = sheet->getStyleProperty(selector, "border-top-right-radius");
-            if (!v.isEmpty()) {
-                outTopRight = clampInt(parsePixelValue(v, outTopRight), 0, 32);
-            }
-            v = sheet->getStyleProperty(selector, "border-bottom-right-radius");
-            if (!v.isEmpty()) {
-                outBottomRight = clampInt(parsePixelValue(v, outBottomRight), 0, 32);
-            }
-            v = sheet->getStyleProperty(selector, "border-bottom-left-radius");
-            if (!v.isEmpty()) {
-                outBottomLeft = clampInt(parsePixelValue(v, outBottomLeft), 0, 32);
-            }
+        if (snapshot.hasBorderTopRightRadius) {
+            outTopRight = snapshot.borderTopRightRadius;
+        }
+        if (snapshot.hasBorderBottomRightRadius) {
+            outBottomRight = snapshot.borderBottomRightRadius;
+        }
+        if (snapshot.hasBorderBottomLeftRadius) {
+            outBottomLeft = snapshot.borderBottomLeftRadius;
         }
     }
 
@@ -1792,29 +2222,11 @@ protected:
         if (!sheet) {
             return fallback;
         }
-
-        auto selectors = classHierarchy();
-        if (!selectors.contains("SwWidget")) {
-            selectors.append("SwWidget");
+        const ResolvedStyleSnapshot_& snapshot = resolvedStyleSnapshot_();
+        if (!snapshot.hasTextColor) {
+            return fallback;
         }
-
-        for (int i = static_cast<int>(selectors.size()) - 1; i >= 0; --i) {
-            const SwString& selector = selectors[i];
-            if (selector.isEmpty()) {
-                continue;
-            }
-            SwString value = sheet->getStyleProperty(selector, "color");
-            if (value.isEmpty()) {
-                continue;
-            }
-            try {
-                SwColor resolved = const_cast<StyleSheet*>(sheet)->parseColor(value, nullptr);
-                return clampColor(resolved);
-            } catch (...) {
-                return fallback;
-            }
-        }
-        return fallback;
+        return snapshot.textColor;
     }
 
     // ─── End style-resolution utilities ───────────────────────────────────
@@ -1858,7 +2270,16 @@ protected:
 
 private:
     bool m_visibilityEventInFlight{false};
+    bool m_SuppressImplicitResizeUpdate_{false};
+    SwString m_DefaultStyleSheet;
+    StyleSheet m_DefaultComplexSheet;
     StyleSheet m_ComplexSheet;
+    mutable StyleSheet m_EffectiveSheet;
+    mutable bool m_EffectiveSheetDirty{true};
+    mutable SwList<SwString> m_StyleSelectorsCache;
+    mutable bool m_StyleSelectorsCacheInitialized{false};
+    mutable ResolvedStyleSnapshot_ m_ResolvedStyleSnapshot;
+    mutable bool m_ResolvedStyleSnapshotDirty{true};
     SwAbstractLayout* m_layout;
 
 protected:

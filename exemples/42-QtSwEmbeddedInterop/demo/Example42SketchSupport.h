@@ -3,7 +3,11 @@
 #include <algorithm>
 
 #include <QColor>
+#include <QDir>
+#include <QFile>
 #include <QString>
+#include <QByteArray>
+#include <QtGlobal>
 
 #include "Sw.h"
 #include "SwString.h"
@@ -14,6 +18,65 @@ static inline SwString toSwString(const QString& value) {
 
 static inline QString toQString(const SwString& value) {
     return QString::fromUtf8(value.toStdString().c_str());
+}
+
+#ifndef EXAMPLE42_SOURCE_DIR
+#define EXAMPLE42_SOURCE_DIR "."
+#endif
+
+static inline QString example42SourceDirQt() {
+    return QDir::cleanPath(QString::fromUtf8(EXAMPLE42_SOURCE_DIR));
+}
+
+static inline QString example42StudioUiPathQt() {
+    return QDir::cleanPath(example42SourceDirQt() + QStringLiteral("/ui/Example42StudioWindow.ui"));
+}
+
+static inline QString example42SharedQssPathQt() {
+    return QDir::cleanPath(example42SourceDirQt() + QStringLiteral("/ui/Example42Studio.qss"));
+}
+
+static inline QString example42WidgetParitySuiteDirQt() {
+    return QDir::cleanPath(example42SourceDirQt() + QStringLiteral("/ui/widget_parity"));
+}
+
+static inline QString example42WidgetParityQssPathQt() {
+    return QDir::cleanPath(example42WidgetParitySuiteDirQt() + QStringLiteral("/WidgetParity.qss"));
+}
+
+static inline QString example42WidgetParityUiPathQt(const QString& fileName) {
+    return QDir::cleanPath(example42WidgetParitySuiteDirQt() + QLatin1Char('/') + fileName);
+}
+
+static inline SwString example42StudioUiPathSw() {
+    return toSwString(example42StudioUiPathQt());
+}
+
+static inline SwString example42SharedQssPathSw() {
+    return toSwString(example42SharedQssPathQt());
+}
+
+static inline SwString example42WidgetParityQssPathSw() {
+    return toSwString(example42WidgetParityQssPathQt());
+}
+
+static inline SwString example42WidgetParityUiPathSw(const QString& fileName) {
+    return toSwString(example42WidgetParityUiPathQt(fileName));
+}
+
+static inline void example42Trace(const char* message) {
+    if (!qEnvironmentVariableIsSet("EXAMPLE42_TRACE")) {
+        return;
+    }
+
+    QFile file(QDir::cleanPath(QDir::tempPath() + QStringLiteral("/qt_sw_interop_trace.txt")));
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+        return;
+    }
+
+    const QByteArray line = QByteArray(message ? message : "(null)") + '\n';
+    file.write(line);
+    file.close();
 }
 
 struct InkColorDef {
@@ -56,7 +119,7 @@ static inline SwString inkNameSw(int index) {
 }
 
 static inline QString inkLabelText(int index) {
-    return QStringLiteral("Ink: %1").arg(inkName(index));
+    return QStringLiteral("Ink: ") + inkName(index);
 }
 
 static inline SwString inkLabelTextSw(int index) {

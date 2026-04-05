@@ -826,7 +826,35 @@ private:
         return {};
     }
 
-    bool parseColorValue_(const SwString& value, SwColor& out) const {
+    SwString styleSubControlProp_(const char* subControl, const char* propName) const {
+        if (!subControl || !propName) {
+            return {};
+        }
+        StyleSheet* sheet = const_cast<SwTabWidget*>(this)->getToolSheet();
+        if (!sheet) {
+            return {};
+        }
+
+        const auto selectors = classHierarchy(); // most-derived first
+        for (const SwString& selector : selectors) {
+            if (selector.isEmpty()) {
+                continue;
+            }
+            SwString compound = selector + SwString("::") + SwString(subControl);
+            SwString v = sheet->getStyleProperty(compound, propName);
+            if (!v.isEmpty()) {
+                return v;
+            }
+        }
+        return {};
+    }
+
+    static bool isStyleNoneValue_(const SwString& value) {
+        const SwString trimmed = value.toLower().trimmed();
+        return trimmed == "none" || trimmed == "0" || trimmed == "0px";
+    }
+
+    bool parseColorValue_(const SwString& value, SwColor& out, float* alphaOut = nullptr) const {
         if (value.isEmpty()) {
             return false;
         }
@@ -837,7 +865,7 @@ private:
         }
 
         try {
-            out = clampColor(sheet->parseColor(value, nullptr));
+            out = clampColor(sheet->parseColor(value, alphaOut));
             return true;
         } catch (...) {
             return false;
@@ -861,14 +889,15 @@ private:
             }
         };
 
-        auto applyColor = [&](const char* propName, SwColor& target) {
+        auto applyColor = [&](const char* propName, SwColor& target, float* alphaTarget = nullptr) {
             SwString value = styleProp_(propName);
             if (value.isEmpty()) {
                 return;
             }
 
             SwColor parsed = target;
-            if (!parseColorValue_(value, parsed)) {
+            float parsedAlpha = alphaTarget ? *alphaTarget : 1.0f;
+            if (!parseColorValue_(value, parsed, alphaTarget ? &parsedAlpha : nullptr)) {
                 return;
             }
 
@@ -876,9 +905,30 @@ private:
                 target = parsed;
                 changed = true;
             }
+            if (alphaTarget && *alphaTarget != parsedAlpha) {
+                *alphaTarget = parsedAlpha;
+                changed = true;
+            }
         };
 
-        SwString v = styleProp_("tab-bar-full-bleed");
+        SwString v = styleProp_("tab-style");
+        if (!v.isEmpty()) {
+            SwString styleValue = v.trimmed().toLower();
+            TabStyle nextStyle = m_tabStyle;
+            if (styleValue == "segmented") {
+                nextStyle = TabStyle::Segmented;
+            } else if (styleValue == "underline") {
+                nextStyle = TabStyle::Underline;
+            } else if (styleValue == "pills") {
+                nextStyle = TabStyle::Pills;
+            }
+            if (nextStyle != m_tabStyle) {
+                m_tabStyle = nextStyle;
+                changed = true;
+            }
+        }
+
+        v = styleProp_("tab-bar-full-bleed");
         if (!v.isEmpty()) {
             const bool on = parseBool_(v, m_tabBarFullBleed);
             if (on != m_tabBarFullBleed) {
@@ -900,12 +950,120 @@ private:
 
         applyColor("surface-color", m_surfaceColor);
         applyColor("border-color", m_borderColor);
-        applyColor("tab-bar-color", m_tabBarColor);
+        applyColor("tab-bar-color", m_tabBarColor, &m_tabBarAlpha);
         applyColor("accent-color", m_accentColor);
         applyColor("text-color", m_textColor);
         applyColor("muted-text-color", m_mutedTextColor);
         applyColor("shadow-color-1", m_shadowColor1);
         applyColor("shadow-color-2", m_shadowColor2);
+
+        int nextFrameBorderWidth = 0;
+        SwColor nextFrameBorderColor = m_borderColor;
+        bool nextFrameBorderNone = false;
+
+        SwString frameValue = styleProp_("border-width");
+        if (!frameValue.isEmpty()) {
+            nextFrameBorderWidth = clampInt(parsePixelValue_(frameValue, nextFrameBorderWidth), 0, 32);
+        }
+
+        SwString frameStyleValue = styleProp_("border-style");
+        if (!frameStyleValue.isEmpty()) {
+            nextFrameBorderNone = (frameStyleValue.toLower().trimmed() == "none");
+        }
+
+        SwString frameColorValue = styleProp_("border-color");
+        if (!frameColorValue.isEmpty()) {
+            parseColorValue_(frameColorValue, nextFrameBorderColor, nullptr);
+        }
+
+        SwString paneFrameValue = styleSubControlProp_("pane", "border-width");
+        if (!paneFrameValue.isEmpty()) {
+            nextFrameBorderWidth = clampInt(parsePixelValue_(paneFrameValue, nextFrameBorderWidth), 0, 32);
+        }
+
+        SwString paneFrameStyleValue = styleSubControlProp_("pane", "border-style");
+        if (!paneFrameStyleValue.isEmpty()) {
+            nextFrameBorderNone = (paneFrameStyleValue.toLower().trimmed() == "none");
+        }
+
+        SwString paneFrameColorValue = styleSubControlProp_("pane", "border-color");
+        if (!paneFrameColorValue.isEmpty()) {
+            parseColorValue_(paneFrameColorValue, nextFrameBorderColor, nullptr);
+        }
+
+        int nextFrameTopBorderWidth = nextFrameBorderNone ? 0 : nextFrameBorderWidth;
+        int nextFrameRightBorderWidth = nextFrameBorderNone ? 0 : nextFrameBorderWidth;
+        int nextFrameBottomBorderWidth = nextFrameBorderNone ? 0 : nextFrameBorderWidth;
+        int nextFrameLeftBorderWidth = nextFrameBorderNone ? 0 : nextFrameBorderWidth;
+
+        SwColor nextFrameTopBorderColor = nextFrameBorderColor;
+        SwColor nextFrameRightBorderColor = nextFrameBorderColor;
+        SwColor nextFrameBottomBorderColor = nextFrameBorderColor;
+        SwColor nextFrameLeftBorderColor = nextFrameBorderColor;
+
+        auto applyFrameSideWidth = [&](const char* sideName, int& target) {
+            SwString value = styleProp_(sideName);
+            if (value.isEmpty()) {
+                value = styleSubControlProp_("pane", sideName);
+            }
+            if (!value.isEmpty()) {
+                target = clampInt(parsePixelValue_(value, target), 0, 32);
+            }
+        };
+
+        auto applyFrameSideColor = [&](const char* sideName, SwColor& target) {
+            SwString value = styleProp_(sideName);
+            if (value.isEmpty()) {
+                value = styleSubControlProp_("pane", sideName);
+            }
+            if (!value.isEmpty()) {
+                parseColorValue_(value, target, nullptr);
+            }
+        };
+
+        auto applyFrameSideStyle = [&](const char* sideName, int& target) {
+            SwString value = styleProp_(sideName);
+            if (value.isEmpty()) {
+                value = styleSubControlProp_("pane", sideName);
+            }
+            if (!value.isEmpty() && value.toLower().trimmed() == "none") {
+                target = 0;
+            }
+        };
+
+        applyFrameSideWidth("border-top-width", nextFrameTopBorderWidth);
+        applyFrameSideWidth("border-right-width", nextFrameRightBorderWidth);
+        applyFrameSideWidth("border-bottom-width", nextFrameBottomBorderWidth);
+        applyFrameSideWidth("border-left-width", nextFrameLeftBorderWidth);
+
+        applyFrameSideColor("border-top-color", nextFrameTopBorderColor);
+        applyFrameSideColor("border-right-color", nextFrameRightBorderColor);
+        applyFrameSideColor("border-bottom-color", nextFrameBottomBorderColor);
+        applyFrameSideColor("border-left-color", nextFrameLeftBorderColor);
+
+        applyFrameSideStyle("border-top-style", nextFrameTopBorderWidth);
+        applyFrameSideStyle("border-right-style", nextFrameRightBorderWidth);
+        applyFrameSideStyle("border-bottom-style", nextFrameBottomBorderWidth);
+        applyFrameSideStyle("border-left-style", nextFrameLeftBorderWidth);
+
+        if (m_frameTopBorderWidth != nextFrameTopBorderWidth ||
+            m_frameRightBorderWidth != nextFrameRightBorderWidth ||
+            m_frameBottomBorderWidth != nextFrameBottomBorderWidth ||
+            m_frameLeftBorderWidth != nextFrameLeftBorderWidth ||
+            m_frameTopBorderColor.r != nextFrameTopBorderColor.r || m_frameTopBorderColor.g != nextFrameTopBorderColor.g || m_frameTopBorderColor.b != nextFrameTopBorderColor.b ||
+            m_frameRightBorderColor.r != nextFrameRightBorderColor.r || m_frameRightBorderColor.g != nextFrameRightBorderColor.g || m_frameRightBorderColor.b != nextFrameRightBorderColor.b ||
+            m_frameBottomBorderColor.r != nextFrameBottomBorderColor.r || m_frameBottomBorderColor.g != nextFrameBottomBorderColor.g || m_frameBottomBorderColor.b != nextFrameBottomBorderColor.b ||
+            m_frameLeftBorderColor.r != nextFrameLeftBorderColor.r || m_frameLeftBorderColor.g != nextFrameLeftBorderColor.g || m_frameLeftBorderColor.b != nextFrameLeftBorderColor.b) {
+            m_frameTopBorderWidth = nextFrameTopBorderWidth;
+            m_frameRightBorderWidth = nextFrameRightBorderWidth;
+            m_frameBottomBorderWidth = nextFrameBottomBorderWidth;
+            m_frameLeftBorderWidth = nextFrameLeftBorderWidth;
+            m_frameTopBorderColor = nextFrameTopBorderColor;
+            m_frameRightBorderColor = nextFrameRightBorderColor;
+            m_frameBottomBorderColor = nextFrameBottomBorderColor;
+            m_frameLeftBorderColor = nextFrameLeftBorderColor;
+            changed = true;
+        }
 
         applyPixels("outer-padding", m_outerPadding, 0, 256);
         applyPixels("page-padding", m_pagePadding, 0, 256);
@@ -993,23 +1151,22 @@ private:
     SwRect contentRect(const SwRect& widgetRect) const {
         SwRect inner = layoutRect(widgetRect);
         const int thickness = tabBarThickness();
-        const int gap = m_tabToContentGap;
 
         if (isHorizontalTabs()) {
             SwRect content = inner;
-            content.height = inner.height - thickness - gap;
+            content.height = inner.height - thickness;
             if (content.height < 0) content.height = 0;
             if (m_tabPosition == TabPosition::Top) {
-                content.y = inner.y + thickness + gap;
+                content.y = inner.y + thickness;
             }
             return content;
         }
 
         SwRect content = inner;
-        content.width = inner.width - thickness - gap;
+        content.width = inner.width - thickness;
         if (content.width < 0) content.width = 0;
         if (m_tabPosition == TabPosition::Left) {
-            content.x = inner.x + thickness + gap;
+            content.x = inner.x + thickness;
         }
         return content;
     }
@@ -1090,6 +1247,10 @@ private:
 
         auto layoutTabs_ = [&](const SwRect& viewport) -> int {
             if (isHorizontalTabs()) {
+                const int itemHeight = clampInt(std::max(m_tabItemHeight, m_minTabHeight), 0, viewport.height);
+                const int tabY = (m_tabPosition == TabPosition::Top)
+                                     ? (viewport.y + viewport.height - itemHeight)
+                                     : viewport.y;
                 if (m_tabsFillSpace) {
                     int baseW = (tabCount > 0) ? (viewport.width / tabCount) : 0;
                     int rem = (tabCount > 0) ? (viewport.width - baseW * tabCount) : 0;
@@ -1099,7 +1260,7 @@ private:
                         if (w < m_minTabWidth) {
                             w = m_minTabWidth;
                         }
-                        m_tabs[i].rect = SwRect{x, viewport.y, w, viewport.height};
+                        m_tabs[i].rect = SwRect{x, tabY, w, itemHeight};
                         x += w;
                     }
                     return x - viewport.x;
@@ -1120,7 +1281,7 @@ private:
                     if (w < m_minTabWidth) {
                         w = m_minTabWidth;
                     }
-                    m_tabs[i].rect = SwRect{x, viewport.y, w, viewport.height};
+                    m_tabs[i].rect = SwRect{x, tabY, w, itemHeight};
                     x += w + m_tabSpacing;
                 }
                 const SwRect& last = m_tabs[tabCount - 1].rect;
@@ -1267,7 +1428,101 @@ private:
         painter->fillRoundedRect(shadow1, r, m_shadowColor1, m_shadowColor1, 0);
         painter->fillRoundedRect(shadow2, r, m_shadowColor2, m_shadowColor2, 0);
 
-        painter->fillRoundedRect(outer, r, m_surfaceColor, m_borderColor, 1);
+        painter->fillRoundedRect(outer, r, m_surfaceColor, m_surfaceColor, 0);
+        paintFrameBorder_(painter, outer, r);
+    }
+
+    void paintFrameBorder_(SwPainter* painter, const SwRect& outer, int radius) {
+        if (!painter) {
+            return;
+        }
+
+        const bool uniformWidth =
+            m_frameTopBorderWidth == m_frameRightBorderWidth &&
+            m_frameTopBorderWidth == m_frameBottomBorderWidth &&
+            m_frameTopBorderWidth == m_frameLeftBorderWidth;
+        const bool uniformColor =
+            m_frameTopBorderColor.r == m_frameRightBorderColor.r &&
+            m_frameTopBorderColor.g == m_frameRightBorderColor.g &&
+            m_frameTopBorderColor.b == m_frameRightBorderColor.b &&
+            m_frameTopBorderColor.r == m_frameBottomBorderColor.r &&
+            m_frameTopBorderColor.g == m_frameBottomBorderColor.g &&
+            m_frameTopBorderColor.b == m_frameBottomBorderColor.b &&
+            m_frameTopBorderColor.r == m_frameLeftBorderColor.r &&
+            m_frameTopBorderColor.g == m_frameLeftBorderColor.g &&
+            m_frameTopBorderColor.b == m_frameLeftBorderColor.b;
+
+        if (uniformWidth && uniformColor && m_frameTopBorderWidth > 0) {
+            painter->fillRoundedRect(outer, radius, m_surfaceColor, m_frameTopBorderColor, m_frameTopBorderWidth);
+            return;
+        }
+
+        const int inset = clampInt(radius, 0, 64);
+        const int leftX = outer.x;
+        const int rightX = outer.x + outer.width - 1;
+        const int topY = outer.y;
+        const int bottomY = outer.y + outer.height - 1;
+
+        if (m_frameTopBorderWidth > 0) {
+            painter->drawLine(leftX + inset, topY, rightX - inset, topY, m_frameTopBorderColor, m_frameTopBorderWidth);
+        }
+        if (m_frameBottomBorderWidth > 0) {
+            painter->drawLine(leftX + inset, bottomY, rightX - inset, bottomY, m_frameBottomBorderColor, m_frameBottomBorderWidth);
+        }
+        if (m_frameLeftBorderWidth > 0) {
+            painter->drawLine(leftX, topY + inset, leftX, bottomY - inset, m_frameLeftBorderColor, m_frameLeftBorderWidth);
+        }
+        if (m_frameRightBorderWidth > 0) {
+            painter->drawLine(rightX, topY + inset, rightX, bottomY - inset, m_frameRightBorderColor, m_frameRightBorderWidth);
+        }
+    }
+
+    void tabCornerRadii_(int tabIndex,
+                         const SwRect& tabRect,
+                         const SwRect& areaRect,
+                         int& radiusTL,
+                         int& radiusTR,
+                         int& radiusBR,
+                         int& radiusBL) const {
+        radiusTL = m_tabItemRadius;
+        radiusTR = m_tabItemRadius;
+        radiusBR = m_tabItemRadius;
+        radiusBL = m_tabItemRadius;
+
+        if (m_tabPosition == TabPosition::Top) {
+            radiusBR = 0;
+            radiusBL = 0;
+            if (tabIndex == 0 && tabRect.x <= areaRect.x + 1) {
+                radiusTL = std::max(radiusTL, m_cornerRadius);
+            }
+            if (tabIndex == (m_tabs.size() - 1) &&
+                (tabRect.x + tabRect.width) >= (areaRect.x + areaRect.width - 1)) {
+                radiusTR = std::max(radiusTR, m_cornerRadius);
+            }
+            return;
+        }
+
+        if (m_tabPosition == TabPosition::Bottom) {
+            radiusTL = 0;
+            radiusTR = 0;
+            if (tabIndex == 0 && tabRect.x <= areaRect.x + 1) {
+                radiusBL = std::max(radiusBL, m_cornerRadius);
+            }
+            if (tabIndex == (m_tabs.size() - 1) &&
+                (tabRect.x + tabRect.width) >= (areaRect.x + areaRect.width - 1)) {
+                radiusBR = std::max(radiusBR, m_cornerRadius);
+            }
+            return;
+        }
+
+        if (m_tabPosition == TabPosition::Left) {
+            radiusTR = 0;
+            radiusBR = 0;
+            return;
+        }
+
+        radiusTL = 0;
+        radiusBL = 0;
     }
 
     void paintTabs(SwPainter* painter, const SwRect& widgetRect) {
@@ -1290,7 +1545,8 @@ private:
 
         const SwColor onSurface = m_textColor;
         const SwColor muted = m_mutedTextColor;
-        const SwColor hoverBg = mix(m_tabBarColor, m_surfaceColor, 65);
+        const SwColor tabBarBlendBase = (m_tabBarAlpha <= 0.001f) ? m_surfaceColor : m_tabBarColor;
+        const SwColor hoverBg = mix(tabBarBlendBase, m_surfaceColor, 65);
         const SwColor accent = m_accentColor;
 
         const int barRadius = clampInt(m_tabBarRadius, 0, roundRadiusForRect(bar));
@@ -1300,26 +1556,40 @@ private:
         const bool doClip = m_scrollButtonsVisible;
 
         if (m_tabStyle == TabStyle::Segmented) {
-            painter->fillRoundedRect(bar, barRadius, m_tabBarColor, m_borderColor, 1);
+            if (m_tabBarAlpha > 0.001f) {
+                painter->fillRoundedRect(bar, barRadius, m_tabBarColor, m_borderColor, 1);
+            }
 
             if (m_currentIndex >= 0 && m_currentIndex < tabCount) {
                 if (doClip) {
                     painter->pushClipRect(viewport);
                 }
                 SwRect active = mapLocalRectToAbsolute_(m_tabs[m_currentIndex].rect);
-                SwRect selector = insetRect(active, 2, 2);
+                SwRect selector = active;
                 if (selector.width < 0) selector.width = 0;
                 if (selector.height < 0) selector.height = 0;
 
-                const int selRadius = clampInt(itemRadius - 2, 0, roundRadiusForRect(selector));
+                int selRadiusTL = itemRadius;
+                int selRadiusTR = itemRadius;
+                int selRadiusBR = itemRadius;
+                int selRadiusBL = itemRadius;
+                tabCornerRadii_(m_currentIndex, active, area, selRadiusTL, selRadiusTR, selRadiusBR, selRadiusBL);
                 SwRect selShadow = selector;
                 if (isHorizontalTabs()) {
                     selShadow.y += 2;
                 } else {
                     selShadow.x += (m_tabPosition == TabPosition::Left) ? 2 : -2;
                 }
-                painter->fillRoundedRect(selShadow, selRadius, SwColor{218, 223, 232}, SwColor{218, 223, 232}, 0);
-                painter->fillRoundedRect(selector, selRadius, m_surfaceColor, m_borderColor, 1);
+                painter->fillRoundedRect(selShadow,
+                                         selRadiusTL, selRadiusTR, selRadiusBR, selRadiusBL,
+                                         SwColor{218, 223, 232},
+                                         SwColor{218, 223, 232},
+                                         0);
+                painter->fillRoundedRect(selector,
+                                         selRadiusTL, selRadiusTR, selRadiusBR, selRadiusBL,
+                                         m_surfaceColor,
+                                         m_borderColor,
+                                         1);
 
                 const int indicator = clampInt(m_indicatorThickness + 1, 3, 10);
                 SwRect indicatorRect = selector;
@@ -1356,8 +1626,17 @@ private:
                 SwRect tabRect = mapLocalRectToAbsolute_(m_tabs[i].rect);
 
                 if (!selected && hovered) {
-                    SwRect hoverRect = insetRect(tabRect, 2, 2);
-                    painter->fillRoundedRect(hoverRect, itemRadius, hoverBg, hoverBg, 0);
+                    SwRect hoverRect = tabRect;
+                    int hoverRadiusTL = itemRadius;
+                    int hoverRadiusTR = itemRadius;
+                    int hoverRadiusBR = itemRadius;
+                    int hoverRadiusBL = itemRadius;
+                    tabCornerRadii_(i, tabRect, area, hoverRadiusTL, hoverRadiusTR, hoverRadiusBR, hoverRadiusBL);
+                    painter->fillRoundedRect(hoverRect,
+                                             hoverRadiusTL, hoverRadiusTR, hoverRadiusBR, hoverRadiusBL,
+                                             hoverBg,
+                                             hoverBg,
+                                             0);
                 }
 
                 const SwRect textRect = tabTextRect(tabRect);
@@ -1454,7 +1733,7 @@ private:
             const bool hovered = (i == m_hoverIndex);
             SwRect tabRect = mapLocalRectToAbsolute_(m_tabs[i].rect);
 
-            SwColor fill = selected ? accent : (hovered ? hoverBg : mix(m_tabBarColor, m_surfaceColor, 35));
+            SwColor fill = selected ? accent : (hovered ? hoverBg : mix(tabBarBlendBase, m_surfaceColor, 35));
             SwColor border = selected ? accent : m_borderColor;
             SwColor textColor = selected ? SwColor{255, 255, 255} : onSurface;
 
@@ -1506,7 +1785,8 @@ private:
         if (pad.width < 0) pad.width = 0;
         if (pad.height < 0) pad.height = 0;
         const int radius = clampInt(roundRadiusForRect(pad), 0, 999);
-        SwColor fill = mix(m_tabBarColor, m_surfaceColor, 20);
+        const SwColor tabBarBlendBase = (m_tabBarAlpha <= 0.001f) ? m_surfaceColor : m_tabBarColor;
+        SwColor fill = mix(tabBarBlendBase, m_surfaceColor, 20);
         if (enabled) {
             if (pressed) {
                 fill = mix(hoverBg, onSurface, 10);
@@ -1546,7 +1826,8 @@ private:
             if (pad.height < 0) pad.height = 0;
             const int radius = clampInt(roundRadiusForRect(pad), 0, 999);
 
-            SwColor fill = mix(m_tabBarColor, m_surfaceColor, 20);
+            const SwColor tabBarBlendBase = (m_tabBarAlpha <= 0.001f) ? m_surfaceColor : m_tabBarColor;
+            SwColor fill = mix(tabBarBlendBase, m_surfaceColor, 20);
             if (enabled) {
                 if (pressed) {
                     fill = mix(hoverBg, onSurface, 10);
@@ -1554,7 +1835,7 @@ private:
                     fill = hoverBg;
                 }
             } else {
-                fill = mix(m_tabBarColor, m_surfaceColor, 10);
+                fill = mix(tabBarBlendBase, m_surfaceColor, 10);
             }
 
             painter->fillRoundedRect(pad, radius, fill, fill, 0);
@@ -1698,34 +1979,43 @@ private:
     SwColor m_surfaceColor{255, 255, 255};
     SwColor m_borderColor{226, 232, 240};
     SwColor m_tabBarColor{243, 244, 246};
+    float m_tabBarAlpha{1.0f};
     SwColor m_accentColor{59, 130, 246};
     SwColor m_textColor{17, 24, 39};
     SwColor m_mutedTextColor{107, 114, 128};
     SwColor m_shadowColor1{226, 230, 238};
     SwColor m_shadowColor2{214, 219, 230};
+    int m_frameTopBorderWidth{0};
+    int m_frameRightBorderWidth{0};
+    int m_frameBottomBorderWidth{0};
+    int m_frameLeftBorderWidth{0};
+    SwColor m_frameTopBorderColor{226, 232, 240};
+    SwColor m_frameRightBorderColor{226, 232, 240};
+    SwColor m_frameBottomBorderColor{226, 232, 240};
+    SwColor m_frameLeftBorderColor{226, 232, 240};
 
-    int m_outerPadding{12};
-    int m_pagePadding{14};
-    int m_tabToContentGap{10};
+    int m_outerPadding{0};
+    int m_pagePadding{0};
+    int m_tabToContentGap{0};
 
-    int m_cornerRadius{18};
-    int m_tabBarRadius{14};
-    int m_tabItemRadius{12};
+    int m_cornerRadius{0};
+    int m_tabBarRadius{0};
+    int m_tabItemRadius{6};
     int m_indicatorThickness{3};
     int m_indicatorPadding{0};
 
-    int m_tabBarHeight{54}; // horizontal
+    int m_tabBarHeight{25}; // horizontal
     int m_tabBarWidth{180}; // vertical
 
-    int m_barPadding{6};
-    int m_tabPaddingX{16};
-    int m_tabTextIndent{22};
-    int m_tabSpacing{8};
+    int m_barPadding{0};
+    int m_tabPaddingX{12};
+    int m_tabTextIndent{10};
+    int m_tabSpacing{0};
 
-    int m_tabItemHeight{44};
+    int m_tabItemHeight{24};
 
-    int m_minTabWidth{84};
-    int m_minTabHeight{40};
+    int m_minTabWidth{68};
+    int m_minTabHeight{24};
 
     bool m_usesScrollButtons{true};
     bool m_scrollButtonsVisible{false};

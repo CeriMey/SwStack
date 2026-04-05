@@ -170,13 +170,46 @@ public:
      *
      * @details The returned value reflects the state currently stored by the instance.
      */
-    SwRect contentsRect() const {
+    SwRect clientRect() const override {
         const SwRect r = rect();
-        const int top = r.y + titleHeight();
-        return SwRect{r.x + m_padding,
-                      top + m_padding,
-                      std::max(0, r.width - 2 * m_padding),
-                      std::max(0, r.height - (top - r.y) - 2 * m_padding)};
+        const int inset = contentInset_();
+        const int top = contentTopInset_();
+        return SwRect{r.x + inset,
+                      r.y + top,
+                      std::max(0, r.width - (2 * inset)),
+                      std::max(0, r.height - top - inset)};
+    }
+
+    SwRect contentsRect() const {
+        return clientRect();
+    }
+
+    SwSize sizeHint() const override {
+        SwSize hint = SwFrame::sizeHint();
+        const SwAbstractLayout* currentLayout = layout();
+        const int inset = contentInset_();
+        if (currentLayout) {
+            const SwSize contentHint = currentLayout->sizeHint();
+            hint.width = std::max(hint.width, contentHint.width + (2 * inset));
+            hint.height = std::max(hint.height, contentHint.height + titleHeight() + inset);
+        }
+        hint.width = std::max(hint.width, titleMinimumOuterWidth_());
+        hint.height = std::max(hint.height, titleHeight() + inset);
+        return hint;
+    }
+
+    SwSize minimumSizeHint() const override {
+        SwSize hint = SwFrame::minimumSizeHint();
+        const SwAbstractLayout* currentLayout = layout();
+        const int inset = contentInset_();
+        if (currentLayout) {
+            const SwSize contentHint = currentLayout->minimumSizeHint();
+            hint.width = std::max(hint.width, contentHint.width + (2 * inset));
+            hint.height = std::max(hint.height, contentHint.height + titleHeight() + inset);
+        }
+        hint.width = std::max(hint.width, titleMinimumOuterWidth_());
+        hint.height = std::max(hint.height, titleHeight() + inset);
+        return hint;
     }
 
     DECLARE_SIGNAL(toggled, bool);
@@ -201,6 +234,7 @@ protected:
         }
 
         const SwRect rect = this->rect();
+        const ResolvedStyleSnapshot_& snapshot = resolvedStyleSnapshot_();
 
         StyleSheet* sheet = getToolSheet();
         SwColor bg{255, 255, 255};
@@ -214,33 +248,36 @@ protected:
         resolveBackground(sheet, bg, bgAlpha, paintBackground);
         resolveBorder(sheet, border, borderWidth, radius);
 
-        if (paintBackground && bgAlpha > 0.0f) {
-            painter->fillRoundedRect(rect, radius, bg, border, borderWidth);
-        } else {
-            painter->drawRect(rect, border, borderWidth);
-        }
-
-        // Header
         const int headerH = titleHeight();
-        const int headerY = rect.y;
-        const int headerX = rect.x + m_padding;
-
         SwRect indicator = checkIndicatorRect(rect);
         SwRect titleRect = titleTextRect(rect);
+        const bool nativeFrameFallback = usesNativeFrameFallback_(snapshot);
 
-        // Break the frame line behind the title for a cleaner look.
-        if (paintBackground && bgAlpha > 0.0f) {
-            SwRect patch = titleRect;
-            patch.x -= 4;
-            patch.width += 8;
-            painter->fillRect(patch, bg, bg, 0);
-            if (m_checkable) {
-                SwRect patch2 = indicator;
-                patch2.x -= 4;
-                patch2.y -= 2;
-                patch2.width += 8;
-                patch2.height += 4;
-                painter->fillRect(patch2, bg, bg, 0);
+        if (nativeFrameFallback) {
+            paintNativeFrame_(painter, rect, indicator, titleRect);
+        } else {
+            if (paintBackground && bgAlpha > 0.0f) {
+                painter->fillRoundedRect(rect, radius, bg, border, borderWidth);
+            } else {
+                painter->drawRect(rect, border, borderWidth);
+            }
+
+            // Break the frame line behind the title for a cleaner look.
+            if (paintBackground && bgAlpha > 0.0f) {
+                SwRect patch = titleRect;
+                patch.x -= 6;
+                patch.y = rect.y;
+                patch.width += 12;
+                patch.height = std::max(2, borderWidth + 2);
+                painter->fillRect(patch, bg, bg, 0);
+                if (m_checkable) {
+                    SwRect patch2 = indicator;
+                    patch2.x -= 6;
+                    patch2.y = rect.y;
+                    patch2.width += 12;
+                    patch2.height = std::max(2, borderWidth + 2);
+                    painter->fillRect(patch2, bg, bg, 0);
+                }
             }
         }
 
@@ -260,7 +297,7 @@ protected:
                           getFont());
 
         // Children, clipped to the inside rect for a clean group box.
-        const SwRect clip = SwRect{rect.x + 1, rect.y + headerH, rect.width - 2, rect.height - headerH - 1};
+        const SwRect clip = SwRect{rect.x + 1, rect.y + contentTopInset_(), rect.width - 2, rect.height - contentTopInset_() - 1};
         painter->pushClipRect(clip);
         paintChildren(event);
         painter->popClipRect();
@@ -333,12 +370,75 @@ private:
     }
 
     int titleHeight() const {
-        return clampInt(m_headerHeight, 18, 32);
+        return clampInt(m_headerHeight, 14, 24);
+    }
+
+    int contentTopInset_() const {
+        return titleHeight();
     }
 
     int titleTextWidthEstimate(const SwString& text) const {
         const int fallbackWidth = 8;
         return SwWidgetPlatformAdapter::textWidthUntil(nativeWindowHandle(), text, getFont(), text.size(), fallbackWidth);
+    }
+
+    int titleMinimumOuterWidth_() const {
+        int titleWidth = (2 * m_padding) + titleTextWidthEstimate(getText()) + 6;
+        if (m_checkable) {
+            titleWidth += m_checkSize + m_checkSpacing;
+        }
+        return std::max(titleWidth + (2 * contentInset_()), 2 * m_padding);
+    }
+
+    int contentInset_() const {
+        return 0;
+    }
+
+    bool usesNativeFrameFallback_(const ResolvedStyleSnapshot_& snapshot) const {
+        return !snapshot.hasBackgroundColor &&
+               !snapshot.hasBorderColor &&
+               !snapshot.hasBorderWidth &&
+               !snapshot.hasBorderRadius &&
+               !snapshot.hasBorderTopLeftRadius &&
+               !snapshot.hasBorderTopRightRadius &&
+               !snapshot.hasBorderBottomRightRadius &&
+               !snapshot.hasBorderBottomLeftRadius &&
+               !snapshot.borderStyleNone;
+    }
+
+    void paintNativeFrame_(SwPainter* painter,
+                           const SwRect& rect,
+                           const SwRect& indicator,
+                           const SwRect& titleRect) const {
+        if (!painter || rect.width <= 2 || rect.height <= 2) {
+            return;
+        }
+
+        const SwColor frameColor = getEnable() ? SwColor{214, 218, 226} : SwColor{228, 231, 236};
+        const SwColor frameFill{255, 255, 255};
+        const int radius = 4;
+        const int lineY = rect.y + (titleHeight() / 2);
+        const int gapPadding = 4;
+        const SwRect frameRect{rect.x, lineY, rect.width, std::max(0, rect.height - (lineY - rect.y))};
+
+        int gapLeft = titleRect.x - gapPadding;
+        int gapRight = titleRect.x + titleRect.width + gapPadding;
+        if (m_checkable) {
+            gapLeft = indicator.x - gapPadding;
+            gapRight = titleRect.x + titleRect.width + gapPadding;
+        }
+
+        const int frameLeft = frameRect.x;
+        const int frameRight = frameRect.x + frameRect.width - 1;
+        gapLeft = clampInt(gapLeft, frameLeft + radius + 6, frameRight - radius - 6);
+        gapRight = clampInt(gapRight, frameLeft + radius + 6, frameRight - radius - 6);
+
+        painter->fillRoundedRect(frameRect, radius, frameFill, frameColor, 1);
+
+        SwRect patch{gapLeft, frameRect.y, std::max(0, gapRight - gapLeft), radius + 3};
+        if (patch.width > 0 && patch.height > 0) {
+            painter->fillRect(patch, frameFill, frameFill, 0);
+        }
     }
 
     SwRect checkIndicatorRect(const SwRect& rect) const {
@@ -422,7 +522,7 @@ private:
     bool m_checkable{false};
     bool m_checked{true};
     SwColor m_accent{0, 120, 215};
-    int m_headerHeight{24};
+    int m_headerHeight{18};
     int m_padding{12};
     int m_checkSize{16};
     int m_checkSpacing{8};

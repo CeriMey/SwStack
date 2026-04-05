@@ -3,19 +3,347 @@
 #include <algorithm>
 
 #include <QAbstractButton>
+#include <QButtonGroup>
+#include <QFile>
+#include <QHBoxLayout>
 #include <QLabel>
+#include <QLayout>
 #include <QLineEdit>
-#include <QList>
 #include <QMouseEvent>
-#include <QPaintEvent>
 #include <QPainter>
 #include <QPushButton>
-#include <QResizeEvent>
-#include <QVector>
+#include <QSpacerItem>
+#include <QVBoxLayout>
+#include <QWidget>
+
+#include "SwXmlDocument.h"
 
 #include "../demo/Example42SketchSupport.h"
 
 namespace {
+
+using XmlNode = SwXmlNode;
+
+QString loadSharedStyleSheet_() {
+    QFile file(example42SharedQssPathQt());
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return QString();
+    }
+    return QString::fromUtf8(file.readAll());
+}
+
+SwString childText_(const XmlNode& node, const char* childName) {
+    const XmlNode* child = node.firstChild(childName);
+    return child ? child->text.trimmed() : SwString();
+}
+
+SwString textValue_(const XmlNode& propNode) {
+    if (!propNode.children.isEmpty()) {
+        for (const auto& child : propNode.children) {
+            if (child.name == "string" || child.name == "cstring" || child.name == "number" || child.name == "bool" ||
+                child.name == "enum") {
+                return child.text.trimmed();
+            }
+        }
+    }
+    return propNode.text.trimmed();
+}
+
+int toInt_(const SwString& value, int defaultValue = 0) {
+    if (value.isEmpty()) {
+        return defaultValue;
+    }
+    bool ok = false;
+    const int parsed = value.trimmed().toInt(&ok);
+    return ok ? parsed : defaultValue;
+}
+
+QSpacerItem* loadQtSpacer_(const XmlNode& spacerNode) {
+    int width = 40;
+    int height = 20;
+    bool vertical = false;
+    QSizePolicy::Policy horizontalPolicy = QSizePolicy::Minimum;
+    QSizePolicy::Policy verticalPolicy = QSizePolicy::Minimum;
+
+    for (const auto* prop : spacerNode.childrenNamed("property")) {
+        if (!prop) {
+            continue;
+        }
+
+        const SwString rawName = prop->attr("name");
+        if (rawName == "orientation") {
+            const SwString value = textValue_(*prop).toLower();
+            vertical = value.contains("vertical");
+        } else if (rawName == "sizeHint") {
+            const XmlNode* size = prop->firstChild("size");
+            if (!size) {
+                continue;
+            }
+            width = toInt_(childText_(*size, "width"), width);
+            height = toInt_(childText_(*size, "height"), height);
+        } else if (rawName == "sizeType") {
+            const SwString value = textValue_(*prop);
+            const bool expanding = value.contains("Expanding");
+            if (vertical) {
+                verticalPolicy = expanding ? QSizePolicy::Expanding : QSizePolicy::Minimum;
+            } else {
+                horizontalPolicy = expanding ? QSizePolicy::Expanding : QSizePolicy::Minimum;
+            }
+        }
+    }
+
+    return new QSpacerItem(width, height, horizontalPolicy, verticalPolicy);
+}
+
+QLayout* createQtLayout_(const SwString& className, QString& error) {
+    if (className == "QVBoxLayout") {
+        return new QVBoxLayout();
+    }
+    if (className == "QHBoxLayout") {
+        return new QHBoxLayout();
+    }
+
+    error = QStringLiteral("Unsupported layout class: ") + toQString(className);
+    return nullptr;
+}
+
+QWidget* createQtWidget_(const SwString& className, QWidget* parent, QString& error) {
+    if (className == "QWidget") {
+        return new QWidget(parent);
+    }
+    if (className == "QLabel") {
+        return new QLabel(parent);
+    }
+    if (className == "QPushButton") {
+        return new QPushButton(parent);
+    }
+    if (className == "QLineEdit") {
+        return new QLineEdit(parent);
+    }
+
+    error = QStringLiteral("Unsupported widget class: ") + toQString(className);
+    return nullptr;
+}
+
+void applyQtProperty_(QWidget* widget, const SwString& rawName, const XmlNode& propNode) {
+    if (!widget || rawName.isEmpty()) {
+        return;
+    }
+
+    if (rawName == "minimumSize") {
+        const XmlNode* size = propNode.firstChild("size");
+        if (!size) {
+            return;
+        }
+        widget->setMinimumSize(toInt_(childText_(*size, "width")), toInt_(childText_(*size, "height")));
+        return;
+    }
+
+    if (rawName == "maximumSize") {
+        const XmlNode* size = propNode.firstChild("size");
+        if (!size) {
+            return;
+        }
+        widget->setMaximumSize(toInt_(childText_(*size, "width")), toInt_(childText_(*size, "height")));
+        return;
+    }
+
+    if (rawName == "text") {
+        const QString text = toQString(textValue_(propNode));
+        if (QLabel* label = qobject_cast<QLabel*>(widget)) {
+            label->setText(text);
+            return;
+        }
+        if (QPushButton* button = qobject_cast<QPushButton*>(widget)) {
+            button->setText(text);
+            return;
+        }
+    }
+
+    if (rawName == "placeholderText") {
+        if (QLineEdit* lineEdit = qobject_cast<QLineEdit*>(widget)) {
+            lineEdit->setPlaceholderText(toQString(textValue_(propNode)));
+        }
+        return;
+    }
+}
+
+QWidget* loadQtWidget_(const XmlNode& widgetNode, QWidget* parent, QString& error);
+
+bool applyQtLayout_(QWidget* parentWidget, const XmlNode& widgetNode, QString& error) {
+    const XmlNode* layoutNode = widgetNode.firstChild("layout");
+    if (!layoutNode) {
+        return true;
+    }
+
+    QLayout* layout = createQtLayout_(layoutNode->attr("class"), error);
+    if (!layout) {
+        return false;
+    }
+
+    for (const auto* prop : layoutNode->childrenNamed("property")) {
+        if (!prop) {
+            continue;
+        }
+        const SwString rawName = prop->attr("name");
+        if (rawName == "spacing") {
+            layout->setSpacing(toInt_(textValue_(*prop), layout->spacing()));
+        } else if (rawName == "leftMargin" || rawName == "topMargin" || rawName == "rightMargin" || rawName == "bottomMargin") {
+            int left = 0;
+            int top = 0;
+            int right = 0;
+            int bottom = 0;
+            layout->getContentsMargins(&left, &top, &right, &bottom);
+            const int value = toInt_(textValue_(*prop), 0);
+            if (rawName == "leftMargin") left = value;
+            if (rawName == "topMargin") top = value;
+            if (rawName == "rightMargin") right = value;
+            if (rawName == "bottomMargin") bottom = value;
+            layout->setContentsMargins(left, top, right, bottom);
+        } else if (rawName == "margin") {
+            const int value = toInt_(textValue_(*prop), 0);
+            layout->setContentsMargins(value, value, value, value);
+        }
+    }
+
+    for (const auto* item : layoutNode->childrenNamed("item")) {
+        if (!item) {
+            continue;
+        }
+
+        if (const XmlNode* childWidgetNode = item->firstChild("widget")) {
+            QWidget* child = loadQtWidget_(*childWidgetNode, parentWidget, error);
+            if (!child) {
+                delete layout;
+                return false;
+            }
+            layout->addWidget(child);
+            continue;
+        }
+
+        if (const XmlNode* spacerNode = item->firstChild("spacer")) {
+            QSpacerItem* spacer = loadQtSpacer_(*spacerNode);
+            if (!spacer) {
+                delete layout;
+                error = QStringLiteral("Failed to create spacer");
+                return false;
+            }
+            layout->addItem(spacer);
+        }
+    }
+
+    parentWidget->setLayout(layout);
+    return true;
+}
+
+QWidget* loadQtWidget_(const XmlNode& widgetNode, QWidget* parent, QString& error) {
+    QWidget* widget = createQtWidget_(widgetNode.attr("class"), parent, error);
+    if (!widget) {
+        return nullptr;
+    }
+
+    const SwString objectName = widgetNode.attr("name");
+    if (!objectName.isEmpty()) {
+        widget->setObjectName(toQString(objectName));
+    }
+
+    for (const auto* prop : widgetNode.childrenNamed("property")) {
+        if (!prop) {
+            continue;
+        }
+        const SwString rawName = prop->attr("name");
+        if (rawName == "geometry") {
+            continue;
+        }
+        applyQtProperty_(widget, rawName, *prop);
+    }
+
+    if (!applyQtLayout_(widget, widgetNode, error)) {
+        delete widget;
+        return nullptr;
+    }
+
+    if (!widgetNode.firstChild("layout")) {
+        for (const auto* childWidgetNode : widgetNode.childrenNamed("widget")) {
+            if (!childWidgetNode) {
+                continue;
+            }
+            QWidget* child = loadQtWidget_(*childWidgetNode, widget, error);
+            if (!child) {
+                delete widget;
+                return nullptr;
+            }
+            child->setParent(widget);
+        }
+    }
+
+    return widget;
+}
+
+QWidget* loadQtCentralWidgetFromUi_(const QString& filePath, QWidget* parent, QString& error) {
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        error = QStringLiteral("Failed to open UI file: ") + filePath;
+        return nullptr;
+    }
+
+    const SwString xml = SwString::fromUtf8(file.readAll().constData());
+    const auto parsed = SwXmlDocument::parse(xml);
+    if (!parsed.ok) {
+        error = toQString(parsed.error.isEmpty() ? SwString("XML parse error") : parsed.error);
+        return nullptr;
+    }
+
+    const XmlNode* uiRoot = &parsed.root;
+    if (uiRoot->name != "ui") {
+        error = QStringLiteral("UI root element must be <ui>");
+        return nullptr;
+    }
+
+    const XmlNode* mainWidget = uiRoot->firstChild("widget");
+    if (!mainWidget || mainWidget->attr("class") != "QMainWindow") {
+        error = QStringLiteral("UI root widget must be QMainWindow");
+        return nullptr;
+    }
+
+    for (const auto* childWidgetNode : mainWidget->childrenNamed("widget")) {
+        if (!childWidgetNode) {
+            continue;
+        }
+        if (childWidgetNode->attr("name") == "centralWidget") {
+            return loadQtWidget_(*childWidgetNode, parent, error);
+        }
+    }
+
+    error = QStringLiteral("QMainWindow has no centralWidget");
+    return nullptr;
+}
+
+template<typename T>
+T* findChildByObjectName_(QObject* root, const QString& name) {
+    if (!root) {
+        return nullptr;
+    }
+
+    const QObjectList directChildren = root->children();
+    for (QObject* child : directChildren) {
+        if (!child) {
+            continue;
+        }
+
+        if (T* typed = qobject_cast<T*>(child)) {
+            if (typed->objectName().compare(name, Qt::CaseSensitive) == 0) {
+                return typed;
+            }
+        }
+
+        if (T* nested = findChildByObjectName_<T>(child, name)) {
+            return nested;
+        }
+    }
+
+    return nullptr;
+}
 
 class QtColorChipButton final : public QAbstractButton {
 public:
@@ -25,7 +353,8 @@ public:
         , color_(inkQColor(paletteIndex_)) {
         setCheckable(true);
         setCursor(Qt::PointingHandCursor);
-        setFixedSize(30, 30);
+        setFixedSize(example42SwatchSize(), example42SwatchSize());
+        setFocusPolicy(Qt::NoFocus);
     }
 
     int paletteIndex() const {
@@ -57,9 +386,11 @@ class QtSketchCanvas final : public QWidget {
 public:
     explicit QtSketchCanvas(QWidget* parent = nullptr)
         : QWidget(parent) {
+        setObjectName(QStringLiteral("canvasSurface"));
         setMouseTracking(true);
         setCursor(Qt::CrossCursor);
         setMinimumSize(example42CanvasMinimumWidth(), example42CanvasMinimumHeight());
+        setAttribute(Qt::WA_StyledBackground, true);
     }
 
     void setInkColor(int paletteIndex) {
@@ -76,7 +407,7 @@ public:
 
 protected:
     void mousePressEvent(QMouseEvent* event) override {
-        if (event->button() != Qt::LeftButton) {
+        if (!event || event->button() != Qt::LeftButton) {
             QWidget::mousePressEvent(event);
             return;
         }
@@ -88,7 +419,7 @@ protected:
     }
 
     void mouseMoveEvent(QMouseEvent* event) override {
-        if (drawing_ && (event->buttons() & Qt::LeftButton) && !strokes_.isEmpty()) {
+        if (drawing_ && event && (event->buttons() & Qt::LeftButton) && !strokes_.isEmpty()) {
             appendPoint_(strokes_.last().points, clampPoint_(event->pos()));
             event->accept();
             update();
@@ -99,7 +430,7 @@ protected:
     }
 
     void mouseReleaseEvent(QMouseEvent* event) override {
-        if (!drawing_ || event->button() != Qt::LeftButton || strokes_.isEmpty()) {
+        if (!drawing_ || !event || event->button() != Qt::LeftButton || strokes_.isEmpty()) {
             QWidget::mouseReleaseEvent(event);
             return;
         }
@@ -110,15 +441,13 @@ protected:
         update();
     }
 
-    void paintEvent(QPaintEvent*) override {
+    void paintEvent(QPaintEvent* event) override {
+        QWidget::paintEvent(event);
+
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing, true);
 
         const QRectF bounds = rect().adjusted(0.5, 0.5, -0.5, -0.5);
-        painter.setBrush(QColor(255, 255, 255));
-        painter.setPen(QPen(QColor(220, 224, 232), 1));
-        painter.drawRoundedRect(bounds, 18, 18);
-
         painter.save();
         painter.setClipRect(bounds.adjusted(6.0, 6.0, -6.0, -6.0));
         painter.setPen(QPen(QColor(236, 240, 247), 1));
@@ -188,57 +517,99 @@ class QtStudioPane::Impl {
 public:
     explicit Impl(QtStudioPane* owner)
         : owner_(owner) {
-        const Example42PaneTextSet& texts = example42PaneTexts();
+        example42Trace("qt pane: ctor start");
 
-        titleLabel_ = new QLabel(example42TextQt(texts.title), owner_);
-        subtitleLabel_ = new QLabel(example42TextQt(texts.subtitle), owner_);
-        statusLabel_ = new QLabel(example42TextQt(texts.readyStatus), owner_);
-        runtimeLabel_ = new QLabel(example42TextQt(texts.runtimeIdle), owner_);
-        bridgeButton_ = new QPushButton(example42TextQt(texts.bridgeButton), owner_);
-        fiberButton_ = new QPushButton(example42TextQt(texts.fiberButton), owner_);
-        lineEdit_ = new QLineEdit(owner_);
-        paletteLabel_ = new QLabel(example42TextQt(texts.paletteLabel), owner_);
-        currentInkLabel_ = new QLabel(inkLabelText(0), owner_);
-        clearButton_ = new QPushButton(example42TextQt(texts.clearButton), owner_);
-        canvas_ = new QtSketchCanvas(owner_);
-
-        titleLabel_->setStyleSheet(QStringLiteral("QLabel { color: rgb(15, 23, 42); font-size: 20px; }"));
-        subtitleLabel_->setStyleSheet(QStringLiteral("QLabel { color: rgb(100, 116, 139); font-size: 12px; }"));
-        statusLabel_->setStyleSheet(QStringLiteral("QLabel { color: rgb(37, 99, 235); font-size: 13px; }"));
-        runtimeLabel_->setStyleSheet(QStringLiteral("QLabel { color: rgb(71, 85, 105); font-size: 12px; }"));
-        paletteLabel_->setStyleSheet(QStringLiteral("QLabel { color: rgb(71, 85, 105); font-size: 12px; }"));
-        currentInkLabel_->setStyleSheet(QStringLiteral("QLabel { color: rgb(100, 116, 139); font-size: 12px; }"));
-        bridgeButton_->setStyleSheet(qtPrimaryButtonStyleSheet());
-        fiberButton_->setStyleSheet(qtSecondaryButtonStyleSheet());
-        clearButton_->setStyleSheet(qtSecondaryButtonStyleSheet());
-        lineEdit_->setStyleSheet(qtLineEditStyleSheet());
-        lineEdit_->setPlaceholderText(example42TextQt(texts.placeholder));
-        titleLabel_->setMinimumHeight(example42TitleHeight());
-        subtitleLabel_->setMinimumHeight(example42SubtitleHeight());
-        statusLabel_->setMinimumHeight(example42StatusHeight());
-        runtimeLabel_->setMinimumHeight(example42RuntimeHeight());
-        bridgeButton_->setMinimumSize(example42ContentMinimumWidth(), example42BridgeButtonHeight());
-        fiberButton_->setMinimumSize(example42ContentMinimumWidth(), example42FiberButtonHeight());
-        lineEdit_->setMinimumSize(example42ContentMinimumWidth(), example42LineEditHeight());
-        paletteLabel_->setMinimumSize(example42PaletteLabelWidth(), example42PaletteRowHeight());
-        currentInkLabel_->setMinimumSize(example42CurrentInkLabelWidth(), example42PaletteRowHeight());
-        clearButton_->setMinimumSize(example42ClearButtonWidth(), example42ClearButtonHeight());
-
-        for (int index = 0; index < kInkPaletteCount; ++index) {
-            QtColorChipButton* swatch = new QtColorChipButton(index, owner_);
-            owner_->connect(swatch, &QAbstractButton::clicked, owner_, [this, index]() {
-                selectInk(index);
-                statusLabel_->setText(QStringLiteral("Qt ink -> %1").arg(inkName(index)));
-            });
-            swatches_.append(swatch);
+        QString uiError;
+        contentRoot_ = loadQtCentralWidgetFromUi_(example42StudioUiPathQt(), owner_, uiError);
+        example42Trace(contentRoot_ ? "qt pane: ui loaded" : "qt pane: ui load failed");
+        if (!contentRoot_) {
+            contentRoot_ = new QWidget(owner_);
+            contentRoot_->setObjectName(QStringLiteral("centralWidget"));
+            contentRoot_->setMinimumSize(example42PaneMinimumWidth(), example42PaneMinimumHeight());
         }
 
-        owner_->connect(clearButton_, &QPushButton::clicked, owner_, [this]() {
-            canvas_->clearSketch();
-            statusLabel_->setText(QStringLiteral("Qt canvas cleared"));
-        });
+        contentRoot_->setAttribute(Qt::WA_StyledBackground, true);
+
+        QVBoxLayout* hostLayout = new QVBoxLayout(owner_);
+        hostLayout->setContentsMargins(0, 0, 0, 0);
+        hostLayout->setSpacing(0);
+        hostLayout->addWidget(contentRoot_);
+
+        titleLabel_ = findChildByObjectName_<QLabel>(contentRoot_, QString::fromLatin1("titleLabel"));
+        subtitleLabel_ = findChildByObjectName_<QLabel>(contentRoot_, QString::fromLatin1("subtitleLabel"));
+        statusLabel_ = findChildByObjectName_<QLabel>(contentRoot_, QString::fromLatin1("statusLabel"));
+        runtimeLabel_ = findChildByObjectName_<QLabel>(contentRoot_, QString::fromLatin1("runtimeLabel"));
+        bridgeButton_ = findChildByObjectName_<QPushButton>(contentRoot_, QString::fromLatin1("bridgeButton"));
+        fiberButton_ = findChildByObjectName_<QPushButton>(contentRoot_, QString::fromLatin1("fiberButton"));
+        lineEdit_ = findChildByObjectName_<QLineEdit>(contentRoot_, QString::fromLatin1("messageEdit"));
+        paletteLabel_ = findChildByObjectName_<QLabel>(contentRoot_, QString::fromLatin1("paletteLabel"));
+        currentInkLabel_ = findChildByObjectName_<QLabel>(contentRoot_, QString::fromLatin1("currentInkLabel"));
+        clearButton_ = findChildByObjectName_<QPushButton>(contentRoot_, QString::fromLatin1("clearButton"));
+        swatchStrip_ = findChildByObjectName_<QWidget>(contentRoot_, QString::fromLatin1("swatchStrip"));
+        canvasHost_ = findChildByObjectName_<QWidget>(contentRoot_, QString::fromLatin1("canvasHost"));
+        rootLayout_ = qobject_cast<QVBoxLayout*>(contentRoot_->layout());
+
+        if (currentInkLabel_) {
+            currentInkLabel_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        }
+
+        owner_->setStyleSheet(loadSharedStyleSheet_());
+        example42Trace("qt pane: stylesheet applied");
+
+        if (swatchStrip_) {
+            QHBoxLayout* swatchLayout = new QHBoxLayout();
+            swatchLayout->setContentsMargins(0, 0, 0, 0);
+            swatchLayout->setSpacing(example42SwatchStep() - example42SwatchSize());
+            swatchStrip_->setLayout(swatchLayout);
+
+            swatchGroup_ = new QButtonGroup(owner_);
+            swatchGroup_->setExclusive(true);
+
+            for (int index = 0; index < kInkPaletteCount; ++index) {
+                QtColorChipButton* swatch = new QtColorChipButton(index, swatchStrip_);
+                swatchGroup_->addButton(swatch, index);
+                swatchLayout->addWidget(swatch);
+                swatches_.append(swatch);
+
+                owner_->connect(swatch, &QAbstractButton::clicked, owner_, [this, index]() {
+                    selectInk(index);
+                    if (statusLabel_) {
+                        statusLabel_->setText(QStringLiteral("Qt ink -> ") + inkName(index));
+                    }
+                });
+            }
+            swatchLayout->addStretch(1);
+        }
+
+        if (canvasHost_) {
+            QVBoxLayout* canvasLayout = new QVBoxLayout();
+            canvasLayout->setContentsMargins(0, 0, 0, 0);
+            canvasLayout->setSpacing(0);
+            canvasHost_->setLayout(canvasLayout);
+
+            canvas_ = new QtSketchCanvas(canvasHost_);
+            canvasLayout->addWidget(canvas_);
+            example42Trace("qt pane: canvas created");
+        }
+
+        if (rootLayout_ && canvasHost_) {
+            rootLayout_->setStretchFactor(canvasHost_, 1);
+        }
+
+        if (clearButton_) {
+            owner_->connect(clearButton_, &QPushButton::clicked, owner_, [this]() {
+                if (canvas_) {
+                    canvas_->clearSketch();
+                }
+                if (statusLabel_) {
+                    statusLabel_->setText(QStringLiteral("Qt canvas cleared"));
+                }
+            });
+        }
 
         selectInk(0);
+        owner_->setMinimumSize(contentRoot_->minimumSizeHint());
+        example42Trace("qt pane: ctor done");
     }
 
     QPushButton* bridgeButton() const {
@@ -250,55 +621,97 @@ public:
     }
 
     QString messageText() const {
-        return lineEdit_->text().trimmed();
+        return lineEdit_ ? lineEdit_->text().trimmed() : QString();
     }
 
     void setStatusText(const QString& text) {
-        statusLabel_->setText(text);
+        if (statusLabel_) {
+            statusLabel_->setText(text);
+        }
     }
 
     void setRuntimeStatusText(const QString& text) {
-        runtimeLabel_->setText(text);
+        if (runtimeLabel_) {
+            runtimeLabel_->setText(text);
+        }
     }
 
-    void layoutWidgets() {
-        const Example42PaneLayout layout = computeExample42PaneLayout(owner_->width(), owner_->height());
+    QSize minimumSizeHint() const {
+        return contentRoot_ ? contentRoot_->minimumSizeHint()
+                            : QSize(example42PaneMinimumWidth(), example42PaneMinimumHeight());
+    }
 
-        titleLabel_->setGeometry(layout.title.x, layout.title.y, layout.title.width, layout.title.height);
-        subtitleLabel_->setGeometry(layout.subtitle.x, layout.subtitle.y, layout.subtitle.width, layout.subtitle.height);
-        statusLabel_->setGeometry(layout.status.x, layout.status.y, layout.status.width, layout.status.height);
-        runtimeLabel_->setGeometry(layout.runtime.x, layout.runtime.y, layout.runtime.width, layout.runtime.height);
-        bridgeButton_->setGeometry(layout.bridgeButton.x, layout.bridgeButton.y, layout.bridgeButton.width, layout.bridgeButton.height);
-        fiberButton_->setGeometry(layout.fiberButton.x, layout.fiberButton.y, layout.fiberButton.width, layout.fiberButton.height);
-        lineEdit_->setGeometry(layout.lineEdit.x, layout.lineEdit.y, layout.lineEdit.width, layout.lineEdit.height);
-        paletteLabel_->setGeometry(layout.paletteLabel.x, layout.paletteLabel.y, layout.paletteLabel.width, layout.paletteLabel.height);
-        currentInkLabel_->setGeometry(layout.currentInkLabel.x,
-                                      layout.currentInkLabel.y,
-                                      layout.currentInkLabel.width,
-                                      layout.currentInkLabel.height);
-
-        int x = layout.paletteLabel.x;
-        for (QtColorChipButton* swatch : swatches_) {
-            swatch->setGeometry(x, layout.clearButton.y + 2, example42SwatchSize(), example42SwatchSize());
-            x += example42SwatchStep();
+    QSize sizeHint() const {
+        if (!contentRoot_) {
+            return QSize(example42PanePreferredWidth(), example42PanePreferredHeight());
         }
+        return contentRoot_->sizeHint().expandedTo(contentRoot_->minimumSizeHint());
+    }
 
-        clearButton_->setGeometry(layout.clearButton.x, layout.clearButton.y, layout.clearButton.width, layout.clearButton.height);
-        canvas_->setGeometry(layout.canvas.x, layout.canvas.y, layout.canvas.width, layout.canvas.height);
+    QString debugGeometryReport() const {
+        QString report;
+        auto appendWidget = [&report](const QString& label, const QWidget* widget) {
+            report += label;
+            if (!widget) {
+                report += QStringLiteral(": <null>\n");
+                return;
+            }
+
+            const QRect g = widget->geometry();
+            const QSize min = widget->minimumSizeHint();
+            const QSize pref = widget->sizeHint();
+            report += QStringLiteral(": geom=%1,%2 %3x%4 min=%5x%6 pref=%7x%8 object=%9\n")
+                          .arg(g.x())
+                          .arg(g.y())
+                          .arg(g.width())
+                          .arg(g.height())
+                          .arg(min.width())
+                          .arg(min.height())
+                          .arg(pref.width())
+                          .arg(pref.height())
+                          .arg(widget->objectName());
+        };
+
+        appendWidget(QStringLiteral("owner"), owner_);
+        appendWidget(QStringLiteral("contentRoot"), contentRoot_);
+        appendWidget(QStringLiteral("titleLabel"), titleLabel_);
+        appendWidget(QStringLiteral("subtitleLabel"), subtitleLabel_);
+        appendWidget(QStringLiteral("statusLabel"), statusLabel_);
+        appendWidget(QStringLiteral("runtimeLabel"), runtimeLabel_);
+        appendWidget(QStringLiteral("bridgeButton"), bridgeButton_);
+        appendWidget(QStringLiteral("fiberButton"), fiberButton_);
+        appendWidget(QStringLiteral("messageEdit"), lineEdit_);
+        appendWidget(QStringLiteral("paletteLabel"), paletteLabel_);
+        appendWidget(QStringLiteral("currentInkLabel"), currentInkLabel_);
+        appendWidget(QStringLiteral("clearButton"), clearButton_);
+        appendWidget(QStringLiteral("swatchStrip"), swatchStrip_);
+        appendWidget(QStringLiteral("canvasHost"), canvasHost_);
+        appendWidget(QStringLiteral("canvasSurface"), canvas_);
+        for (int i = 0; i < swatches_.size(); ++i) {
+            appendWidget(QStringLiteral("swatch[%1]").arg(i), swatches_.at(i));
+        }
+        return report;
     }
 
 private:
     void selectInk(int index) {
         const int clamped = clampInkIndex(index);
-        currentInkLabel_->setText(inkLabelText(clamped));
-        canvas_->setInkColor(clamped);
+        if (currentInkLabel_) {
+            currentInkLabel_->setText(inkLabelText(clamped));
+        }
+        if (canvas_) {
+            canvas_->setInkColor(clamped);
+        }
         for (QtColorChipButton* swatch : swatches_) {
-            swatch->setChecked(swatch->paletteIndex() == clamped);
-            swatch->update();
+            if (swatch) {
+                swatch->setChecked(swatch->paletteIndex() == clamped);
+                swatch->update();
+            }
         }
     }
 
     QtStudioPane* owner_{nullptr};
+    QWidget* contentRoot_{nullptr};
     QLabel* titleLabel_{nullptr};
     QLabel* subtitleLabel_{nullptr};
     QLabel* statusLabel_{nullptr};
@@ -309,15 +722,17 @@ private:
     QLabel* paletteLabel_{nullptr};
     QLabel* currentInkLabel_{nullptr};
     QPushButton* clearButton_{nullptr};
+    QWidget* swatchStrip_{nullptr};
+    QWidget* canvasHost_{nullptr};
+    QVBoxLayout* rootLayout_{nullptr};
     QtSketchCanvas* canvas_{nullptr};
+    QButtonGroup* swatchGroup_{nullptr};
     QList<QtColorChipButton*> swatches_;
 };
 
 QtStudioPane::QtStudioPane(QWidget* parent)
     : QWidget(parent)
     , impl_(new Impl(this)) {
-    setAutoFillBackground(true);
-    setMinimumSize(example42PaneMinimumWidth(), example42PaneMinimumHeight());
 }
 
 QtStudioPane::~QtStudioPane() = default;
@@ -342,21 +757,14 @@ void QtStudioPane::setRuntimeStatusText(const QString& text) {
     impl_->setRuntimeStatusText(text);
 }
 
+QString QtStudioPane::debugGeometryReport() const {
+    return impl_->debugGeometryReport();
+}
+
 QSize QtStudioPane::minimumSizeHint() const {
-    return QSize(example42PaneMinimumWidth(), example42PaneMinimumHeight());
+    return impl_->minimumSizeHint();
 }
 
 QSize QtStudioPane::sizeHint() const {
-    return QSize(example42PanePreferredWidth(), example42PanePreferredHeight());
-}
-
-void QtStudioPane::resizeEvent(QResizeEvent* event) {
-    QWidget::resizeEvent(event);
-    impl_->layoutWidgets();
-}
-
-void QtStudioPane::paintEvent(QPaintEvent* event) {
-    QWidget::paintEvent(event);
-    QPainter painter(this);
-    painter.fillRect(rect(), QColor(244, 247, 251));
+    return impl_->sizeHint();
 }

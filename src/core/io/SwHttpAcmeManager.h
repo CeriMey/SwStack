@@ -101,6 +101,7 @@ public:
 
     void setConfig(const SwAcmeConfig& config);
     const SwAcmeConfig& config() const;
+    void setCertificateActivationHandler(const std::function<bool(const SwString&, const SwString&)>& handler);
 
     bool start(SwHttpApp* app);
     void stop();
@@ -223,6 +224,7 @@ private:
     bool m_preRouteInstalled = false;
 
     SwTimer m_renewTimer;
+    std::function<bool(const SwString&, const SwString&)> m_certificateActivationHandler;
     bool m_operationInProgress = false;
     bool m_pendingRenew = false;
     uint64_t m_operationSerial = 0;
@@ -270,6 +272,11 @@ inline void SwHttpAcmeManager::setConfig(const SwAcmeConfig& config) {
 
 inline const SwAcmeConfig& SwHttpAcmeManager::config() const {
     return m_config;
+}
+
+inline void SwHttpAcmeManager::setCertificateActivationHandler(
+    const std::function<bool(const SwString&, const SwString&)>& handler) {
+    m_certificateActivationHandler = handler;
 }
 
 inline SwString SwHttpAcmeManager::certificatePath() const {
@@ -1050,6 +1057,9 @@ inline bool SwHttpAcmeManager::installCertificate_(const SwString& certificatePe
         return false;
     }
 
+    if (m_certificateActivationHandler) {
+        return m_certificateActivationHandler(certificateFilePath_(), certificateKeyFilePath_());
+    }
     if (m_app->isHttpsListening() && m_app->httpsPort() == m_config.httpsPort) {
         return m_app->reloadHttpsCredentials(m_config.httpsPort, certificateFilePath_(), certificateKeyFilePath_());
     }
@@ -1059,6 +1069,9 @@ inline bool SwHttpAcmeManager::installCertificate_(const SwString& certificatePe
 inline bool SwHttpAcmeManager::enableHttpsFromStorage_() {
     if (!m_app) {
         return false;
+    }
+    if (m_certificateActivationHandler) {
+        return m_certificateActivationHandler(certificateFilePath_(), certificateKeyFilePath_());
     }
     if (m_app->isHttpsListening() && m_app->httpsPort() == m_config.httpsPort) {
         return m_app->reloadHttpsCredentials(m_config.httpsPort, certificateFilePath_(), certificateKeyFilePath_());

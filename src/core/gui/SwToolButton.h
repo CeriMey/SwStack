@@ -46,6 +46,7 @@
  ***************************************************************************************************/
 
 #include "SwWidget.h"
+#include "graphics/SwFontMetrics.h"
 
 class SwToolButton : public SwWidget {
     SW_OBJECT(SwToolButton, SwWidget)
@@ -133,6 +134,31 @@ protected:
     CUSTOM_PROPERTY(SwString, Text, "ToolButton") { update(); }
     CUSTOM_PROPERTY(bool, Pressed, false) { update(); }
 
+    SwSize sizeHint() const override {
+        StyleSheet* sheet = const_cast<SwToolButton*>(this)->getToolSheet();
+        const SwFont font = resolvedStyledFont_(sheet);
+        const SwFontMetrics metrics(font);
+        const SwString label = getText().isEmpty() ? SwString("ToolButton") : getText();
+        const SwSize minSize = minimumSize();
+        const SwSize maxSize = maximumSize();
+        const SwSize styleMin = resolvedStyleMinimumSize_();
+        const SwSize styleMax = resolvedStyleMaximumSize_();
+
+        SwSize hint{
+            metrics.horizontalAdvance(label) + 24,
+            metrics.height() + 16
+        };
+        hint.width = std::max(hint.width, std::max(minSize.width, styleMin.width));
+        hint.height = std::max(hint.height, std::max(minSize.height, styleMin.height));
+        hint.width = std::min(hint.width, std::min(maxSize.width, styleMax.width));
+        hint.height = std::min(hint.height, std::min(maxSize.height, styleMax.height));
+        return hint;
+    }
+
+    SwSize minimumSizeHint() const override {
+        return sizeHint();
+    }
+
     /**
      * @brief Handles the paint Event forwarded by the framework.
      * @param event Event object forwarded by the framework.
@@ -146,26 +172,34 @@ protected:
         }
 
         const SwRect bounds = rect();
-        const int radius = clampInt(std::min(bounds.width, bounds.height) / 4, 6, 12);
+        const int radius = clampInt(std::min(bounds.width, bounds.height) / 5, 4, 8);
 
-        SwColor bg{249, 249, 249};
-        SwColor border{213, 213, 213};
-        SwColor textColor{32, 32, 32};
+        SwColor bg{243, 243, 243};
+        SwColor border{173, 173, 173};
+        SwColor textColor{18, 18, 18};
 
         if (!getEnable()) {
-            bg = SwColor{249, 249, 249};
-            border = SwColor{229, 229, 229};
-            textColor = SwColor{160, 160, 160};
+            bg = SwColor{244, 244, 244};
+            border = SwColor{205, 205, 205};
+            textColor = SwColor{122, 122, 122};
+        } else if (m_checkable && m_checked && getPressed()) {
+            bg = SwColor{0, 84, 153};
+            border = SwColor{0, 72, 131};
+            textColor = SwColor{255, 255, 255};
+        } else if (m_checkable && m_checked && getHover()) {
+            bg = SwColor{0, 132, 239};
+            border = SwColor{0, 120, 215};
+            textColor = SwColor{255, 255, 255};
         } else if (m_checkable && m_checked) {
-            bg = m_accent;
-            border = m_accent;
+            bg = SwColor{0, 120, 215};
+            border = SwColor{0, 99, 177};
             textColor = SwColor{255, 255, 255};
         } else if (getPressed()) {
-            bg = SwColor{204, 204, 204};
-            border = SwColor{180, 180, 180};
+            bg = SwColor{204, 228, 247};
+            border = SwColor{0, 84, 153};
         } else if (getHover()) {
-            bg = SwColor{229, 229, 229};
-            border = SwColor{198, 198, 198};
+            bg = SwColor{229, 241, 251};
+            border = SwColor{0, 120, 215};
         }
 
         painter->fillRoundedRect(bounds, radius, bg, border, 1);
@@ -232,19 +266,32 @@ private:
         setFont(SwFont(L"Segoe UI", 9, Medium));
         setStyleSheet(R"(
             SwToolButton {
-                background-color: rgb(255, 255, 255);
-                border-color: rgb(220, 224, 232);
+                background-color: rgb(243, 243, 243);
+                border-color: rgb(173, 173, 173);
                 border-width: 1px;
-                border-radius: 10px;
-                color: rgb(30, 30, 30);
+                border-radius: 4px;
+                color: rgb(18, 18, 18);
                 font-size: 13px;
                 padding: 6px 10px;
+            }
+            SwToolButton:hover {
+                background-color: rgb(229, 241, 251);
+                border-color: rgb(0, 120, 215);
+            }
+            SwToolButton:pressed {
+                background-color: rgb(204, 228, 247);
+                border-color: rgb(0, 84, 153);
+            }
+            SwToolButton:checked {
+                background-color: rgb(0, 120, 215);
+                border-color: rgb(0, 99, 177);
+                color: rgb(255, 255, 255);
             }
         )");
     }
 
     bool m_checkable{false};
     bool m_checked{false};
-    SwColor m_accent{59, 130, 246};
+    SwColor m_accent{0, 120, 215};
 };
 

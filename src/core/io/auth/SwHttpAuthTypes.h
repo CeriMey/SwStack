@@ -70,6 +70,7 @@ struct SwHttpAuthAccount {
     SwString email;
     SwString passwordHash;
     SwString emailVerifiedAt;
+    bool passwordResetRequired = false;
     bool suspended = false;
     SwString createdAt;
     SwString updatedAt;

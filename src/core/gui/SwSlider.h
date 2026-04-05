@@ -84,9 +84,9 @@ public:
         , m_dragging(false)
         , m_handleSize(18) {
         if (m_orientation == Orientation::Horizontal) {
-            resize(260, 36);
+            resize(84, 24);
         } else {
-            resize(36, 260);
+            resize(24, 84);
         }
         setCursor(CursorType::Hand);
     }
@@ -103,9 +103,9 @@ public:
         }
         m_orientation = orientation;
         if (m_orientation == Orientation::Horizontal) {
-            resize(std::max(width(), 200), std::max(height(), 40));
+            resize(std::max(width(), 84), std::max(height(), 24));
         } else {
-            resize(std::max(width(), 55), std::max(height(), 200));
+            resize(std::max(width(), 24), std::max(height(), 84));
         }
         update();
     }
@@ -209,6 +209,32 @@ public:
     DECLARE_SIGNAL(valueChanged, int);
 
 protected:
+    SwSize sizeHint() const override {
+        const SwSize styleMin = resolvedStyleMinimumSize_();
+        const SwSize styleMax = resolvedStyleMaximumSize_();
+        SwSize hint = (m_orientation == Orientation::Horizontal)
+                          ? SwSize{84, 24}
+                          : SwSize{24, 84};
+        hint.width = std::max(hint.width, std::max(minimumSize().width, styleMin.width));
+        hint.height = std::max(hint.height, std::max(minimumSize().height, styleMin.height));
+        hint.width = std::min(hint.width, std::min(maximumSize().width, styleMax.width));
+        hint.height = std::min(hint.height, std::min(maximumSize().height, styleMax.height));
+        return hint;
+    }
+
+    SwSize minimumSizeHint() const override {
+        const SwSize styleMin = resolvedStyleMinimumSize_();
+        const SwSize styleMax = resolvedStyleMaximumSize_();
+        SwSize hint = (m_orientation == Orientation::Horizontal)
+                          ? SwSize{24, 24}
+                          : SwSize{24, 24};
+        hint.width = std::max(hint.width, std::max(minimumSize().width, styleMin.width));
+        hint.height = std::max(hint.height, std::max(minimumSize().height, styleMin.height));
+        hint.width = std::min(hint.width, std::min(maximumSize().width, styleMax.width));
+        hint.height = std::min(hint.height, std::min(maximumSize().height, styleMax.height));
+        return hint;
+    }
+
     /**
      * @brief Handles the paint Event forwarded by the framework.
      * @param event Event object forwarded by the framework.
@@ -432,4 +458,3 @@ private:
     bool m_dragging;
     int m_handleSize;
 };
-

@@ -50,9 +50,8 @@
 #include <algorithm>
 #include <functional>
 #include <limits>
-#include <numeric>
-#include <vector>
 
+#include "SwVector.h"
 #include "SwWidgetInterface.h"
 
 enum class SwOrientationFlag {
@@ -203,8 +202,7 @@ public:
         if (!m_widget) {
             return;
         }
-        m_widget->move(rect.x, rect.y);
-        m_widget->resize(rect.width, rect.height);
+        m_widget->setGeometry(rect);
     }
 
     SwSize sizeHint() const override {
@@ -324,44 +322,123 @@ inline SwSizePolicy::Policy spacerPolicyFromString_(SwString value) {
     return SwSizePolicy::Minimum;
 }
 
+inline SwString policyToString_(SwSizePolicy::Policy policy) {
+    switch (policy) {
+    case SwSizePolicy::Fixed:
+        return SwString("Fixed");
+    case SwSizePolicy::Minimum:
+        return SwString("Minimum");
+    case SwSizePolicy::Maximum:
+        return SwString("Maximum");
+    case SwSizePolicy::Preferred:
+        return SwString("Preferred");
+    case SwSizePolicy::MinimumExpanding:
+        return SwString("MinimumExpanding");
+    case SwSizePolicy::Expanding:
+        return SwString("Expanding");
+    case SwSizePolicy::Ignored:
+        return SwString("Ignored");
+    }
+    return SwString("Preferred");
+}
+
+template<typename T>
+inline int sumVector_(const SwVector<T>& values) {
+    int total = 0;
+    for (const auto& value : values) {
+        total += static_cast<int>(value);
+    }
+    return total;
+}
+
 inline bool isSpacerWidget_(SwWidgetInterface* widget) {
     return widget && widget->propertyExist("__SwCreator_IsSpacer") &&
            widget->property("__SwCreator_IsSpacer").toBool();
 }
 
-inline SwSizePolicy spacerWidgetSizePolicy_(SwWidgetInterface* widget) {
-    if (!isSpacerWidget_(widget)) {
+inline SwSizePolicy defaultWidgetSizePolicy_(SwWidgetInterface* widget) {
+    if (!widget) {
         return SwSizePolicy{};
     }
 
-    SwString horizontalPolicy("Minimum");
-    SwString verticalPolicy("Minimum");
+    const SwString className = widget->className();
+    if (className == "SwPushButton" ||
+        className == "SwToolButton" ||
+        className == "SwCheckBox" ||
+        className == "SwRadioButton") {
+        return SwSizePolicy(SwSizePolicy::Minimum, SwSizePolicy::Fixed);
+    }
+
+    if (className == "SwLineEdit") {
+        return SwSizePolicy(SwSizePolicy::Expanding, SwSizePolicy::Fixed);
+    }
+
+    if (className == "SwComboBox" ||
+        className == "SwSpinBox" ||
+        className == "SwDoubleSpinBox") {
+        return SwSizePolicy(SwSizePolicy::Preferred, SwSizePolicy::Fixed);
+    }
+
+    if (className == "SwProgressBar" ||
+        className == "SwSlider") {
+        return SwSizePolicy(SwSizePolicy::Expanding, SwSizePolicy::Fixed);
+    }
+
+    if (className == "SwScrollArea" ||
+        className == "SwSplitter" ||
+        className == "SwTabWidget" ||
+        className == "SwToolBox" ||
+        className == "SwStackedWidget" ||
+        className == "SwTextEdit" ||
+        className == "SwPlainTextEdit") {
+        return SwSizePolicy(SwSizePolicy::Expanding, SwSizePolicy::Expanding);
+    }
+
+    return SwSizePolicy(SwSizePolicy::Preferred, SwSizePolicy::Preferred);
+}
+
+inline SwSizePolicy widgetSizePolicy_(SwWidgetInterface* widget) {
+    SwSizePolicy sizePolicy = defaultWidgetSizePolicy_(widget);
+    if (!widget) {
+        return sizePolicy;
+    }
+
+    SwString horizontalPolicy = policyToString_(sizePolicy.horizontalPolicy());
+    SwString verticalPolicy = policyToString_(sizePolicy.verticalPolicy());
     if (widget->propertyExist("HorizontalPolicy")) {
         horizontalPolicy = widget->property("HorizontalPolicy").get<SwString>();
     }
     if (widget->propertyExist("VerticalPolicy")) {
         verticalPolicy = widget->property("VerticalPolicy").get<SwString>();
     }
-    return SwSizePolicy(spacerPolicyFromString_(horizontalPolicy), spacerPolicyFromString_(verticalPolicy));
+    sizePolicy.setHorizontalPolicy(spacerPolicyFromString_(horizontalPolicy));
+    sizePolicy.setVerticalPolicy(spacerPolicyFromString_(verticalPolicy));
+    return sizePolicy;
+}
+
+inline SwSizePolicy itemSizePolicy_(SwLayoutItem* item) {
+    if (!item) {
+        return SwSizePolicy{};
+    }
+
+    if (SwSpacerItem* spacer = item->spacerItem()) {
+        return spacer->sizePolicy();
+    }
+
+    return widgetSizePolicy_(item->widget());
+}
+
+inline bool itemHasExpandFlagOnAxis_(SwLayoutItem* item, bool horizontal) {
+    const SwSizePolicy sizePolicy = itemSizePolicy_(item);
+    const SwSizePolicy::Policy policy = horizontal ? sizePolicy.horizontalPolicy() : sizePolicy.verticalPolicy();
+    return SwSizePolicy::hasExpandFlag(policy);
 }
 
 inline bool itemCanGrowOnAxis_(SwLayoutItem* item, bool horizontal) {
     if (!item) {
         return false;
     }
-
-    if (SwSpacerItem* spacer = item->spacerItem()) {
-        const SwSizePolicy sizePolicy = spacer->sizePolicy();
-        const SwSizePolicy::Policy policy = horizontal ? sizePolicy.horizontalPolicy() : sizePolicy.verticalPolicy();
-        return SwSizePolicy::canGrow(policy) || SwSizePolicy::shouldIgnoreSizeHint(policy);
-    }
-
-    SwWidgetInterface* widget = item->widget();
-    if (!isSpacerWidget_(widget)) {
-        return false;
-    }
-
-    const SwSizePolicy sizePolicy = spacerWidgetSizePolicy_(widget);
+    const SwSizePolicy sizePolicy = itemSizePolicy_(item);
     const SwSizePolicy::Policy policy = horizontal ? sizePolicy.horizontalPolicy() : sizePolicy.verticalPolicy();
     return SwSizePolicy::canGrow(policy) || SwSizePolicy::shouldIgnoreSizeHint(policy);
 }
@@ -374,7 +451,10 @@ public:
         : SwObject(parent)
         , m_parentWidget(parent)
         , m_spacing(8)
-        , m_margin(8) {}
+        , m_leftMargin(8)
+        , m_topMargin(8)
+        , m_rightMargin(8)
+        , m_bottomMargin(8) {}
 
     virtual ~SwAbstractLayout() = default;
 
@@ -396,12 +476,60 @@ public:
     }
 
     void setMargin(int margin) {
-        m_margin = std::max(0, margin);
+        const int clamped = std::max(0, margin);
+        m_leftMargin = clamped;
+        m_topMargin = clamped;
+        m_rightMargin = clamped;
+        m_bottomMargin = clamped;
         updateGeometry();
     }
 
     int margin() const {
-        return m_margin;
+        return m_leftMargin;
+    }
+
+    void setLeftMargin(int margin) {
+        m_leftMargin = std::max(0, margin);
+        updateGeometry();
+    }
+
+    void setTopMargin(int margin) {
+        m_topMargin = std::max(0, margin);
+        updateGeometry();
+    }
+
+    void setRightMargin(int margin) {
+        m_rightMargin = std::max(0, margin);
+        updateGeometry();
+    }
+
+    void setBottomMargin(int margin) {
+        m_bottomMargin = std::max(0, margin);
+        updateGeometry();
+    }
+
+    int leftMargin() const {
+        return m_leftMargin;
+    }
+
+    int topMargin() const {
+        return m_topMargin;
+    }
+
+    int rightMargin() const {
+        return m_rightMargin;
+    }
+
+    int bottomMargin() const {
+        return m_bottomMargin;
+    }
+
+    void setContentsMargins(int left, int top, int right, int bottom) {
+        m_leftMargin = std::max(0, left);
+        m_topMargin = std::max(0, top);
+        m_rightMargin = std::max(0, right);
+        m_bottomMargin = std::max(0, bottom);
+        updateGeometry();
     }
 
     virtual SwSize sizeHint() const {
@@ -442,12 +570,12 @@ protected:
         if (!m_parentWidget) {
             return {0, 0, 0, 0};
         }
-        const SwSize parentSize = m_parentWidget->clientSize();
+        const SwRect parentRect = m_parentWidget->clientRect();
         SwRect rect;
-        rect.x = m_margin;
-        rect.y = m_margin;
-        rect.width = std::max(0, parentSize.width - 2 * m_margin);
-        rect.height = std::max(0, parentSize.height - 2 * m_margin);
+        rect.x = parentRect.x + m_leftMargin;
+        rect.y = parentRect.y + m_topMargin;
+        rect.width = std::max(0, parentRect.width - m_leftMargin - m_rightMargin);
+        rect.height = std::max(0, parentRect.height - m_topMargin - m_bottomMargin);
         return rect;
     }
 
@@ -456,7 +584,10 @@ protected:
 private:
     SwWidgetInterface* m_parentWidget;
     int m_spacing;
-    int m_margin;
+    int m_leftMargin;
+    int m_topMargin;
+    int m_rightMargin;
+    int m_bottomMargin;
 };
 
 class SwBoxLayout : public SwAbstractLayout {
@@ -574,7 +705,7 @@ public:
     }
 
 protected:
-    const std::vector<Item>& items() const {
+    const SwVector<Item>& items() const {
         return m_items;
     }
 
@@ -582,7 +713,7 @@ protected:
 
     void applyBoxLayout_(const SwRect& rect) {
         const auto& entries = items();
-        if (entries.empty()) {
+        if (entries.isEmpty()) {
             return;
         }
 
@@ -592,9 +723,9 @@ protected:
             0,
             (horizontal ? rect.width : rect.height) - std::max(0, static_cast<int>(entries.size()) - 1) * spacingAmount);
 
-        std::vector<int> minimumSizes;
-        std::vector<int> preferredSizes;
-        std::vector<int> finalSizes;
+        SwVector<int> minimumSizes;
+        SwVector<int> preferredSizes;
+        SwVector<int> finalSizes;
         minimumSizes.reserve(entries.size());
         preferredSizes.reserve(entries.size());
         finalSizes.reserve(entries.size());
@@ -614,18 +745,13 @@ protected:
         }
 
         if (totalMinimum > availablePrimary && totalMinimum > 0) {
-            int scaledTotal = 0;
-            for (size_t i = 0; i < minimumSizes.size(); ++i) {
-                finalSizes[i] = static_cast<int>((static_cast<long long>(minimumSizes[i]) * availablePrimary) / totalMinimum);
-                scaledTotal += finalSizes[i];
-            }
-            int remainder = availablePrimary - scaledTotal;
-            for (size_t i = 0; remainder > 0 && i < finalSizes.size(); ++i, --remainder) {
-                ++finalSizes[i];
-            }
+            // Respect the minimum contract even when the parent is undersized.
+            // Qt keeps controls at their minimum sizes and lets clipping/overflow
+            // happen rather than proportionally crushing child widgets.
+            finalSizes = minimumSizes;
         } else if (totalPreferred > availablePrimary) {
             int deficit = totalPreferred - availablePrimary;
-            std::vector<int> shrinkCapacity;
+            SwVector<int> shrinkCapacity;
             shrinkCapacity.reserve(entries.size());
             int totalShrinkCapacity = 0;
             for (size_t i = 0; i < entries.size(); ++i) {
@@ -652,7 +778,7 @@ protected:
             }
         }
 
-        const int allocated = std::accumulate(finalSizes.begin(), finalSizes.end(), 0);
+        const int allocated = SwLayoutDetail::sumVector_(finalSizes);
         int extra = std::max(0, availablePrimary - allocated);
 
         if (extra > 0 && totalStretch > 0) {
@@ -674,15 +800,37 @@ protected:
         }
 
         if (extra > 0) {
-            std::vector<size_t> growable;
+            SwVector<size_t> growable;
             growable.reserve(entries.size());
-            for (size_t i = 0; i < entries.size(); ++i) {
-                if (spacerCanGrow_(entries[i], horizontal)) {
-                    growable.push_back(i);
+            const auto collectGrowable = [&](bool spacersOnly, bool requireExpandFlag) -> bool {
+                growable.clear();
+                for (size_t i = 0; i < entries.size(); ++i) {
+                    if (!entries[i].item) {
+                        continue;
+                    }
+
+                    const bool isSpacer = entries[i].item->spacerItem() != nullptr;
+                    if (isSpacer != spacersOnly) {
+                        continue;
+                    }
+
+                    const bool acceptsExtra = requireExpandFlag
+                                                 ? SwLayoutDetail::itemHasExpandFlagOnAxis_(entries[i].item, horizontal)
+                                                 : spacerCanGrow_(entries[i], horizontal);
+                    if (acceptsExtra) {
+                        growable.push_back(i);
+                    }
                 }
+                return !growable.isEmpty();
+            };
+
+            if (!collectGrowable(true, true) &&
+                !collectGrowable(false, true) &&
+                !collectGrowable(true, false)) {
+                collectGrowable(false, false);
             }
 
-            if (!growable.empty()) {
+            if (!growable.isEmpty()) {
                 const int perItem = extra / static_cast<int>(growable.size());
                 int remainder = extra % static_cast<int>(growable.size());
                 for (size_t index : growable) {
@@ -701,10 +849,14 @@ protected:
                 continue;
             }
 
+            const int crossAvailable = std::max(0, horizontal ? rect.height : rect.width);
+            const int crossSize = resolvedCrossSize_(entries[i], horizontal, crossAvailable);
             if (horizontal) {
-                entries[i].item->setGeometry(SwRect{primaryPos, rect.y, finalSizes[i], rect.height});
+                const int crossPos = rect.y + std::max(0, (rect.height - crossSize) / 2);
+                entries[i].item->setGeometry(SwRect{primaryPos, crossPos, finalSizes[i], crossSize});
             } else {
-                entries[i].item->setGeometry(SwRect{rect.x, primaryPos, rect.width, finalSizes[i]});
+                const int crossPos = rect.x + std::max(0, (rect.width - crossSize) / 2);
+                entries[i].item->setGeometry(SwRect{crossPos, primaryPos, crossSize, finalSizes[i]});
             }
             primaryPos += finalSizes[i] + spacingAmount;
         }
@@ -767,9 +919,8 @@ private:
 
     SwSize layoutSizeHint_(bool minimum) const {
         const auto& entries = items();
-        if (entries.empty()) {
-            const int extent = 2 * margin();
-            return {extent, extent};
+        if (entries.isEmpty()) {
+            return {leftMargin() + rightMargin(), topMargin() + bottomMargin()};
         }
 
         const bool horizontal = primaryOrientation() == SwOrientationFlag::Horizontal;
@@ -797,9 +948,9 @@ private:
         }
 
         if (horizontal) {
-            return {primary + 2 * margin(), cross + 2 * margin()};
+            return {primary + leftMargin() + rightMargin(), cross + topMargin() + bottomMargin()};
         }
-        return {cross + 2 * margin(), primary + 2 * margin()};
+        return {cross + leftMargin() + rightMargin(), primary + topMargin() + bottomMargin()};
     }
 
     int primaryPreferredSize_(const Item& item, bool horizontal) const {
@@ -824,6 +975,36 @@ private:
         return std::max(0, horizontal ? size.width : size.height);
     }
 
+    int crossPreferredSize_(const Item& item, bool horizontal) const {
+        if (!item.item) {
+            return 0;
+        }
+        const SwSize size = item.item->sizeHint();
+        return std::max(0, horizontal ? size.height : size.width);
+    }
+
+    int crossMinimumSize_(const Item& item, bool horizontal) const {
+        if (!item.item) {
+            return 0;
+        }
+        const SwSize size = item.item->minimumSize();
+        return std::max(0, horizontal ? size.height : size.width);
+    }
+
+    int resolvedCrossSize_(const Item& item, bool horizontal, int availableCross) const {
+        if (!item.item) {
+            return 0;
+        }
+
+        const int minimum = crossMinimumSize_(item, horizontal);
+        const int preferred = std::max(minimum, crossPreferredSize_(item, horizontal));
+        if (SwLayoutDetail::itemCanGrowOnAxis_(item.item, !horizontal)) {
+            return std::max(minimum, availableCross);
+        }
+
+        return std::max(minimum, std::min(availableCross, preferred));
+    }
+
     bool spacerCanGrow_(const Item& item, bool horizontal) const {
         return SwLayoutDetail::itemCanGrowOnAxis_(item.item, horizontal);
     }
@@ -843,7 +1024,7 @@ private:
         return new SwSpacerItem(0, 0, SwSizePolicy::Minimum, SwSizePolicy::Expanding);
     }
 
-    std::vector<Item> m_items;
+    SwVector<Item> m_items;
 };
 
 class SwVerticalLayout : public SwBoxLayout {
@@ -993,7 +1174,7 @@ public:
 
 protected:
     void applyLayout(const SwRect& rect) override {
-        if (m_cells.empty()) {
+        if (m_cells.isEmpty()) {
             return;
         }
 
@@ -1014,12 +1195,75 @@ protected:
             m_columnStretch.resize(static_cast<size_t>(columns), 0);
         }
 
-        std::vector<int> rowMin(static_cast<size_t>(rows), 0);
-        std::vector<int> columnMin(static_cast<size_t>(columns), 0);
-        std::vector<bool> rowOccupied(static_cast<size_t>(rows), false);
-        std::vector<bool> columnOccupied(static_cast<size_t>(columns), false);
-        std::vector<bool> rowGrow(static_cast<size_t>(rows), false);
-        std::vector<bool> columnGrow(static_cast<size_t>(columns), false);
+        SwVector<int> rowMin(static_cast<size_t>(rows), 0);
+        SwVector<int> columnMin(static_cast<size_t>(columns), 0);
+        SwVector<bool> rowOccupied(static_cast<size_t>(rows), false);
+        SwVector<bool> columnOccupied(static_cast<size_t>(columns), false);
+        SwVector<bool> rowGrow(static_cast<size_t>(rows), false);
+        SwVector<bool> columnGrow(static_cast<size_t>(columns), false);
+
+        auto requiredSpanExtent_ = [](int totalExtent, int spacingAmount, int span) {
+            return std::max(0, totalExtent - std::max(0, span - 1) * spacingAmount);
+        };
+
+        auto ensureSpanMinimum_ = [](SwVector<int>& mins,
+                                     const SwVector<bool>& growable,
+                                     int start,
+                                     int span,
+                                     int required) {
+            if (required <= 0 || span <= 0) {
+                return;
+            }
+
+            int current = 0;
+            SwVector<int> growableIndices;
+            SwVector<int> allIndices;
+            growableIndices.reserve(static_cast<size_t>(span));
+            allIndices.reserve(static_cast<size_t>(span));
+
+            for (int i = 0; i < span; ++i) {
+                const int index = start + i;
+                if (index < 0 || static_cast<size_t>(index) >= mins.size()) {
+                    continue;
+                }
+                current += mins[static_cast<size_t>(index)];
+                allIndices.push_back(index);
+                if (growable[static_cast<size_t>(index)]) {
+                    growableIndices.push_back(index);
+                }
+            }
+
+            if (current >= required || allIndices.isEmpty()) {
+                return;
+            }
+
+            const int deficit = required - current;
+            const SwVector<int>& targetIndices = growableIndices.isEmpty() ? allIndices : growableIndices;
+            const int per = deficit / static_cast<int>(targetIndices.size());
+            int remainder = deficit % static_cast<int>(targetIndices.size());
+            for (const int index : targetIndices) {
+                mins[static_cast<size_t>(index)] += per;
+                if (remainder > 0) {
+                    ++mins[static_cast<size_t>(index)];
+                    --remainder;
+                }
+            }
+        };
+
+        auto resolveItemExtent_ = [](SwLayoutItem* item, bool horizontal, int availableExtent) {
+            if (!item) {
+                return 0;
+            }
+
+            const SwSize minimumSize = item->minimumSize();
+            const SwSize preferredSize = item->sizeHint();
+            const int minimum = std::max(0, horizontal ? minimumSize.width : minimumSize.height);
+            const int preferred = std::max(minimum, horizontal ? preferredSize.width : preferredSize.height);
+            if (SwLayoutDetail::itemCanGrowOnAxis_(item, horizontal)) {
+                return std::max(minimum, availableExtent);
+            }
+            return std::max(minimum, std::min(availableExtent, preferred));
+        };
 
         for (const Cell& cell : m_cells) {
             if (!cell.item) {
@@ -1030,15 +1274,12 @@ protected:
             const SwSize minimum = cell.item->minimumSize();
             const int totalHeight = std::max(minimum.height, preferred.height);
             const int totalWidth = std::max(minimum.width, preferred.width);
-            const int sharedHeight = cell.rowSpan > 0 ? (totalHeight + cell.rowSpan - 1) / cell.rowSpan : totalHeight;
-            const int sharedWidth = cell.columnSpan > 0 ? (totalWidth + cell.columnSpan - 1) / cell.columnSpan : totalWidth;
 
             for (int i = 0; i < cell.rowSpan; ++i) {
                 const int rowIndex = cell.row + i;
                 if (rowIndex < rows) {
                     rowOccupied[static_cast<size_t>(rowIndex)] = true;
-                    rowMin[static_cast<size_t>(rowIndex)] = std::max(rowMin[static_cast<size_t>(rowIndex)], sharedHeight);
-                    if (SwLayoutDetail::itemCanGrowOnAxis_(cell.item, false)) {
+                    if (SwLayoutDetail::itemHasExpandFlagOnAxis_(cell.item, false)) {
                         rowGrow[static_cast<size_t>(rowIndex)] = true;
                     }
                 }
@@ -1048,21 +1289,53 @@ protected:
                 const int columnIndex = cell.column + i;
                 if (columnIndex < columns) {
                     columnOccupied[static_cast<size_t>(columnIndex)] = true;
-                    columnMin[static_cast<size_t>(columnIndex)] = std::max(columnMin[static_cast<size_t>(columnIndex)], sharedWidth);
-                    if (SwLayoutDetail::itemCanGrowOnAxis_(cell.item, true)) {
+                    if (SwLayoutDetail::itemHasExpandFlagOnAxis_(cell.item, true)) {
                         columnGrow[static_cast<size_t>(columnIndex)] = true;
                     }
                 }
             }
+
+            if (cell.rowSpan == 1 && cell.row < rows) {
+                rowMin[static_cast<size_t>(cell.row)] = std::max(rowMin[static_cast<size_t>(cell.row)], totalHeight);
+            }
+            if (cell.columnSpan == 1 && cell.column < columns) {
+                columnMin[static_cast<size_t>(cell.column)] = std::max(columnMin[static_cast<size_t>(cell.column)], totalWidth);
+            }
+        }
+
+        for (const Cell& cell : m_cells) {
+            if (!cell.item) {
+                continue;
+            }
+
+            const SwSize preferred = cell.item->sizeHint();
+            const SwSize minimum = cell.item->minimumSize();
+            const int totalHeight = std::max(minimum.height, preferred.height);
+            const int totalWidth = std::max(minimum.width, preferred.width);
+
+            if (cell.rowSpan > 1) {
+                ensureSpanMinimum_(rowMin,
+                                   rowGrow,
+                                   cell.row,
+                                   cell.rowSpan,
+                                   requiredSpanExtent_(totalHeight, m_verticalSpacing, cell.rowSpan));
+            }
+            if (cell.columnSpan > 1) {
+                ensureSpanMinimum_(columnMin,
+                                   columnGrow,
+                                   cell.column,
+                                   cell.columnSpan,
+                                   requiredSpanExtent_(totalWidth, m_horizontalSpacing, cell.columnSpan));
+            }
         }
 
         auto distributeSizes = [](int available,
-                                  std::vector<int>& mins,
-                                  const std::vector<int>& stretches,
-                                  const std::vector<bool>& occupied,
-                                  const std::vector<bool>& growable,
+                                  SwVector<int>& mins,
+                                  const SwVector<int>& stretches,
+                                  const SwVector<bool>& occupied,
+                                  const SwVector<bool>& growable,
                                   int count) {
-            int totalMin = std::accumulate(mins.begin(), mins.end(), 0);
+            int totalMin = SwLayoutDetail::sumVector_(mins);
             if (available < totalMin && totalMin > 0) {
                 int scaledTotal = 0;
                 for (int i = 0; i < count; ++i) {
@@ -1103,7 +1376,7 @@ protected:
                 return;
             }
 
-            std::vector<int> growableIndices;
+            SwVector<int> growableIndices;
             growableIndices.reserve(static_cast<size_t>(count));
             for (int i = 0; i < count; ++i) {
                 if (occupied[static_cast<size_t>(i)] && growable[static_cast<size_t>(i)]) {
@@ -1111,7 +1384,7 @@ protected:
                 }
             }
 
-            if (!growableIndices.empty()) {
+            if (!growableIndices.isEmpty()) {
                 const int per = extra / static_cast<int>(growableIndices.size());
                 int remainder = extra % static_cast<int>(growableIndices.size());
                 for (const int index : growableIndices) {
@@ -1124,13 +1397,7 @@ protected:
                 return;
             }
 
-            for (int i = count - 1; i >= 0; --i) {
-                if (!occupied[static_cast<size_t>(i)]) {
-                    continue;
-                }
-                mins[static_cast<size_t>(i)] += extra;
-                return;
-            }
+            SW_UNUSED(extra);
         };
 
         const int totalVerticalSpacing = std::max(0, rows - 1) * m_verticalSpacing;
@@ -1139,8 +1406,8 @@ protected:
         distributeSizes(std::max(0, rect.height - totalVerticalSpacing), rowMin, m_rowStretch, rowOccupied, rowGrow, rows);
         distributeSizes(std::max(0, rect.width - totalHorizontalSpacing), columnMin, m_columnStretch, columnOccupied, columnGrow, columns);
 
-        std::vector<int> rowPositions(static_cast<size_t>(rows), rect.y);
-        std::vector<int> columnPositions(static_cast<size_t>(columns), rect.x);
+        SwVector<int> rowPositions(static_cast<size_t>(rows), rect.y);
+        SwVector<int> columnPositions(static_cast<size_t>(columns), rect.x);
 
         int current = rect.y;
         for (int i = 0; i < rows; ++i) {
@@ -1174,15 +1441,19 @@ protected:
             }
             height += m_verticalSpacing * std::max(0, cell.rowSpan - 1);
 
-            cell.item->setGeometry(SwRect{x, y, width, height});
+            const int targetWidth = resolveItemExtent_(cell.item, true, width);
+            const int targetHeight = resolveItemExtent_(cell.item, false, height);
+            const int targetX = x;
+            const int targetY = y + std::max(0, (height - targetHeight) / 2);
+
+            cell.item->setGeometry(SwRect{targetX, targetY, targetWidth, targetHeight});
         }
     }
 
 private:
     SwSize layoutSizeHint_(bool minimum) const {
-        if (m_cells.empty()) {
-            const int extent = 2 * margin();
-            return {extent, extent};
+        if (m_cells.isEmpty()) {
+            return {leftMargin() + rightMargin(), topMargin() + bottomMargin()};
         }
 
         int rows = 0;
@@ -1192,12 +1463,48 @@ private:
             columns = std::max(columns, cell.column + cell.columnSpan);
         }
         if (rows <= 0 || columns <= 0) {
-            const int extent = 2 * margin();
-            return {extent, extent};
+            return {leftMargin() + rightMargin(), topMargin() + bottomMargin()};
         }
 
-        std::vector<int> rowSizes(static_cast<size_t>(rows), 0);
-        std::vector<int> columnSizes(static_cast<size_t>(columns), 0);
+        SwVector<int> rowSizes(static_cast<size_t>(rows), 0);
+        SwVector<int> columnSizes(static_cast<size_t>(columns), 0);
+
+        auto requiredSpanExtent_ = [](int totalExtent, int spacingAmount, int span) {
+            return std::max(0, totalExtent - std::max(0, span - 1) * spacingAmount);
+        };
+
+        auto ensureSpanMinimum_ = [](SwVector<int>& mins, int start, int span, int required) {
+            if (required <= 0 || span <= 0) {
+                return;
+            }
+
+            int current = 0;
+            SwVector<int> indices;
+            indices.reserve(static_cast<size_t>(span));
+            for (int i = 0; i < span; ++i) {
+                const int index = start + i;
+                if (index < 0 || static_cast<size_t>(index) >= mins.size()) {
+                    continue;
+                }
+                current += mins[static_cast<size_t>(index)];
+                indices.push_back(index);
+            }
+
+            if (current >= required || indices.isEmpty()) {
+                return;
+            }
+
+            const int deficit = required - current;
+            const int per = deficit / static_cast<int>(indices.size());
+            int remainder = deficit % static_cast<int>(indices.size());
+            for (const int index : indices) {
+                mins[static_cast<size_t>(index)] += per;
+                if (remainder > 0) {
+                    ++mins[static_cast<size_t>(index)];
+                    --remainder;
+                }
+            }
+        };
 
         for (const Cell& cell : m_cells) {
             if (!cell.item) {
@@ -1211,28 +1518,46 @@ private:
                 size.height = std::max(size.height, minSize.height);
             }
 
-            const int sharedHeight = cell.rowSpan > 0 ? (std::max(0, size.height) + cell.rowSpan - 1) / cell.rowSpan : std::max(0, size.height);
-            const int sharedWidth = cell.columnSpan > 0 ? (std::max(0, size.width) + cell.columnSpan - 1) / cell.columnSpan : std::max(0, size.width);
-
-            for (int i = 0; i < cell.rowSpan; ++i) {
-                const int rowIndex = cell.row + i;
-                if (rowIndex < rows) {
-                    rowSizes[static_cast<size_t>(rowIndex)] = std::max(rowSizes[static_cast<size_t>(rowIndex)], sharedHeight);
-                }
+            if (cell.rowSpan == 1 && cell.row < rows) {
+                rowSizes[static_cast<size_t>(cell.row)] = std::max(rowSizes[static_cast<size_t>(cell.row)], std::max(0, size.height));
             }
 
-            for (int i = 0; i < cell.columnSpan; ++i) {
-                const int columnIndex = cell.column + i;
-                if (columnIndex < columns) {
-                    columnSizes[static_cast<size_t>(columnIndex)] = std::max(columnSizes[static_cast<size_t>(columnIndex)], sharedWidth);
-                }
+            if (cell.columnSpan == 1 && cell.column < columns) {
+                columnSizes[static_cast<size_t>(cell.column)] = std::max(columnSizes[static_cast<size_t>(cell.column)], std::max(0, size.width));
             }
         }
 
-        const int totalHeight = std::accumulate(rowSizes.begin(), rowSizes.end(), 0) +
-                                std::max(0, rows - 1) * m_verticalSpacing + 2 * margin();
-        const int totalWidth = std::accumulate(columnSizes.begin(), columnSizes.end(), 0) +
-                               std::max(0, columns - 1) * m_horizontalSpacing + 2 * margin();
+        for (const Cell& cell : m_cells) {
+            if (!cell.item) {
+                continue;
+            }
+
+            SwSize size = minimum ? cell.item->minimumSize() : cell.item->sizeHint();
+            if (!minimum) {
+                const SwSize minSize = cell.item->minimumSize();
+                size.width = std::max(size.width, minSize.width);
+                size.height = std::max(size.height, minSize.height);
+            }
+
+            if (cell.rowSpan > 1) {
+                ensureSpanMinimum_(rowSizes,
+                                   cell.row,
+                                   cell.rowSpan,
+                                   requiredSpanExtent_(std::max(0, size.height), m_verticalSpacing, cell.rowSpan));
+            }
+
+            if (cell.columnSpan > 1) {
+                ensureSpanMinimum_(columnSizes,
+                                   cell.column,
+                                   cell.columnSpan,
+                                   requiredSpanExtent_(std::max(0, size.width), m_horizontalSpacing, cell.columnSpan));
+            }
+        }
+
+        const int totalHeight = SwLayoutDetail::sumVector_(rowSizes) +
+                                std::max(0, rows - 1) * m_verticalSpacing + topMargin() + bottomMargin();
+        const int totalWidth = SwLayoutDetail::sumVector_(columnSizes) +
+                               std::max(0, columns - 1) * m_horizontalSpacing + leftMargin() + rightMargin();
         return {totalWidth, totalHeight};
     }
 
@@ -1244,9 +1569,9 @@ private:
         m_cells.clear();
     }
 
-    std::vector<Cell> m_cells;
-    std::vector<int> m_columnStretch;
-    std::vector<int> m_rowStretch;
+    SwVector<Cell> m_cells;
+    SwVector<int> m_columnStretch;
+    SwVector<int> m_rowStretch;
     int m_horizontalSpacing;
     int m_verticalSpacing;
 };
@@ -1400,12 +1725,12 @@ public:
 
 protected:
     void applyLayout(const SwRect& rect) override {
-        if (m_rows.empty()) {
+        if (m_rows.isEmpty()) {
             return;
         }
 
         int labelWidth = 0;
-        std::vector<size_t> validRows;
+        SwVector<size_t> validRows;
         validRows.reserve(m_rows.size());
         for (size_t i = 0; i < m_rows.size(); ++i) {
             const Row& row = m_rows[i];
@@ -1416,7 +1741,7 @@ protected:
             labelWidth = std::max(labelWidth, std::max(0, row.label->sizeHint().width));
         }
 
-        if (validRows.empty()) {
+        if (validRows.isEmpty()) {
             return;
         }
 
@@ -1425,7 +1750,7 @@ protected:
         const int fieldX = rect.x + labelWidth + columnSpacing;
         const int fieldWidth = std::max(0, rect.width - labelWidth - columnSpacing);
 
-        std::vector<int> rowHeights;
+        SwVector<int> rowHeights;
         rowHeights.reserve(validRows.size());
         int totalPreferredHeights = 0;
         for (size_t rowIndex : validRows) {
@@ -1451,8 +1776,6 @@ protected:
             for (size_t i = 0; remainder > 0 && i < rowHeights.size(); ++i, --remainder) {
                 ++rowHeights[i];
             }
-        } else if (!rowHeights.empty()) {
-            rowHeights.back() += std::max(0, availableHeight - totalPreferredHeights);
         }
 
         int y = rect.y;
@@ -1489,13 +1812,12 @@ private:
         }
 
         if (count == 0) {
-            const int extent = 2 * margin();
-            return {extent, extent};
+            return {leftMargin() + rightMargin(), topMargin() + bottomMargin()};
         }
 
         totalHeight += std::max(0, count - 1) * spacing();
         const int totalWidth = labelWidth + fieldWidth + spacing();
-        return {totalWidth + 2 * margin(), totalHeight + 2 * margin()};
+        return {totalWidth + leftMargin() + rightMargin(), totalHeight + topMargin() + bottomMargin()};
     }
 
     void addRowItems_(SwLayoutItem* label, SwLayoutItem* field) {
@@ -1521,6 +1843,6 @@ private:
         m_rows.clear();
     }
 
-    std::vector<Row> m_rows;
+    SwVector<Row> m_rows;
     SwLayoutItem* m_pending{nullptr};
 };

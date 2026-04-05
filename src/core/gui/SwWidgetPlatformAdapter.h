@@ -1105,6 +1105,9 @@ inline std::string sanitizeFamily(const std::wstring& family) {
 }
 
 inline int toPixelSize(const SwFont& font) {
+    if (font.getPixelSize() > 0) {
+        return font.getPixelSize();
+    }
     const int point = font.getPointSize() > 0 ? font.getPointSize() : 9;
     constexpr double dpi = 96.0;
     return static_cast<int>(point * dpi / 72.0 + 0.5);

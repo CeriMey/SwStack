@@ -47,11 +47,9 @@
 
 #include "SwFrame.h"
 #include "SwToolButton.h"
+#include "SwVector.h"
 
 #include <algorithm>
-#include <sstream>
-#include <string>
-#include <vector>
 
 class SwToolBox : public SwFrame {
     SW_OBJECT(SwToolBox, SwFrame)
@@ -74,7 +72,6 @@ public:
                 border-radius: 12px;
             }
         )");
-        m_headerStyleSheet = defaultHeaderStyleSheet_();
     }
 
     /**
@@ -127,14 +124,13 @@ public:
      * @details Call this method to replace the currently stored value with the caller-provided one.
      */
     void setHeaderStyleSheet(const SwString& styleSheet) {
-        SwString next = styleSheet;
-        if (next.isEmpty()) {
-            next = defaultHeaderStyleSheet_();
-        }
-        if (m_headerStyleSheet == next) {
+        const bool explicitStyle = !styleSheet.isEmpty();
+        SwString next = explicitStyle ? styleSheet : SwString();
+        if (m_headerStyleSheet == next && m_headerStyleSheetExplicit == explicitStyle) {
             return;
         }
         m_headerStyleSheet = next;
+        m_headerStyleSheetExplicit = explicitStyle;
         for (auto& it : m_items) {
             it.appliedHeaderStyle.clear();
         }
@@ -232,7 +228,7 @@ public:
                     }
                 }
             }
-            if (next < 0 && !m_items.empty()) {
+            if (next < 0 && !m_items.isEmpty()) {
                 next = 0;
             }
             setCurrentIndex(next);
@@ -284,8 +280,8 @@ public:
         header->setCheckable(true);
         header->setChecked(false);
         header->setFocusPolicy(FocusPolicyEnum::NoFocus);
-        header->resize(120, m_headerHeight);
-        header->setStyleSheet(m_headerStyleSheet);
+        header->setStyleSheet(resolvedHeaderStyleSheet_());
+        header->resize(120, effectiveHeaderHeight_());
 
         page->setParent(this);
         page->hide();
@@ -429,7 +425,7 @@ public:
 
         if (m_currentIndex == idx) {
             m_currentIndex = -1;
-            if (m_exclusive && !m_items.empty()) {
+            if (m_exclusive && !m_items.isEmpty()) {
                 const int next = std::min(idx, count() - 1);
                 setCurrentIndex(next);
                 return;
@@ -591,14 +587,14 @@ protected:
      * @details The returned value reflects the state currently stored by the instance.
      */
     SwSize sizeHint() const override {
-        return SwSize{width(), computeContentHeight_()};
+        return toolboxSizeHint_(false);
     }
 
     /**
      * @brief Performs the `minimumSizeHint` operation.
      * @return The requested minimum Size Hint.
      */
-    SwSize minimumSizeHint() const override { return sizeHint(); }
+    SwSize minimumSizeHint() const override { return toolboxSizeHint_(true); }
 
 private:
     class SwToolBoxHeaderButton final : public SwToolButton {
@@ -617,6 +613,71 @@ private:
         }
 
     protected:
+        SwSize sizeHint() const override {
+            StyleSheet* sheet = const_cast<SwToolBoxHeaderButton*>(this)->getToolSheet();
+            const auto hierarchy = classHierarchy();
+
+            Padding padding{8, 10, 8, 10};
+            const SwString pad = styleValue_(sheet, hierarchy, "padding");
+            if (!pad.isEmpty()) {
+                padding = parsePadding_(pad);
+            }
+
+            const SwString padTop = styleValue_(sheet, hierarchy, "padding-top");
+            const SwString padRight = styleValue_(sheet, hierarchy, "padding-right");
+            const SwString padBottom = styleValue_(sheet, hierarchy, "padding-bottom");
+            const SwString padLeft = styleValue_(sheet, hierarchy, "padding-left");
+            if (!padTop.isEmpty()) padding.top = clampInt_(parsePixelValue_(padTop, padding.top), 0, 64);
+            if (!padRight.isEmpty()) padding.right = clampInt_(parsePixelValue_(padRight, padding.right), 0, 64);
+            if (!padBottom.isEmpty()) padding.bottom = clampInt_(parsePixelValue_(padBottom, padding.bottom), 0, 64);
+            if (!padLeft.isEmpty()) padding.left = clampInt_(parsePixelValue_(padLeft, padding.left), 0, 64);
+
+            SwFont font = getFont();
+            const SwString fontSize = styleValue_(sheet, hierarchy, "font-size");
+            if (!fontSize.isEmpty()) {
+                const int px = clampInt_(parsePixelValue_(fontSize, 0), 0, 96);
+                if (px > 0) {
+                    font.setPixelSize(px);
+                }
+            }
+            const SwString fontWeight = styleValue_(sheet, hierarchy, "font-weight");
+            if (!fontWeight.isEmpty()) {
+                font.setWeight(StyleSheet::parseFontWeightValue(fontWeight, font.getWeight()));
+            }
+
+            int borderWidth = 1;
+            const SwString bw = styleValue_(sheet, hierarchy, "border-width");
+            if (!bw.isEmpty()) {
+                borderWidth = clampInt_(parsePixelValue_(bw, borderWidth), 0, 20);
+            }
+
+            int minHeight = 0;
+            const SwString minHeightValue = styleValue_(sheet, hierarchy, "min-height");
+            if (!minHeightValue.isEmpty()) {
+                minHeight = clampInt_(parsePixelValue_(minHeightValue, 0), 0, 512);
+            }
+
+            const SwFontMetrics metrics(font);
+            const SwString label = getText().isEmpty() ? SwString("ToolBox") : getText();
+            const int textWidth = std::max(0, metrics.horizontalAdvance(label));
+            const int indicatorSize = clampInt_(metrics.height() - 4, 8, 12);
+            const int gap = 8;
+            const int textPixelHeight = font.getPixelSize() > 0
+                                            ? font.getPixelSize()
+                                            : std::max(12, static_cast<int>(std::max(1, font.getPointSize()) * 96.0 / 72.0 + 0.5));
+
+            SwSize hint;
+            hint.width = textWidth + padding.left + padding.right + indicatorSize + gap + borderWidth * 2;
+            hint.height = textPixelHeight + std::max(padding.top, padding.bottom) + borderWidth * 2 + 1;
+            hint.height = std::max(hint.height, minHeight);
+            hint.height = std::max(hint.height, 24);
+            return hint;
+        }
+
+        SwSize minimumSizeHint() const override {
+            return sizeHint();
+        }
+
         /**
          * @brief Performs the `clampInt_` operation.
          * @param value Value passed to the method.
@@ -700,47 +761,11 @@ private:
                 return padding;
             }
 
-            std::vector<std::string> tokens;
-            std::istringstream ss(value.toStdString());
-            std::string token;
-            while (ss >> token) {
-                tokens.push_back(token);
-            }
-            if (tokens.empty()) {
-                return padding;
-            }
-
-            auto resolve = [](const std::string& t) -> int {
-                std::string copy = t;
-                size_t pos = copy.find_first_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ%");
-                if (pos != std::string::npos) {
-                    copy = copy.substr(0, pos);
-                }
-                try {
-                    return std::stoi(copy);
-                } catch (...) {
-                    return 0;
-                }
-            };
-
-            if (tokens.size() == 1) {
-                const int v = resolve(tokens[0]);
-                padding.top = padding.right = padding.bottom = padding.left = v;
-            } else if (tokens.size() == 2) {
-                const int v = resolve(tokens[0]);
-                const int h = resolve(tokens[1]);
-                padding.top = padding.bottom = v;
-                padding.left = padding.right = h;
-            } else if (tokens.size() == 3) {
-                padding.top = resolve(tokens[0]);
-                padding.left = padding.right = resolve(tokens[1]);
-                padding.bottom = resolve(tokens[2]);
-            } else {
-                padding.top = resolve(tokens[0]);
-                padding.right = resolve(tokens[1]);
-                padding.bottom = resolve(tokens[2]);
-                padding.left = resolve(tokens[3]);
-            }
+            const StyleSheet::BoxEdges edges = StyleSheet::parseBoxEdges(value);
+            padding.top = edges.top;
+            padding.right = edges.right;
+            padding.bottom = edges.bottom;
+            padding.left = edges.left;
 
             return padding;
         }
@@ -1068,6 +1093,93 @@ private:
         return -1;
     }
 
+    SwString subControlStyleValue_(const char* subControlSelector, const char* propertyName) const {
+        if (!subControlSelector || !propertyName) {
+            return SwString();
+        }
+
+        StyleSheet* sheet = const_cast<SwToolBox*>(this)->getToolSheet();
+        if (!sheet) {
+            return SwString();
+        }
+
+        SwString value;
+        const auto hierarchy = classHierarchy();
+        for (int i = static_cast<int>(hierarchy.size()) - 1; i >= 0; --i) {
+            const SwString& selector = hierarchy[static_cast<size_t>(i)];
+            if (selector.isEmpty()) {
+                continue;
+            }
+            SwString compound = selector + SwString("::") + SwString(subControlSelector);
+            SwString candidate = sheet->getStyleProperty(compound, propertyName);
+            if (!candidate.isEmpty()) {
+                value = candidate;
+            }
+        }
+        return value;
+    }
+
+    SwString resolvedHeaderStyleSheet_() const {
+        if (m_headerStyleSheetExplicit && !m_headerStyleSheet.isEmpty()) {
+            return m_headerStyleSheet;
+        }
+
+        SwString css = defaultHeaderStyleSheet_();
+        SwString overrideCss;
+
+        auto appendRule = [&](const char* propertyName, const SwString& value) {
+            if (value.isEmpty()) {
+                return;
+            }
+            overrideCss.append(propertyName);
+            overrideCss.append(": ");
+            overrideCss.append(value);
+            overrideCss.append("; ");
+        };
+
+        appendRule("background-color", subControlStyleValue_("tab", "background-color"));
+        appendRule("border-color", subControlStyleValue_("tab", "border-color"));
+        appendRule("border-width", subControlStyleValue_("tab", "border-width"));
+        appendRule("border-radius", subControlStyleValue_("tab", "border-radius"));
+        appendRule("border-top-left-radius", subControlStyleValue_("tab", "border-top-left-radius"));
+        appendRule("border-top-right-radius", subControlStyleValue_("tab", "border-top-right-radius"));
+        appendRule("border-bottom-left-radius", subControlStyleValue_("tab", "border-bottom-left-radius"));
+        appendRule("border-bottom-right-radius", subControlStyleValue_("tab", "border-bottom-right-radius"));
+        appendRule("padding", subControlStyleValue_("tab", "padding"));
+        appendRule("padding-top", subControlStyleValue_("tab", "padding-top"));
+        appendRule("padding-right", subControlStyleValue_("tab", "padding-right"));
+        appendRule("padding-bottom", subControlStyleValue_("tab", "padding-bottom"));
+        appendRule("padding-left", subControlStyleValue_("tab", "padding-left"));
+        appendRule("font-size", subControlStyleValue_("tab", "font-size"));
+        appendRule("font-weight", subControlStyleValue_("tab", "font-weight"));
+        appendRule("color", subControlStyleValue_("tab", "color"));
+        appendRule("min-height", subControlStyleValue_("tab", "min-height"));
+
+        appendRule("background-color-checked", subControlStyleValue_("tab:selected", "background-color"));
+        appendRule("border-color-checked", subControlStyleValue_("tab:selected", "border-color"));
+        appendRule("color-checked", subControlStyleValue_("tab:selected", "color"));
+
+        if (!overrideCss.isEmpty()) {
+            css.append("\nSwToolButton { ");
+            css.append(overrideCss);
+            css.append("}\n");
+        }
+        return css;
+    }
+
+    int effectiveHeaderHeight_() const {
+        int height = std::max(16, m_headerHeight);
+        for (const auto& it : m_items) {
+            if (it.header) {
+                const SwWidget* headerWidget = it.header;
+                const SwSize headerSize = headerWidget->sizeHint();
+                height = std::max(height, headerSize.height);
+                break;
+            }
+        }
+        return height;
+    }
+
     Item* itemAt_(int idx) {
         if (idx < 0 || idx >= count()) {
             return nullptr;
@@ -1093,6 +1205,8 @@ private:
         if (n <= 0) {
             return;
         }
+        const int headerHeight = effectiveHeaderHeight_();
+        const SwString headerBaseCss = resolvedHeaderStyleSheet_();
 
         int expandedCount = 0;
         if (m_exclusive) {
@@ -1111,7 +1225,7 @@ private:
             const int pagesVisible = expandedCount;
             const int visibleCount = n + pagesVisible;
             const int gaps = std::max(0, visibleCount - 1);
-            const int totalHeaders = n * m_headerHeight;
+            const int totalHeaders = n * headerHeight;
             const int totalSpacing = gaps * m_spacing;
             const int contentH = std::max(0, inner.height - totalHeaders - totalSpacing);
 
@@ -1144,17 +1258,17 @@ private:
             }
             if (it.header) {
                 it.header->move(inner.x, y);
-                it.header->resize(inner.width, m_headerHeight);
+                it.header->resize(inner.width, headerHeight);
                 if (m_exclusive) {
                     it.header->setChecked(i == m_currentIndex);
                 } else {
                     it.header->setChecked(it.expanded);
                 }
 
-                SwString css = m_headerStyleSheet;
+                SwString css = headerBaseCss;
                 if (wantsEdgeOnlyRadii) {
                     const bool isTop = (i == 0) && (y <= inner.y);
-                    const bool isBottom = (i == n - 1) && !showPage && ((y + m_headerHeight) >= innerBottom);
+                    const bool isBottom = (i == n - 1) && !showPage && ((y + headerHeight) >= innerBottom);
                     const int tl = isTop ? toolboxRadius : 0;
                     const int tr = isTop ? toolboxRadius : 0;
                     const int br = isBottom ? toolboxRadius : 0;
@@ -1183,7 +1297,7 @@ private:
                     it.appliedHeaderStyle = css;
                 }
             }
-            y += m_headerHeight;
+            y += headerHeight;
 
             if (!it.page) {
                 if (i < n - 1) {
@@ -1261,15 +1375,16 @@ private:
     }
 
     int computeContentHeight_() const {
-        if (!m_contentBasedLayout) {
-            return height();
-        }
+        return computeContentHeightHint_(false);
+    }
 
+    int computeContentHeightHint_(bool minimum) const {
         const int n = static_cast<int>(m_items.size());
         const int margin = std::max(0, m_contentsMargin);
         if (n <= 0) {
             return margin * 2;
         }
+        const int headerHeight = effectiveHeaderHeight_();
 
         int pageCount = 0;
         int pagesHeight = 0;
@@ -1280,25 +1395,62 @@ private:
                 continue;
             }
             ++pageCount;
-            pagesHeight += std::max(0, it.page->sizeHint().height);
+            const SwSize pageSize = minimum ? it.page->minimumSizeHint() : it.page->sizeHint();
+            pagesHeight += std::max(0, pageSize.height);
         }
 
         const int visibleCount = n + pageCount;
         const int gaps = std::max(0, visibleCount - 1);
-        const int totalHeaders = n * m_headerHeight;
+        const int totalHeaders = n * headerHeight;
         const int totalSpacing = gaps * m_spacing;
 
         return std::max(0, margin * 2 + totalHeaders + totalSpacing + pagesHeight);
     }
 
-    std::vector<Item> m_items;
+    SwSize toolboxSizeHint_(bool minimum) const {
+        const int n = static_cast<int>(m_items.size());
+        const int margin = std::max(0, m_contentsMargin);
+        const SwSize minSize = minimumSize();
+        const SwSize maxSize = maximumSize();
+        const SwSize styleMin = resolvedStyleMinimumSize_();
+        const SwSize styleMax = resolvedStyleMaximumSize_();
+
+        int widthHint = 0;
+        for (int i = 0; i < n; ++i) {
+            const Item& it = m_items[static_cast<size_t>(i)];
+            if (it.header) {
+                const SwWidget* headerWidget = it.header;
+                const SwSize headerSize = minimum ? headerWidget->minimumSizeHint() : headerWidget->sizeHint();
+                widthHint = std::max(widthHint, headerSize.width);
+            }
+            const bool showPage = m_exclusive ? (i == m_currentIndex) : it.expanded;
+            if (!showPage || !it.page) {
+                continue;
+            }
+            const SwSize pageSize = minimum ? it.page->minimumSizeHint() : it.page->sizeHint();
+            widthHint = std::max(widthHint, pageSize.width);
+        }
+
+        SwSize hint{
+            widthHint + (margin * 2),
+            computeContentHeightHint_(minimum)
+        };
+        hint.width = std::max(hint.width, std::max(minSize.width, styleMin.width));
+        hint.height = std::max(hint.height, std::max(minSize.height, styleMin.height));
+        hint.width = std::min(hint.width, std::min(maxSize.width, styleMax.width));
+        hint.height = std::min(hint.height, std::min(maxSize.height, styleMax.height));
+        return hint;
+    }
+
+    SwVector<Item> m_items;
     int m_currentIndex{-1};
-    int m_headerHeight{34};
+    int m_headerHeight{24};
     bool m_exclusive{true};
     bool m_contentBasedLayout{false};
     int m_cachedContentHeight{-1};
 
     SwString m_headerStyleSheet;
+    bool m_headerStyleSheetExplicit{false};
     int m_contentsMargin{8};
     int m_spacing{6};
 
@@ -1316,10 +1468,13 @@ private:
                 color: rgb(15, 23, 42);
                 color-checked: rgb(15, 23, 42);
                 color-disabled: rgb(148, 163, 184);
+                font-size: 13px;
+                font-weight: 600;
+                min-height: 0px;
                 indicator-color: rgb(71, 85, 105);
                 indicator-color-checked: rgb(51, 65, 85);
                 indicator-color-disabled: rgb(148, 163, 184);
-                padding: 6px 10px;
+                padding: 8px 10px;
             }
         )");
     }

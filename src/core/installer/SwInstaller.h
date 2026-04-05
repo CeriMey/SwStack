@@ -65,6 +65,7 @@ struct SwInstallerPrerequisiteSpec {
     SwString arguments;
     bool createNoWindow{true};
     long long expectedExitCode{0};
+    bool optional{false};
 };
 
 struct SwInstallerWriteJsonSpec {
@@ -282,6 +283,7 @@ struct SwInstallerPlanAction {
     bool preserveIfModified{false};
     bool createNoWindow{true};
     long long expectedExitCode{0};
+    bool optional{false};
     SwJsonObject jsonDocument;
 
     static SwString kindToString(SwInstallerActionKind kindValue) {
@@ -335,6 +337,7 @@ struct SwInstallerPlanAction {
         obj["preserveIfModified"] = preserveIfModified;
         obj["createNoWindow"] = createNoWindow;
         obj["expectedExitCode"] = expectedExitCode;
+        obj["optional"] = optional;
         obj["jsonDocument"] = jsonDocument;
         return obj;
     }
@@ -359,6 +362,7 @@ struct SwInstallerPlanAction {
         action.preserveIfModified = obj["preserveIfModified"].toBool(false);
         action.createNoWindow = obj["createNoWindow"].toBool(true);
         action.expectedExitCode = obj["expectedExitCode"].toLongLong();
+        action.optional = obj["optional"].toBool(false);
         if (obj.contains("jsonDocument") && obj["jsonDocument"].isObject()) {
             action.jsonDocument = obj["jsonDocument"].toObject();
         }
@@ -820,6 +824,7 @@ inline void SwInstallerEngine::appendInstallActionsForComponent_(const SwInstall
         action.workingDirectory = parentPath_(action.targetPath);
         action.createNoWindow = component.prerequisites[i].createNoWindow;
         action.expectedExitCode = component.prerequisites[i].expectedExitCode;
+        action.optional = component.prerequisites[i].optional;
         plan.actions.append(action);
     }
 
@@ -885,7 +890,10 @@ inline void SwInstallerEngine::appendShortcutAction_(const SwInstallerShortcutSp
         action.iconPath = iconPath;
         action.iconIndex = shortcut.iconIndex;
         action.linkPath = SwDir::normalizePath(
-            SwInstallerWindows::commonDesktopDir() + "/" + shortcut.linkName + ".lnk");
+            (SwInstallerWindows::isProcessElevated()
+                 ? SwInstallerWindows::commonDesktopDir()
+                 : SwInstallerWindows::userDesktopDir()) +
+            "/" + shortcut.linkName + ".lnk");
         plan.actions.append(action);
     }
 
@@ -901,7 +909,10 @@ inline void SwInstallerEngine::appendShortcutAction_(const SwInstallerShortcutSp
         action.iconPath = iconPath;
         action.iconIndex = shortcut.iconIndex;
         action.linkPath = SwDir::normalizePath(
-            SwInstallerWindows::commonProgramsDir() + "/" + product_.effectiveDisplayName() + "/" +
+            (SwInstallerWindows::isProcessElevated()
+                 ? SwInstallerWindows::commonProgramsDir()
+                 : SwInstallerWindows::userProgramsDir()) +
+            "/" + product_.effectiveDisplayName() + "/" +
             shortcut.linkName + ".lnk");
         plan.actions.append(action);
     }
@@ -1105,6 +1116,9 @@ inline SwInstallerExecutionResult SwInstallerEngine::execute(const SwInstallerPl
     for (size_t i = 0; i < plan.actions.size(); ++i) {
         SwString actionErr;
         if (!executeAction_(plan, plan.actions[i], state, &actionErr)) {
+            if (plan.actions[i].optional) {
+                continue;
+            }
             result.message = actionErr.isEmpty()
                                  ? (SwString("installer action failed: ") + plan.actions[i].title)
                                  : actionErr;

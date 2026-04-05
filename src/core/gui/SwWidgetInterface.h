@@ -47,6 +47,7 @@
 
 #include "SwObject.h"
 #include "SwFont.h"
+#include "StyleSheet.h"
 
 #include "Sw.h"
 
@@ -54,7 +55,6 @@ class MouseEvent;
 class KeyEvent;
 class WheelEvent;
 class PaintEvent;
-class StyleSheet;
 
 class SwWidgetInterface : public SwObject {
 
@@ -111,6 +111,13 @@ public:
      * @return The requested resize.
      */
     virtual void resize(int newWidth, int newHeight) = 0;
+    virtual void setGeometry(int newX, int newY, int newWidth, int newHeight) {
+        move(newX, newY);
+        resize(newWidth, newHeight);
+    }
+    virtual void setGeometry(const SwRect& rect) {
+        setGeometry(rect.x, rect.y, rect.width, rect.height);
+    }
 
     // MÃ©thodes pour gÃ©rer les Ã©vÃ©nements
     /**
@@ -186,6 +193,52 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     virtual StyleSheet* getToolSheet() = 0;
+    virtual bool resolveStyledBackground(unsigned int stateFlags, SwColor& color, float& alpha, bool& paint) const {
+        SW_UNUSED(stateFlags);
+        SW_UNUSED(color);
+        SW_UNUSED(alpha);
+        SW_UNUSED(paint);
+        return false;
+    }
+    virtual bool resolveStyledBorder(unsigned int stateFlags, SwColor& color, int& width, int& radius) const {
+        SW_UNUSED(stateFlags);
+        SW_UNUSED(color);
+        SW_UNUSED(width);
+        SW_UNUSED(radius);
+        return false;
+    }
+    virtual void resolveStyledBorderCorners(unsigned int stateFlags,
+                                            int& topLeft,
+                                            int& topRight,
+                                            int& bottomRight,
+                                            int& bottomLeft) const {
+        SW_UNUSED(stateFlags);
+        SW_UNUSED(topLeft);
+        SW_UNUSED(topRight);
+        SW_UNUSED(bottomRight);
+        SW_UNUSED(bottomLeft);
+    }
+    virtual SwColor resolveStyledTextColor(unsigned int stateFlags, const SwColor& fallback) const {
+        SW_UNUSED(stateFlags);
+        return fallback;
+    }
+    virtual StyleSheet::BoxEdges resolveStyledPadding(unsigned int stateFlags) const {
+        SW_UNUSED(stateFlags);
+        return StyleSheet::BoxEdges{};
+    }
+    virtual SwFont resolveStyledFont(unsigned int stateFlags) const {
+        SW_UNUSED(stateFlags);
+        return getFont();
+    }
+    virtual SwString resolveStyledBoxShadow(unsigned int stateFlags) const {
+        SW_UNUSED(stateFlags);
+        return SwString();
+    }
+    virtual bool hasExplicitStyledStateProperty(unsigned int stateFlags, const SwString& property) const {
+        SW_UNUSED(stateFlags);
+        SW_UNUSED(property);
+        return false;
+    }
     /**
      * @brief Returns the widget frame geometry in window coordinates.
      * @return The current frame geometry.
@@ -201,6 +254,18 @@ public:
     virtual SwSize clientSize() const {
         SwRect fg = frameGeometry();
         return SwSize{fg.width, fg.height};
+    }
+
+    /**
+     * @brief Returns the widget-local rectangle available to layouts and child placement.
+     * @return The origin and size of the usable client rectangle.
+     */
+    virtual SwRect clientRect() const {
+        const SwSize client = clientSize();
+        return SwRect{0,
+                      0,
+                      client.width < 0 ? 0 : client.width,
+                      client.height < 0 ? 0 : client.height};
     }
 
     /**

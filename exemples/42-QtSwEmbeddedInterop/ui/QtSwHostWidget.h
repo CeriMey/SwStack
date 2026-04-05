@@ -12,6 +12,7 @@
 class QByteArray;
 class QMouseEvent;
 class QPaintEngine;
+class QPaintEvent;
 class QResizeEvent;
 class QShowEvent;
 
@@ -27,12 +28,14 @@ public:
     void showIncomingMessage(const QString& text);
     void setRuntimeStatusText(const QString& text);
     bool saveSwRootSnapshot(const QString& filePath) const;
+    QString debugGeometryReport() const;
     QSize minimumSizeHint() const override;
     QSize sizeHint() const override;
 
     QPaintEngine* paintEngine() const override;
 
 protected:
+    void paintEvent(QPaintEvent* event) override;
     void showEvent(QShowEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;

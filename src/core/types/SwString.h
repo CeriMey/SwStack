@@ -398,7 +398,10 @@ public:
         long long parsedValue = 0;
         bool success = parseIntegerString(sanitized, parsedValue);
         if (!success) {
-            if (ok) *ok = false;
+            if (ok) {
+                *ok = false;
+                return 0;
+            }
             swCError(kSwLogCategory_SwString) << "Invalid long long conversion in SwString: " << data_;
             return 0;
         }

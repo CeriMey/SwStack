@@ -151,6 +151,14 @@ public:
      */
     SwScrollBar* verticalScrollBar() const { return m_vBar; }
 
+    SwSize sizeHint() const override {
+        return scrollAreaSizeHint_(false);
+    }
+
+    SwSize minimumSizeHint() const override {
+        return scrollAreaSizeHint_(true);
+    }
+
 protected:
     /**
      * @brief Handles the resize Event forwarded by the framework.
@@ -430,5 +438,31 @@ private:
     int m_scrollBarThickness{14};
     bool m_inUpdateLayout{false};
     bool m_updateLayoutQueued{false};
+
+    SwSize scrollAreaSizeHint_(bool minimum) const {
+        int borderWidth = lineWidth() > 0 ? lineWidth() : 1;
+        int radius = 10;
+        SwColor border{220, 224, 232};
+        const StyleSheet* sheet = const_cast<SwScrollArea*>(this)->getToolSheet();
+        resolveBorder(sheet, border, borderWidth, radius);
+        const int framePad = std::max(0, borderWidth) * 2;
+
+        SwSize hint{framePad, framePad};
+        if (m_widget) {
+            const SwSize childHint = minimum ? m_widget->minimumSizeHint() : m_widget->sizeHint();
+            hint.width += std::max(0, childHint.width);
+            hint.height += std::max(0, childHint.height);
+        }
+
+        const SwSize minSize = minimumSize();
+        const SwSize maxSize = maximumSize();
+        const SwSize styleMin = resolvedStyleMinimumSize_();
+        const SwSize styleMax = resolvedStyleMaximumSize_();
+        hint.width = std::max(hint.width, std::max(minSize.width, styleMin.width));
+        hint.height = std::max(hint.height, std::max(minSize.height, styleMin.height));
+        hint.width = std::min(hint.width, std::min(maxSize.width, styleMax.width));
+        hint.height = std::min(hint.height, std::min(maxSize.height, styleMax.height));
+        return hint;
+    }
 };
 

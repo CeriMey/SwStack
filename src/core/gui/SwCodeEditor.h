@@ -422,6 +422,18 @@ public:
         return m_lineNumbersVisible;
     }
 
+    void setHighlightCurrentLine(bool on) {
+        if (m_highlightCurrentLine == on) {
+            return;
+        }
+        m_highlightCurrentLine = on;
+        update();
+    }
+
+    bool highlightCurrentLine() const {
+        return m_highlightCurrentLine;
+    }
+
     void setCodeFoldingEnabled(bool on) {
         if (m_codeFoldingEnabled == on) {
             return;

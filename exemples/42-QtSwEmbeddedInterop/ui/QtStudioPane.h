@@ -20,12 +20,9 @@ public:
     QString messageText() const;
     void setStatusText(const QString& text);
     void setRuntimeStatusText(const QString& text);
+    QString debugGeometryReport() const;
     QSize minimumSizeHint() const override;
     QSize sizeHint() const override;
-
-protected:
-    void resizeEvent(QResizeEvent* event) override;
-    void paintEvent(QPaintEvent* event) override;
 
 private:
     class Impl;

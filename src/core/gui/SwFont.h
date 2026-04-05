@@ -89,6 +89,7 @@ public:
     SwFont(const SwFont &other)
         : familyName(other.familyName),
           pointSize(other.pointSize),
+          pixelSize(other.pixelSize),
           weight(other.weight),
           italic(other.italic),
           underline(other.underline)
@@ -102,7 +103,7 @@ public:
      */
     bool operator==(const SwFont &other) const
     {
-        return familyName == other.familyName && pointSize == other.pointSize && weight == other.weight &&
+        return familyName == other.familyName && pointSize == other.pointSize && pixelSize == other.pixelSize && weight == other.weight &&
                italic == other.italic && underline == other.underline;
     }
 
@@ -117,6 +118,7 @@ public:
         {
             familyName = other.familyName;
             pointSize = other.pointSize;
+            pixelSize = other.pixelSize;
             weight = other.weight;
             italic = other.italic;
             underline = other.underline;
@@ -168,9 +170,10 @@ public:
      */
     void setPointSize(int size)
     {
-        if (pointSize != size)
+        if (pointSize != size || pixelSize != 0)
         {
             pointSize = size;
+            pixelSize = 0;
             m_dirty = true;
         }
     }
@@ -182,6 +185,23 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     int getPointSize() const { return pointSize; }
+
+    void setPixelSize(int size)
+    {
+        const int clamped = size > 0 ? size : 0;
+        const int approxPoint = clamped > 0 ? std::max(1, (clamped * 72 + 48) / 96) : pointSize;
+        if (pixelSize != clamped || pointSize != approxPoint)
+        {
+            pixelSize = clamped;
+            if (clamped > 0)
+            {
+                pointSize = approxPoint;
+            }
+            m_dirty = true;
+        }
+    }
+
+    int getPixelSize() const { return pixelSize; }
 
     /**
      * @brief Sets the weight.
@@ -273,6 +293,7 @@ public:
 private:
     std::wstring familyName;
     int pointSize;
+    int pixelSize{0};
     FontWeight weight;
     bool italic;
     bool underline;
@@ -319,7 +340,7 @@ private:
 
         std::wstring fam = familyName.empty() ? std::wstring(L"Segoe UI") : familyName;
         const int size = pointSize > 0 ? pointSize : 9;
-        const int pixelHeight = -MulDiv(size, dpiY, 72);
+        const int pixelHeight = pixelSize > 0 ? -pixelSize : -MulDiv(size, dpiY, 72);
 
         hFont = CreateFontW(
             pixelHeight,

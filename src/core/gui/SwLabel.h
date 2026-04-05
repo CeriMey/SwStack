@@ -35,6 +35,7 @@
  ***************************************************************************************************/
 
 #include "SwWidget.h"
+#include "graphics/SwFontMetrics.h"
 #include "SwString.h"
 
 class SwLabel : public SwWidget {
@@ -45,7 +46,7 @@ class SwLabel : public SwWidget {
         update();
     }
 
-    CUSTOM_PROPERTY(DrawTextFormats, Alignment, DrawTextFormats(DrawTextFormat::Left | DrawTextFormat::VCenter)) {
+    CUSTOM_PROPERTY(DrawTextFormats, Alignment, DrawTextFormats(DrawTextFormat::Left | DrawTextFormat::VCenter | DrawTextFormat::SingleLine)) {
         update();
     }
 
@@ -87,23 +88,25 @@ public:
      * @details Override this hook when the default framework behavior needs to be extended or replaced.
      */
     virtual void paintEvent(PaintEvent* event) override {
-        SwPainter* painter = event->painter();
+        SwPainter* painter = event ? event->painter() : nullptr;
         if (!painter) {
             return;
         }
 
-        SwRect rect = this->rect();
+        const SwRect rect = this->rect();
 
         WidgetState state = WidgetState::Normal;
-        //if (getHover()) {
-        //    state = WidgetStateHelper::setState(state, WidgetState::Hovered);
-        //}
-        //if (getFocus()) {
-        //    state = WidgetStateHelper::setState(state, WidgetState::Focused);
-        //}
+        if (getHover()) {
+            state = WidgetStateHelper::setState(state, WidgetState::Hovered);
+        }
+        if (getFocus()) {
+            state = WidgetStateHelper::setState(state, WidgetState::Focused);
+        }
+        if (!getEnable()) {
+            state = WidgetStateHelper::setState(state, WidgetState::Disabled);
+        }
 
-        // Dessiner le label avec le style CSS et l'Ã©tat dÃ©fini
-        m_style->drawControl(WidgetStyle::LabelStyle, rect, painter, this, WidgetState::Normal);
+        m_style->drawControl(WidgetStyle::LabelStyle, rect, painter, this, state);
     }
 
     /**
@@ -146,7 +149,30 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     virtual SwSize sizeHint() const override {
-        return SwSize{width(), height()};
+        StyleSheet* sheet = const_cast<SwLabel*>(this)->getToolSheet();
+        const SwFont font = resolvedStyledFont_(sheet);
+        const SwFontMetrics metrics(font);
+        const StyleSheet::BoxEdges padding = resolvePaddingEdges_(sheet);
+
+        SwColor borderColor{0, 0, 0};
+        int borderWidth = 0;
+        int borderRadius = 0;
+        resolveBorder(sheet, borderColor, borderWidth, borderRadius);
+
+        const SwSize minSize = minimumSize();
+        const SwSize maxSize = maximumSize();
+        const SwSize styleMin = resolvedStyleMinimumSize_();
+        const SwSize styleMax = resolvedStyleMaximumSize_();
+
+        SwSize hint{
+            metrics.horizontalAdvance(getText()) + padding.left + padding.right + (borderWidth * 2),
+            metrics.height() + padding.top + padding.bottom + (borderWidth * 2)
+        };
+        hint.width = std::max(hint.width, std::max(minSize.width, styleMin.width));
+        hint.height = std::max(hint.height, std::max(minSize.height, styleMin.height));
+        hint.width = std::min(hint.width, std::min(maxSize.width, styleMax.width));
+        hint.height = std::min(hint.height, std::min(maxSize.height, styleMax.height));
+        return hint;
     }
 
     /**
