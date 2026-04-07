@@ -1033,16 +1033,36 @@ private:
             return;
         }
 
+        SwRect dirtyRect{resolvedEvent.dirtyRect.x,
+                         resolvedEvent.dirtyRect.y,
+                         resolvedEvent.dirtyRect.width,
+                         resolvedEvent.dirtyRect.height};
+        if (dirtyRect.width <= 0 || dirtyRect.height <= 0) {
+            dirtyRect = SwRect{0, 0, surfaceWidth, surfaceHeight};
+        } else {
+            dirtyRect.x = std::max(0, dirtyRect.x);
+            dirtyRect.y = std::max(0, dirtyRect.y);
+            dirtyRect.width = std::max(0, std::min(surfaceWidth - dirtyRect.x, dirtyRect.width));
+            dirtyRect.height = std::max(0, std::min(surfaceHeight - dirtyRect.y, dirtyRect.height));
+            if (dirtyRect.width <= 0 || dirtyRect.height <= 0) {
+                dirtyRect = SwRect{0, 0, surfaceWidth, surfaceHeight};
+            }
+        }
+
+        painter->pushClipRect(dirtyRect);
+
         if (clearBackground) {
             painter->clear(SwColor{241, 245, 249});
         }
 
-        PaintEvent paintEvent(painter.asPainter(), SwRect{0, 0, surfaceWidth, surfaceHeight});
+        PaintEvent paintEvent(painter.asPainter(), dirtyRect);
         dispatch(paintEvent);
 
         if (paintOverlay) {
             SwDragDrop::instance().paintOverlay(painter.asPainter());
         }
+
+        painter->popClipRect();
 
         painter->finalize();
         painter->flush();
@@ -1086,6 +1106,9 @@ private:
             move(0, 0);
             SwWidget::resize(size.width, size.height);
         };
+        callbacks.minimumClientSizeHandler = [this]() {
+            return implicitMinimumClientSize_();
+        };
         callbacks.mousePressHandler = [this](const SwMouseEvent& evt) {
             postOrRunNativeEvent_([evt](SwDialog* self) { self->dispatchNativeMousePress_(evt); });
         };
@@ -1111,6 +1134,11 @@ private:
             postOrRunNativeEvent_([evt](SwDialog* self) { self->dispatchNativeKeyRelease_(evt); });
         };
         return callbacks;
+    }
+
+    SwPlatformSize implicitMinimumClientSize_() const {
+        const SwSize hint = minimumSizeHint();
+        return SwPlatformSize{std::max(0, hint.width), std::max(0, hint.height)};
     }
 
     void openNativePlatformWindow_() {

@@ -74,6 +74,52 @@ public:
         initDefaults();
     }
 
+    SwSize minimumSizeHint() const override {
+        const int columns = std::max(1, columnCount());
+        const SwFont headerFont(L"Segoe UI", 9, SemiBold);
+        int minimumContentWidth = 0;
+        for (int column = 0; column < columns; ++column) {
+            int sectionMinimumWidth = 80;
+            if (m_header) {
+                sectionMinimumWidth = std::max(sectionMinimumWidth, m_header->minimumSectionSize());
+                sectionMinimumWidth = std::max(sectionMinimumWidth, std::max(1, m_header->defaultSectionSize() / 3));
+            }
+            if (m_model) {
+                SwAny headerData = m_model->headerData(column,
+                                                       SwOrientation::Horizontal,
+                                                       SwItemDataRole::DisplayRole);
+                SwString headerText = headerData.toString();
+                if (headerText.isEmpty()) {
+                    headerText = SwString("Column %1").arg(SwString::number(column + 1));
+                }
+                sectionMinimumWidth = std::max(sectionMinimumWidth, textWidthPx(headerText, headerFont) + 20);
+            }
+            if (column == 0) {
+                sectionMinimumWidth += m_indent + 20;
+            }
+            minimumContentWidth += sectionMinimumWidth;
+        }
+
+        const int headerHeight = m_headerHidden ? 0 : m_headerHeight;
+        const int minimumRows = std::max(4, std::min(8, static_cast<int>(m_visible.size())));
+        const int scrollAllowance = 16;
+
+        const SwSize minSize = minimumSize();
+        const SwSize maxSize = maximumSize();
+        const SwSize styleMin = resolvedStyleMinimumSize_();
+        const SwSize styleMax = resolvedStyleMaximumSize_();
+
+        SwSize hint{
+            std::max(180, minimumContentWidth + scrollAllowance),
+            std::max(headerHeight + minimumRows * m_rowHeight + scrollAllowance, 96)
+        };
+        hint.width = std::max(hint.width, std::max(minSize.width, styleMin.width));
+        hint.height = std::max(hint.height, std::max(minSize.height, styleMin.height));
+        hint.width = std::min(hint.width, std::min(maxSize.width, styleMax.width));
+        hint.height = std::min(hint.height, std::min(maxSize.height, styleMax.height));
+        return hint;
+    }
+
     /**
      * @brief Sets the model.
      * @param model Value passed to the method.

@@ -22,6 +22,7 @@ class SwCreatorWidgetPalette : public SwWidget {
 
 public:
     explicit SwCreatorWidgetPalette(SwWidget* parent = nullptr);
+    SwSize minimumSizeHint() const override;
 
 signals:
     DECLARE_SIGNAL(entryActivated, SwCreatorPaletteEntry);

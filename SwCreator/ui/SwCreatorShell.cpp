@@ -411,6 +411,17 @@ bool SwCreatorShell::isCreatorPageActive() const {
     return m_stack && m_stack->currentIndex() == pageIndex_(PageId::Creator);
 }
 
+SwSize SwCreatorShell::minimumSizeHint() const {
+    SwSize hint = SwWidget::minimumSizeHint();
+    const auto& th = SwCreatorTheme::current();
+    const SwSize contentMin = m_stack ? static_cast<const SwWidget*>(m_stack)->minimumSizeHint() : SwSize{0, 0};
+    const int sidebarBottom = 126 + th.sidebarBtnSize + 12;
+
+    hint.width = std::max(hint.width, th.sidebarWidth + contentMin.width + 2 * kContentInset);
+    hint.height = std::max(hint.height, std::max(sidebarBottom, contentMin.height + 2 * kContentInset));
+    return hint;
+}
+
 void SwCreatorShell::resizeEvent(ResizeEvent* event) {
     SwWidget::resizeEvent(event);
     updateLayout_();

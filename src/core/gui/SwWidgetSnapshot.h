@@ -80,79 +80,36 @@ public:
             return false;
         }
 
-        HDC screenDc = GetDC(nullptr);
-        if (!screenDc) {
+        RenderBuffer_& buf = RenderBuffer_::instance();
+        if (!buf.ensure(rect.width, rect.height)) {
             return false;
         }
-
-        HDC memDc = CreateCompatibleDC(screenDc);
-        if (!memDc) {
-            ReleaseDC(nullptr, screenDc);
-            return false;
-        }
-
-        BITMAPINFO bmi{};
-        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        bmi.bmiHeader.biWidth = rect.width;
-        bmi.bmiHeader.biHeight = -rect.height; // top-down
-        bmi.bmiHeader.biPlanes = 1;
-        bmi.bmiHeader.biBitCount = 32;
-        bmi.bmiHeader.biCompression = BI_RGB;
-
-        void* bits = nullptr;
-        HBITMAP dib = CreateDIBSection(screenDc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
-        if (!dib || !bits) {
-            if (dib) {
-                DeleteObject(dib);
-            }
-            DeleteDC(memDc);
-            ReleaseDC(nullptr, screenDc);
-            return false;
-        }
-
-        HBITMAP oldBitmap = static_cast<HBITMAP>(SelectObject(memDc, dib));
 
         SwGuiApplication* guiApp = SwGuiApplication::instance(false);
         if (!guiApp || !guiApp->platformIntegration()) {
-            SelectObject(memDc, oldBitmap);
-            DeleteObject(dib);
-            DeleteDC(memDc);
-            ReleaseDC(nullptr, screenDc);
             return false;
         }
 
         SwScopedPlatformPainter painter(guiApp->platformIntegration(),
                                         SwMakePlatformPaintEvent(SwPlatformSize{rect.width, rect.height},
-                                                                 memDc,
+                                                                 buf.dc,
                                                                  nullptr,
                                                                  nullptr,
                                                                  SwPlatformRect{0, 0, rect.width, rect.height}));
         if (!painter) {
-            SelectObject(memDc, oldBitmap);
-            DeleteObject(dib);
-            DeleteDC(memDc);
-            ReleaseDC(nullptr, screenDc);
             return false;
         }
-
         painter->clear(SwColor{255, 255, 255});
-
         PaintEvent paintEvent(painter.asPainter(), rect);
         SwCoreApplication::sendEvent(widget, &paintEvent);
         painter->finalize();
         painter->flush();
 
         const int strideBytes = rect.width * 4;
-        SwByteArray png = encodePngRgb24(static_cast<const std::uint8_t*>(bits),
+        SwByteArray png = encodePngRgb24(static_cast<const std::uint8_t*>(buf.bits),
                                          rect.width,
                                          rect.height,
                                          strideBytes);
-
-        SelectObject(memDc, oldBitmap);
-        DeleteObject(dib);
-        DeleteDC(memDc);
-        ReleaseDC(nullptr, screenDc);
-
         if (png.size() == 0) {
             return false;
         }
@@ -172,6 +129,60 @@ public:
 
 private:
 #if defined(_WIN32)
+    struct RenderBuffer_ {
+        HDC      dc{nullptr};
+        HBITMAP  bitmap{nullptr};
+        HBITMAP  prevBitmap{nullptr};
+        void*    bits{nullptr};
+        int      width{0};
+        int      height{0};
+
+        static RenderBuffer_& instance() {
+            static RenderBuffer_ buf;
+            return buf;
+        }
+
+        bool ensure(int w, int h) {
+            if (dc && width == w && height == h) {
+                return true; // reuse existing buffer
+            }
+            release();
+            HDC screenDc = GetDC(nullptr);
+            if (!screenDc) return false;
+            dc = CreateCompatibleDC(screenDc);
+            if (!dc) { ReleaseDC(nullptr, screenDc); return false; }
+
+            BITMAPINFO bmi{};
+            bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+            bmi.bmiHeader.biWidth       = w;
+            bmi.bmiHeader.biHeight      = -h; // top-down
+            bmi.bmiHeader.biPlanes      = 1;
+            bmi.bmiHeader.biBitCount    = 32;
+            bmi.bmiHeader.biCompression = BI_RGB;
+
+            bitmap = CreateDIBSection(screenDc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+            ReleaseDC(nullptr, screenDc);
+            if (!bitmap || !bits) { release(); return false; }
+
+            prevBitmap = static_cast<HBITMAP>(SelectObject(dc, bitmap));
+            width = w;
+            height = h;
+            return true;
+        }
+
+        void release() {
+            if (dc) {
+                if (prevBitmap) SelectObject(dc, prevBitmap);
+                if (bitmap)     DeleteObject(bitmap);
+                DeleteDC(dc);
+            }
+            dc = nullptr; bitmap = nullptr; prevBitmap = nullptr;
+            bits = nullptr; width = 0; height = 0;
+        }
+
+        ~RenderBuffer_() { release(); }
+    };
+
     static void appendU8(SwByteArray& out, std::uint8_t value) {
         out.append(static_cast<char>(value));
     }
@@ -240,16 +251,6 @@ private:
         appendU32BE(out, crc);
     }
 
-    static void adler32Update(std::uint32_t& a, std::uint32_t& b, std::uint8_t byte) {
-        static const std::uint32_t mod = 65521U;
-        a += byte;
-        if (a >= mod) {
-            a -= mod;
-        }
-        b += a;
-        b %= mod;
-    }
-
     static void deflateStoreFlush(SwByteArray& out, SwByteArray& block, bool finalBlock) {
         appendU8(out, finalBlock ? 0x01 : 0x00);
 
@@ -280,23 +281,35 @@ private:
         appendU8(out, 0x78);
         appendU8(out, 0x01);
 
-        std::uint32_t adlerA = 1;
-        std::uint32_t adlerB = 0;
+        // Adler32 with deferred modulo (NMAX = 5552, as in zlib).
+        // Eliminates the per-byte division that dominated the original encoder.
+        static const std::uint32_t ADLER_MOD  = 65521U;
+        static const size_t        ADLER_NMAX = 5552U;
+        std::uint32_t adlerA    = 1;
+        std::uint32_t adlerB    = 0;
+        size_t        adlerAcc  = 0; // bytes accumulated since last modulo flush
+
+        auto adlerUpdateBuf = [&](const std::uint8_t* data, size_t len) {
+            while (len > 0) {
+                const size_t room = ADLER_NMAX - adlerAcc;
+                const size_t n    = (len < room) ? len : room;
+                for (size_t i = 0; i < n; ++i) {
+                    adlerA += data[i];
+                    adlerB += adlerA;
+                }
+                data     += n;
+                len      -= n;
+                adlerAcc += n;
+                if (adlerAcc >= ADLER_NMAX) {
+                    adlerA %= ADLER_MOD;
+                    adlerB %= ADLER_MOD;
+                    adlerAcc = 0;
+                }
+            }
+        };
 
         SwByteArray block;
         block.reserve(65535);
-
-        SwByteArray rowBuf;
-        rowBuf.reserve(static_cast<size_t>(rowBytes));
-
-        auto adlerUpdateBuffer = [&](const char* data, size_t len) {
-            if (!data || len == 0) {
-                return;
-            }
-            for (size_t i = 0; i < len; ++i) {
-                adler32Update(adlerA, adlerB, static_cast<std::uint8_t>(data[i]));
-            }
-        };
 
         auto appendToBlock = [&](const char* data, size_t len) {
             const char* p = data;
@@ -307,39 +320,45 @@ private:
                     deflateStoreFlush(out, block, false);
                     space = 65535u;
                 }
-
                 const size_t chunk = (remaining < space) ? remaining : space;
                 block.append(p, chunk);
-                p += chunk;
+                p         += chunk;
                 remaining -= chunk;
-
                 if (block.size() == 65535u) {
                     deflateStoreFlush(out, block, false);
                 }
             }
         };
 
+        SwByteArray rowBuf;
+        rowBuf.resize(static_cast<size_t>(rowBytes));
+
         for (int y = 0; y < height; ++y) {
-            rowBuf.resize(static_cast<size_t>(rowBytes));
-            char* dst = rowBuf.data();
-            dst[0] = 0; // filter type: None
+            std::uint8_t* dst = reinterpret_cast<std::uint8_t*>(rowBuf.data());
+            dst[0] = 0; // PNG filter: None
 
             const std::uint8_t* row = bgrxPixels + (y * strideBytes);
+            std::uint8_t* rgb = dst + 1;
             for (int x = 0; x < width; ++x) {
                 const std::uint8_t* px = row + (x * 4);
-                const size_t base = static_cast<size_t>(1 + x * 3);
-                dst[base + 0] = static_cast<char>(px[2]); // R
-                dst[base + 1] = static_cast<char>(px[1]); // G
-                dst[base + 2] = static_cast<char>(px[0]); // B
+                rgb[x * 3 + 0] = px[2]; // R
+                rgb[x * 3 + 1] = px[1]; // G
+                rgb[x * 3 + 2] = px[0]; // B
             }
 
-            adlerUpdateBuffer(rowBuf.constData(), rowBuf.size());
-            appendToBlock(rowBuf.constData(), rowBuf.size());
+            adlerUpdateBuf(dst, static_cast<size_t>(rowBytes));
+            appendToBlock(rowBuf.constData(), static_cast<size_t>(rowBytes));
         }
 
         deflateStoreFlush(out, block, true);
 
-        std::uint32_t adler = (adlerB << 16) | adlerA;
+        // Final Adler32 flush (pending bytes that haven't had modulo applied)
+        if (adlerAcc > 0) {
+            adlerA %= ADLER_MOD;
+            adlerB %= ADLER_MOD;
+        }
+
+        const std::uint32_t adler = (adlerB << 16) | adlerA;
         appendU32BE(out, adler);
         return out;
     }

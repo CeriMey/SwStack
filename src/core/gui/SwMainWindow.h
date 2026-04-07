@@ -95,6 +95,7 @@ public:
         callbacks.paintRequestHandler = [this](const SwPlatformPaintEvent& event) { handlePaintRequest(event); };
         callbacks.deleteHandler = [this]() { handleDeleteRequest(true); };
         callbacks.resizeHandler = [this](const SwPlatformSize& size) { onResize(size.width, size.height); };
+        callbacks.minimumClientSizeHandler = [this]() { return implicitMinimumClientSize_(); };
         callbacks.mousePressHandler = [this](const SwMouseEvent& event) {
             handleMouseEvent(EventType::MousePressEvent, event);
         };
@@ -187,6 +188,7 @@ public:
         if (m_platformWindow) {
             m_platformWindow->show();
         }
+        m_forceFullClientPaint = true;
         SwWidget::show();
     }
 
@@ -589,6 +591,7 @@ private:
     SwMenuBar* m_menuBar{nullptr};
     SwToolBar* m_toolBar{nullptr};
     SwStatusBar* m_statusBar{nullptr};
+    bool m_forceFullClientPaint{true};
     SwMenu* m_helpMenu{nullptr};
     SwDialog* m_aboutDialog{nullptr};
 
@@ -757,6 +760,8 @@ private:
     // Event Handlers
 
     void handlePaintRequest(const SwPlatformPaintEvent& paintEvent) {
+        SW_WIDGET_PERF_SCOPE("mainWindow.handlePaintRequest");
+        SW_WIDGET_PERF_COUNT("mainWindow.paintRequest");
         SwGuiApplication* app = SwGuiApplication::instance(false);
         if (!app || !app->platformIntegration() || !m_platformWindow) {
             return;
@@ -772,7 +777,8 @@ private:
         clientRect.width = std::max(1, clientRect.width);
         clientRect.height = std::max(1, clientRect.height);
 
-        if (width() != clientRect.width || height() != clientRect.height) {
+        const bool sizeChangedDuringPaint = (width() != clientRect.width || height() != clientRect.height);
+        if (sizeChangedDuringPaint) {
             SwWidget::resize(clientRect.width, clientRect.height);
         }
 
@@ -788,11 +794,36 @@ private:
             return;
         }
 
-        PaintEvent widgetPaintEvent(painter.asPainter(), SwRect{0, 0, clientRect.width, clientRect.height});
+        SwRect dirtyRect{resolvedEvent.dirtyRect.x,
+                         resolvedEvent.dirtyRect.y,
+                         resolvedEvent.dirtyRect.width,
+                         resolvedEvent.dirtyRect.height};
+        if (m_forceFullClientPaint || sizeChangedDuringPaint ||
+            dirtyRect.width <= 0 || dirtyRect.height <= 0) {
+            dirtyRect = SwRect{0, 0, clientRect.width, clientRect.height};
+        } else {
+            dirtyRect.x = std::max(0, dirtyRect.x);
+            dirtyRect.y = std::max(0, dirtyRect.y);
+            dirtyRect.width = std::max(0, std::min(clientRect.width - dirtyRect.x, dirtyRect.width));
+            dirtyRect.height = std::max(0, std::min(clientRect.height - dirtyRect.y, dirtyRect.height));
+            if (dirtyRect.width <= 0 || dirtyRect.height <= 0) {
+                dirtyRect = SwRect{0, 0, clientRect.width, clientRect.height};
+            }
+        }
+
+        painter->pushClipRect(dirtyRect);
+        PaintEvent widgetPaintEvent(painter.asPainter(), dirtyRect);
         SwCoreApplication::sendEvent(this, &widgetPaintEvent);
         SwDragDrop::instance().paintOverlay(painter.asPainter());
+        painter->popClipRect();
         painter->finalize();
         painter->flush();
+        m_forceFullClientPaint = false;
+    }
+
+    SwPlatformSize implicitMinimumClientSize_() const {
+        const SwSize hint = minimumSizeHint();
+        return SwPlatformSize{std::max(0, hint.width), std::max(0, hint.height)};
     }
 
     void applyWindowTitle() {
@@ -830,6 +861,7 @@ private:
      * @param height The new height of the widget.
      */
     void onResize(int width, int height) {
+        m_forceFullClientPaint = true;
         SwWidget::resize(width, height);
     }
 

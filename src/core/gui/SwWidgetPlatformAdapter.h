@@ -49,6 +49,7 @@
 #include "Sw.h"
 #include "SwFont.h"
 #include "SwString.h"
+#include "SwWidgetPerfTrace.h"
 #include "core/runtime/SwCoreApplication.h"
 #include "platform/SwPlatformTarget.h"
 
@@ -121,6 +122,7 @@ public:
      */
     static void setCursor(CursorType cursor);
     static void setDamageThrottleSuppressed(const SwWidgetPlatformHandle& handle, bool suppressed);
+    static void setInteractiveResizeActive(const SwWidgetPlatformHandle& handle, bool active);
     /**
      * @brief Performs the `invalidateRect` operation.
      * @param handle Value passed to the method.
@@ -411,6 +413,17 @@ inline std::map<HWND, int>& swWidgetDamageThrottleSuppressionCounts_() {
     return s_counts;
 }
 
+inline std::map<HWND, int>& swWidgetInteractiveResizeCounts_() {
+    static std::map<HWND, int> s_counts;
+    return s_counts;
+}
+
+inline bool swWidgetInteractiveResizeActive_(HWND hwnd) {
+    std::map<HWND, int>& activeCounts = swWidgetInteractiveResizeCounts_();
+    std::map<HWND, int>::const_iterator it = activeCounts.find(hwnd);
+    return it != activeCounts.end() && it->second > 0;
+}
+
 inline void SwWidgetPlatformAdapter::setDamageThrottleSuppressed(const SwWidgetPlatformHandle& handle, bool suppressed) {
     HWND hwnd = nativeHandleAs<HWND>(handle);
     if (!hwnd) {
@@ -437,13 +450,105 @@ inline void SwWidgetPlatformAdapter::setDamageThrottleSuppressed(const SwWidgetP
     --(it->second);
 }
 
+inline void SwWidgetPlatformAdapter::setInteractiveResizeActive(const SwWidgetPlatformHandle& handle, bool active) {
+    HWND hwnd = nativeHandleAs<HWND>(handle);
+    if (!hwnd) {
+        return;
+    }
+
+    std::map<HWND, int>& activeCounts = swWidgetInteractiveResizeCounts_();
+    if (active) {
+        int& count = activeCounts[hwnd];
+        ++count;
+        return;
+    }
+
+    std::map<HWND, int>::iterator it = activeCounts.find(hwnd);
+    if (it == activeCounts.end()) {
+        return;
+    }
+
+    if (it->second <= 1) {
+        activeCounts.erase(it);
+        return;
+    }
+
+    --(it->second);
+}
+
 // ── Damage-region accumulator ────────────────────────────────────────
-// Instead of issuing one InvalidateRect per widget, we accumulate dirty
-// rects into a single union per HWND.  flushDamage() issues one
-// InvalidateRect call with the accumulated region.  This turns O(N)
-// syscalls per update() tree walk into O(1).
-inline std::map<HWND, RECT>& swWidgetPendingDamage_() {
-    static std::map<HWND, RECT> s_damage;
+// Accumulate up to kMaxDamageRects independent dirty rects per HWND.
+// When the limit is exceeded or two rects overlap significantly, they
+// are merged.  flushDamage() issues one InvalidateRect per accumulated
+// rect, avoiding the whole-window repaint that a single RECT union causes
+// when two small widgets at opposite corners are dirtied.
+static const size_t kMaxDamageRects = 8;
+
+struct SwDamageRegion_ {
+    RECT rects[kMaxDamageRects];
+    size_t count{0};
+
+    void addRect(const RECT& r) {
+        // Try to merge with an existing rect if they overlap or are close
+        for (size_t i = 0; i < count; ++i) {
+            if (rectsOverlapOrTouch_(rects[i], r)) {
+                unionRect_(rects[i], r);
+                return;
+            }
+        }
+        // Append if room
+        if (count < kMaxDamageRects) {
+            rects[count++] = r;
+            return;
+        }
+        // No room — merge with the nearest rect (smallest union area growth)
+        size_t bestIdx = 0;
+        long long bestCost = unionAreaCost_(rects[0], r);
+        for (size_t i = 1; i < count; ++i) {
+            long long cost = unionAreaCost_(rects[i], r);
+            if (cost < bestCost) {
+                bestCost = cost;
+                bestIdx = i;
+            }
+        }
+        unionRect_(rects[bestIdx], r);
+    }
+
+    RECT boundingRect() const {
+        if (count == 0) return RECT{0,0,0,0};
+        RECT b = rects[0];
+        for (size_t i = 1; i < count; ++i) {
+            if (rects[i].left   < b.left)   b.left   = rects[i].left;
+            if (rects[i].top    < b.top)    b.top    = rects[i].top;
+            if (rects[i].right  > b.right)  b.right  = rects[i].right;
+            if (rects[i].bottom > b.bottom) b.bottom = rects[i].bottom;
+        }
+        return b;
+    }
+
+    void clear() { count = 0; }
+
+private:
+    static bool rectsOverlapOrTouch_(const RECT& a, const RECT& b) {
+        return a.left <= b.right && b.left <= a.right &&
+               a.top <= b.bottom && b.top <= a.bottom;
+    }
+    static void unionRect_(RECT& a, const RECT& b) {
+        if (b.left   < a.left)   a.left   = b.left;
+        if (b.top    < a.top)    a.top    = b.top;
+        if (b.right  > a.right)  a.right  = b.right;
+        if (b.bottom > a.bottom) a.bottom = b.bottom;
+    }
+    static long long unionAreaCost_(const RECT& a, const RECT& b) {
+        long long uw = std::max(a.right, b.right) - std::min(a.left, b.left);
+        long long uh = std::max(a.bottom, b.bottom) - std::min(a.top, b.top);
+        long long aa = (long long)(a.right - a.left) * (a.bottom - a.top);
+        return (uw * uh) - aa; // extra area added by the merge
+    }
+};
+
+inline std::map<HWND, SwDamageRegion_>& swWidgetPendingDamage_() {
+    static std::map<HWND, SwDamageRegion_> s_damage;
     return s_damage;
 }
 
@@ -510,7 +615,9 @@ inline bool swWidgetShouldThrottleDamage_(HWND hwnd,
         return false;
     }
 
-    static const long long kMinPresentedFrameIntervalUs_ = 100000LL;
+    // Cap very large damage bursts to roughly 60 FPS instead of the previous 10 FPS
+    // so resize/drag interactions stay fluid while still coalescing redundant repaints.
+    static const long long kMinPresentedFrameIntervalUs_ = 16667LL;
     const long long elapsedUs = std::max(0LL, (nowNs - lastPaintIt->second) / 1000LL);
     if (elapsedUs >= kMinPresentedFrameIntervalUs_) {
         return false;
@@ -563,18 +670,18 @@ inline void SwWidgetPlatformAdapter::invalidateRect(const SwWidgetPlatformHandle
     r.right = rect.x + rect.width;
     r.bottom = rect.y + rect.height;
 
-    auto& damage = swWidgetPendingDamage_();
-    auto it = damage.find(hwnd);
-    if (it == damage.end()) {
-        damage[hwnd] = r;
-    } else {
-        // Union of existing damage and new rect
-        RECT& d = it->second;
-        if (r.left   < d.left)   d.left   = r.left;
-        if (r.top    < d.top)    d.top    = r.top;
-        if (r.right  > d.right)  d.right  = r.right;
-        if (r.bottom > d.bottom) d.bottom = r.bottom;
+    SwDamageRegion_& pendingDamage = swWidgetPendingDamage_()[hwnd];
+    if (swWidgetInteractiveResizeActive_(hwnd)) {
+        RECT clientRect{};
+        if (::GetClientRect(hwnd, &clientRect)) {
+            pendingDamage.clear();
+            pendingDamage.addRect(clientRect);
+            SW_WIDGET_PERF_COUNT("invalidateRect.liveResizeFullClient");
+            return;
+        }
     }
+
+    pendingDamage.addRect(r);
 }
 
 inline void SwWidgetPlatformAdapter::flushDamage(bool forceImmediate) {
@@ -585,7 +692,7 @@ inline void SwWidgetPlatformAdapter::flushDamage(bool forceImmediate) {
 
     const long long nowNs = swWidgetSteadyNowNs_();
     long long shortestRemainingUs = 0;
-    for (std::map<HWND, RECT>::iterator it = damage.begin(); it != damage.end();) {
+    for (std::map<HWND, SwDamageRegion_>::iterator it = damage.begin(); it != damage.end();) {
         HWND hwnd = it->first;
         if (!hwnd || !::IsWindow(hwnd)) {
             swWidgetLastPaintedAtNs_().erase(hwnd);
@@ -593,8 +700,9 @@ inline void SwWidgetPlatformAdapter::flushDamage(bool forceImmediate) {
             continue;
         }
 
+        RECT bounding = it->second.boundingRect();
         long long remainingUs = 0;
-        if (!forceImmediate && swWidgetShouldThrottleDamage_(hwnd, it->second, nowNs, remainingUs)) {
+        if (!forceImmediate && swWidgetShouldThrottleDamage_(hwnd, bounding, nowNs, remainingUs)) {
             if (shortestRemainingUs == 0 || remainingUs < shortestRemainingUs) {
                 shortestRemainingUs = remainingUs;
             }
@@ -602,7 +710,11 @@ inline void SwWidgetPlatformAdapter::flushDamage(bool forceImmediate) {
             continue;
         }
 
-        ::InvalidateRect(hwnd, &it->second, FALSE);
+        // Issue one InvalidateRect per accumulated damage rect
+        const SwDamageRegion_& region = it->second;
+        for (size_t i = 0; i < region.count; ++i) {
+            ::InvalidateRect(hwnd, &region.rects[i], FALSE);
+        }
         it = damage.erase(it);
     }
 
@@ -848,6 +960,7 @@ inline bool SwWidgetPlatformAdapter::isShiftModifierActive() {
 
 inline void SwWidgetPlatformAdapter::setCursor(CursorType) {}
 inline void SwWidgetPlatformAdapter::setDamageThrottleSuppressed(const SwWidgetPlatformHandle&, bool) {}
+inline void SwWidgetPlatformAdapter::setInteractiveResizeActive(const SwWidgetPlatformHandle&, bool) {}
 
 inline void SwWidgetPlatformAdapter::invalidateRect(const SwWidgetPlatformHandle& handle,
                                                     const SwRect&) {
@@ -1195,6 +1308,7 @@ inline XFontStruct* acquire(Display* display, const SwFont& font) {
 
 inline void SwWidgetPlatformAdapter::setCursor(CursorType) {}
 inline void SwWidgetPlatformAdapter::setDamageThrottleSuppressed(const SwWidgetPlatformHandle&, bool) {}
+inline void SwWidgetPlatformAdapter::setInteractiveResizeActive(const SwWidgetPlatformHandle&, bool) {}
 
 inline void SwWidgetPlatformAdapter::invalidateRect(const SwWidgetPlatformHandle& handle,
                                                     const SwRect& rect) {
@@ -1515,6 +1629,7 @@ inline bool SwWidgetPlatformAdapter::isShiftModifierActive() {
 
 inline void SwWidgetPlatformAdapter::setCursor(CursorType) {}
 inline void SwWidgetPlatformAdapter::setDamageThrottleSuppressed(const SwWidgetPlatformHandle&, bool) {}
+inline void SwWidgetPlatformAdapter::setInteractiveResizeActive(const SwWidgetPlatformHandle&, bool) {}
 inline void SwWidgetPlatformAdapter::invalidateRect(const SwWidgetPlatformHandle&, const SwRect&) {}
 inline void SwWidgetPlatformAdapter::flushDamage(bool) {}
 inline void SwWidgetPlatformAdapter::notePainted(const SwWidgetPlatformHandle&) {}

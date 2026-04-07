@@ -1247,11 +1247,27 @@ inline SwString SwHttpAcmeManager::storageRoot_() const {
     return path;
 }
 
-inline SwString SwHttpAcmeManager::accountKeyFilePath_() const { return storageRoot_() + "/account_key.pem"; }
-inline SwString SwHttpAcmeManager::accountStateFilePath_() const { return storageRoot_() + "/account.json"; }
-inline SwString SwHttpAcmeManager::certificateKeyFilePath_() const { return storageRoot_() + "/certificate_key.pem"; }
-inline SwString SwHttpAcmeManager::certificateFilePath_() const { return storageRoot_() + "/certificate.pem"; }
-inline SwString SwHttpAcmeManager::certificateMetaFilePath_() const { return storageRoot_() + "/certificate_meta.json"; }
+#if defined(_WIN32)
+#define SW_ACME_SEP_ "\\"
+#else
+#define SW_ACME_SEP_ "/"
+#endif
+
+inline SwString SwHttpAcmeManager::accountKeyFilePath_() const {
+    return storageRoot_() + SW_ACME_SEP_ "account_key.pem";
+}
+inline SwString SwHttpAcmeManager::accountStateFilePath_() const {
+    return storageRoot_() + SW_ACME_SEP_ "account.json";
+}
+inline SwString SwHttpAcmeManager::certificateKeyFilePath_() const {
+    return storageRoot_() + SW_ACME_SEP_ "certificate_key.pem";
+}
+inline SwString SwHttpAcmeManager::certificateFilePath_() const {
+    return storageRoot_() + SW_ACME_SEP_ "certificate.pem";
+}
+inline SwString SwHttpAcmeManager::certificateMetaFilePath_() const {
+    return storageRoot_() + SW_ACME_SEP_ "certificate_meta.json";
+}
 
 inline bool SwHttpAcmeManager::loadAccountState_() {
     SwString json;

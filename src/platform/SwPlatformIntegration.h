@@ -285,6 +285,15 @@ struct SwWindowCallbacks {
      * @details The returned value reflects the state currently stored by the instance.
      */
     std::function<void(const SwPlatformPaintEvent&)> paintRequestHandler;
+    /**
+     * @brief Returns the implicit minimum client size derived from the widget tree.
+     * @return Minimum client size in pixels.
+     *
+     * @details Returning `{0, 0}` keeps the native window unconstrained. Backends may query this
+     * during native resize tracking to prevent the user from shrinking the window below the
+     * content-derived minimum.
+     */
+    std::function<SwPlatformSize()> minimumClientSizeHandler;
     /** @brief Called on close request. Return true to allow, false to prevent. */
     std::function<bool()> closeHandler;
 };

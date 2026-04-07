@@ -39,6 +39,20 @@ SwCreatorFormCanvas* SwCreatorWorkspace::canvas() const {
     return m_canvas;
 }
 
+SwSize SwCreatorWorkspace::minimumSizeHint() const {
+    SwSize hint = SwWidget::minimumSizeHint();
+    const SwSize canvasMin = m_canvas ? m_canvas->minimumSizeHint() : SwSize{0, 0};
+    int framePad = 0;
+    if (m_scrollArea) {
+        const int borderWidth = m_scrollArea->lineWidth() > 0 ? m_scrollArea->lineWidth() : 1;
+        framePad = std::max(0, borderWidth) * 2;
+    }
+
+    hint.width = std::max(hint.width, canvasMin.width + 2 * kWorkspacePadding + framePad);
+    hint.height = std::max(hint.height, canvasMin.height + 2 * kWorkspacePadding + framePad);
+    return hint;
+}
+
 void SwCreatorWorkspace::refreshGeometry() {
     updateLayout_();
     if (!m_scrollArea) {

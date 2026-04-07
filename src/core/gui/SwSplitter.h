@@ -60,6 +60,15 @@
 class SwSplitter : public SwWidget {
     SW_OBJECT(SwSplitter, SwWidget)
 
+    CUSTOM_PROPERTY(bool, ChildrenCollapsible, false) {
+        const int collapsible = value ? 1 : 0;
+        for (size_t i = 0; i < m_collapsibleStates.size(); ++i) {
+            m_collapsibleStates[i] = collapsible;
+        }
+        updateLayout();
+        invalidateRect();
+    }
+
 public:
     enum class Orientation {
         Horizontal,
@@ -175,18 +184,27 @@ public:
         }
 
         SwVector<SwWidget*> newWidgets;
+        SwVector<int> newCollapsibleStates;
         newWidgets.reserve(static_cast<SwVector<SwWidget*>::size_type>(n + 1));
+        newCollapsibleStates.reserve(static_cast<SwVector<int>::size_type>(n + 1));
         for (int i = 0; i < n + 1; ++i) {
             if (i == index) {
                 newWidgets.push_back(widget);
+                newCollapsibleStates.push_back(getChildrenCollapsible() ? 1 : 0);
             } else {
                 const int src = (i < index) ? i : (i - 1);
                 if (src >= 0 && src < n) {
                     newWidgets.push_back(m_widgets[src]);
+                    if (src < m_collapsibleStates.size()) {
+                        newCollapsibleStates.push_back(m_collapsibleStates[src]);
+                    } else {
+                        newCollapsibleStates.push_back(getChildrenCollapsible() ? 1 : 0);
+                    }
                 }
             }
         }
         m_widgets = newWidgets;
+        m_collapsibleStates = newCollapsibleStates;
 
         m_sizes.clear();
         updateLayout();
@@ -222,6 +240,7 @@ public:
             return;
         }
         m_sizes = sizes;
+        normalizeCollapsedSizes_();
         updateLayout();
         invalidateRect();
     }
@@ -233,6 +252,39 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     SwVector<int> sizes() const { return m_sizes; }
+
+    void setCollapsible(int index, bool collapsible) {
+        if (index < 0 || index >= m_widgets.size()) {
+            return;
+        }
+        const size_t idx = static_cast<size_t>(index);
+        if (idx >= m_collapsibleStates.size()) {
+            m_collapsibleStates.resize(static_cast<SwVector<int>::size_type>(m_widgets.size()),
+                                       getChildrenCollapsible() ? 1 : 0);
+        }
+        const int nextValue = collapsible ? 1 : 0;
+        if (m_collapsibleStates[idx] == nextValue) {
+            return;
+        }
+        m_collapsibleStates[idx] = nextValue;
+        if (!collapsible && idx < m_sizes.size() && m_sizes[idx] <= 0) {
+            m_sizes[idx] = childMinimumPrimarySize_(index);
+        }
+        normalizeCollapsedSizes_();
+        updateLayout();
+        invalidateRect();
+    }
+
+    bool isCollapsible(int index) const {
+        if (index < 0 || index >= m_widgets.size()) {
+            return false;
+        }
+        const size_t idx = static_cast<size_t>(index);
+        if (idx < m_collapsibleStates.size()) {
+            return m_collapsibleStates[idx] != 0;
+        }
+        return getChildrenCollapsible();
+    }
 
     DECLARE_SIGNAL(splitterMoved, int, int);
 
@@ -495,6 +547,38 @@ private:
         return sum;
     }
 
+    void normalizeCollapsedSizes_() {
+        if (m_sizes.size() != m_widgets.size()) {
+            return;
+        }
+        for (int i = 0; i < m_sizes.size(); ++i) {
+            if (!isCollapsible(i) && m_sizes[i] <= 0) {
+                m_sizes[i] = childMinimumPrimarySize_(i);
+            }
+            if (isCollapsible(i) && m_sizes[i] > 0) {
+                const int childMinimum = childMinimumPrimarySize_(i);
+                if (childMinimum > 0 && m_sizes[i] < childMinimum) {
+                    m_sizes[i] = childMinimum;
+                }
+            }
+        }
+    }
+
+    int effectiveMinimumPrimarySize_(int index) const {
+        const int childMinimum = childMinimumPrimarySize_(index);
+        if (index >= 0 && index < m_sizes.size() && isCollapsible(index) && m_sizes[index] <= 0) {
+            return 0;
+        }
+        return childMinimum;
+    }
+
+    int collapseSnapThreshold_(int visibleMinimum) const {
+        if (visibleMinimum <= 1) {
+            return 0;
+        }
+        return std::max(4, std::min(visibleMinimum - 1, visibleMinimum / 2));
+    }
+
     void ensureSizesInitialized(int available) {
         const int n = count();
         if (n <= 0) {
@@ -507,6 +591,7 @@ private:
         }
 
         if (m_sizes.size() == n) {
+            normalizeCollapsedSizes_();
             const int sum = sizesSum();
             if (sum == available) {
                 enforceMinimumSizes_(available);
@@ -558,12 +643,7 @@ private:
         mins.reserve(static_cast<SwVector<int>::size_type>(n));
         long long totalMin = 0;
         for (int i = 0; i < n; ++i) {
-            SwWidget* w = m_widgets[i];
-            int minPrimary = 0;
-            if (w) {
-                const SwSize r = w->minimumSizeHint();
-                minPrimary = std::max(0, (m_orientation == Orientation::Horizontal) ? r.width : r.height);
-            }
+            const int minPrimary = effectiveMinimumPrimarySize_(i);
             mins.push_back(minPrimary);
             totalMin += minPrimary;
         }
@@ -869,19 +949,19 @@ private:
         const int available = std::max(0, primaryLength(bounds) - handles * m_handleWidth);
         ensureSizesInitialized(available);
 
-        const int minSize = 24;
-
         const int startAxis = (m_orientation == Orientation::Horizontal) ? bounds.x : bounds.y;
         const int leftStart = startAxis + prefixSize(handleIdx) + handleIdx * m_handleWidth;
 
         const int pairTotal = std::max(0, m_sizes[handleIdx]) + std::max(0, m_sizes[handleIdx + 1]);
-        const int leftMinSize = childMinimumPrimarySize_(handleIdx);
-        const int rightMinSize = childMinimumPrimarySize_(handleIdx + 1);
+        const int leftVisibleMin = childMinimumPrimarySize_(handleIdx);
+        const int rightVisibleMin = childMinimumPrimarySize_(handleIdx + 1);
+        const bool leftCollapsible = isCollapsible(handleIdx);
+        const bool rightCollapsible = isCollapsible(handleIdx + 1);
 
         int newHandleStart = axisPos - m_dragOffset;
         int newLeftSize = newHandleStart - leftStart;
-        int minLeft = std::max(minSize, leftMinSize);
-        int minRight = std::max(minSize, rightMinSize);
+        int minLeft = leftCollapsible ? 0 : leftVisibleMin;
+        int minRight = rightCollapsible ? 0 : rightVisibleMin;
 
         if (pairTotal < (minLeft + minRight)) {
             const int scaledLeft =
@@ -890,8 +970,38 @@ private:
             minRight = std::max(0, pairTotal - minLeft);
         }
 
-        newLeftSize = clampInt(newLeftSize, minLeft, std::max(minLeft, pairTotal - minRight));
+        newLeftSize = clampInt(newLeftSize, 0, pairTotal);
+        if (leftCollapsible && leftVisibleMin > 0 && newLeftSize < leftVisibleMin) {
+            newLeftSize = (newLeftSize <= collapseSnapThreshold_(leftVisibleMin)) ? 0 : leftVisibleMin;
+        } else if (!leftCollapsible) {
+            newLeftSize = std::max(minLeft, newLeftSize);
+        }
         int newRightSize = pairTotal - newLeftSize;
+
+        if (rightCollapsible && rightVisibleMin > 0 && newRightSize < rightVisibleMin) {
+            if (newRightSize <= collapseSnapThreshold_(rightVisibleMin)) {
+                newRightSize = 0;
+                newLeftSize = pairTotal;
+            } else {
+                newRightSize = rightVisibleMin;
+                newLeftSize = pairTotal - newRightSize;
+            }
+        } else if (!rightCollapsible) {
+            newRightSize = std::max(minRight, newRightSize);
+            newLeftSize = pairTotal - newRightSize;
+        }
+
+        newLeftSize = clampInt(newLeftSize, minLeft, std::max(minLeft, pairTotal - minRight));
+        newRightSize = pairTotal - newLeftSize;
+
+        if (leftCollapsible && newLeftSize > 0 && leftVisibleMin > 0 && newLeftSize < leftVisibleMin) {
+            newLeftSize = leftVisibleMin;
+            newRightSize = pairTotal - newLeftSize;
+        }
+        if (rightCollapsible && newRightSize > 0 && rightVisibleMin > 0 && newRightSize < rightVisibleMin) {
+            newRightSize = rightVisibleMin;
+            newLeftSize = pairTotal - newRightSize;
+        }
 
         if (newLeftSize == m_sizes[handleIdx] && newRightSize == m_sizes[handleIdx + 1]) {
             return;
@@ -998,6 +1108,7 @@ private:
     }
 
     SwVector<SwWidget*> m_widgets;
+    SwVector<int> m_collapsibleStates;
     SwVector<int> m_sizes;
     Orientation m_orientation{Orientation::Horizontal};
 

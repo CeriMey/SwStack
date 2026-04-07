@@ -468,6 +468,7 @@ public:
 
     void setSpacing(int spacing) {
         m_spacing = std::max(0, spacing);
+        invalidateLayout();
         updateGeometry();
     }
 
@@ -481,6 +482,7 @@ public:
         m_topMargin = clamped;
         m_rightMargin = clamped;
         m_bottomMargin = clamped;
+        invalidateLayout();
         updateGeometry();
     }
 
@@ -490,21 +492,25 @@ public:
 
     void setLeftMargin(int margin) {
         m_leftMargin = std::max(0, margin);
+        invalidateLayout();
         updateGeometry();
     }
 
     void setTopMargin(int margin) {
         m_topMargin = std::max(0, margin);
+        invalidateLayout();
         updateGeometry();
     }
 
     void setRightMargin(int margin) {
         m_rightMargin = std::max(0, margin);
+        invalidateLayout();
         updateGeometry();
     }
 
     void setBottomMargin(int margin) {
         m_bottomMargin = std::max(0, margin);
+        invalidateLayout();
         updateGeometry();
     }
 
@@ -529,6 +535,7 @@ public:
         m_topMargin = std::max(0, top);
         m_rightMargin = std::max(0, right);
         m_bottomMargin = std::max(0, bottom);
+        invalidateLayout();
         updateGeometry();
     }
 
@@ -552,7 +559,18 @@ public:
         if (rect.width <= 0 || rect.height <= 0) {
             return;
         }
+        if (!m_layoutDirty &&
+            rect.width == m_lastContentRect.width &&
+            rect.height == m_lastContentRect.height) {
+            return; // size unchanged and no structural change — skip layout
+        }
+        m_lastContentRect = rect;
+        m_layoutDirty = false;
         applyLayout(rect);
+    }
+
+    void invalidateLayout() {
+        m_layoutDirty = true;
     }
 
 protected:
@@ -588,6 +606,8 @@ private:
     int m_topMargin;
     int m_rightMargin;
     int m_bottomMargin;
+    SwRect m_lastContentRect{0, 0, -1, -1};
+    bool m_layoutDirty{true};
 };
 
 class SwBoxLayout : public SwAbstractLayout {
@@ -660,6 +680,7 @@ public:
             return;
         }
         m_items[static_cast<size_t>(index)].stretch = std::max(0, stretch);
+        invalidateLayout();
         updateGeometry();
     }
 
@@ -670,7 +691,9 @@ public:
         for (Item& item : m_items) {
             if (item.item && item.item->widget() == widget) {
                 item.stretch = std::max(0, stretch);
-                updateGeometry();
+    
+                invalidateLayout();
+        updateGeometry();
                 return true;
             }
         }
@@ -889,6 +912,7 @@ private:
         entry.stretch = std::max(0, stretch);
         entry.minSize = minSize;
         m_items.insert(m_items.begin() + normalizeIndex_(index), entry);
+        invalidateLayout();
         updateGeometry();
     }
 
@@ -905,7 +929,9 @@ private:
             removed = true;
         }
         if (removed) {
-            updateGeometry();
+
+            invalidateLayout();
+        updateGeometry();
         }
     }
 
@@ -957,7 +983,7 @@ private:
         if (!item.item) {
             return 0;
         }
-        if (item.minSize >= 0) {
+        if (item.minSize > 0) {
             return item.minSize;
         }
         const SwSize size = item.item->sizeHint();
@@ -968,7 +994,7 @@ private:
         if (!item.item) {
             return 0;
         }
-        if (item.minSize >= 0) {
+        if (item.minSize > 0) {
             return item.minSize;
         }
         const SwSize size = item.item->minimumSize();
@@ -1078,11 +1104,13 @@ public:
 
     void setHorizontalSpacing(int value) {
         m_horizontalSpacing = std::max(0, value);
+        invalidateLayout();
         updateGeometry();
     }
 
     void setVerticalSpacing(int value) {
         m_verticalSpacing = std::max(0, value);
+        invalidateLayout();
         updateGeometry();
     }
 
@@ -1094,6 +1122,7 @@ public:
             m_columnStretch.resize(static_cast<size_t>(column + 1), 0);
         }
         m_columnStretch[static_cast<size_t>(column)] = std::max(0, stretch);
+        invalidateLayout();
         updateGeometry();
     }
 
@@ -1105,6 +1134,7 @@ public:
             m_rowStretch.resize(static_cast<size_t>(row + 1), 0);
         }
         m_rowStretch[static_cast<size_t>(row)] = std::max(0, stretch);
+        invalidateLayout();
         updateGeometry();
     }
 
@@ -1120,6 +1150,7 @@ public:
         cell.rowSpan = rowSpan;
         cell.columnSpan = columnSpan;
         m_cells.push_back(cell);
+        invalidateLayout();
         updateGeometry();
     }
 
@@ -1148,7 +1179,9 @@ public:
             removed = true;
         }
         if (removed) {
-            updateGeometry();
+
+            invalidateLayout();
+        updateGeometry();
         }
     }
 
@@ -1624,6 +1657,7 @@ public:
 
         delete *slot;
         *slot = item;
+        invalidateLayout();
         updateGeometry();
     }
 
@@ -1689,7 +1723,9 @@ public:
         }
 
         if (removed) {
-            updateGeometry();
+
+            invalidateLayout();
+        updateGeometry();
         }
     }
 
@@ -1830,6 +1866,7 @@ private:
         row.label = label;
         row.field = field;
         m_rows.push_back(row);
+        invalidateLayout();
         updateGeometry();
     }
 

@@ -35,6 +35,7 @@ SwCreatorMainPanel::SwCreatorMainPanel(SwWidget* parent)
 
     m_splitter = new SwSplitter(SwSplitter::Orientation::Horizontal, this);
     m_splitter->setHandleWidth(4);
+    m_splitter->setChildrenCollapsible(false);
 
     m_palettePanel = new SwFrame(this);
     m_palettePanel->setFrameShape(SwFrame::Shape::NoFrame);
@@ -52,6 +53,7 @@ SwCreatorMainPanel::SwCreatorMainPanel(SwWidget* parent)
 
     m_inspectorSplitter = new SwSplitter(SwSplitter::Orientation::Vertical, m_inspectorPanel);
     m_inspectorSplitter->setHandleWidth(4);
+    m_inspectorSplitter->setChildrenCollapsible(false);
 
     m_hierarchyTree = new SwTreeWidget(2, m_inspectorSplitter);
     m_hierarchyTree->setHeaderLabels(SwList<SwString>{"Object", "Class"});
@@ -97,6 +99,27 @@ SwCreatorFormCanvas* SwCreatorMainPanel::canvas() const {
     return m_workspace ? m_workspace->canvas() : nullptr;
 }
 
+SwSize SwCreatorMainPanel::minimumSizeHint() const {
+    SwSize hint = SwWidget::minimumSizeHint();
+    const SwSize paletteHint = m_palette ? m_palette->minimumSizeHint() : SwSize{0, 0};
+    const SwSize workspaceHint = m_workspace ? m_workspace->minimumSizeHint() : SwSize{0, 0};
+    const SwSize inspectorHint = m_inspectorSplitter
+        ? static_cast<const SwWidget*>(m_inspectorSplitter)->minimumSizeHint()
+        : SwSize{0, 0};
+    const int splitterHandles = (m_splitter && paletteHint.width > 0 && inspectorHint.width > 0)
+        ? (m_splitter->handleWidth() * 2)
+        : 0;
+
+    hint.width = std::max(hint.width,
+                          paletteHint.width + workspaceHint.width + inspectorHint.width
+                              + splitterHandles + 2 * kMainPanelInset);
+    hint.height = std::max(hint.height,
+                           std::max(paletteHint.height,
+                                    std::max(workspaceHint.height, inspectorHint.height))
+                               + 2 * kMainPanelInset);
+    return hint;
+}
+
 SwPoint SwCreatorMainPanel::windowClientToCanvasLocal_(int clientX, int clientY) const {
     SwCreatorFormCanvas* c = canvas();
     SwWidget* root = rootWidget_();
@@ -118,7 +141,11 @@ void SwCreatorMainPanel::setSidebarsVisible(bool visible) {
     if (!m_splitter) return;
     if (visible) {
         m_splitter->setSizes(SwVector<int>{190, 1000, 250});
+        m_splitter->setCollapsible(0, false);
+        m_splitter->setCollapsible(2, false);
     } else {
+        m_splitter->setCollapsible(0, true);
+        m_splitter->setCollapsible(2, true);
         m_splitter->setSizes(SwVector<int>{0, 10000, 0});
     }
 }

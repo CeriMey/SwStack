@@ -36,6 +36,7 @@
 #include "SwPainter.h"
 #include "SwGuiApplication.h"
 #include "SwWidgetPlatformAdapter.h"
+#include "SwWidgetPerfTrace.h"
 #include "core/types/SwMap.h"
 
 class SwStyle;
@@ -362,6 +363,7 @@ protected:
      * @param Visible The new visibility state (`true` for visible, `false` for hidden).
      */
     CUSTOM_PROPERTY(bool, Visible, true) {
+        invalidateVisibilityCache_();
         if (!value) {
             clearFocusInHierarchy_();
         }
@@ -490,10 +492,12 @@ public:
      */
     virtual void addChild(SwObject* child) override {
         SwObject::addChild(child);
+        m_swWidgetChildrenDirty = true;
     }
 
     virtual void removeChild(SwObject* child) override {
         SwObject::removeChild(child);
+        m_swWidgetChildrenDirty = true;
     }
 
     void setLayout(SwAbstractLayout* layout) {
@@ -609,7 +613,12 @@ public:
      *
      */
     virtual void update() override {
+        SW_WIDGET_PERF_COUNT("update");
         if (!isVisibleInHierarchy()) {
+            return;
+        }
+        if (m_SuppressImplicitResizeUpdate_) {
+            SW_WIDGET_PERF_COUNT("update.suppressedDuringResize");
             return;
         }
         invalidateRect();
@@ -717,17 +726,24 @@ public:
     }
 
     void setGeometry(int newX, int newY, int newWidth, int newHeight) override {
+        SW_WIDGET_PERF_SCOPE("setGeometry");
+        SW_WIDGET_PERF_COUNT("setGeometry.calls");
         int absX = newX;
         int absY = newY;
-        if (auto* pw = dynamic_cast<SwWidget*>(SwObject::parent())) {
-            absX += pw->m_absX;
-            absY += pw->m_absY;
+        if (m_parentWidgetCached) {
+            absX += m_parentWidgetCached->m_absX;
+            absY += m_parentWidgetCached->m_absY;
         }
 
         const SwSize styleMin = resolvedStyleMinimumSize_();
         const SwSize styleMax = resolvedStyleMaximumSize_();
-        const int effectiveMinWidth = std::max(m_minWidth, styleMin.width);
-        const int effectiveMinHeight = std::max(m_minHeight, styleMin.height);
+        int effectiveMinWidth = std::max(m_minWidth, styleMin.width);
+        int effectiveMinHeight = std::max(m_minHeight, styleMin.height);
+        if (m_layout) {
+            const SwSize layoutMinimumHint = minimumSizeHint();
+            effectiveMinWidth = std::max(effectiveMinWidth, layoutMinimumHint.width);
+            effectiveMinHeight = std::max(effectiveMinHeight, layoutMinimumHint.height);
+        }
         const int effectiveMaxWidth = std::min(m_maxWidth, styleMax.width);
         const int effectiveMaxHeight = std::min(m_maxHeight, styleMax.height);
         newWidth = std::max(effectiveMinWidth, std::min(effectiveMaxWidth, newWidth));
@@ -745,10 +761,9 @@ public:
             const int deltaY = absY - m_absY;
             m_absX = absX;
             m_absY = absY;
-            for (SwObject* objChild : children()) {
-                if (auto* childWidget = dynamic_cast<SwWidget*>(objChild)) {
-                    childWidget->translateAbsolutePosRecursive_(deltaX, deltaY);
-                }
+            ensureSwWidgetChildren_();
+            for (SwWidget* childWidget : m_swWidgetChildren) {
+                childWidget->translateAbsolutePosRecursive_(deltaX, deltaY);
             }
         }
         if (sizeChanged) {
@@ -924,19 +939,24 @@ public:
     }
 
     bool isVisibleInHierarchy() const {
-        if (!getVisible()) {
-            return false;
-        }
-
-        const SwObject* p = parent();
-        while (p) {
-            const SwWidget* widgetParent = dynamic_cast<const SwWidget*>(p);
-            if (widgetParent && !widgetParent->getVisible()) {
-                return false;
+        if (m_visibleInHierarchyDirty) {
+            if (!getVisible()) {
+                m_cachedVisibleInHierarchy = false;
+            } else {
+                m_cachedVisibleInHierarchy = true;
+                const SwObject* p = parent();
+                while (p) {
+                    const SwWidget* wp = dynamic_cast<const SwWidget*>(p);
+                    if (wp) {
+                        m_cachedVisibleInHierarchy = wp->isVisibleInHierarchy();
+                        break;
+                    }
+                    p = p->parent();
+                }
             }
-            p = p->parent();
+            m_visibleInHierarchyDirty = false;
         }
-        return true;
+        return m_cachedVisibleInHierarchy;
     }
 
     virtual SwSize sizeHint() const override {
@@ -1197,6 +1217,7 @@ protected:
     virtual void newParentEvent(SwObject* parent) override {
         invalidateEffectiveStyleCacheRecursive_();
         SwWidget *ui = dynamic_cast<SwWidget*>(parent);
+        m_parentWidgetCached = ui;
         if (ui) {
             setNativeWindowHandleRecursive(ui->nativeWindowHandle());
 
@@ -1251,8 +1272,8 @@ protected:
     }
 
     SwPoint currentLocalPos_() const {
-        if (auto* pw = dynamic_cast<SwWidget*>(SwObject::parent())) {
-            return {m_absX - pw->m_absX, m_absY - pw->m_absY};
+        if (m_parentWidgetCached) {
+            return {m_absX - m_parentWidgetCached->m_absX, m_absY - m_parentWidgetCached->m_absY};
         }
         return {m_absX, m_absY};
     }
@@ -1263,10 +1284,9 @@ protected:
         }
         m_absX += deltaX;
         m_absY += deltaY;
-        for (SwObject* objChild : children()) {
-            if (auto* childWidget = dynamic_cast<SwWidget*>(objChild)) {
-                childWidget->translateAbsolutePosRecursive_(deltaX, deltaY);
-            }
+        ensureSwWidgetChildren_();
+        for (SwWidget* childWidget : m_swWidgetChildren) {
+            childWidget->translateAbsolutePosRecursive_(deltaX, deltaY);
         }
     }
 
@@ -1283,6 +1303,7 @@ protected:
         if (!isVisibleInHierarchy()) {
             return;
         }
+        SW_WIDGET_PERF_COUNT("invalidateGeometryChange.calls");
         SwWidgetPlatformAdapter::invalidateRect(m_nativeWindowHandle, inflateForGeometryInvalidate_(oldRect));
         SwWidgetPlatformAdapter::invalidateRect(m_nativeWindowHandle, inflateForGeometryInvalidate_(absoluteRect_()));
     }
@@ -1334,6 +1355,7 @@ protected:
      * @param event Pointer to the `PaintEvent` containing the context and paint area.
      */
     virtual void paintEvent(PaintEvent* event) override {
+        SW_WIDGET_PERF_SCOPE("paintEvent");
         if (!isVisibleInHierarchy()) {
             return;
         }
@@ -1357,31 +1379,20 @@ protected:
         }
 
         const SwRect rect = this->rect();
-        SwColor bgColor = {249, 249, 249};  // Windows 11 default surface
-        SwColor borderColor = {0, 0, 0};
-        int borderWidth = 0;
-        int borderRadius = 0;
-        int borderTopLeftRadius = 0;
-        int borderTopRightRadius = 0;
-        int borderBottomRightRadius = 0;
-        int borderBottomLeftRadius = 0;
-        float backgroundAlpha = 1.0f;
-        // Top-level widgets (no parent widget) paint background by default, like Qt.
-        // Child widgets are transparent by default.
-        bool paintBackground = (dynamic_cast<SwWidget*>(SwObject::parent()) == nullptr);
-        if (StyleSheet* sheet = getToolSheet()) {
-            resolveBackground(sheet, bgColor, backgroundAlpha, paintBackground);
-            resolveBorder(sheet, borderColor, borderWidth, borderRadius);
-            borderTopLeftRadius = borderRadius;
-            borderTopRightRadius = borderRadius;
-            borderBottomRightRadius = borderRadius;
-            borderBottomLeftRadius = borderRadius;
-            resolveBorderCornerRadii(sheet,
-                                     borderTopLeftRadius,
-                                     borderTopRightRadius,
-                                     borderBottomRightRadius,
-                                     borderBottomLeftRadius);
-        }
+        // Read the resolved style snapshot ONCE — avoids 4 separate calls
+        // to resolvedStyleSnapshot_() per frame.
+        const ResolvedStyleSnapshot_& snap = resolvedStyleSnapshot_();
+        const bool isTopLevel = !m_parentWidgetCached;
+
+        SwColor bgColor     = snap.hasBackgroundColor ? snap.backgroundColor : SwColor{249, 249, 249};
+        float backgroundAlpha = snap.backgroundAlpha;
+        bool paintBackground = snap.hasBackgroundColor ? snap.paintBackground : isTopLevel;
+        SwColor borderColor = snap.hasBorderColor ? snap.borderColor : SwColor{0, 0, 0};
+        int borderWidth     = snap.hasBorderWidth ? (snap.borderStyleNone ? 0 : snap.borderWidth) : 0;
+        int borderTopLeftRadius     = snap.hasBorderTopLeftRadius     ? snap.borderTopLeftRadius     : (snap.hasBorderRadius ? snap.borderRadius : 0);
+        int borderTopRightRadius    = snap.hasBorderTopRightRadius    ? snap.borderTopRightRadius    : (snap.hasBorderRadius ? snap.borderRadius : 0);
+        int borderBottomRightRadius = snap.hasBorderBottomRightRadius ? snap.borderBottomRightRadius : (snap.hasBorderRadius ? snap.borderRadius : 0);
+        int borderBottomLeftRadius  = snap.hasBorderBottomLeftRadius  ? snap.borderBottomLeftRadius  : (snap.hasBorderRadius ? snap.borderRadius : 0);
 
         if (paintBackground || borderWidth > 0) {
             const bool hasRoundedCorners =
@@ -1403,15 +1414,13 @@ protected:
         }
 
         const SwRect& paintRect = localEvent->paintRect();
-        for (SwObject* objChild : children()) {
-            auto* child = dynamic_cast<SwWidget*>(objChild);
-            if (!child) {
+        ensureSwWidgetChildren_();
+        for (SwWidget* child : m_swWidgetChildren) {
+            if (!child->isVisibleInHierarchy()) {
                 continue;
             }
             const SwRect childRect = child->geometry();
-            const bool intersects = rectsIntersect(paintRect, childRect);
-
-            if (child->isVisibleInHierarchy() && intersects) {
+            if (rectsIntersect(paintRect, childRect)) {
                 paintChild_(localEvent, child);
             }
         }
@@ -1469,7 +1478,7 @@ protected:
             return result;
         }
 
-        if (!dynamic_cast<SwWidget*>(SwObject::parent())) {
+        if (!m_parentWidgetCached) {
             return result;
         }
 
@@ -1498,7 +1507,7 @@ protected:
     }
 
     void paintChild_(PaintEvent* event, SwWidget* child) {
-        if (!event || !child || !child->isVisibleInHierarchy()) {
+        if (!event || !child) {
             return;
         }
         SwPainter* painter = event->painter();
@@ -1712,6 +1721,7 @@ protected:
      * @param event Pointer to the `ResizeEvent` containing the new dimensions of the SwWidget.
      */
     virtual void resizeEvent(ResizeEvent* event) {
+        SW_WIDGET_PERF_SCOPE("resizeEvent");
         if (!m_SuppressImplicitResizeUpdate_) {
             this->update();
         }
@@ -2251,6 +2261,7 @@ protected:
      * through the active platform adapter.
      */
     virtual void invalidateRect() {
+        SW_WIDGET_PERF_COUNT("invalidateRect");
         SwWidgetPlatformAdapter::invalidateRect(m_nativeWindowHandle, absoluteRect_());
     }
 
@@ -2264,11 +2275,35 @@ protected:
     int m_absX, m_absY;
     SwStyle *m_style;
     SwWidgetPlatformHandle m_nativeWindowHandle;
+    SwWidget* m_parentWidgetCached{nullptr};
     SwWidget* m_mouseGrabberWidget{nullptr};
     unsigned int m_mouseGrabButtons{0};
     SwList<SwWidget*> m_hoveredPath_;
 
 private:
+    void ensureSwWidgetChildren_() {
+        if (!m_swWidgetChildrenDirty) return;
+        m_swWidgetChildren.clear();
+        for (SwObject* obj : children()) {
+            if (auto* w = dynamic_cast<SwWidget*>(obj)) {
+                m_swWidgetChildren.push_back(w);
+            }
+        }
+        m_swWidgetChildrenDirty = false;
+    }
+
+    void invalidateVisibilityCache_() {
+        m_visibleInHierarchyDirty = true;
+        // Propagate to children. Use children() + dynamic_cast to avoid
+        // triggering ensureSwWidgetChildren_() which would rebuild the cache
+        // at every level during construction (O(N²) with N widgets).
+        for (SwObject* obj : children()) {
+            if (auto* w = dynamic_cast<SwWidget*>(obj)) {
+                w->invalidateVisibilityCache_();
+            }
+        }
+    }
+
     bool m_visibilityEventInFlight{false};
     bool m_SuppressImplicitResizeUpdate_{false};
     SwString m_DefaultStyleSheet;
@@ -2280,6 +2315,10 @@ private:
     mutable bool m_StyleSelectorsCacheInitialized{false};
     mutable ResolvedStyleSnapshot_ m_ResolvedStyleSnapshot;
     mutable bool m_ResolvedStyleSnapshotDirty{true};
+    mutable bool m_cachedVisibleInHierarchy{true};
+    mutable bool m_visibleInHierarchyDirty{true};
+    bool m_swWidgetChildrenDirty{true};
+    SwList<SwWidget*> m_swWidgetChildren;
     SwAbstractLayout* m_layout;
 
 protected:

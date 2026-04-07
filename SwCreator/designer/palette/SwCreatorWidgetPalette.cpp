@@ -39,6 +39,22 @@ SwCreatorWidgetPalette::SwCreatorWidgetPalette(SwWidget* parent)
     applyFilter_(SwString());
 }
 
+SwSize SwCreatorWidgetPalette::minimumSizeHint() const {
+    SwSize hint = SwWidget::minimumSizeHint();
+    const int pad = 0;
+    const int gap = 6;
+    const int searchH = 34;
+    const SwSize searchMin = m_search ? m_search->minimumSizeHint() : SwSize{0, searchH};
+    const SwSize contentMin = m_toolBoxScroll
+        ? m_toolBoxScroll->minimumSizeHint()
+        : (m_toolBox ? static_cast<const SwWidget*>(m_toolBox)->minimumSizeHint() : SwSize{0, 0});
+
+    hint.width = std::max(hint.width, std::max(searchMin.width, contentMin.width) + 2 * pad);
+    hint.height = std::max(hint.height,
+                           pad + std::max(searchH, searchMin.height) + gap + contentMin.height + pad);
+    return hint;
+}
+
 void SwCreatorWidgetPalette::resizeEvent(ResizeEvent* event) {
     SwWidget::resizeEvent(event);
     updateLayout_();

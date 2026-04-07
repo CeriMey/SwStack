@@ -1217,6 +1217,14 @@ private:
             if (!m_tabs[i].page) {
                 continue;
             }
+            // Skip hidden (inactive) pages: their layout will be updated lazily
+            // when they are shown via setCurrentIndex().  This prevents the resize
+            // cascade from propagating into every inactive tab's subtree on every
+            // parent resize event, which was causing O(N_total_widgets) layout
+            // work regardless of how many tabs were actually visible.
+            if (!m_tabs[i].page->getVisible()) {
+                continue;
+            }
             m_tabs[i].page->move(pageRect.x, pageRect.y);
             m_tabs[i].page->resize(pageRect.width, pageRect.height);
         }

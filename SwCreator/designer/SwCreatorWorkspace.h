@@ -20,6 +20,7 @@ public:
 
     SwCreatorFormCanvas* canvas() const;
     void refreshGeometry();
+    SwSize minimumSizeHint() const override;
 
 protected:
     void resizeEvent(ResizeEvent* event) override;

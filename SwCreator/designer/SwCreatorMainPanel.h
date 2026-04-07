@@ -32,6 +32,7 @@ public:
 
     SwCreatorFormCanvas* canvas() const;
     void setSidebarsVisible(bool visible);
+    SwSize minimumSizeHint() const override;
 
 signals:
     DECLARE_SIGNAL_VOID(documentModified);

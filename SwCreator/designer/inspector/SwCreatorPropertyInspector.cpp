@@ -125,6 +125,22 @@ SwWidget* SwCreatorPropertyInspector::target() const {
     return m_target;
 }
 
+SwSize SwCreatorPropertyInspector::minimumSizeHint() const {
+    SwSize hint = SwWidget::minimumSizeHint();
+    const int pad = 8;
+    const int headerH = 40;
+    const int buttonGap = 6;
+    const int buttonSize = 34;
+
+    const int titleWidth = m_title ? m_title->sizeHint().width : 0;
+    const int headerMinWidth = pad + titleWidth + pad + buttonSize + buttonGap + buttonSize + pad;
+    const SwSize treeMin = m_tree ? m_tree->minimumSizeHint() : SwSize{140, 96};
+
+    hint.width = std::max(hint.width, std::max(headerMinWidth, treeMin.width));
+    hint.height = std::max(hint.height, headerH + treeMin.height);
+    return hint;
+}
+
 void SwCreatorPropertyInspector::resizeEvent(ResizeEvent* event) {
     SwWidget::resizeEvent(event);
     updateLayout_();
@@ -203,24 +219,31 @@ void SwCreatorPropertyInspector::updateLayout_() {
     const SwRect r = rect();
     const int pad = 8;
     const int headerH = 40;
+    const int buttonSize = 34;
+    const int buttonGap = 6;
 
     if (m_header) {
         m_header->move(0, 0);
         m_header->resize(r.width, headerH);
     }
 
-    if (m_title && m_header) {
+    if (m_header) {
         const SwRect hr = m_header->frameGeometry();
-        m_title->move(pad, (headerH - 28) / 2);
-        m_title->resize(std::max(0, hr.width - 3 * pad - 70), 28);
-    }
-    if (m_add && m_header) {
-        const SwRect hr = m_header->frameGeometry();
-        m_add->move(hr.width - pad - 34 * 2 - 6, (headerH - 34) / 2);
-    }
-    if (m_remove && m_header) {
-        const SwRect hr = m_header->frameGeometry();
-        m_remove->move(hr.width - pad - 34, (headerH - 34) / 2);
+        const int totalButtonsWidth = buttonSize * 2 + buttonGap;
+        const int buttonStartX = std::max(pad, hr.width - pad - totalButtonsWidth);
+        const int titleWidth = std::max(0, buttonStartX - 2 * pad);
+
+        if (m_title) {
+            m_title->move(pad, (headerH - 28) / 2);
+            m_title->resize(titleWidth, 28);
+            m_title->setVisible(titleWidth >= 42);
+        }
+        if (m_add) {
+            m_add->move(buttonStartX, (headerH - buttonSize) / 2);
+        }
+        if (m_remove) {
+            m_remove->move(buttonStartX + buttonSize + buttonGap, (headerH - buttonSize) / 2);
+        }
     }
 
     if (m_tree) {

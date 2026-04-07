@@ -51,6 +51,7 @@
 
 #include "platform/win/SwWindows.h"
 
+#include "core/gui/SwWidgetPerfTrace.h"
 #include "core/gui/graphics/SwImage.h"
 #include "platform/SwPlatformIntegration.h"
 
@@ -221,6 +222,8 @@ public:
                          const SwColor& fillColor,
                          const SwColor& borderColor,
                          int borderWidth) override {
+        SW_WIDGET_PERF_SCOPE("win32.fillRoundedRect");
+        SW_WIDGET_PERF_COUNT("win32.fillRoundedRect.calls");
         if (!m_hdc) {
             return;
         }
@@ -307,6 +310,8 @@ public:
                          const SwColor& fillColor,
                          const SwColor& borderColor,
                          int borderWidth) override {
+        SW_WIDGET_PERF_SCOPE("win32.fillRoundedRect.perCorner");
+        SW_WIDGET_PERF_COUNT("win32.fillRoundedRect.perCorner.calls");
         if (!m_hdc) {
             return;
         }
@@ -613,6 +618,8 @@ public:
                   DrawTextFormats alignment,
                   const SwColor& color,
                   const SwFont& font) override {
+        SW_WIDGET_PERF_SCOPE("win32.drawText");
+        SW_WIDGET_PERF_COUNT("win32.drawText.calls");
         if (!m_hdc) {
             return;
         }
@@ -626,19 +633,19 @@ public:
             return;
         }
 
-        // Prefer DirectWrite/Direct2D for parity with Qt text rasterization, then fall back to GDI.
-        if (drawTextD2D_(rect, wText, alignment, color, font)) {
-            return;
-        }
-
-        // Emoji: prefer DirectWrite color paths before classic GDI when the generic D2D path is unavailable.
+        // DirectWrite per label is too expensive during resize storms. Keep the
+        // richer paths for emoji/color fonts, but use classic GDI by default for
+        // ordinary widget text so interactive resize stays responsive.
         if (likelyEmojiText_(wText)) {
             if (drawTextColorEmoji_(rect, wText, alignment, color, font)) {
                 return;
             }
+            if (drawTextD2D_(rect, wText, alignment, color, font)) {
+                return;
+            }
         }
 
-        // Fallback: classic GDI text (no color-font support).
+        // Default path: classic GDI text.
         RECT r = toRect(rect);
         HFONT hFont = const_cast<SwFont&>(font).handle(m_hdc);
         HFONT oldFont = (HFONT)SelectObject(m_hdc, hFont);
@@ -1351,6 +1358,7 @@ private:
                              DrawTextFormats formats,
                              const SwColor& color,
                              const SwFont& font) {
+        SW_WIDGET_PERF_SCOPE("win32.drawTextColorEmoji");
         if (!m_hdc) {
             return false;
         }
@@ -2068,6 +2076,7 @@ private:
                       DrawTextFormats formats,
                       const SwColor& color,
                       const SwFont& font) {
+        SW_WIDGET_PERF_SCOPE("win32.drawTextD2D");
         if (!ensureD2DTarget_()) {
             return false;
         }

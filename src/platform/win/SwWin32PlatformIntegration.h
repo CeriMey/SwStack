@@ -57,6 +57,7 @@
 #if defined(_WIN32)
 
 #include "core/runtime/SwCoreApplication.h"
+#include "core/gui/SwWidgetPerfTrace.h"
 #include "core/gui/SwWidgetPlatformAdapter.h"
 #include "platform/win/SwWin32Painter.h"
 
@@ -359,6 +360,11 @@ struct SwWin32WindowCallbacks {
      * @return The requested function<void.
      */
     std::function<void(int width, int height)> resizeHandler;
+    /**
+     * @brief Returns the minimum client size derived from the widget tree.
+     * @return Minimum client width/height in pixels.
+     */
+    std::function<SwPlatformSize()> minimumClientSizeHandler;
     /** @brief Called on WM_CLOSE. Return true to allow close, false to prevent it. */
     std::function<bool()> closeHandler;
 };
@@ -584,6 +590,7 @@ public:
      * @return The requested deregister Window.
      */
     static void deregisterWindow(HWND hwnd, bool invokeDeleteHandler = true) {
+        setInteractiveResizeActive_(hwnd, false);
         auto& registry = windowRegistry();
         std::lock_guard<std::mutex> lock(windowMutex());
         auto it = registry.find(hwnd);
@@ -596,6 +603,75 @@ public:
         if (registry.empty()) {
             unregisterWindowClass();
         }
+    }
+
+    static UINT_PTR interactiveResizePaintTimerId_() {
+        return static_cast<UINT_PTR>(0x5357525A);
+    }
+
+    static std::map<HWND, bool>& interactiveResizeRegistry_() {
+        static std::map<HWND, bool> registry;
+        return registry;
+    }
+
+    static std::map<HWND, ULONGLONG>& interactiveResizeLastPresentMs_() {
+        static std::map<HWND, ULONGLONG> registry;
+        return registry;
+    }
+
+    static bool interactiveResizeActive_(HWND hwnd) {
+        std::map<HWND, bool>& registry = interactiveResizeRegistry_();
+        std::map<HWND, bool>::const_iterator it = registry.find(hwnd);
+        return it != registry.end() && it->second;
+    }
+
+    static void setInteractiveResizeActive_(HWND hwnd, bool active) {
+        if (!hwnd) {
+            return;
+        }
+
+        if (active) {
+            interactiveResizeRegistry_()[hwnd] = true;
+        } else {
+            interactiveResizeRegistry_().erase(hwnd);
+            interactiveResizeLastPresentMs_().erase(hwnd);
+            KillTimer(hwnd, interactiveResizePaintTimerId_());
+        }
+
+        SwWidgetPlatformAdapter::setInteractiveResizeActive(
+            SwWidgetPlatformAdapter::fromNativeHandle(hwnd),
+            active);
+    }
+
+    static void noteInteractiveResizePresented_(HWND hwnd) {
+        if (!hwnd) {
+            return;
+        }
+        interactiveResizeLastPresentMs_()[hwnd] = GetTickCount64();
+        KillTimer(hwnd, interactiveResizePaintTimerId_());
+    }
+
+    static bool shouldPresentInteractiveResizeNow_(HWND hwnd, UINT& delayMsOut) {
+        delayMsOut = 0;
+        if (!hwnd) {
+            return false;
+        }
+
+        static const ULONGLONG kMinInteractiveResizeFrameMs = 16ULL;
+        std::map<HWND, ULONGLONG>& lastPresent = interactiveResizeLastPresentMs_();
+        std::map<HWND, ULONGLONG>::const_iterator it = lastPresent.find(hwnd);
+        if (it == lastPresent.end()) {
+            return true;
+        }
+
+        const ULONGLONG nowMs = GetTickCount64();
+        const ULONGLONG elapsedMs = nowMs >= it->second ? (nowMs - it->second) : 0ULL;
+        if (elapsedMs >= kMinInteractiveResizeFrameMs) {
+            return true;
+        }
+
+        delayMsOut = static_cast<UINT>(std::max<ULONGLONG>(1ULL, kMinInteractiveResizeFrameMs - elapsedMs));
+        return false;
     }
 
     /**
@@ -621,6 +697,48 @@ public:
         const SwWin32WindowCallbacks& callbacks = *callbacksPtr;
 
         switch (uMsg) {
+        case WM_GETMINMAXINFO: {
+            MINMAXINFO* minMaxInfo = reinterpret_cast<MINMAXINFO*>(lParam);
+            if (minMaxInfo && callbacks.minimumClientSizeHandler) {
+                const SwPlatformSize minimumClient = callbacks.minimumClientSizeHandler();
+                const int minimumClientWidth = std::max(0, minimumClient.width);
+                const int minimumClientHeight = std::max(0, minimumClient.height);
+                if (minimumClientWidth > 0 || minimumClientHeight > 0) {
+                    RECT minWindowRect{
+                        0,
+                        0,
+                        std::max(1, minimumClientWidth),
+                        std::max(1, minimumClientHeight)
+                    };
+                    const DWORD style = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE));
+                    const DWORD exStyle = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE));
+                    AdjustWindowRectEx(&minWindowRect, style, FALSE, exStyle);
+                    minMaxInfo->ptMinTrackSize.x = std::max<LONG>(
+                        minMaxInfo->ptMinTrackSize.x,
+                        std::max<LONG>(1, minWindowRect.right - minWindowRect.left));
+                    minMaxInfo->ptMinTrackSize.y = std::max<LONG>(
+                        minMaxInfo->ptMinTrackSize.y,
+                        std::max<LONG>(1, minWindowRect.bottom - minWindowRect.top));
+                }
+            }
+            return 0;
+        }
+        case WM_ENTERSIZEMOVE: {
+            SW_WIDGET_PERF_COUNT("win32.liveResize.enter");
+            setInteractiveResizeActive_(hwnd, true);
+            return 0;
+        }
+        case WM_EXITSIZEMOVE: {
+            SW_WIDGET_PERF_COUNT("win32.liveResize.exit");
+            const bool wasInteractiveResize = interactiveResizeActive_(hwnd);
+            setInteractiveResizeActive_(hwnd, false);
+            if (wasInteractiveResize && !IsIconic(hwnd)) {
+                SW_WIDGET_PERF_COUNT("win32.liveResize.present.exit");
+                SwWidgetPlatformAdapter::flushDamage(true);
+                UpdateWindow(hwnd);
+            }
+            return 0;
+        }
         case WM_PAINT: {
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hwnd, &ps);
@@ -630,6 +748,19 @@ public:
             EndPaint(hwnd, &ps);
             SwWidgetPlatformAdapter::notePainted(SwWidgetPlatformAdapter::fromNativeHandle(hwnd));
             return 0;
+        }
+        case WM_TIMER: {
+            if (wParam == interactiveResizePaintTimerId_()) {
+                KillTimer(hwnd, interactiveResizePaintTimerId_());
+                if (interactiveResizeActive_(hwnd) && !IsIconic(hwnd)) {
+                    SW_WIDGET_PERF_COUNT("win32.liveResize.present.timer");
+                    SwWidgetPlatformAdapter::flushDamage(true);
+                    UpdateWindow(hwnd);
+                    noteInteractiveResizePresented_(hwnd);
+                    return 0;
+                }
+            }
+            break;
         }
         case WM_ERASEBKGND: {
             return 1;
@@ -643,9 +774,24 @@ public:
                 // return to SwGuiApplication::exec() until the mouse is released.
                 // Flush batched widget invalidations here so live resize repaints
                 // are not deferred until the end of the drag.
-                SwWidgetPlatformAdapter::flushDamage(true);
-                if (!IsIconic(hwnd)) {
-                    UpdateWindow(hwnd);
+                if (interactiveResizeActive_(hwnd)) {
+                    UINT delayMs = 0;
+                    if (shouldPresentInteractiveResizeNow_(hwnd, delayMs)) {
+                        SW_WIDGET_PERF_COUNT("win32.liveResize.present.size");
+                        SwWidgetPlatformAdapter::flushDamage(true);
+                        if (!IsIconic(hwnd)) {
+                            UpdateWindow(hwnd);
+                            noteInteractiveResizePresented_(hwnd);
+                        }
+                    } else {
+                        SW_WIDGET_PERF_COUNT("win32.liveResize.timerScheduled");
+                        SetTimer(hwnd, interactiveResizePaintTimerId_(), delayMs, nullptr);
+                    }
+                } else {
+                    SwWidgetPlatformAdapter::flushDamage(true);
+                    if (!IsIconic(hwnd)) {
+                        UpdateWindow(hwnd);
+                    }
                 }
             }
             return 0;
@@ -929,6 +1075,8 @@ public:
         default:
             return DefWindowProcW(hwnd, uMsg, wParam, lParam);
         }
+
+        return DefWindowProcW(hwnd, uMsg, wParam, lParam);
     }
 
     /**
@@ -1398,6 +1546,7 @@ public:
 
         const DWORD style = buildStyle_(options);
         const DWORD exStyle = buildExStyle_(options);
+        clampClientSizeToMinimum_(width, height);
         RECT windowRect = {0, 0, std::max(1, width), std::max(1, height)};
         AdjustWindowRectEx(&windowRect, style, FALSE, exStyle);
 
@@ -1428,6 +1577,10 @@ public:
     void show() override {
         if (m_hwnd) {
             ShowWindow(m_hwnd, SW_SHOW);
+            // Force a full first-frame repaint on native show. Recent damage/layout
+            // optimizations can otherwise leave only a partial dirty region queued
+            // until the user manually resizes the window.
+            InvalidateRect(m_hwnd, nullptr, FALSE);
             UpdateWindow(m_hwnd);
         }
     }
@@ -1446,10 +1599,12 @@ public:
     }
 
     void resize(int width, int height) override {
+        SW_WIDGET_PERF_SCOPE("win32.platformResize");
         if (!m_hwnd) {
             return;
         }
 
+        clampClientSizeToMinimum_(width, height);
         RECT windowRect = {0, 0, std::max(1, width), std::max(1, height)};
         const DWORD style = static_cast<DWORD>(GetWindowLongPtrW(m_hwnd, GWL_STYLE));
         const DWORD exStyle = static_cast<DWORD>(GetWindowLongPtrW(m_hwnd, GWL_EXSTYLE));
@@ -1484,6 +1639,20 @@ public:
     }
 
 private:
+    void clampClientSizeToMinimum_(int& width, int& height) const {
+        if (!m_callbacks.minimumClientSizeHandler) {
+            return;
+        }
+
+        const SwPlatformSize minimumClient = m_callbacks.minimumClientSizeHandler();
+        if (minimumClient.width > 0) {
+            width = std::max(width, minimumClient.width);
+        }
+        if (minimumClient.height > 0) {
+            height = std::max(height, minimumClient.height);
+        }
+    }
+
     static DWORD buildStyle_(const SwPlatformWindowOptions& options) {
         if (options.frameless) {
             return WS_POPUP | WS_CLIPCHILDREN;
@@ -1547,6 +1716,7 @@ private:
             };
         }
         nativeCallbacks.deleteHandler = callbacks.deleteHandler;
+        nativeCallbacks.minimumClientSizeHandler = callbacks.minimumClientSizeHandler;
         nativeCallbacks.closeHandler = callbacks.closeHandler;
         nativeCallbacks.mousePressHandler = [handler = callbacks.mousePressHandler](int x,
                                                                                     int y,

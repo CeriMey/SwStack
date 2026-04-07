@@ -1,0 +1,16 @@
+cmake_minimum_required(VERSION 3.10)
+project(WidgetPerfSelfTest)
+
+add_executable(WidgetPerfSelfTest WidgetPerfSelfTest.cpp)
+
+if(WIN32)
+    target_link_libraries(WidgetPerfSelfTest PRIVATE ws2_32 user32 gdi32)
+elseif(UNIX AND NOT APPLE)
+    find_package(X11)
+    if(NOT X11_FOUND)
+        message(WARNING "X11 not found, skipping WidgetPerfSelfTest target.")
+        return()
+    endif()
+    target_include_directories(WidgetPerfSelfTest PRIVATE ${X11_INCLUDE_DIR})
+    target_link_libraries(WidgetPerfSelfTest PRIVATE ${X11_LIBRARIES} pthread)
+endif()

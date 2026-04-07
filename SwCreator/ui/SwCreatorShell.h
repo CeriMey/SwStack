@@ -30,6 +30,7 @@ public:
     void openEditorPath(const SwString& path);
     bool isEditorPageActive() const;
     bool isCreatorPageActive() const;
+    SwSize minimumSizeHint() const override;
 
 signals:
     DECLARE_SIGNAL_VOID(currentPageChanged);

@@ -29,6 +29,7 @@ public:
 
     void setTarget(SwWidget* widget);
     SwWidget* target() const;
+    SwSize minimumSizeHint() const override;
 
 signals:
     DECLARE_SIGNAL_VOID(hierarchyNeedsRebuild);

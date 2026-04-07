@@ -1,5 +1,6 @@
 #include "SwCreatorDocument.h"
 #include "SwCreatorController.h"
+#include "designer/SwCreatorMainPanel.h"
 #include "editor/SwCreatorEditorPanel.h"
 #include "theme/SwCreatorTheme.h"
 #include "ui/SwCreatorShell.h"
@@ -10,6 +11,9 @@
 #include "SwStatusBar.h"
 #include "core/runtime/SwCrashHandler.h"
 
+#include <cstdlib>
+#include <fstream>
+
 namespace {
 
 SwString initialEditorPath_(int argc, char** argv) {
@@ -17,6 +21,42 @@ SwString initialEditorPath_(int argc, char** argv) {
         return SwString(argv[1]);
     }
     return SwDir::currentPath();
+}
+
+bool shouldDumpMinHints_() {
+    char* env = nullptr;
+    size_t envLen = 0;
+    const errno_t err = _dupenv_s(&env, &envLen, "SW_CREATOR_DUMP_MINHINTS");
+    const bool enabled = (err == 0) && env && env[0] != '\0' && env[0] != '0';
+    free(env);
+    return enabled;
+}
+
+void dumpMinHints_(const SwMainWindow& mainWindow, const SwCreatorShell* shell) {
+    if (!shouldDumpMinHints_() || !shell) {
+        return;
+    }
+
+    std::ofstream out("swcreator_minhint_dump.txt", std::ios::trunc);
+    if (!out) {
+        return;
+    }
+
+    const SwWidget* central = mainWindow.centralWidget();
+    const SwCreatorMainPanel* creator = shell->creatorPanel();
+    const SwCreatorEditorPanel* editor = shell->editorPanel();
+
+    auto dumpSize = [&out](const char* label, const SwSize& size) {
+        out << label << '=' << size.width << 'x' << size.height << '\n';
+    };
+
+    dumpSize("mainWindow.minimumSizeHint", mainWindow.minimumSizeHint());
+    dumpSize("central.minimumSizeHint", central ? central->minimumSizeHint() : SwSize{0, 0});
+    dumpSize("shell.minimumSizeHint", shell->minimumSizeHint());
+    dumpSize("creator.minimumSizeHint", creator ? creator->minimumSizeHint() : SwSize{0, 0});
+    dumpSize("editor.minimumSizeHint", editor ? editor->minimumSizeHint() : SwSize{0, 0});
+    out << "shell.isCreatorPageActive=" << (shell->isCreatorPageActive() ? 1 : 0) << '\n';
+    out << "shell.isEditorPageActive=" << (shell->isEditorPageActive() ? 1 : 0) << '\n';
 }
 
 } // namespace
@@ -85,6 +125,7 @@ int main(int argc, char** argv) {
     }
 
     updateStatus();
+    dumpMinHints_(mainWindow, shell);
     mainWindow.showMaximized();
     return app.exec();
 }
