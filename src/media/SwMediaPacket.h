@@ -18,7 +18,8 @@ public:
         Unknown,
         Audio,
         Video,
-        Metadata
+        Metadata,
+        Subtitle
     };
 
     SwMediaPacket() = default;

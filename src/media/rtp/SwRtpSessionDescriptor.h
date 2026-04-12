@@ -9,7 +9,8 @@
 #include "media/SwMediaOpenOptions.h"
 
 struct SwRtpSessionDescriptor {
-    SwString bindAddress{"0.0.0.0"};
+    SwString bindAddress{};
+    SwString multicastGroup{};
     uint16_t localRtpPort{0};
     uint16_t localRtcpPort{0};
     SwString sourceAddressFilter{};
@@ -25,8 +26,8 @@ struct SwRtpSessionDescriptor {
 
     static SwRtpSessionDescriptor fromOpenOptions(const SwMediaOpenOptions& options) {
         SwRtpSessionDescriptor descriptor;
-        descriptor.bindAddress =
-            options.bindAddress.isEmpty() ? SwString("0.0.0.0") : options.bindAddress;
+        descriptor.bindAddress = options.bindAddress;
+        descriptor.multicastGroup = options.multicastGroup;
         descriptor.localRtpPort = options.rtpPort != 0
                                       ? options.rtpPort
                                       : static_cast<uint16_t>(options.mediaUrl.port() > 0
@@ -49,6 +50,9 @@ struct SwRtpSessionDescriptor {
                 : options.udpFormat;
         descriptor.fmtp = options.fmtp;
         descriptor.lowLatency = options.lowLatency;
+        if (!descriptor.multicastGroup.isEmpty()) {
+            descriptor.allowKeyFrameRequests = false;
+        }
         return descriptor;
     }
 };

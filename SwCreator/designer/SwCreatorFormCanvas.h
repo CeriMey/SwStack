@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+class SwGridLayout;
 class SwMenu;
 
 class SwCreatorFormCanvas : public SwFrame {
@@ -91,18 +92,23 @@ protected:
     void applyLayout_(const SwString& layoutName);
     void breakLayout_();
     void registerDesignWidget_(SwWidget* w, bool attachToParentLayout);
+    static void detachFromParentLayout_(SwWidget* parent, SwWidget* w);
+    static void attachToParentLayout_(SwWidget* parent, SwWidget* w);
     SwSize computeMinimumFormSize_() const;
 
     SwString m_createClass;
     SwWidget* m_selected{nullptr};
     std::vector<SwWidget*> m_designWidgets;
     std::map<std::string, int> m_classCounters;
-    int m_gridColumns{2};
 
     SwWidget* m_designOverlay{nullptr};
     SwWidget* m_dropTarget{nullptr};
     bool m_debugOverlay{false};
     SwMenu* m_contextMenu{nullptr};
+
+    // Layout drag-reorder indicator: a rect (line) showing where the widget will be inserted.
+    SwRect m_dropIndicatorRect{0, 0, 0, 0};
+    SwWidget* m_dropIndicatorParent{nullptr};
 
     RegistryOverlay* m_registryOverlay{nullptr};
     RegistryPopup* m_registryPopup{nullptr};

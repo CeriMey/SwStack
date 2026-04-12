@@ -49,6 +49,7 @@ static constexpr SwNativeListenHandle kSwInvalidListenHandle = INVALID_SOCKET;
 #else
 
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
@@ -65,6 +66,14 @@ class SwTcpServer : public SwObject {
     SW_OBJECT(SwTcpServer, SwObject)
 
 public:
+    struct ResolvedAddress {
+        sockaddr_storage storage{};
+        socklen_t length{0};
+        int family{AF_UNSPEC};
+        SwString address{};
+        uint16_t port{0};
+    };
+
     explicit SwTcpServer(SwObject* parent = nullptr)
         : SwObject(parent) {
 #if defined(_WIN32)
@@ -93,103 +102,52 @@ public:
     }
 
     bool listen(const SwString& bindAddress, uint16_t port) {
-        SwString effectiveBindAddress = bindAddress.trimmed();
-        if (effectiveBindAddress.isEmpty()) {
-            effectiveBindAddress = "0.0.0.0";
-        }
-
-        if (isListening() && m_listenPort == port && m_listenAddress == effectiveBindAddress) {
+        const SwString requestedBindAddress = normalizeAddressText_(bindAddress);
+        if (isListening() && m_listenPort == port && m_requestedListenAddress == requestedBindAddress) {
             return true;
         }
         close();
 
+        ResolvedAddress resolved{};
+        bool dualStack = false;
+        if (!resolveBindAddress_(requestedBindAddress, port, resolved, dualStack)) {
+            swCError(kSwLogCategory_SwTcpServer) << "invalid bind address: " << requestedBindAddress;
+            return false;
+        }
+
+        if (!createListenSocket_(resolved.family, dualStack)) {
+            close();
+            return false;
+        }
+
+        if (!bindResolvedAddress_(resolved)) {
+            close();
+            return false;
+        }
+
+        if (::listen(m_listenSocket, SOMAXCONN)
 #if defined(_WIN32)
-        m_listenSocket = ::WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
-        if (m_listenSocket == INVALID_SOCKET) {
-            swCError(kSwLogCategory_SwTcpServer) << "WSASocket failed: " << WSAGetLastError();
-            return false;
-        }
-
-        u_long mode = 1;
-        ::ioctlsocket(m_listenSocket, FIONBIO, &mode);
-
-        sockaddr_in addr {};
-        addr.sin_family = AF_INET;
-        if (effectiveBindAddress == "0.0.0.0") {
-            addr.sin_addr.s_addr = htonl(INADDR_ANY);
-        } else if (::InetPtonA(AF_INET, effectiveBindAddress.toStdString().c_str(), &addr.sin_addr) != 1) {
-            swCError(kSwLogCategory_SwTcpServer) << "invalid bind address: " << effectiveBindAddress;
-            close();
-            return false;
-        }
-        addr.sin_port = htons(port);
-
-        if (::bind(m_listenSocket, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
-            swCError(kSwLogCategory_SwTcpServer) << "bind failed: " << WSAGetLastError();
-            close();
-            return false;
-        }
-
-        if (::listen(m_listenSocket, SOMAXCONN) == SOCKET_ERROR) {
-            swCError(kSwLogCategory_SwTcpServer) << "listen failed: " << WSAGetLastError();
-            close();
-            return false;
-        }
-
-        m_listenEvent = ::WSACreateEvent();
-        if (m_listenEvent == WSA_INVALID_EVENT) {
-            swCError(kSwLogCategory_SwTcpServer) << "WSACreateEvent failed: " << WSAGetLastError();
-            close();
-            return false;
-        }
-
-        if (::WSAEventSelect(m_listenSocket, m_listenEvent, FD_ACCEPT | FD_CLOSE) == SOCKET_ERROR) {
-            swCError(kSwLogCategory_SwTcpServer) << "WSAEventSelect failed: " << WSAGetLastError();
-            close();
-            return false;
-        }
+            == SOCKET_ERROR
 #else
-        m_listenSocket = ::socket(AF_INET, SOCK_STREAM, 0);
-        if (m_listenSocket < 0) {
-            swCError(kSwLogCategory_SwTcpServer) << "socket failed: " << std::strerror(errno);
-            return false;
-        }
-
-        int opt = 1;
-        ::setsockopt(m_listenSocket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-        setNonBlocking_(m_listenSocket);
-
-        sockaddr_in addr {};
-        addr.sin_family = AF_INET;
-        if (effectiveBindAddress == "0.0.0.0") {
-            addr.sin_addr.s_addr = INADDR_ANY;
-        } else if (::inet_pton(AF_INET, effectiveBindAddress.toStdString().c_str(), &addr.sin_addr) != 1) {
-            swCError(kSwLogCategory_SwTcpServer) << "invalid bind address: " << effectiveBindAddress;
-            close();
-            return false;
-        }
-        addr.sin_port = htons(port);
-
-        if (::bind(m_listenSocket, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-            swCError(kSwLogCategory_SwTcpServer) << "bind failed: " << std::strerror(errno);
-            close();
-            return false;
-        }
-
-        if (::listen(m_listenSocket, SOMAXCONN) < 0) {
-            swCError(kSwLogCategory_SwTcpServer) << "listen failed: " << std::strerror(errno);
-            close();
-            return false;
-        }
+            < 0
 #endif
+        ) {
+#if defined(_WIN32)
+            swCError(kSwLogCategory_SwTcpServer) << "listen failed: " << WSAGetLastError();
+#else
+            swCError(kSwLogCategory_SwTcpServer) << "listen failed: " << std::strerror(errno);
+#endif
+            close();
+            return false;
+        }
 
         if (!registerDispatcher_()) {
             close();
             return false;
         }
 
-        m_listenPort = port;
-        m_listenAddress = effectiveBindAddress;
+        m_requestedListenAddress = requestedBindAddress;
+        refreshLocalEndpoint_();
         return true;
     }
 
@@ -213,6 +171,9 @@ public:
 #endif
         m_listenPort = 0;
         m_listenAddress.clear();
+        m_requestedListenAddress.clear();
+        m_listenFamily = AF_UNSPEC;
+        m_dualStackEnabled = false;
     }
 
     virtual SwTcpSocket* nextPendingConnection() {
@@ -254,12 +215,220 @@ protected:
 private:
     SwNativeListenHandle m_listenSocket = kSwInvalidListenHandle;
     size_t m_dispatchToken = 0;
+    int m_listenFamily = AF_UNSPEC;
+    bool m_dualStackEnabled = false;
     uint16_t m_listenPort = 0;
-    SwString m_listenAddress = "0.0.0.0";
+    SwString m_listenAddress;
+    SwString m_requestedListenAddress;
 
 #if defined(_WIN32)
     WSAEVENT m_listenEvent = NULL;
 #endif
+
+    static SwString normalizeAddressText_(const SwString& text) {
+        SwString normalized = text.trimmed();
+        if (normalized.startsWith("[") && normalized.endsWith("]") && normalized.size() > 2) {
+            normalized = normalized.mid(1, static_cast<int>(normalized.size()) - 2);
+        }
+        return normalized;
+    }
+
+    static SwString socketAddressToString_(const sockaddr_storage& address) {
+        char buffer[INET6_ADDRSTRLEN] = {0};
+        if (address.ss_family == AF_INET) {
+            const sockaddr_in* ipv4 = reinterpret_cast<const sockaddr_in*>(&address);
+#if defined(_WIN32)
+            InetNtopA(AF_INET, const_cast<IN_ADDR*>(&ipv4->sin_addr), buffer, sizeof(buffer));
+#else
+            inet_ntop(AF_INET, const_cast<in_addr*>(&ipv4->sin_addr), buffer, sizeof(buffer));
+#endif
+            return SwString(buffer);
+        }
+        if (address.ss_family == AF_INET6) {
+            const sockaddr_in6* ipv6 = reinterpret_cast<const sockaddr_in6*>(&address);
+            if (IN6_IS_ADDR_V4MAPPED(&ipv6->sin6_addr)) {
+                in_addr mapped{};
+                std::memcpy(&mapped, ipv6->sin6_addr.s6_addr + 12, sizeof(mapped));
+#if defined(_WIN32)
+                InetNtopA(AF_INET, &mapped, buffer, sizeof(buffer));
+#else
+                inet_ntop(AF_INET, &mapped, buffer, sizeof(buffer));
+#endif
+                return SwString(buffer);
+            }
+#if defined(_WIN32)
+            InetNtopA(AF_INET6, const_cast<IN6_ADDR*>(&ipv6->sin6_addr), buffer, sizeof(buffer));
+#else
+            inet_ntop(AF_INET6, const_cast<in6_addr*>(&ipv6->sin6_addr), buffer, sizeof(buffer));
+#endif
+            return SwString(buffer);
+        }
+        return SwString();
+    }
+
+    static uint16_t socketAddressPort_(const sockaddr_storage& address) {
+        if (address.ss_family == AF_INET) {
+            return ntohs(reinterpret_cast<const sockaddr_in*>(&address)->sin_port);
+        }
+        if (address.ss_family == AF_INET6) {
+            return ntohs(reinterpret_cast<const sockaddr_in6*>(&address)->sin6_port);
+        }
+        return 0;
+    }
+
+    bool resolveBindAddress_(const SwString& bindAddress,
+                             uint16_t port,
+                             ResolvedAddress& out,
+                             bool& dualStack) const {
+        dualStack = false;
+        const SwString normalized = normalizeAddressText_(bindAddress);
+        const bool wildcardBind = normalized.isEmpty();
+        int preferredFamily = AF_UNSPEC;
+        if (normalized.contains(":")) {
+            preferredFamily = AF_INET6;
+        } else if (normalized.contains(".")) {
+            preferredFamily = AF_INET;
+        }
+
+        addrinfo hints{};
+        hints.ai_family = preferredFamily;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_protocol = IPPROTO_TCP;
+        hints.ai_flags = AI_PASSIVE;
+
+        addrinfo* result = nullptr;
+        const int rc = ::getaddrinfo(wildcardBind ? nullptr : normalized.toStdString().c_str(),
+                                     SwString::number(port).toStdString().c_str(),
+                                     &hints,
+                                     &result);
+        if (rc != 0 || !result) {
+            return false;
+        }
+
+        const addrinfo* best = nullptr;
+        for (const addrinfo* it = result; it != nullptr; it = it->ai_next) {
+            if (it->ai_family != AF_INET && it->ai_family != AF_INET6) {
+                continue;
+            }
+            if (!best) {
+                best = it;
+            }
+            if (preferredFamily != AF_UNSPEC && it->ai_family == preferredFamily) {
+                best = it;
+                break;
+            }
+            if ((wildcardBind || normalized == "::") && it->ai_family == AF_INET6) {
+                best = it;
+                break;
+            }
+        }
+        if (!best) {
+            ::freeaddrinfo(result);
+            return false;
+        }
+
+        std::memset(&out, 0, sizeof(out));
+        std::memcpy(&out.storage, best->ai_addr, static_cast<size_t>(best->ai_addrlen));
+        out.length = static_cast<socklen_t>(best->ai_addrlen);
+        out.family = best->ai_family;
+        out.address = socketAddressToString_(out.storage);
+        out.port = socketAddressPort_(out.storage);
+        dualStack = (best->ai_family == AF_INET6) && (wildcardBind || normalized == "::");
+        ::freeaddrinfo(result);
+        return true;
+    }
+
+    bool createListenSocket_(int family, bool dualStack) {
+#if defined(_WIN32)
+        m_listenSocket = ::WSASocketW(family, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
+        if (m_listenSocket == INVALID_SOCKET) {
+            swCError(kSwLogCategory_SwTcpServer) << "WSASocket failed: " << WSAGetLastError();
+            return false;
+        }
+        u_long mode = 1;
+        ::ioctlsocket(m_listenSocket, FIONBIO, &mode);
+#else
+        m_listenSocket = ::socket(family, SOCK_STREAM, 0);
+        if (m_listenSocket < 0) {
+            swCError(kSwLogCategory_SwTcpServer) << "socket failed: " << std::strerror(errno);
+            return false;
+        }
+        int reuse = 1;
+        ::setsockopt(m_listenSocket, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+        setNonBlocking_(m_listenSocket);
+#endif
+
+        m_listenFamily = family;
+        m_dualStackEnabled = false;
+        if (family == AF_INET6) {
+            const int v6Only = dualStack ? 0 : 1;
+#if defined(_WIN32)
+            const int rc = ::setsockopt(m_listenSocket,
+                                        IPPROTO_IPV6,
+                                        IPV6_V6ONLY,
+                                        reinterpret_cast<const char*>(&v6Only),
+                                        sizeof(v6Only));
+#else
+            const int rc = ::setsockopt(m_listenSocket, IPPROTO_IPV6, IPV6_V6ONLY, &v6Only, sizeof(v6Only));
+#endif
+            m_dualStackEnabled = (rc == 0 && dualStack);
+        }
+
+#if defined(_WIN32)
+        m_listenEvent = ::WSACreateEvent();
+        if (m_listenEvent == WSA_INVALID_EVENT) {
+            swCError(kSwLogCategory_SwTcpServer) << "WSACreateEvent failed: " << WSAGetLastError();
+            return false;
+        }
+        if (::WSAEventSelect(m_listenSocket, m_listenEvent, FD_ACCEPT | FD_CLOSE) == SOCKET_ERROR) {
+            swCError(kSwLogCategory_SwTcpServer) << "WSAEventSelect failed: " << WSAGetLastError();
+            return false;
+        }
+#endif
+        return true;
+    }
+
+    bool bindResolvedAddress_(const ResolvedAddress& resolved) {
+        if (::bind(m_listenSocket,
+                   reinterpret_cast<const sockaddr*>(&resolved.storage),
+                   static_cast<int>(resolved.length))
+#if defined(_WIN32)
+            == SOCKET_ERROR
+#else
+            < 0
+#endif
+        ) {
+#if defined(_WIN32)
+            swCError(kSwLogCategory_SwTcpServer) << "bind failed: " << WSAGetLastError();
+#else
+            swCError(kSwLogCategory_SwTcpServer) << "bind failed: " << std::strerror(errno);
+#endif
+            return false;
+        }
+        return true;
+    }
+
+    void refreshLocalEndpoint_() {
+        if (m_listenSocket == kSwInvalidListenHandle) {
+            m_listenAddress.clear();
+            m_listenPort = 0;
+            return;
+        }
+        sockaddr_storage address{};
+#if defined(_WIN32)
+        int length = sizeof(address);
+        if (::getsockname(m_listenSocket, reinterpret_cast<sockaddr*>(&address), &length) != 0) {
+            return;
+        }
+#else
+        socklen_t length = sizeof(address);
+        if (::getsockname(m_listenSocket, reinterpret_cast<sockaddr*>(&address), &length) != 0) {
+            return;
+        }
+#endif
+        m_listenAddress = socketAddressToString_(address);
+        m_listenPort = socketAddressPort_(address);
+    }
 
     bool registerDispatcher_() {
         unregisterDispatcher_();

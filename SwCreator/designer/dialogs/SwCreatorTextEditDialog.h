@@ -2,8 +2,8 @@
 /***************************************************************************************************
  * SwCreatorTextEditDialog
  *
- * Reusable multi-line text editor dialog (dockable via SwCreatorDockDialog).
- * Intended for long string properties like StyleSheet, JSON, scripts, etc.
+ * Multi-line code editor dialog (dockable via SwCreatorDockDialog).
+ * Used for StyleSheet editing with CSS/QSS syntax highlighting and auto-completion.
  **************************************************************************************************/
 
 #include "designer/dialogs/SwCreatorDockDialog.h"
@@ -12,7 +12,9 @@
 
 #include <functional>
 
-class SwPlainTextEdit;
+class SwCodeEditor;
+class SwCompleter;
+class SwCssSyntaxHighlighter;
 class SwPushButton;
 
 class SwCreatorTextEditDialog : public SwCreatorDockDialog {
@@ -33,8 +35,11 @@ signals:
 
 private:
     void buildUi_();
+    void setupCompletion_();
 
-    SwPlainTextEdit* m_edit{nullptr};
+    SwCodeEditor* m_editor{nullptr};
+    SwCssSyntaxHighlighter* m_highlighter{nullptr};
+    SwCompleter* m_completer{nullptr};
     SwPushButton* m_apply{nullptr};
     SwPushButton* m_close{nullptr};
     std::function<void(const SwString&)> m_onApply;

@@ -702,30 +702,47 @@ SwString SwCreatorSwuiSerializer::serializeCanvas(const SwCreatorFormCanvas* can
             emitProperty_(oss, "spacing", SwAny(layout->spacing()), indent + 4);
             emitProperty_(oss, "margin", SwAny(layout->margin()), indent + 4);
 
-            const int count = kids ? static_cast<int>(kids->size()) : 0;
-            const bool isGrid = dynamic_cast<const SwGridLayout*>(layout) != nullptr;
-            int cols = 1;
-            if (isGrid) {
-                const int n = std::max(1, count);
-                while (cols * cols < n) {
-                    ++cols;
+            if (const auto* grid = dynamic_cast<const SwGridLayout*>(layout)) {
+                std::vector<const SwGridLayout::Cell*> orderedCells;
+                orderedCells.reserve(grid->cells().size());
+                for (const auto& cell : grid->cells()) {
+                    if (!cell.item || !cell.item->widget()) {
+                        continue;
+                    }
+                    orderedCells.push_back(&cell);
                 }
-            }
+                std::sort(orderedCells.begin(), orderedCells.end(), [](const SwGridLayout::Cell* a, const SwGridLayout::Cell* b) {
+                    if (a->row != b->row) {
+                        return a->row < b->row;
+                    }
+                    if (a->column != b->column) {
+                        return a->column < b->column;
+                    }
+                    if (a->rowSpan != b->rowSpan) {
+                        return a->rowSpan < b->rowSpan;
+                    }
+                    return a->columnSpan < b->columnSpan;
+                });
 
-            for (int i = 0; i < count; ++i) {
-                emitIndent_(oss, indent + 4);
-                if (isGrid) {
-                    const int row = i / cols;
-                    const int col = i % cols;
-                    oss << "<item row=\"" << row << "\" column=\"" << col << "\" rowspan=\"1\" colspan=\"1\">\n";
-                } else {
+                for (size_t i = 0; i < orderedCells.size(); ++i) {
+                    const SwGridLayout::Cell& cell = *orderedCells[i];
+                    emitIndent_(oss, indent + 4);
+                    oss << "<item row=\"" << cell.row << "\" column=\"" << cell.column
+                        << "\" rowspan=\"" << cell.rowSpan << "\" colspan=\"" << cell.columnSpan << "\">\n";
+                    emitNode(dynamic_cast<const SwWidget*>(cell.item->widget()), w, static_cast<int>(i), indent + 6);
+                    emitIndent_(oss, indent + 4);
+                    oss << "</item>\n";
+                }
+            } else {
+                const int count = kids ? static_cast<int>(kids->size()) : 0;
+                for (int i = 0; i < count; ++i) {
+                    emitIndent_(oss, indent + 4);
                     oss << "<item>\n";
+                    emitNode((*kids)[static_cast<size_t>(i)], w, i, indent + 6);
+
+                    emitIndent_(oss, indent + 4);
+                    oss << "</item>\n";
                 }
-
-                emitNode((*kids)[static_cast<size_t>(i)], w, i, indent + 6);
-
-                emitIndent_(oss, indent + 4);
-                oss << "</item>\n";
             }
 
             emitIndent_(oss, indent + 2);

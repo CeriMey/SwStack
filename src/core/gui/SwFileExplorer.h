@@ -65,6 +65,25 @@ inline SwString fileName(const SwString& rawPath) {
     return SwString(info.fileName());
 }
 
+inline SwString parentPath(const SwString& rawPath) {
+    const SwString path = normalizePath(rawPath);
+    if (path.isEmpty()) {
+        return SwString();
+    }
+
+    const size_t slash = path.lastIndexOf('/');
+    if (slash == static_cast<size_t>(-1)) {
+        return SwString();
+    }
+    if (slash == 0) {
+        return SwString("/");
+    }
+    if (slash == 2 && path.size() >= 3 && path[1] == ':') {
+        return path.substr(0, slash + 1);
+    }
+    return path.substr(0, slash);
+}
+
 inline bool isSameOrChildPath(const SwString& rawParentPath, const SwString& rawChildPath) {
     const SwString parentPath = normalizePath(rawParentPath);
     const SwString childPath = normalizePath(rawChildPath);
@@ -501,6 +520,7 @@ public:
 
     void reload() {
         m_itemsByPath.clear();
+        m_populatedDirectories.clear();
         m_iconCache.clear();
         if (m_tree) {
             m_tree->clear();
@@ -531,7 +551,7 @@ public:
             m_tree->addTopLevelItem(rootItem);
         }
 
-        (void)populateDirectory_(rootItem, m_rootPath);
+        populateDirectoryChildren_(rootItem, m_rootPath);
         refreshLabels_();
         expandToItem_(rootItem);
         syncSelection_(false);
@@ -571,10 +591,40 @@ private:
         }
     };
 
-    bool populateDirectory_(SwStandardItem* parentItem, const SwString& directoryPath) {
-        if (!parentItem) {
-            return false;
+    static SwString lazyPlaceholderToken_() {
+        return "__sw_file_explorer_lazy_placeholder__";
+    }
+
+    bool directoryMayHaveVisibleChildren_(const SwString& directoryPath) const {
+        SwDir directory(directoryPath);
+        SwStringList directories = directory.entryList(EntryType::Directories);
+        if (!directories.isEmpty()) {
+            return true;
         }
+
+        SwStringList files = m_nameFilters.isEmpty()
+                                 ? directory.entryList(EntryType::Files)
+                                 : directory.entryList(m_nameFilters, EntryType::Files);
+        return !files.isEmpty();
+    }
+
+    void primeDirectoryItem_(SwStandardItem* item, const SwString& directoryPath) {
+        if (!item) {
+            return;
+        }
+        if (directoryMayHaveVisibleChildren_(directoryPath)) {
+            SwStandardItem* placeholder = new SwStandardItem("");
+            placeholder->setToolTip(lazyPlaceholderToken_());
+            item->appendRow(placeholder);
+        }
+    }
+
+    void populateDirectoryChildren_(SwStandardItem* parentItem, const SwString& directoryPath) {
+        if (!parentItem || m_populatedDirectories.contains(directoryPath)) {
+            return;
+        }
+
+        parentItem->removeAllChildren();
 
         SwDir directory(directoryPath);
         SwStringList directories = directory.entryList(EntryType::Directories);
@@ -585,19 +635,12 @@ private:
         swFileExplorerDetail::sortEntries(directories);
         swFileExplorerDetail::sortEntries(files);
 
-        bool hasVisibleEntries = false;
-
         for (size_t i = 0; i < directories.size(); ++i) {
             const SwString childPath = swFileExplorerDetail::joinPath(directoryPath, directories[i]);
             SwStandardItem* childItem = makeDirectoryItem_(childPath);
-            const bool childVisible = populateDirectory_(childItem, childPath);
-            if (childVisible || m_nameFilters.isEmpty()) {
-                parentItem->appendRow(childItem);
-                m_itemsByPath.insert(childPath, childItem);
-                hasVisibleEntries = true;
-            } else {
-                delete childItem;
-            }
+            primeDirectoryItem_(childItem, childPath);
+            parentItem->appendRow(childItem);
+            m_itemsByPath.insert(childPath, childItem);
         }
 
         for (size_t i = 0; i < files.size(); ++i) {
@@ -605,10 +648,56 @@ private:
             SwStandardItem* childItem = makeFileItem_(childPath);
             parentItem->appendRow(childItem);
             m_itemsByPath.insert(childPath, childItem);
-            hasVisibleEntries = true;
         }
 
-        return hasVisibleEntries;
+        m_populatedDirectories.insert(directoryPath, true);
+    }
+
+    void ensureDirectoryPopulated_(SwStandardItem* item) {
+        if (!item) {
+            return;
+        }
+
+        const SwString path = swFileExplorerDetail::normalizePath(item->toolTip());
+        if (path.isEmpty()) {
+            return;
+        }
+
+        const SwFileInfo info(path.toStdString());
+        if (!info.exists() || !info.isDir()) {
+            return;
+        }
+
+        populateDirectoryChildren_(item, path);
+    }
+
+    SwStandardItem* ensureItemForPath_(const SwString& rawPath) {
+        const SwString path = swFileExplorerDetail::normalizePath(rawPath);
+        if (path.isEmpty()) {
+            return nullptr;
+        }
+
+        SwStandardItem* existing = m_itemsByPath.value(path, nullptr);
+        if (existing) {
+            return existing;
+        }
+
+        if (!swFileExplorerDetail::isSameOrChildPath(m_rootPath, path) || path == m_rootPath) {
+            return m_itemsByPath.value(path, nullptr);
+        }
+
+        const SwString parentPath = swFileExplorerDetail::parentPath(path);
+        if (parentPath.isEmpty() || parentPath == path) {
+            return nullptr;
+        }
+
+        SwStandardItem* parentItem = ensureItemForPath_(parentPath);
+        if (!parentItem) {
+            return nullptr;
+        }
+
+        ensureDirectoryPopulated_(parentItem);
+        return m_itemsByPath.value(path, nullptr);
     }
 
     SwStandardItem* makeDirectoryItem_(const SwString& path) {
@@ -649,7 +738,7 @@ private:
                 m_tree->selectionModel()->clearSelection();
             }
         } else {
-            SwStandardItem* item = m_itemsByPath.value(m_currentPath, nullptr);
+            SwStandardItem* item = ensureItemForPath_(m_currentPath);
             if (item) {
                 expandToItem_(item);
             }
@@ -670,6 +759,7 @@ private:
 
         SwStandardItem* current = item;
         while (current) {
+            ensureDirectoryPopulated_(current);
             m_tree->expand(current);
             current = current->parent();
         }
@@ -685,6 +775,7 @@ private:
             return;
         }
 
+        ensureDirectoryPopulated_(current);
         m_currentPath = path;
         if (!m_syncingSelection) {
             emit currentPathChanged(m_currentPath);
@@ -723,6 +814,7 @@ private:
         }
 
         if (info.isDir()) {
+            ensureDirectoryPopulated_(item);
             const SwModelIndex index = indexForItem_(item);
             if (index.isValid()) {
                 if (m_tree->isExpanded(index)) {
@@ -807,6 +899,7 @@ private:
     SwStringList m_nameFilters;
     SwMap<SwString, bool> m_markedPaths;
     SwMap<SwString, SwStandardItem*> m_itemsByPath;
+    SwMap<SwString, bool> m_populatedDirectories;
     swFileExplorerDetail::SystemIconCache m_iconCache;
     bool m_syncingSelection{false};
     bool m_doubleClickActivationEnabled{false};

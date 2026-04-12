@@ -116,10 +116,11 @@ public:
         });
         SwObject::connect(this, &SwPlainTextEdit::textChanged, this, [this]() {
             const int newLineCount = documentLineCount_();
-            if (newLineCount != m_lastKnownLineCount) {
-                m_lastKnownLineCount = newLineCount;
-                syncVisibleLineCacheAfterTextChange_();
-            }
+            m_lastKnownLineCount = newLineCount;
+            m_cursorPos = std::min(m_cursorPos, documentLength_());
+            m_selectionStart = std::min(m_selectionStart, documentLength_());
+            m_selectionEnd = std::min(m_selectionEnd, documentLength_());
+            syncVisibleLineCacheAfterTextChange_();
             m_maxLineWidthDirty = true;
             if (!m_suppressFoldRefresh) {
                 scheduleFoldRefresh_();
@@ -2661,7 +2662,10 @@ private:
     }
 
     int documentLineCount_() const {
-        return std::max(1, m_document ? m_document->blockCount() : m_pieceTable.lineCount());
+        // The editable source of truth is the piece table. During high-frequency
+        // edits, relying on the document block cache can transiently desync line
+        // based cursor logic from the text buffer and produce erratic deletes.
+        return std::max(1, m_pieceTable.lineCount());
     }
 
     size_t documentLength_() const {

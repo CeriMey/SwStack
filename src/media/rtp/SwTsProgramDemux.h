@@ -119,7 +119,8 @@ private:
         Unknown,
         Video,
         Audio,
-        Metadata
+        Metadata,
+        Subtitle
     };
 
     struct StreamInfo {
@@ -131,6 +132,7 @@ private:
         int clockRate{0};
         int sampleRate{0};
         int channelCount{0};
+        SwString language{};
         bool hevc{false};
         bool keyFrame{false};
         bool hasPesPts{false};
@@ -335,6 +337,28 @@ private:
                     return true;
                 }
             }
+            if (tag == 0x59 && length >= 8) {
+                outStream.pid = pid;
+                outStream.kind = StreamKind::Subtitle;
+                outStream.codec = "dvb-subtitle";
+                outStream.trackId =
+                    SwString("ts-subtitle-") + SwString(std::to_string(pid));
+                outStream.clockRate = 90000;
+                outStream.language =
+                    SwString(std::string(reinterpret_cast<const char*>(data + offset), 3));
+                return true;
+            }
+            if (tag == 0x56 && length >= 5) {
+                outStream.pid = pid;
+                outStream.kind = StreamKind::Subtitle;
+                outStream.codec = "teletext";
+                outStream.trackId =
+                    SwString("ts-subtitle-") + SwString(std::to_string(pid));
+                outStream.clockRate = 90000;
+                outStream.language =
+                    SwString(std::string(reinterpret_cast<const char*>(data + offset), 3));
+                return true;
+            }
             offset += length;
         }
         return false;
@@ -353,6 +377,7 @@ private:
             current.clockRate != stream.clockRate ||
             current.sampleRate != stream.sampleRate ||
             current.channelCount != stream.channelCount ||
+            current.language != stream.language ||
             current.hevc != stream.hevc ||
             current.trackId != stream.trackId;
         current.kind = stream.kind;
@@ -362,6 +387,7 @@ private:
         current.clockRate = stream.clockRate;
         current.sampleRate = stream.sampleRate;
         current.channelCount = stream.channelCount;
+        current.language = stream.language;
         current.hevc = stream.hevc;
         return changed;
     }
@@ -381,6 +407,7 @@ private:
                                   : stream.clockRate;
             track.sampleRate = stream.sampleRate;
             track.channelCount = stream.channelCount;
+            track.language = stream.language;
             track.selected = false;
             track.availability = SwMediaTrack::Availability::Available;
             switch (stream.kind) {
@@ -392,6 +419,9 @@ private:
                 break;
             case StreamKind::Metadata:
                 track.type = SwMediaTrack::Type::Metadata;
+                break;
+            case StreamKind::Subtitle:
+                track.type = SwMediaTrack::Type::Subtitle;
                 break;
             case StreamKind::Unknown:
             default:
@@ -525,6 +555,12 @@ private:
         }
         case StreamKind::Metadata:
             packet.setType(SwMediaPacket::Type::Metadata);
+            packet.setClockRate(90000);
+            packet.setPts(static_cast<std::int64_t>(rawPts));
+            packet.setDts(static_cast<std::int64_t>(rawPts));
+            break;
+        case StreamKind::Subtitle:
+            packet.setType(SwMediaPacket::Type::Subtitle);
             packet.setClockRate(90000);
             packet.setPts(static_cast<std::int64_t>(rawPts));
             packet.setDts(static_cast<std::int64_t>(rawPts));

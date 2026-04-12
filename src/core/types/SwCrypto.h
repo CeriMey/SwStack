@@ -407,6 +407,10 @@ public:
      * @param input Value passed to the method.
      * @return The requested generate Hash SHA1.
      */
+    static std::vector<unsigned char> generateHashMD5(const std::string& input) {
+        return computeHash(input, HashAlgo::MD5);
+    }
+
     static std::vector<unsigned char> generateHashSHA1(const std::string& input) {
         return computeHash(input, HashAlgo::SHA1);
     }
@@ -436,6 +440,10 @@ public:
      *
      * @details This query does not modify the object state.
      */
+    static std::string hashMD5(const std::string& input) {
+        return hexEncode(generateHashMD5(input));
+    }
+
     static std::string hashSHA1(const std::string& input) {
         return hexEncode(generateHashSHA1(input));
     }
@@ -705,7 +713,7 @@ public:
 
 private:
     // ---- Helpers cross‑platform (API interne, pas visible à l'extérieur) ----
-    enum class HashAlgo { SHA1, SHA256, SHA512 };
+    enum class HashAlgo { MD5, SHA1, SHA256, SHA512 };
 
     static std::string hexEncode(const std::vector<unsigned char>& bytes) {
         std::ostringstream oss;
@@ -730,6 +738,7 @@ private:
 
         LPCWSTR algId = BCRYPT_SHA256_ALGORITHM;
         switch (algo) {
+        case HashAlgo::MD5: algId = BCRYPT_MD5_ALGORITHM; break;
         case HashAlgo::SHA1:   algId = BCRYPT_SHA1_ALGORITHM;   break;
         case HashAlgo::SHA256: algId = BCRYPT_SHA256_ALGORITHM; break;
         case HashAlgo::SHA512: algId = BCRYPT_SHA512_ALGORITHM; break;
@@ -764,6 +773,7 @@ private:
     #elif SW_CRYPTO_HAS_OPENSSL
         const EVP_MD* md = nullptr;
         switch (algo) {
+        case HashAlgo::MD5:    md = EVP_md5();    break;
         case HashAlgo::SHA1:   md = EVP_sha1();   break;
         case HashAlgo::SHA256: md = EVP_sha256(); break;
         case HashAlgo::SHA512: md = EVP_sha512(); break;

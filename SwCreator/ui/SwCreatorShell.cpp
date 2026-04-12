@@ -59,9 +59,9 @@ protected:
 
         const SwRect hoverRect{bounds.x + 4, bounds.y + 4, bounds.width - 8, bounds.height - 8};
         if (active) {
-            painter->fillRoundedRect(hoverRect, 8, th.pressedBg, th.pressedBg, 0);
+            painter->fillRoundedRect(hoverRect, 2, th.pressedBg, th.pressedBg, 0);
         } else if (getPressed() || getHover()) {
-            painter->fillRoundedRect(hoverRect, 8, th.hoverBg, th.hoverBg, 0);
+            painter->fillRoundedRect(hoverRect, 2, th.hoverBg, th.hoverBg, 0);
         }
 
         if (active) {
@@ -171,7 +171,7 @@ public:
             "SwPushButton { background-color: " + SwCreatorTheme::rgb(th.surface2)
             + "; border-color: " + SwCreatorTheme::rgb(th.accentPrimary)
             + "; color: " + SwCreatorTheme::rgb(th.accentPrimary)
-            + "; border-radius: 12px; padding: 8px 14px; border-width: 1px; font-size: 14px; }"
+            + "; border-radius: 2px; padding: 8px 14px; border-width: 1px; font-size: 14px; }"
             " SwPushButton:hover { background-color: " + SwCreatorTheme::rgb(th.surface3) + "; }"
             " SwPushButton:pressed { background-color: " + SwCreatorTheme::rgb(th.surface4) + "; }"
         );
@@ -181,7 +181,7 @@ public:
             "SwPushButton { background-color: " + SwCreatorTheme::rgb(th.accentPrimary)
             + "; border-color: " + SwCreatorTheme::rgb(th.accentPrimary)
             + "; color: " + SwCreatorTheme::rgb(th.textInverse)
-            + "; border-radius: 12px; padding: 8px 14px; border-width: 1px; font-size: 14px; }"
+            + "; border-radius: 2px; padding: 8px 14px; border-width: 1px; font-size: 14px; }"
             " SwPushButton:hover { background-color: " + SwCreatorTheme::rgb(th.accentHover)
             + "; border-color: " + SwCreatorTheme::rgb(th.accentHover) + "; }"
             " SwPushButton:pressed { background-color: " + SwCreatorTheme::rgb(th.accentPressed)
@@ -230,7 +230,7 @@ private:
         card->setStyleSheet(
             "SwFrame { background-color: " + SwCreatorTheme::rgb(th.cardBg)
             + "; border-color: " + SwCreatorTheme::rgb(th.cardBorder)
-            + "; border-radius: 20px; border-width: 1px; }"
+            + "; border-radius: 2px; border-width: 1px; }"
         );
         return card;
     }
@@ -339,7 +339,7 @@ SwCreatorShell::SwCreatorShell(SwWidget* parent)
         "SwFrame { background-color: " + SwCreatorTheme::rgb(th.surface0)
         + "; border-color: " + SwCreatorTheme::rgb(th.surface0)
         + "; border-radius: 0px; border-width: 0px;"
-        " border-top-right-radius: 10px; border-bottom-right-radius: 10px; }"
+        " border-top-right-radius: 0px; border-bottom-right-radius: 0px; }"
     );
 
     m_brandBadge = new SwFrame(m_sidebarFrame);

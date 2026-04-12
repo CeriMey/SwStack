@@ -83,7 +83,9 @@ public:
                       std::size_t packetSize = 64 * 1024)
         : m_path(filePath)
         , m_codec(codec)
-        , m_packetSize(packetSize > 0 ? packetSize : 64 * 1024) {}
+        , m_packetSize(packetSize > 0 ? packetSize : 64 * 1024) {
+        publishTracks_();
+    }
 
     /**
      * @brief Destroys the `SwFileVideoSource` instance.
@@ -115,8 +117,11 @@ public:
         }
         if (m_path.empty()) {
             swCError(kSwLogCategory_SwFileVideoSource) << "[SwFileVideoSource] empty file path.";
+            emitStatus(StreamState::Recovering, "Empty file path");
             return;
         }
+        publishTracks_();
+        emitStatus(StreamState::Connecting, "Opening file source...");
         setRunning(true);
         m_worker = std::thread([this]() { streamLoop(); });
     }
@@ -147,11 +152,53 @@ public:
     }
 
 private:
+    static SwString codecName_(SwVideoPacket::Codec codec) {
+        switch (codec) {
+        case SwVideoPacket::Codec::H264:
+            return "h264";
+        case SwVideoPacket::Codec::H265:
+            return "h265";
+        case SwVideoPacket::Codec::VP8:
+            return "vp8";
+        case SwVideoPacket::Codec::VP9:
+            return "vp9";
+        case SwVideoPacket::Codec::AV1:
+            return "av1";
+        case SwVideoPacket::Codec::MotionJPEG:
+            return "mjpeg";
+        case SwVideoPacket::Codec::RawBGRA:
+            return "raw-bgra";
+        case SwVideoPacket::Codec::RawRGBA:
+            return "raw-rgba";
+        case SwVideoPacket::Codec::RawBGR:
+            return "raw-bgr";
+        case SwVideoPacket::Codec::RawRGB:
+            return "raw-rgb";
+        case SwVideoPacket::Codec::Unknown:
+        default:
+            return "unknown";
+        }
+    }
+
+    void publishTracks_() {
+        SwMediaTrack track;
+        track.id = "file-video-0";
+        track.type = SwMediaTrack::Type::Video;
+        track.codec = codecName_(m_codec);
+        track.selected = true;
+        track.availability = SwMediaTrack::Availability::Available;
+        SwList<SwMediaTrack> tracks;
+        tracks.append(track);
+        setTracks(tracks);
+    }
+
     void streamLoop() {
+        bool reachedEndOfFile = false;
         while (isRunning()) {
             std::ifstream input(m_path, std::ios::binary);
             if (!input) {
                 swCError(kSwLogCategory_SwFileVideoSource) << "[SwFileVideoSource] failed to open file: " << m_path;
+                emitStatus(StreamState::Recovering, "Failed to open file");
                 break;
             }
 
@@ -166,15 +213,19 @@ private:
 
                 SwByteArray payload(buffer.data(), static_cast<std::size_t>(bytesRead));
                 SwVideoPacket packet(m_codec, payload, static_cast<std::int64_t>(pts));
+                emitStatus(StreamState::Streaming, "Streaming");
                 emitPacket(packet);
                 pts += static_cast<std::size_t>(bytesRead);
             }
 
             if (!m_loop.load()) {
+                reachedEndOfFile = true;
                 break;
             }
         }
         setRunning(false);
+        emitStatus(StreamState::Stopped,
+                   reachedEndOfFile ? SwString("End of file") : SwString("Stream stopped"));
     }
 
     std::string m_path;

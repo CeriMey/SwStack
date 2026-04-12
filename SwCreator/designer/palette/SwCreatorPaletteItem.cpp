@@ -14,7 +14,7 @@ SwCreatorPaletteItem::SwCreatorPaletteItem(const SwCreatorPaletteEntry& entry, S
     , m_entry(entry) {
     setCursor(CursorType::Hand);
     setFocusPolicy(FocusPolicyEnum::NoFocus);
-    resize(220, 24);
+    resize(220, 32);
     setStyleSheet("SwCreatorPaletteItem { background-color: rgba(0,0,0,0); border-width: 0px; }");
 }
 
@@ -66,6 +66,7 @@ void SwCreatorPaletteItem::paintEvent(PaintEvent* event) {
 
     if (m_selected) {
         bg = th.selectionBg;
+        text = th.accentPrimary;
         paintBg = true;
     } else if (m_pressed) {
         bg = th.pressedBg;
@@ -76,11 +77,12 @@ void SwCreatorPaletteItem::paintEvent(PaintEvent* event) {
     }
 
     if (paintBg) {
-        painter->fillRect(r, bg, bg, 0);
+        const SwRect bgRect{r.x + 4, r.y + 1, r.width - 8, r.height - 2};
+        painter->fillRoundedRect(bgRect, 2, bg, bg, 0);
     }
 
-    const int pad = 10;
-    const int iconSize = 16;
+    const int pad = 12;
+    const int iconSize = 20;
     SwRect iconRect{r.x + pad, r.y + (r.height - iconSize) / 2, iconSize, iconSize};
     drawIcon_(painter, iconRect, m_entry);
 
@@ -91,7 +93,7 @@ void SwCreatorPaletteItem::paintEvent(PaintEvent* event) {
                       m_entry.displayName,
                       DrawTextFormats(DrawTextFormat::Left | DrawTextFormat::VCenter | DrawTextFormat::SingleLine),
                       text,
-                      getFont());
+                      th.uiBody);
 }
 
 void SwCreatorPaletteItem::mousePressEvent(MouseEvent* event) {

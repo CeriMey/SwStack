@@ -897,7 +897,7 @@ protected:
         SwPainter* painter = event->painter();
         const SwRect bounds = rect();
 
-        painter->fillRoundedRect(bounds, 12, SwColor{255, 255, 255}, SwColor{220, 224, 232}, 1);
+        painter->fillRoundedRect(bounds, m_colors.bgRadius, m_colors.background, m_colors.backgroundBorder, 1);
 
         const SwRect viewport = contentViewportRect(bounds);
         if (viewport.width <= 0 || viewport.height <= 0) {
@@ -1906,14 +1906,14 @@ private:
 
         int y = dataArea.y - yWithin;
 
-        const SwColor altFill{249, 249, 249};
-        const SwColor selFill{204, 228, 247};
-        const SwColor selBorder{0, 103, 192};
-        const SwColor hoverFill{229, 229, 229};
-        const SwColor textColor{32, 32, 32};
-        const SwColor toggleStroke{96, 96, 96};
-        const SwColor gridColor{226, 232, 240};
-        const SwFont font(L"Segoe UI", 9, Normal);
+        const SwColor& altFill      = m_colors.altFill;
+        const SwColor& selFill      = m_colors.selFill;
+        const SwColor& selBorder    = m_colors.selBorder;
+        const SwColor& hoverFill    = m_colors.hoverFill;
+        const SwColor& textColor    = m_colors.text;
+        const SwColor& toggleStroke = m_colors.toggleStroke;
+        const SwColor& gridColor    = m_colors.gridLine;
+        const SwFont& font          = m_treeFont;
 
         for (int row = firstRow; row < rows && y < dataArea.y + dataArea.height; ++row) {
             const VisibleRow& vr = m_visible[static_cast<size_t>(row)];
@@ -1968,10 +1968,10 @@ private:
             if (!rowHasIndexWidget) {
                 if (selected) {
                     SwRect highlight{rowRect.x + 2, rowRect.y + 2, std::max(0, rowRect.width - 4), std::max(0, rowRect.height - 4)};
-                    painter->fillRoundedRect(highlight, 6, selFill, selBorder, 1);
+                    painter->fillRoundedRect(highlight, m_colors.selRadius, selFill, selBorder, 1);
                 } else if (hovered) {
                     SwRect hi{rowRect.x + 2, rowRect.y + 2, std::max(0, rowRect.width - 4), std::max(0, rowRect.height - 4)};
-                    painter->fillRoundedRect(hi, 6, hoverFill, hoverFill, 0);
+                    painter->fillRoundedRect(hi, m_colors.selRadius, hoverFill, hoverFill, 0);
                 }
             }
 
@@ -2282,5 +2282,31 @@ private:
     SwList<VisibleRow> m_visible;
     SwList<int> m_expanded;
     SwList<IndexWidgetEntry> m_indexWidgets;
+
+public:
+    // ── Theming ─────────────────────────────────────────────────────────
+    struct TreeColors {
+        SwColor background      {255, 255, 255};
+        SwColor backgroundBorder{220, 224, 232};
+        SwColor altFill         {249, 249, 249};
+        SwColor selFill         {204, 228, 247};
+        SwColor selBorder       {  0, 103, 192};
+        SwColor hoverFill       {229, 229, 229};
+        SwColor text            { 32,  32,  32};
+        SwColor toggleStroke    { 96,  96,  96};
+        SwColor gridLine        {226, 232, 240};
+        int     bgRadius        {12};
+        int     selRadius       { 6};
+    };
+
+    void setTreeColors(const TreeColors& colors) { m_colors = colors; update(); }
+    const TreeColors& treeColors() const { return m_colors; }
+
+    void setTreeFont(const SwFont& f) { m_treeFont = f; m_treeFontSet = true; update(); }
+
+private:
+    TreeColors m_colors;
+    SwFont     m_treeFont{L"Segoe UI", 9, Normal};
+    bool       m_treeFontSet{false};
 };
 

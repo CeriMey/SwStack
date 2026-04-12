@@ -2400,11 +2400,35 @@ protected:
         return false;
     }
 
+    SwWidget* findFocusedDescendantByState_() {
+        const auto& directChildren = children();
+        for (int i = static_cast<int>(directChildren.size()) - 1; i >= 0; --i) {
+            SwObject* obj = directChildren[static_cast<size_t>(i)];
+            SwWidget* child = obj ? dynamic_cast<SwWidget*>(obj) : nullptr;
+            if (!child || !child->isVisibleInHierarchy()) {
+                continue;
+            }
+            if (SwWidget* focusedChild = child->findFocusedDescendantByState_()) {
+                return focusedChild;
+            }
+            if (child->getFocus()) {
+                return child;
+            }
+        }
+        return nullptr;
+    }
+
     SwWidget* findFocusedWidgetInHierarchy_() {
-        SwWidget* focused = currentFocusOwnerInScope_();
+        SwWidget* focused = findFocusedDescendantByState_();
+        if (focused && focused->isVisibleInHierarchy()) {
+            return focused;
+        }
+
+        focused = currentFocusOwnerInScope_();
         if (focused && focused->isVisibleInHierarchy() && belongsToHierarchy_(focused)) {
             return focused;
         }
+
         if (getFocus() && isVisibleInHierarchy()) {
             return this;
         }

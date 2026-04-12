@@ -71,6 +71,9 @@ public:
         m_tsDemux.setPacketCallback([this](const SwMediaPacket& packet) {
             emitProgramVideoPacket_(packet);
         });
+        m_tsDemux.setTracksChangedCallback([this](const SwList<SwMediaTrack>& tracks) {
+            setTracks(tracks);
+        });
 
         if (m_descriptor.codec == SwVideoPacket::Codec::H265) {
             m_h265Depacketizer.setFmtp(m_descriptor.fmtp);
@@ -129,6 +132,7 @@ private:
 
     void emitProgramVideoPacket_(const SwMediaPacket& packet) {
         if (packet.type() != SwMediaPacket::Type::Video) {
+            emitMediaPacket(packet);
             return;
         }
         emitStatus(StreamState::Streaming, "Streaming");

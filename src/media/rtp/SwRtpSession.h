@@ -130,7 +130,8 @@ public:
     }
 
     void requestKeyFrame(const SwString& reason = SwString()) {
-        if (!m_running.load() || !m_descriptor.allowKeyFrameRequests || m_remoteSsrc == 0) {
+        if (!m_running.load() || !m_descriptor.allowKeyFrameRequests || m_remoteSsrc == 0 ||
+            !m_descriptor.multicastGroup.isEmpty()) {
             return;
         }
         const auto now = std::chrono::steady_clock::now();
@@ -175,6 +176,10 @@ public:
     }
 
 private:
+    static SwString wildcardBindAddressForGroup_(const SwString& group) {
+        return group.contains(":") ? SwString("::") : SwString("0.0.0.0");
+    }
+
     static bool parseSequenceNumber_(const SwByteArray& datagram, uint16_t& sequenceNumber) {
         if (datagram.size() < 4) {
             return false;
@@ -250,7 +255,9 @@ private:
             return false;
         }
         const SwString bindAddress =
-            m_descriptor.bindAddress.isEmpty() ? SwString("0.0.0.0") : m_descriptor.bindAddress;
+            m_descriptor.multicastGroup.isEmpty()
+                ? m_descriptor.bindAddress
+                : wildcardBindAddressForGroup_(m_descriptor.multicastGroup);
         const auto bindMode = static_cast<SwUdpSocket::BindMode>(SwUdpSocket::ShareAddress |
                                                                  SwUdpSocket::ReuseAddressHint);
         if (!m_rtpSocket->bind(bindAddress, m_descriptor.localRtpPort, bindMode)) {
@@ -268,6 +275,17 @@ private:
             m_rtpSocket->close();
             m_rtcpSocket->close();
             return false;
+        }
+        if (!m_descriptor.multicastGroup.isEmpty()) {
+            if (!m_rtpSocket->joinMulticastGroup(m_descriptor.multicastGroup, m_descriptor.bindAddress) ||
+                !m_rtcpSocket->joinMulticastGroup(m_descriptor.multicastGroup, m_descriptor.bindAddress)) {
+                swCError(kSwLogCategory_SwRtpSession)
+                    << "[SwRtpSession] Failed to join multicast group "
+                    << m_descriptor.multicastGroup;
+                m_rtpSocket->close();
+                m_rtcpSocket->close();
+                return false;
+            }
         }
         swCWarning(kSwLogCategory_SwRtpSession)
             << "[SwRtpSession] Listening on "
@@ -562,7 +580,7 @@ private:
     }
 
     void maybeSendReceiverReport_() {
-        if (!m_running.load() || m_remoteSsrc == 0) {
+        if (!m_running.load() || m_remoteSsrc == 0 || !m_descriptor.multicastGroup.isEmpty()) {
             return;
         }
         const auto now = std::chrono::steady_clock::now();
@@ -577,6 +595,9 @@ private:
     }
 
     void sendReceiverReport_() {
+        if (!m_descriptor.multicastGroup.isEmpty()) {
+            return;
+        }
         const SwString targetAddress = remoteControlAddress_();
         const uint16_t targetPort = remoteControlPort_();
         if (targetAddress.isEmpty() || targetPort == 0) {
@@ -701,6 +722,9 @@ private:
     }
 
     SwString remoteControlAddress_() const {
+        if (!m_descriptor.multicastGroup.isEmpty()) {
+            return SwString();
+        }
         if (!m_detectedRtcpSenderAddress.isEmpty()) {
             return m_detectedRtcpSenderAddress;
         }
@@ -711,6 +735,9 @@ private:
     }
 
     uint16_t remoteControlPort_() const {
+        if (!m_descriptor.multicastGroup.isEmpty()) {
+            return 0;
+        }
         if (m_detectedRtcpSenderPort != 0) {
             return m_detectedRtcpSenderPort;
         }

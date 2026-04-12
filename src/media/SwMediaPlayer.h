@@ -11,6 +11,7 @@
 #include "media/SwAudioTrackPipeline.h"
 #include "media/SwAudioOutput.h"
 #include "media/SwMediaSource.h"
+#include "media/SwMediaTimelineSource.h"
 #include "media/SwMetadataTrackPipeline.h"
 #include "media/SwVideoSink.h"
 
@@ -22,6 +23,7 @@ class SwMediaPlayer : public SwObject {
 public:
     using TracksChangedCallback = std::function<void(const SwList<SwMediaTrack>&)>;
     using MetadataPacketCallback = std::function<void(const SwMediaPacket&)>;
+    using SubtitlePacketCallback = std::function<void(const SwMediaPacket&)>;
 
     struct MediaInfo {
         int trackCount{0};
@@ -49,6 +51,9 @@ public:
         bool audioOutputActive{false};
         SwString audioOutputName{};
         std::int64_t audioPlayedTimestamp{-1};
+        std::int64_t durationMs{-1};
+        std::int64_t positionMs{-1};
+        bool seekable{false};
     };
 
     enum class PlaybackState {
@@ -214,6 +219,9 @@ public:
         info.audioOutputActive = isAudioOutputActive();
         info.audioOutputName = audioOutputName();
         info.audioPlayedTimestamp = audioPlayedTimestamp();
+        info.durationMs = durationMs();
+        info.positionMs = positionMs();
+        info.seekable = isSeekable();
         return info;
     }
 
@@ -233,14 +241,24 @@ public:
     void setActiveMetadataTrack(const SwString& trackId) { m_activeMetadataTrackId = trackId; }
     SwString activeMetadataTrack() const { return m_activeMetadataTrackId; }
 
+    void setActiveSubtitleTrack(const SwString& trackId) { m_activeSubtitleTrackId = trackId; }
+    SwString activeSubtitleTrack() const { return m_activeSubtitleTrackId; }
+
     void setAudioEnabled(bool enabled) { m_audioEnabled = enabled; }
     bool isAudioEnabled() const { return m_audioEnabled; }
 
     void setMetadataEnabled(bool enabled) { m_metadataEnabled = enabled; }
     bool isMetadataEnabled() const { return m_metadataEnabled; }
 
+    void setSubtitleEnabled(bool enabled) { m_subtitleEnabled = enabled; }
+    bool isSubtitleEnabled() const { return m_subtitleEnabled; }
+
     void setMetadataPacketCallback(MetadataPacketCallback callback) {
         m_metadataPacketCallback = std::move(callback);
+    }
+
+    void setSubtitlePacketCallback(SubtitlePacketCallback callback) {
+        m_subtitlePacketCallback = std::move(callback);
     }
 
     void setMuted(bool muted) {
@@ -273,6 +291,30 @@ public:
 
     static SwList<SwAudioDecoderDescriptor> availableAudioDecoders(SwAudioPacket::Codec codec) {
         return SwAudioDecoderFactory::instance().list(codec);
+    }
+
+    bool isSeekable() const {
+        const std::shared_ptr<SwMediaTimelineSource> timelineSource =
+            std::dynamic_pointer_cast<SwMediaTimelineSource>(m_source);
+        return timelineSource ? timelineSource->isSeekable() : false;
+    }
+
+    std::int64_t durationMs() const {
+        const std::shared_ptr<SwMediaTimelineSource> timelineSource =
+            std::dynamic_pointer_cast<SwMediaTimelineSource>(m_source);
+        return timelineSource ? timelineSource->durationMs() : -1;
+    }
+
+    std::int64_t positionMs() const {
+        const std::shared_ptr<SwMediaTimelineSource> timelineSource =
+            std::dynamic_pointer_cast<SwMediaTimelineSource>(m_source);
+        return timelineSource ? timelineSource->positionMs() : -1;
+    }
+
+    bool seek(std::int64_t positionMs) {
+        const std::shared_ptr<SwMediaTimelineSource> timelineSource =
+            std::dynamic_pointer_cast<SwMediaTimelineSource>(m_source);
+        return timelineSource ? timelineSource->seek(positionMs) : false;
     }
 
     void play() {
@@ -414,6 +456,16 @@ private:
                 return;
             }
             m_metadataTrackPipeline.enqueue(packet);
+            return;
+        }
+        if (packet.type() == SwMediaPacket::Type::Subtitle) {
+            if (!m_subtitleEnabled) {
+                return;
+            }
+            if (!m_activeSubtitleTrackId.isEmpty() && packet.trackId() != m_activeSubtitleTrackId) {
+                return;
+            }
+            dispatchSubtitlePacket_(packet);
         }
     }
 
@@ -430,6 +482,14 @@ private:
         dispatchToAffinity_([this, packet]() {
             if (m_metadataPacketCallback) {
                 m_metadataPacketCallback(packet);
+            }
+        });
+    }
+
+    void dispatchSubtitlePacket_(const SwMediaPacket& packet) {
+        dispatchToAffinity_([this, packet]() {
+            if (m_subtitlePacketCallback) {
+                m_subtitlePacketCallback(packet);
             }
         });
     }
@@ -540,8 +600,10 @@ private:
     SwString m_activeSubtitleTrackId{};
     bool m_audioEnabled{true};
     bool m_metadataEnabled{false};
+    bool m_subtitleEnabled{true};
     PlaybackState m_playbackState{PlaybackState::StoppedState};
     MetadataPacketCallback m_metadataPacketCallback{};
+    SubtitlePacketCallback m_subtitlePacketCallback{};
     std::shared_ptr<int> m_callbackGuard{std::make_shared<int>(0)};
     std::atomic<bool> m_sourceCallbacksActive{false};
 };

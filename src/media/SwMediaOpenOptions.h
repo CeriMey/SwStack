@@ -41,7 +41,11 @@ struct SwMediaOpenOptions {
     SwString preferredAudioTrackId{};
     SwString preferredVideoTrackId{};
     SwString audioDeviceId{};
+    SwString userName{};
+    SwString password{};
+    SwString trustedCaFile{};
     SwString sourceAddressFilter{};
+    SwString multicastGroup{};
     uint16_t sourceRtcpPort{0};
     bool lowLatency{true};
     bool enableAudio{false};
@@ -58,11 +62,7 @@ struct SwMediaOpenOptions {
             result += mediaUrl.userInfo();
             result += "@";
         }
-        result += mediaUrl.host();
-        if (mediaUrl.port() >= 0) {
-            result += ":";
-            result += SwString::number(mediaUrl.port());
-        }
+        result += mediaUrl.authority();
         result += mediaUrl.path().isEmpty() ? SwString("/") : mediaUrl.path();
 
         SwString filteredQuery;
@@ -114,11 +114,24 @@ struct SwMediaOpenOptions {
         options.preferredAudioTrackId = firstQueryValue_(options.mediaUrl, {"audio_track", "audio-track"});
         options.preferredVideoTrackId = firstQueryValue_(options.mediaUrl, {"video_track", "video-track"});
         options.audioDeviceId = firstQueryValue_(options.mediaUrl, {"audio_device", "audio-device"});
+        options.userName = firstQueryValue_(options.mediaUrl, {"username", "user"});
+        options.password = firstQueryValue_(options.mediaUrl, {"password", "pass"});
+        options.trustedCaFile = firstQueryValue_(options.mediaUrl,
+                                                 {"trusted_ca", "trusted-ca", "ca_file", "ca-file"});
         options.lowLatency = queryBool_(options.mediaUrl, {"lowlatency", "low_latency"}, true);
         options.enableAudio = queryBool_(options.mediaUrl, {"audio", "enable_audio", "enable-audio"}, false);
         options.enableMetadata =
             queryBool_(options.mediaUrl, {"metadata", "enable_metadata", "enable-metadata", "klv"}, false);
+        if ((!options.userName.isEmpty() || !options.password.isEmpty()) &&
+            options.mediaUrl.userInfo().isEmpty()) {
+            return finalizeDerived_(options);
+        }
+        splitUserInfo_(options.mediaUrl.userInfo(), options.userName, options.password);
+        return finalizeDerived_(options);
+    }
 
+private:
+    static SwMediaOpenOptions finalizeDerived_(SwMediaOpenOptions options) {
         if ((options.mediaUrl.scheme() == "rtp") &&
             options.udpFormat == UdpPayloadFormat::Auto) {
             options.udpFormat = UdpPayloadFormat::Rtp;
@@ -135,7 +148,12 @@ struct SwMediaOpenOptions {
                    options.mediaUrl.scheme() == "rtp") {
             options.codec = SwVideoPacket::Codec::H264;
         }
+        if ((options.mediaUrl.scheme() == "rtp" || options.mediaUrl.scheme() == "udp") &&
+            isMulticastHost_(options.mediaUrl.host())) {
+            options.multicastGroup = options.mediaUrl.host();
+        }
         if (options.sourceAddressFilter.isEmpty() &&
+            options.multicastGroup.isEmpty() &&
             (options.mediaUrl.scheme() == "rtp" || options.mediaUrl.scheme() == "udp") &&
             !isWildcardHost_(options.mediaUrl.host())) {
             options.sourceAddressFilter = options.mediaUrl.host();
@@ -143,6 +161,7 @@ struct SwMediaOpenOptions {
         return options;
     }
 
+public:
     static TransportPreference transportFromString(const SwString& value) {
         const SwString normalized = value.trimmed().toLower();
         if (normalized == "udp") {
@@ -257,7 +276,51 @@ private:
 
     static bool isWildcardHost_(const SwString& host) {
         const SwString normalized = host.trimmed().toLower();
-        return normalized.isEmpty() || normalized == "*" || normalized == "0.0.0.0";
+        return normalized.isEmpty() || normalized == "*" || normalized == "0.0.0.0" ||
+               normalized == "::";
+    }
+
+    static bool isIpv4MulticastHost_(const SwString& host) {
+        const std::string text = host.trimmed().toStdString();
+        if (text.empty() || text.find(':') != std::string::npos) {
+            return false;
+        }
+        const std::size_t dot = text.find('.');
+        if (dot == std::string::npos) {
+            return false;
+        }
+        const int firstOctet = std::atoi(text.substr(0, dot).c_str());
+        return firstOctet >= 224 && firstOctet <= 239;
+    }
+
+    static bool isIpv6MulticastHost_(const SwString& host) {
+        const SwString normalized = host.trimmed().toLower();
+        return normalized.startsWith("ff");
+    }
+
+    static bool isMulticastHost_(const SwString& host) {
+        return isIpv4MulticastHost_(host) || isIpv6MulticastHost_(host);
+    }
+
+    static void splitUserInfo_(const SwString& userInfo,
+                               SwString& outUserName,
+                               SwString& outPassword) {
+        if (userInfo.isEmpty()) {
+            return;
+        }
+        const int colon = userInfo.indexOf(":");
+        if (colon < 0) {
+            if (outUserName.isEmpty()) {
+                outUserName = userInfo;
+            }
+            return;
+        }
+        if (outUserName.isEmpty()) {
+            outUserName = userInfo.left(colon);
+        }
+        if (outPassword.isEmpty()) {
+            outPassword = userInfo.mid(colon + 1);
+        }
     }
 
     static bool isLocalOptionKey_(const SwString& rawKey) {
@@ -295,6 +358,14 @@ private:
                key == "video-track" ||
                key == "audio_device" ||
                key == "audio-device" ||
+               key == "username" ||
+               key == "user" ||
+               key == "password" ||
+               key == "pass" ||
+               key == "trusted_ca" ||
+               key == "trusted-ca" ||
+               key == "ca_file" ||
+               key == "ca-file" ||
                key == "lowlatency" ||
                key == "low_latency" ||
                key == "audio" ||

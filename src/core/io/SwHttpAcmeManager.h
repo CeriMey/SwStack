@@ -334,11 +334,8 @@ inline bool SwHttpAcmeManager::handlePreRoute_(const SwHttpRequest& request, SwH
         return false;
     }
 
-    response = swHttpTextResponse(404, "Not Found");
-    response.closeConnection = !request.keepAlive;
-
     if (!m_started) {
-        return true;
+        return false;
     }
     if (request.method.toUpper() != "GET" && request.method.toUpper() != "HEAD") {
         response = swHttpTextResponse(405, "Method Not Allowed");
@@ -356,10 +353,10 @@ inline bool SwHttpAcmeManager::handlePreRoute_(const SwHttpRequest& request, SwH
         token.chop(1);
     }
     if (m_activeChallengeToken.isEmpty()) {
-        return true;
+        return false;
     }
     if (token != m_activeChallengeToken) {
-        return true;
+        return false;
     }
 
     response = swHttpTextResponse(200, m_activeChallengeKeyAuthorization);
@@ -724,7 +721,16 @@ inline void SwHttpAcmeManager::ensureAccount_(uint64_t serial) {
                       return;
                   }
                   if (!result.transportOk || (result.statusCode != 200 && result.statusCode != 201)) {
-                      failOperation_(serial, "ACME account creation failed");
+                      SwString detail = "ACME account creation failed";
+                      if (!result.transportOk) {
+                          detail += " (transport error " + SwString::number(result.transportError) + ")";
+                      } else {
+                          detail += " (HTTP " + SwString::number(result.statusCode) + ")";
+                          if (!result.body.isEmpty()) {
+                              detail += " body=" + SwString::fromUtf8(result.body.constData(), static_cast<int>(result.body.size())).left(512);
+                          }
+                      }
+                      failOperation_(serial, detail);
                       return;
                   }
 
@@ -763,7 +769,16 @@ inline void SwHttpAcmeManager::createOrder_(uint64_t serial) {
                       return;
                   }
                   if (!result.transportOk || (result.statusCode != 200 && result.statusCode != 201)) {
-                      failOperation_(serial, "ACME newOrder request failed");
+                      SwString detail = "ACME newOrder request failed";
+                      if (!result.transportOk) {
+                          detail += " (transport error " + SwString::number(result.transportError) + ")";
+                      } else {
+                          detail += " (HTTP " + SwString::number(result.statusCode) + ")";
+                          if (!result.body.isEmpty()) {
+                              detail += " body=" + SwString::fromUtf8(result.body.constData(), static_cast<int>(result.body.size())).left(512);
+                          }
+                      }
+                      failOperation_(serial, detail);
                       return;
                   }
 

@@ -59,6 +59,7 @@
 #include <cstdint>
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
 #include <thread>
 static constexpr const char* kSwLogCategory_SwUdpSocket = "sw.core.io.swudpsocket";
@@ -70,6 +71,8 @@ static constexpr const char* kSwLogCategory_SwUdpSocket = "sw.core.io.swudpsocke
 #pragma comment(lib, "ws2_32.lib")
 #else
 #include <arpa/inet.h>
+#include <netdb.h>
+#include <net/if.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/select.h>
@@ -82,6 +85,14 @@ class SwUdpSocket : public SwIODevice {
     SW_OBJECT(SwUdpSocket, SwIODevice)
 
 public:
+    struct ResolvedAddress {
+        sockaddr_storage storage{};
+        socklen_t length{0};
+        int family{AF_UNSPEC};
+        SwString address{};
+        uint16_t port{0};
+    };
+
     enum class SocketState {
         UnconnectedState,
         BoundState,
@@ -124,6 +135,8 @@ public:
 #endif
         std::memset(&m_remoteAddr, 0, sizeof(m_remoteAddr));
         std::memset(&m_boundAddr, 0, sizeof(m_boundAddr));
+        m_remoteAddrLen = 0;
+        m_boundAddrLen = 0;
         m_readBuffer.resize(m_maxDatagramSize);
     }
 
@@ -188,29 +201,26 @@ public:
      * @return `true` on success; otherwise `false`.
      */
     bool bind(const SwString& localAddress, uint16_t port, BindMode mode = DefaultForPlatform) {
-        ensureSocket();
-        if (!isSocketValid()) {
+        ResolvedAddress addr{};
+        bool dualStack = false;
+        if (!resolveBindAddress_(localAddress, port, addr, dualStack)) {
+            setSocketError(SocketError::HostNotFoundError, SwString("Invalid bind address"));
+            return false;
+        }
+        if (!ensureSocketForFamily_(addr.family, dualStack)) {
             setSocketError(SocketError::SocketAccessError, SwString("Socket creation failed"));
             return false;
         }
 
         applyBindMode(mode);
-
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(port);
-        addr.sin_addr.s_addr = localAddress.isEmpty()
-                                   ? htonl(INADDR_ANY)
-                                   : inetAddr(localAddress);
-
         if (!bindSocket(addr)) {
             setSocketError(SocketError::BoundError, SwString("Failed to bind socket"));
             return false;
         }
 
-        m_boundAddr = addr;
-        m_boundAddress = localAddress.isEmpty() ? SwString("0.0.0.0") : localAddress;
-        m_boundPort = port;
+        m_boundAddr = addr.storage;
+        m_boundAddrLen = addr.length;
+        refreshLocalEndpoint_();
         m_state = SocketState::BoundState;
         swSocketTrafficSetOpenState(socketTrafficState_, true);
         refreshTrafficMonitorEndpoints_(true);
@@ -224,23 +234,23 @@ public:
      * @return `true` on success; otherwise `false`.
      */
     bool connectToHost(const SwString& host, uint16_t port) {
-        ensureSocket();
-        if (!isSocketValid()) {
-            setSocketError(SocketError::SocketAccessError, SwString("Socket creation failed"));
-            return false;
-        }
-
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(port);
-        addr.sin_addr.s_addr = inetAddr(host);
-        if (addr.sin_addr.s_addr == INADDR_NONE) {
+        ResolvedAddress addr{};
+        if (!resolveRemoteAddress_(host, port, addr)) {
             setSocketError(SocketError::HostNotFoundError, SwString("Invalid host address"));
             return false;
         }
-        m_remoteAddr = addr;
-        m_remoteAddress = host;
-        m_remotePort = port;
+        if (!ensureSocketForAddress_(addr)) {
+            setSocketError(SocketError::SocketAccessError, SwString("Socket creation failed"));
+            return false;
+        }
+        if (!coerceAddressForSocket_(addr)) {
+            setSocketError(SocketError::OperationError, SwString("Address family mismatch"));
+            return false;
+        }
+        m_remoteAddr = addr.storage;
+        m_remoteAddrLen = addr.length;
+        m_remoteAddress = addr.address;
+        m_remotePort = addr.port;
         m_remoteSet = true;
         if (m_state == SocketState::UnconnectedState) {
             m_state = SocketState::ConnectedState;
@@ -257,10 +267,21 @@ public:
         m_remoteSet = false;
         m_remoteAddress.clear();
         m_remotePort = 0;
+        m_remoteAddrLen = 0;
         if (m_state == SocketState::ConnectedState) {
             m_state = isSocketValid() ? SocketState::BoundState : SocketState::UnconnectedState;
         }
         refreshTrafficMonitorEndpoints_(true);
+    }
+
+    bool joinMulticastGroup(const SwString& groupAddress,
+                            const SwString& localInterface = SwString()) {
+        return updateMulticastMembership_(groupAddress, localInterface, true);
+    }
+
+    bool leaveMulticastGroup(const SwString& groupAddress,
+                             const SwString& localInterface = SwString()) {
+        return updateMulticastMembership_(groupAddress, localInterface, false);
     }
 
     /**
@@ -280,13 +301,17 @@ public:
         if (!data || size <= 0) {
             return -1;
         }
-        ensureSocket();
-        sockaddr_in target{};
-        target.sin_family = AF_INET;
-        target.sin_port = htons(port);
-        target.sin_addr.s_addr = inetAddr(host);
-        if (target.sin_addr.s_addr == INADDR_NONE) {
+        ResolvedAddress target{};
+        if (!resolveRemoteAddress_(host, port, target)) {
             setSocketError(SocketError::HostNotFoundError, SwString("Invalid host address"));
+            return -1;
+        }
+        if (!ensureSocketForAddress_(target)) {
+            setSocketError(SocketError::SocketAccessError, SwString("Socket creation failed"));
+            return -1;
+        }
+        if (!coerceAddressForSocket_(target)) {
+            setSocketError(SocketError::OperationError, SwString("Address family mismatch"));
             return -1;
         }
         return sendDatagram(data, static_cast<size_t>(size), target);
@@ -321,7 +346,13 @@ public:
             setSocketError(SocketError::OperationError, SwString("No remote host set"));
             return -1;
         }
-        return sendDatagram(data, static_cast<size_t>(size), m_remoteAddr);
+        ResolvedAddress target{};
+        target.storage = m_remoteAddr;
+        target.length = m_remoteAddrLen;
+        target.family = m_socketFamily;
+        target.address = m_remoteAddress;
+        target.port = m_remotePort;
+        return sendDatagram(data, static_cast<size_t>(size), target);
     }
 
     /**
@@ -588,6 +619,16 @@ public:
             m_readyReadPosted.store(false);
             m_pendingDatagramCount.store(0, std::memory_order_relaxed);
             publishTrafficMonitorUdpStats_(0);
+            m_state = SocketState::UnconnectedState;
+            m_remoteSet = false;
+            m_remoteAddress.clear();
+            m_remotePort = 0;
+            m_remoteAddrLen = 0;
+            m_boundAddress.clear();
+            m_boundPort = 0;
+            m_boundAddrLen = 0;
+            m_socketFamily = AF_UNSPEC;
+            m_dualStackEnabled = false;
             return;
         }
 #if defined(_WIN32)
@@ -616,6 +657,12 @@ public:
         m_remoteSet = false;
         m_remoteAddress.clear();
         m_remotePort = 0;
+        m_remoteAddrLen = 0;
+        m_boundAddress.clear();
+        m_boundPort = 0;
+        m_boundAddrLen = 0;
+        m_socketFamily = AF_UNSPEC;
+        m_dualStackEnabled = false;
     }
 
     /**
@@ -632,39 +679,6 @@ signals:
     DECLARE_SIGNAL(errorOccurred, int);
 
 private:
-    void ensureSocket() {
-        if (isSocketValid()) {
-            return;
-        }
-#if defined(_WIN32)
-        m_socket = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        if (m_socket == INVALID_SOCKET) {
-            setSocketError(SocketError::SocketAccessError, SwString("Socket creation failed"));
-            return;
-        }
-        u_long mode = 1;
-        ioctlsocket(m_socket, FIONBIO, &mode);
-#else
-        m_socket = ::socket(AF_INET, SOCK_DGRAM, 0);
-        if (m_socket < 0) {
-            setSocketError(SocketError::SocketAccessError, SwString("Socket creation failed"));
-            return;
-        }
-        int flags = fcntl(m_socket, F_GETFL, 0);
-        if (flags != -1) {
-            fcntl(m_socket, F_SETFL, flags | O_NONBLOCK);
-        }
-#endif
-        applyReceiveBufferSize();
-        m_totalReceivedDatagrams.store(0);
-        m_totalQueueDrops.store(0);
-        m_queueHighWatermark.store(0);
-        m_pendingDatagramCount.store(0, std::memory_order_relaxed);
-        registerDispatcher_();
-        swSocketTrafficSetOpenState(socketTrafficState_, true);
-        refreshTrafficMonitorEndpoints_(true);
-    }
-
     bool isSocketValid() const {
 #if defined(_WIN32)
         return m_socket != INVALID_SOCKET;
@@ -673,11 +687,90 @@ private:
 #endif
     }
 
+    bool ensureSocketForAddress_(const ResolvedAddress& address) {
+        if (address.family == AF_UNSPEC) {
+            return ensureSocketForFamily_(AF_INET6, true);
+        }
+        if (isSocketValid()) {
+            if (m_socketFamily == address.family) {
+                return true;
+            }
+            if (m_socketFamily == AF_INET6 && m_dualStackEnabled && address.family == AF_INET) {
+                return true;
+            }
+            return false;
+        }
+        return ensureSocketForFamily_(address.family, false);
+    }
+
+    bool ensureSocketForFamily_(int family, bool dualStack) {
+        if (family == AF_UNSPEC) {
+            family = AF_INET6;
+            dualStack = true;
+        }
+        if (isSocketValid()) {
+            if (m_socketFamily == family) {
+                return true;
+            }
+            if (m_socketFamily == AF_INET6 && m_dualStackEnabled && family == AF_INET) {
+                return true;
+            }
+            return false;
+        }
+#if defined(_WIN32)
+        m_socket = ::socket(family, SOCK_DGRAM, IPPROTO_UDP);
+        if (m_socket == INVALID_SOCKET) {
+            setSocketError(SocketError::SocketAccessError, SwString("Socket creation failed"));
+            return false;
+        }
+        u_long mode = 1;
+        ioctlsocket(m_socket, FIONBIO, &mode);
+#else
+        m_socket = ::socket(family, SOCK_DGRAM, 0);
+        if (m_socket < 0) {
+            setSocketError(SocketError::SocketAccessError, SwString("Socket creation failed"));
+            return false;
+        }
+        int flags = fcntl(m_socket, F_GETFL, 0);
+        if (flags != -1) {
+            fcntl(m_socket, F_SETFL, flags | O_NONBLOCK);
+        }
+#endif
+        m_socketFamily = family;
+        m_dualStackEnabled = false;
+        if (family == AF_INET6) {
+            const int v6Only = dualStack ? 0 : 1;
+#if defined(_WIN32)
+            const int rc = ::setsockopt(m_socket,
+                                        IPPROTO_IPV6,
+                                        IPV6_V6ONLY,
+                                        reinterpret_cast<const char*>(&v6Only),
+                                        sizeof(v6Only));
+#else
+            const int rc = ::setsockopt(m_socket,
+                                        IPPROTO_IPV6,
+                                        IPV6_V6ONLY,
+                                        &v6Only,
+                                        sizeof(v6Only));
+#endif
+            m_dualStackEnabled = (rc == 0 && dualStack);
+        }
+        applyReceiveBufferSize();
+        m_totalReceivedDatagrams.store(0);
+        m_totalQueueDrops.store(0);
+        m_queueHighWatermark.store(0);
+        m_pendingDatagramCount.store(0, std::memory_order_relaxed);
+        registerDispatcher_();
+        swSocketTrafficSetOpenState(socketTrafficState_, true);
+        refreshTrafficMonitorEndpoints_(true);
+        return true;
+    }
+
     bool refreshLocalEndpoint_() {
         if (!isSocketValid()) {
             return false;
         }
-        sockaddr_in address {};
+        sockaddr_storage address {};
 #if defined(_WIN32)
         int length = sizeof(address);
         if (::getsockname(m_socket, reinterpret_cast<sockaddr*>(&address), &length) != 0) {
@@ -689,10 +782,11 @@ private:
             return false;
         }
 #endif
-        const SwString nextBoundAddress = senderToString(address);
-        const uint16_t nextBoundPort = ntohs(address.sin_port);
+        const SwString nextBoundAddress = socketAddressToString_(address);
+        const uint16_t nextBoundPort = socketAddressPort_(address);
         const bool changed = (m_boundAddress != nextBoundAddress) || (m_boundPort != nextBoundPort);
         m_boundAddr = address;
+        m_boundAddrLen = static_cast<socklen_t>(length);
         m_boundAddress = nextBoundAddress;
         m_boundPort = nextBoundPort;
         return changed;
@@ -749,23 +843,26 @@ private:
 #endif
     }
 
-    bool bindSocket(const sockaddr_in& addr) {
+    bool bindSocket(const ResolvedAddress& addr) {
         if (!isSocketValid()) {
             return false;
         }
-        const bool ok = (::bind(m_socket, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) == 0);
+        const bool ok = (::bind(m_socket,
+                                reinterpret_cast<const sockaddr*>(&addr.storage),
+                                static_cast<int>(addr.length)) == 0);
         if (!ok) {
             setSocketError(SocketError::BoundError, SwString("Bind operation failed"));
         }
         return ok;
     }
 
-    int64_t sendDatagram(const char* data, size_t size, const sockaddr_in& target) {
+    int64_t sendDatagram(const char* data, size_t size, const ResolvedAddress& target) {
         if (!isSocketValid() || !data || size == 0) {
             return -1;
         }
         int sent = ::sendto(m_socket, data, static_cast<int>(size), 0,
-                            reinterpret_cast<const sockaddr*>(&target), sizeof(target));
+                            reinterpret_cast<const sockaddr*>(&target.storage),
+                            static_cast<int>(target.length));
         if (sent < 0) {
             setSocketError(SocketError::OperationError, SwString("sendto failed"));
             return -1;
@@ -783,14 +880,47 @@ private:
         return static_cast<int64_t>(sent);
     }
 
-    SwString senderToString(const sockaddr_in& addr) const {
-        char buffer[INET_ADDRSTRLEN] = {0};
+    SwString socketAddressToString_(const sockaddr_storage& addr) const {
+        char buffer[INET6_ADDRSTRLEN] = {0};
+        if (addr.ss_family == AF_INET) {
+            const sockaddr_in* ipv4 = reinterpret_cast<const sockaddr_in*>(&addr);
 #if defined(_WIN32)
-        InetNtopA(AF_INET, const_cast<IN_ADDR*>(&addr.sin_addr), buffer, sizeof(buffer));
+            InetNtopA(AF_INET, const_cast<IN_ADDR*>(&ipv4->sin_addr), buffer, sizeof(buffer));
 #else
-        inet_ntop(AF_INET, const_cast<in_addr*>(&addr.sin_addr), buffer, sizeof(buffer));
+            inet_ntop(AF_INET, const_cast<in_addr*>(&ipv4->sin_addr), buffer, sizeof(buffer));
 #endif
-        return SwString(buffer);
+            return SwString(buffer);
+        }
+        if (addr.ss_family == AF_INET6) {
+            const sockaddr_in6* ipv6 = reinterpret_cast<const sockaddr_in6*>(&addr);
+            if (IN6_IS_ADDR_V4MAPPED(&ipv6->sin6_addr)) {
+                in_addr mapped{};
+                std::memcpy(&mapped, ipv6->sin6_addr.s6_addr + 12, sizeof(mapped));
+#if defined(_WIN32)
+                InetNtopA(AF_INET, &mapped, buffer, sizeof(buffer));
+#else
+                inet_ntop(AF_INET, &mapped, buffer, sizeof(buffer));
+#endif
+                return SwString(buffer);
+            }
+#if defined(_WIN32)
+            InetNtopA(AF_INET6, const_cast<IN6_ADDR*>(&ipv6->sin6_addr), buffer, sizeof(buffer));
+#else
+            inet_ntop(AF_INET6, const_cast<in6_addr*>(&ipv6->sin6_addr), buffer, sizeof(buffer));
+#endif
+            return SwString(buffer);
+        }
+        return SwString();
+    }
+
+    uint16_t socketAddressPort_(const sockaddr_storage& addr) const {
+        if (addr.ss_family == AF_INET) {
+            return ntohs(reinterpret_cast<const sockaddr_in*>(&addr)->sin_port);
+        }
+        if (addr.ss_family == AF_INET6) {
+            return ntohs(reinterpret_cast<const sockaddr_in6*>(&addr)->sin6_port);
+        }
+        return 0;
     }
 
     void pollSocket_(int timeoutMs) {
@@ -802,7 +932,7 @@ private:
         bool receivedAny = false;
         size_t batchCount = 0;
         while (true) {
-            sockaddr_in sender{};
+            sockaddr_storage sender{};
 #if defined(_WIN32)
             int senderLen = sizeof(sender);
             int bytes = recvfrom(m_socket, m_readBuffer.data(), static_cast<int>(m_maxDatagramSize), 0,
@@ -828,10 +958,12 @@ private:
             m_totalReceivedBytes.fetch_add(static_cast<uint64_t>(bytes), std::memory_order_relaxed);
             swSocketTrafficAddReceivedBytes(socketTrafficState_, static_cast<unsigned long long>(bytes));
             uint64_t pendingDatagramCount = 0;
+            const SwString senderAddress = socketAddressToString_(sender);
+            const uint16_t senderPort = socketAddressPort_(sender);
             {
                 SwMutexLocker lock(m_queueMutex);
                 m_pending.append(SwByteArray(m_readBuffer.data(), static_cast<size_t>(bytes)));
-                m_senderQueue.append(SwPair<SwString, uint16_t>(senderToString(sender), ntohs(sender.sin_port)));
+                m_senderQueue.append(SwPair<SwString, uint16_t>(senderAddress, senderPort));
                 uint64_t queueDepth = static_cast<uint64_t>(m_pending.size());
                 if (queueDepth > m_queueHighWatermark.load()) {
                     m_queueHighWatermark.store(queueDepth);
@@ -853,8 +985,8 @@ private:
             auto rx = ++m_debugRxCount;
             if (rx <= 5 || (rx % 100) == 0) {
                 swCDebug(kSwLogCategory_SwUdpSocket) << "[SwUdpSocket] rx bytes=" << bytes
-                          << " from=" << senderToString(sender).toStdString()
-                          << ":" << ntohs(sender.sin_port);
+                          << " from=" << senderAddress.toStdString()
+                          << ":" << senderPort;
             }
             const bool localEndpointChanged = refreshLocalEndpoint_();
             publishTrafficMonitorUdpStats_(pendingDatagramCount);
@@ -985,23 +1117,200 @@ private:
         notify();
     }
 
-    uint32_t inetAddr(const SwString& text) const {
-        if (text.isEmpty()) {
-            return INADDR_ANY;
+    SwString normalizeAddressText_(const SwString& text) const {
+        SwString normalized = text.trimmed();
+        if (normalized.startsWith("[") && normalized.endsWith("]") && normalized.size() > 2) {
+            normalized = normalized.mid(1, static_cast<int>(normalized.size()) - 2);
         }
-#if defined(_WIN32)
-        IN_ADDR addr{};
-        if (InetPtonA(AF_INET, text.toStdString().c_str(), &addr) == 1) {
-            return addr.S_un.S_addr;
+        return normalized;
+    }
+
+    bool resolveAddress_(const SwString& host,
+                         uint16_t port,
+                         bool passive,
+                         int preferredFamily,
+                         ResolvedAddress& out,
+                         bool* dualStack = nullptr) const {
+        if (dualStack) {
+            *dualStack = false;
         }
-        return INADDR_NONE;
+        const SwString normalizedHost = normalizeAddressText_(host);
+        const bool wildcardBind = passive && normalizedHost.isEmpty();
+        std::string hostStd = normalizedHost.toStdString();
+        std::string portStd = SwString::number(port).toStdString();
+        addrinfo hints{};
+        hints.ai_family = preferredFamily;
+        hints.ai_socktype = SOCK_DGRAM;
+        hints.ai_protocol = IPPROTO_UDP;
+        if (wildcardBind) {
+            hints.ai_flags |= AI_PASSIVE;
+        }
+        addrinfo* result = nullptr;
+        const int rc = ::getaddrinfo(wildcardBind ? nullptr : hostStd.c_str(),
+                                     portStd.c_str(),
+                                     &hints,
+                                     &result);
+        if (rc != 0 || !result) {
+            return false;
+        }
+
+        const addrinfo* best = nullptr;
+        for (const addrinfo* it = result; it != nullptr; it = it->ai_next) {
+            if (it->ai_family != AF_INET && it->ai_family != AF_INET6) {
+                continue;
+            }
+            if (!best) {
+                best = it;
+            }
+            if (preferredFamily != AF_UNSPEC && it->ai_family == preferredFamily) {
+                best = it;
+                break;
+            }
+            if (wildcardBind && it->ai_family == AF_INET6) {
+                best = it;
+                break;
+            }
+        }
+        if (!best) {
+            ::freeaddrinfo(result);
+            return false;
+        }
+
+        std::memset(&out, 0, sizeof(out));
+        std::memcpy(&out.storage, best->ai_addr, static_cast<size_t>(best->ai_addrlen));
+        out.length = static_cast<socklen_t>(best->ai_addrlen);
+        out.family = best->ai_family;
+        out.address = socketAddressToString_(out.storage);
+        out.port = socketAddressPort_(out.storage);
+        if (dualStack) {
+            *dualStack = wildcardBind && out.family == AF_INET6;
+        }
+        ::freeaddrinfo(result);
+        return true;
+    }
+
+    bool resolveBindAddress_(const SwString& localAddress,
+                             uint16_t port,
+                             ResolvedAddress& out,
+                             bool& dualStack) const {
+        const SwString normalized = normalizeAddressText_(localAddress);
+        int preferredFamily = AF_UNSPEC;
+        if (normalized.contains(":")) {
+            preferredFamily = AF_INET6;
+        } else if (normalized.contains(".")) {
+            preferredFamily = AF_INET;
+        }
+        if (!resolveAddress_(normalized, port, true, preferredFamily, out, &dualStack)) {
+            return false;
+        }
+        dualStack = dualStack || (normalized == "::" && out.family == AF_INET6);
+        return true;
+    }
+
+    bool resolveRemoteAddress_(const SwString& host, uint16_t port, ResolvedAddress& out) const {
+        return resolveAddress_(host, port, false, AF_UNSPEC, out, nullptr);
+    }
+
+    bool coerceAddressForSocket_(ResolvedAddress& address) const {
+        if (!isSocketValid()) {
+            return false;
+        }
+        if (m_socketFamily == address.family) {
+            return true;
+        }
+        if (m_socketFamily != AF_INET6 || !m_dualStackEnabled || address.family != AF_INET) {
+            return false;
+        }
+        const sockaddr_in* ipv4 = reinterpret_cast<const sockaddr_in*>(&address.storage);
+        sockaddr_in6 mapped{};
+        mapped.sin6_family = AF_INET6;
+        mapped.sin6_port = ipv4->sin_port;
+        mapped.sin6_addr.s6_addr[10] = 0xFF;
+        mapped.sin6_addr.s6_addr[11] = 0xFF;
+        std::memcpy(mapped.sin6_addr.s6_addr + 12, &ipv4->sin_addr, sizeof(ipv4->sin_addr));
+        std::memset(&address.storage, 0, sizeof(address.storage));
+        std::memcpy(&address.storage, &mapped, sizeof(mapped));
+        address.length = sizeof(mapped);
+        address.family = AF_INET6;
+        return true;
+    }
+
+    bool resolveIpv4Interface_(const SwString& localInterface, in_addr& address) const {
+        if (localInterface.isEmpty()) {
+            address.s_addr = htonl(INADDR_ANY);
+            return true;
+        }
+        ResolvedAddress resolved{};
+        if (!resolveAddress_(localInterface, 0, false, AF_INET, resolved, nullptr) ||
+            resolved.family != AF_INET) {
+            return false;
+        }
+        address = reinterpret_cast<const sockaddr_in*>(&resolved.storage)->sin_addr;
+        return true;
+    }
+
+    unsigned int resolveIpv6InterfaceIndex_(const SwString& localInterface) const {
+        if (localInterface.isEmpty()) {
+            return 0;
+        }
+        bool ok = false;
+        const int numericIndex = localInterface.trimmed().toInt(&ok);
+        if (ok && numericIndex >= 0) {
+            return static_cast<unsigned int>(numericIndex);
+        }
+#if !defined(_WIN32)
+        const std::string name = localInterface.trimmed().toStdString();
+        return ::if_nametoindex(name.c_str());
 #else
-        in_addr addr{};
-        if (inet_pton(AF_INET, text.toStdString().c_str(), &addr) == 1) {
-            return addr.s_addr;
-        }
-        return INADDR_NONE;
+        return 0;
 #endif
+    }
+
+    bool updateMulticastMembership_(const SwString& groupAddress,
+                                    const SwString& localInterface,
+                                    bool join) {
+        ResolvedAddress group{};
+        if (!resolveRemoteAddress_(groupAddress, 0, group)) {
+            return false;
+        }
+        if (!isSocketValid() || m_socketFamily != group.family) {
+            return false;
+        }
+
+        if (group.family == AF_INET) {
+            ip_mreq request{};
+            request.imr_multiaddr = reinterpret_cast<const sockaddr_in*>(&group.storage)->sin_addr;
+            if (!resolveIpv4Interface_(localInterface, request.imr_interface)) {
+                return false;
+            }
+            const int option = join ? IP_ADD_MEMBERSHIP : IP_DROP_MEMBERSHIP;
+#if defined(_WIN32)
+            return ::setsockopt(m_socket,
+                                IPPROTO_IP,
+                                option,
+                                reinterpret_cast<const char*>(&request),
+                                sizeof(request)) == 0;
+#else
+            return ::setsockopt(m_socket, IPPROTO_IP, option, &request, sizeof(request)) == 0;
+#endif
+        }
+
+        if (group.family == AF_INET6) {
+            ipv6_mreq request{};
+            request.ipv6mr_multiaddr = reinterpret_cast<const sockaddr_in6*>(&group.storage)->sin6_addr;
+            request.ipv6mr_interface = resolveIpv6InterfaceIndex_(localInterface);
+            const int option = join ? IPV6_JOIN_GROUP : IPV6_LEAVE_GROUP;
+#if defined(_WIN32)
+            return ::setsockopt(m_socket,
+                                IPPROTO_IPV6,
+                                option,
+                                reinterpret_cast<const char*>(&request),
+                                sizeof(request)) == 0;
+#else
+            return ::setsockopt(m_socket, IPPROTO_IPV6, option, &request, sizeof(request)) == 0;
+#endif
+        }
+        return false;
     }
 
     void setSocketError(SocketError error, const SwString& description) {
@@ -1043,8 +1352,12 @@ private:
     int m_socket;
 #endif
     size_t m_dispatchToken{0};
-    sockaddr_in m_remoteAddr{};
-    sockaddr_in m_boundAddr{};
+    int m_socketFamily{AF_UNSPEC};
+    bool m_dualStackEnabled{false};
+    sockaddr_storage m_remoteAddr{};
+    socklen_t m_remoteAddrLen{0};
+    sockaddr_storage m_boundAddr{};
+    socklen_t m_boundAddrLen{0};
     bool m_remoteSet{false};
     mutable SwMutex m_queueMutex;
     SwList<SwByteArray> m_pending;

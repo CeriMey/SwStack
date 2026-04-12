@@ -2,6 +2,9 @@
 
 #include "media/SwMediaOpenOptions.h"
 #include "media/SwMediaSourceFactory.h"
+#include "runtime/SwTimer.h"
+
+#include <cstdlib>
 
 namespace {
 
@@ -26,6 +29,26 @@ static SwString threadLoadText_(double loadPercentage) {
     return "Runtime " + SwString::number(loadPercentage, 'f', loadPercentage >= 10.0 ? 1 : 2) + " %";
 }
 
+static bool shouldAutoOpenRtsp_() {
+    std::string enabled;
+#if defined(_WIN32)
+    char* value = nullptr;
+    std::size_t valueSize = 0;
+    if (_dupenv_s(&value, &valueSize, "SW_RTSP_AUTOSTART") != 0 || !value) {
+        return false;
+    }
+    enabled.assign(value, valueSize > 0 ? valueSize - 1 : 0);
+    std::free(value);
+#else
+    const char* value = std::getenv("SW_RTSP_AUTOSTART");
+    if (!value) {
+        return false;
+    }
+    enabled = value;
+#endif
+    return enabled == "1" || enabled == "true" || enabled == "TRUE" || enabled == "yes" || enabled == "YES";
+}
+
 } // namespace
 
 SocketTrafficRtspPlayerWidget::SocketTrafficRtspPlayerWidget(SwWidget* parent)
@@ -33,6 +56,9 @@ SocketTrafficRtspPlayerWidget::SocketTrafficRtspPlayerWidget(SwWidget* parent)
     buildUi_();
     rebuildPlayer_();
     refreshStatusText_();
+    if (shouldAutoOpenRtsp_()) {
+        SwTimer::singleShot(0, [this]() { openCurrentUrl(); });
+    }
 }
 
 SwSize SocketTrafficRtspPlayerWidget::minimumSizeHint() const {
@@ -126,7 +152,7 @@ void SocketTrafficRtspPlayerWidget::stopPlayback() {
 }
 
 SwString SocketTrafficRtspPlayerWidget::defaultRtspUrl_() {
-    return "rtsp://172.16.40.80:5004/video?audio=1&metadata=1";
+    return "rtsp://127.0.0.1:8554/test";
 }
 
 void SocketTrafficRtspPlayerWidget::buildUi_() {

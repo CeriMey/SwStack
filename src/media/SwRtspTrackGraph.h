@@ -1292,6 +1292,9 @@ private:
         case SwMediaPacket::Type::Metadata:
             submitMetadataPacket(packet);
             break;
+        case SwMediaPacket::Type::Subtitle:
+            submitMetadataPacket(packet);
+            break;
         case SwMediaPacket::Type::Unknown:
         default:
             break;

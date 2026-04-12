@@ -4,9 +4,11 @@
 #include "SwComboBox.h"
 #include "SwFrame.h"
 #include "SwLabel.h"
+#include "SwLayout.h"
 #include "SwLineEdit.h"
 #include "SwListWidget.h"
 #include "SwMenu.h"
+#include "SwSpacer.h"
 #include "SwToolButton.h"
 #include "SwTreeWidget.h"
 
@@ -15,10 +17,15 @@
 #include "theme/SwCreatorTheme.h"
 
 #include <algorithm>
+#include <functional>
 #include <vector>
 
 namespace {
 const SwString kSwCreatorPseudoItemsKey = "__SwCreator_Items";
+const SwString kSwCreatorLayoutRowKey = "__SwCreator_LayoutRow";
+const SwString kSwCreatorLayoutColumnKey = "__SwCreator_LayoutColumn";
+const SwString kSwCreatorRowSpanKey = "__SwCreator_RowSpan";
+const SwString kSwCreatorColumnSpanKey = "__SwCreator_ColumnSpan";
 
 SwString styleSheetPreviewText(const SwString& full) {
     SwString s = full.simplified().trimmed();
@@ -99,6 +106,103 @@ void applyItemsToTarget(SwWidget* target, const SwVector<SwString>& items) {
         return;
     }
 }
+
+SwGridLayout* targetGridLayout_(SwWidget* target) {
+    if (!target) {
+        return nullptr;
+    }
+    auto* parentWidget = dynamic_cast<SwWidget*>(target->parent());
+    return parentWidget ? dynamic_cast<SwGridLayout*>(parentWidget->layout()) : nullptr;
+}
+
+struct EnumEditorConfig {
+    SwVector<SwString> choices;
+    std::function<SwAny(const SwString&)> toValue;
+};
+
+bool sameChoiceText_(const SwString& a, const SwString& b) {
+    return a.trimmed().toLower() == b.trimmed().toLower();
+}
+
+bool enumEditorConfigFor_(SwWidget* target,
+                          const SwString& propName,
+                          const SwAny& value,
+                          EnumEditorConfig* out) {
+    if (!out) {
+        return false;
+    }
+
+    const auto makeStringConfig = [&](std::initializer_list<const char*> items) {
+        out->choices.clear();
+        for (const char* item : items) {
+            out->choices.push_back(SwString(item));
+        }
+        out->toValue = [](const SwString& text) { return SwAny(text); };
+        return true;
+    };
+
+    const std::string typeName = value.typeName();
+    if (typeName == typeid(FocusPolicyEnum).name()) {
+        out->choices = {SwString("Accept"), SwString("Strong"), SwString("NoFocus")};
+        out->toValue = [](const SwString& text) {
+            const SwString t = text.trimmed().toLower();
+            if (t == "strong") return SwAny::fromValue(FocusPolicyEnum::Strong);
+            if (t == "nofocus" || t == "no_focus" || t == "no-focus") return SwAny::fromValue(FocusPolicyEnum::NoFocus);
+            return SwAny::fromValue(FocusPolicyEnum::Accept);
+        };
+        return true;
+    }
+
+    if (typeName == typeid(CursorType).name()) {
+        out->choices = {
+            SwString("Default"), SwString("Arrow"), SwString("Hand"), SwString("IBeam"),
+            SwString("Cross"), SwString("Wait"), SwString("SizeAll"), SwString("SizeNS"),
+            SwString("SizeWE"), SwString("SizeNWSE"), SwString("SizeNESW")
+        };
+        out->toValue = [](const SwString& text) {
+            const SwString t = text.trimmed().toLower();
+            if (t == "arrow") return SwAny::fromValue(CursorType::Arrow);
+            if (t == "hand") return SwAny::fromValue(CursorType::Hand);
+            if (t == "ibeam" || t == "i-beam") return SwAny::fromValue(CursorType::IBeam);
+            if (t == "cross") return SwAny::fromValue(CursorType::Cross);
+            if (t == "wait") return SwAny::fromValue(CursorType::Wait);
+            if (t == "sizeall") return SwAny::fromValue(CursorType::SizeAll);
+            if (t == "sizens") return SwAny::fromValue(CursorType::SizeNS);
+            if (t == "sizewe") return SwAny::fromValue(CursorType::SizeWE);
+            if (t == "sizenwse") return SwAny::fromValue(CursorType::SizeNWSE);
+            if (t == "sizenesw") return SwAny::fromValue(CursorType::SizeNESW);
+            return SwAny::fromValue(CursorType::Default);
+        };
+        return true;
+    }
+
+    if (typeName == typeid(EchoModeEnum).name()) {
+        out->choices = {
+            SwString("NormalEcho"),
+            SwString("NoEcho"),
+            SwString("PasswordEcho"),
+            SwString("PasswordEchoOnEdit")
+        };
+        out->toValue = [](const SwString& text) {
+            const SwString t = text.trimmed().toLower();
+            if (t == "noecho") return SwAny::fromValue(EchoModeEnum::NoEcho);
+            if (t == "passwordecho") return SwAny::fromValue(EchoModeEnum::PasswordEcho);
+            if (t == "passwordechoonedit") return SwAny::fromValue(EchoModeEnum::PasswordEchoOnEdit);
+            return SwAny::fromValue(EchoModeEnum::NormalEcho);
+        };
+        return true;
+    }
+
+    if (propName == "HorizontalPolicy" || propName == "VerticalPolicy") {
+        return makeStringConfig({"Fixed", "Minimum", "Maximum", "Preferred", "MinimumExpanding", "Expanding", "Ignored"});
+    }
+
+    if (propName == "Orientation" && dynamic_cast<SwSpacer*>(target)) {
+        return makeStringConfig({"Horizontal", "Vertical"});
+    }
+
+    return false;
+}
 } // namespace
 
 SwCreatorPropertyInspector::SwCreatorPropertyInspector(SwWidget* parent)
@@ -127,10 +231,10 @@ SwWidget* SwCreatorPropertyInspector::target() const {
 
 SwSize SwCreatorPropertyInspector::minimumSizeHint() const {
     SwSize hint = SwWidget::minimumSizeHint();
-    const int pad = 8;
-    const int headerH = 40;
-    const int buttonGap = 6;
-    const int buttonSize = 34;
+    const int pad = 10;
+    const int headerH = 36;
+    const int buttonGap = 4;
+    const int buttonSize = 28;
 
     const int titleWidth = m_title ? m_title->sizeHint().width : 0;
     const int headerMinWidth = pad + titleWidth + pad + buttonSize + buttonGap + buttonSize + pad;
@@ -152,24 +256,35 @@ void SwCreatorPropertyInspector::buildUi_() {
     m_header = new SwFrame(this);
     m_header->setFrameShape(SwFrame::Shape::StyledPanel);
     m_header->setStyleSheet(
-        "SwFrame { background-color: " + SwCreatorTheme::rgb(th.surface1) + "; border-width: 0px; }"
+        "SwFrame { background-color: " + SwCreatorTheme::rgb(th.surface2)
+        + "; border-width: 0px; border-bottom-width: 1px; border-color: "
+        + SwCreatorTheme::rgb(th.borderLight) + "; border-radius: 0px; }"
     );
 
     m_title = new SwLabel(SwString("Properties"), m_header);
+    m_title->setFont(th.uiLabel);
     m_title->setStyleSheet(
-        "SwLabel { background-color: rgba(0,0,0,0); border-width: 0px; color: " + SwCreatorTheme::rgb(th.textPrimary) + "; font-size: 13px; }"
+        "SwLabel { background-color: rgba(0,0,0,0); border-width: 0px; color: " + SwCreatorTheme::rgb(th.textSecondary) + "; }"
     );
 
     m_add = new SwToolButton("+", m_header);
-    m_add->resize(34, 34);
+    m_add->resize(28, 28);
     m_add->setStyleSheet(
-        "SwToolButton { background-color: " + SwCreatorTheme::rgb(th.surface3) + "; border-color: " + SwCreatorTheme::rgb(th.border) + "; border-width: 1px; border-radius: 10px; padding: 0px; }"
+        "SwToolButton { background-color: rgba(0,0,0,0);"
+        " background-color-hover: " + SwCreatorTheme::rgb(th.hoverBg) + ";"
+        " background-color-pressed: " + SwCreatorTheme::rgb(th.pressedBg) + ";"
+        " border-width: 0px; border-radius: 2px; padding: 0px;"
+        " color: " + SwCreatorTheme::rgb(th.textSecondary) + "; }"
     );
 
     m_remove = new SwToolButton("-", m_header);
-    m_remove->resize(34, 34);
+    m_remove->resize(28, 28);
     m_remove->setStyleSheet(
-        "SwToolButton { background-color: " + SwCreatorTheme::rgb(th.surface3) + "; border-color: " + SwCreatorTheme::rgb(th.border) + "; border-width: 1px; border-radius: 10px; padding: 0px; }"
+        "SwToolButton { background-color: rgba(0,0,0,0);"
+        " background-color-hover: " + SwCreatorTheme::rgb(th.hoverBg) + ";"
+        " background-color-pressed: " + SwCreatorTheme::rgb(th.pressedBg) + ";"
+        " border-width: 0px; border-radius: 2px; padding: 0px;"
+        " color: " + SwCreatorTheme::rgb(th.textSecondary) + "; }"
     );
 
     m_tree = new SwTreeWidget(2, this);
@@ -177,20 +292,35 @@ void SwCreatorPropertyInspector::buildUi_() {
     m_tree->setColumnsFitToWidth(true);
     m_tree->setColumnStretch(0, 1);
     m_tree->setColumnStretch(1, 2);
+    {
+        SwTreeView::TreeColors tc;
+        tc.background       = th.surface2;
+        tc.backgroundBorder = th.surface2;
+        tc.altFill          = th.surface3;
+        tc.selFill          = th.selectionBg;
+        tc.selBorder        = th.accentPrimary;
+        tc.hoverFill        = th.hoverBg;
+        tc.text             = th.textPrimary;
+        tc.toggleStroke     = th.textSecondary;
+        tc.gridLine         = th.borderLight;
+        tc.bgRadius         = 0;
+        tc.selRadius        = 2;
+        m_tree->setTreeColors(tc);
+        m_tree->setTreeFont(th.uiBody);
+        m_tree->setRowHeight(28);
+    }
     if (m_tree->header()) {
         m_tree->header()->setStyleSheet(
             "SwHeaderView {"
-            " background-color: " + SwCreatorTheme::rgb(th.surface1) + ";"
-            " border-color: " + SwCreatorTheme::rgb(th.border) + ";"
-            " border-width: 0px;"
-            " border-top-left-radius: 12px;"
-            " border-top-right-radius: 12px;"
-            " border-bottom-left-radius: 0px;"
-            " border-bottom-right-radius: 0px;"
+            " background-color: " + SwCreatorTheme::rgb(th.surface2) + ";"
+            " border-color: " + SwCreatorTheme::rgb(th.borderLight) + ";"
+            " border-width: 0px; border-bottom-width: 1px;"
+            " border-radius: 0px;"
             " padding: 0px 10px;"
-            " color: " + SwCreatorTheme::rgb(th.textPrimary) + ";"
-            " divider-color: " + SwCreatorTheme::rgb(th.border) + ";"
-            " indicator-color: " + SwCreatorTheme::rgb(th.textSecondary) + ";"
+            " color: " + SwCreatorTheme::rgb(th.textSecondary) + ";"
+            " divider-color: " + SwCreatorTheme::rgb(th.borderLight) + ";"
+            " indicator-color: " + SwCreatorTheme::rgb(th.textMuted) + ";"
+            " font-size: 11px;"
             " }"
         );
     }
@@ -217,10 +347,10 @@ void SwCreatorPropertyInspector::buildUi_() {
 
 void SwCreatorPropertyInspector::updateLayout_() {
     const SwRect r = rect();
-    const int pad = 8;
-    const int headerH = 40;
-    const int buttonSize = 34;
-    const int buttonGap = 6;
+    const int pad = 10;
+    const int headerH = 36;
+    const int buttonSize = 28;
+    const int buttonGap = 4;
 
     if (m_header) {
         m_header->move(0, 0);
@@ -316,6 +446,23 @@ void SwCreatorPropertyInspector::rebuild_() {
         addGeom("y", gr.y);
         addGeom("width", gr.width);
         addGeom("height", gr.height);
+    }
+
+    if (SwGridLayout* grid = targetGridLayout_(m_target)) {
+        if (const SwGridLayout::Cell* cell = grid->cellForWidget(m_target)) {
+            auto addGridProp = [&](const SwString& key, const SwString& label, int v) {
+                PropRow row;
+                row.key = key;
+                row.displayName = label;
+                row.value = SwAny(v);
+                row.owner = "SwGridLayout";
+                groups[row.owner].push_back(row);
+            };
+            addGridProp(kSwCreatorLayoutRowKey, "Layout Row", cell->row);
+            addGridProp(kSwCreatorLayoutColumnKey, "Layout Column", cell->column);
+            addGridProp(kSwCreatorRowSpanKey, "Row Span", cell->rowSpan);
+            addGridProp(kSwCreatorColumnSpanKey, "Column Span", cell->columnSpan);
+        }
     }
 
     // Real properties from SwObject registry.
@@ -608,6 +755,41 @@ void SwCreatorPropertyInspector::setEditorsForRow_(const SwModelIndex& nameIndex
         if (!m_target) {
             return;
         }
+        if (propName == kSwCreatorLayoutRowKey ||
+            propName == kSwCreatorLayoutColumnKey ||
+            propName == kSwCreatorRowSpanKey ||
+            propName == kSwCreatorColumnSpanKey) {
+            bool ok = false;
+            const int iv = v.toInt(&ok);
+            if (!ok) {
+                return;
+            }
+            SwGridLayout* grid = targetGridLayout_(m_target);
+            const SwGridLayout::Cell* cell = grid ? grid->cellForWidget(m_target) : nullptr;
+            if (!grid || !cell) {
+                return;
+            }
+
+            int row = cell->row;
+            int column = cell->column;
+            int rowSpan = std::max(1, cell->rowSpan);
+            int columnSpan = std::max(1, cell->columnSpan);
+
+            if (propName == kSwCreatorLayoutRowKey) row = std::max(0, iv);
+            if (propName == kSwCreatorLayoutColumnKey) column = std::max(0, iv);
+            if (propName == kSwCreatorRowSpanKey) rowSpan = std::max(1, iv);
+            if (propName == kSwCreatorColumnSpanKey) columnSpan = std::max(1, iv);
+
+            if (!grid->setWidgetPosition(m_target, row, column, rowSpan, columnSpan)) {
+                rebuild_();
+                return;
+            }
+
+            documentModified();
+            canvasNeedsUpdate();
+            rebuild_();
+            return;
+        }
         if (propName == "x" || propName == "y" || propName == "width" || propName == "height") {
             bool ok = false;
             int iv = v.toInt(&ok);
@@ -640,10 +822,10 @@ void SwCreatorPropertyInspector::setEditorsForRow_(const SwModelIndex& nameIndex
         nameEdit->setStyleSheet(
             "SwLineEdit {"
             " background-color: " + SwCreatorTheme::rgb(th.surface3) + ";"
-            " border-color: " + SwCreatorTheme::rgb(th.border) + ";"
-            " border-width: 1px;"
-            " border-radius: 10px;"
-            " padding: 4px 8px;"
+            " border-color: " + SwCreatorTheme::rgb(th.borderLight) + ";"
+            " border-width: 0px; border-bottom-width: 1px;"
+            " border-radius: 0px;"
+            " padding: 2px 6px;"
             " color: " + SwCreatorTheme::rgb(th.textPrimary) + ";"
             " }"
         );
@@ -693,6 +875,57 @@ void SwCreatorPropertyInspector::setEditorsForRow_(const SwModelIndex& nameIndex
         return;
     }
 
+    EnumEditorConfig enumConfig;
+    if (enumEditorConfigFor_(m_target, propName, value, &enumConfig) && !enumConfig.choices.isEmpty()) {
+        auto* combo = new SwComboBox(m_tree);
+        combo->setStyleSheet(
+            "SwComboBox {"
+            " background-color: " + SwCreatorTheme::rgb(th.surface3) + ";"
+            " border-color: " + SwCreatorTheme::rgb(th.borderLight) + ";"
+            " border-width: 0px; border-bottom-width: 1px;"
+            " border-radius: 0px;"
+            " padding: 0px 6px;"
+            " color: " + SwCreatorTheme::rgb(th.textPrimary) + ";"
+            " }"
+        );
+
+        const SwString currentValue = value.toString().trimmed();
+        int currentIndex = -1;
+        for (int i = 0; i < enumConfig.choices.size(); ++i) {
+            combo->addItem(enumConfig.choices[i]);
+            if (currentIndex < 0 && sameChoiceText_(enumConfig.choices[i], currentValue)) {
+                currentIndex = i;
+            }
+        }
+        if (currentIndex >= 0) {
+            combo->setCurrentIndex(currentIndex);
+        }
+
+        SwObject::connect(combo, &SwComboBox::currentIndexChanged, this, [this, propName, combo, enumConfig](int index) {
+            if (!m_target || !combo || index < 0 || index >= combo->count()) {
+                return;
+            }
+            if (propName == kSwCreatorLayoutRowKey ||
+                propName == kSwCreatorLayoutColumnKey ||
+                propName == kSwCreatorRowSpanKey ||
+                propName == kSwCreatorColumnSpanKey) {
+                return;
+            }
+
+            const SwAny newValue = enumConfig.toValue ? enumConfig.toValue(combo->itemText(index))
+                                                      : SwAny(combo->itemText(index));
+            m_target->setProperty(propName, newValue);
+            documentModified();
+            canvasNeedsUpdate();
+            if (propName == "ObjectName" || propName == "Text" || propName == "ToolTips") {
+                hierarchyNeedsRebuild();
+            }
+        });
+
+        m_tree->setIndexWidget(valueIndex, combo);
+        return;
+    }
+
     if (propName == "StyleSheet") {
         auto* cell = new SwWidget(m_tree);
         cell->setStyleSheet("SwWidget { background-color: rgba(0,0,0,0); border-width: 0px; }");
@@ -703,10 +936,10 @@ void SwCreatorPropertyInspector::setEditorsForRow_(const SwModelIndex& nameIndex
         preview->setStyleSheet(
             "SwLineEdit {"
             " background-color: " + SwCreatorTheme::rgb(th.surface3) + ";"
-            " border-color: " + SwCreatorTheme::rgb(th.border) + ";"
-            " border-width: 1px;"
-            " border-radius: 10px;"
-            " padding: 4px 8px;"
+            " border-color: " + SwCreatorTheme::rgb(th.borderLight) + ";"
+            " border-width: 0px; border-bottom-width: 1px;"
+            " border-radius: 0px;"
+            " padding: 2px 6px;"
             " color: " + SwCreatorTheme::rgb(th.textPrimary) + ";"
             " }"
         );
@@ -716,10 +949,12 @@ void SwCreatorPropertyInspector::setEditorsForRow_(const SwModelIndex& nameIndex
         open->setStyleSheet(
             "SwToolButton {"
             " background-color: " + SwCreatorTheme::rgb(th.surface3) + ";"
-            " border-color: " + SwCreatorTheme::rgb(th.border) + ";"
+            " background-color-hover: " + SwCreatorTheme::rgb(th.hoverBg) + ";"
+            " border-color: " + SwCreatorTheme::rgb(th.borderLight) + ";"
             " border-width: 1px;"
-            " border-radius: 10px;"
+            " border-radius: 2px;"
             " padding: 0px;"
+            " color: " + SwCreatorTheme::rgb(th.textSecondary) + ";"
             " }"
         );
 
@@ -765,10 +1000,10 @@ void SwCreatorPropertyInspector::setEditorsForRow_(const SwModelIndex& nameIndex
         preview->setStyleSheet(
             "SwLineEdit {"
             " background-color: " + SwCreatorTheme::rgb(th.surface3) + ";"
-            " border-color: " + SwCreatorTheme::rgb(th.border) + ";"
-            " border-width: 1px;"
-            " border-radius: 10px;"
-            " padding: 4px 8px;"
+            " border-color: " + SwCreatorTheme::rgb(th.borderLight) + ";"
+            " border-width: 0px; border-bottom-width: 1px;"
+            " border-radius: 0px;"
+            " padding: 2px 6px;"
             " color: " + SwCreatorTheme::rgb(th.textPrimary) + ";"
             " }"
         );
@@ -778,10 +1013,12 @@ void SwCreatorPropertyInspector::setEditorsForRow_(const SwModelIndex& nameIndex
         open->setStyleSheet(
             "SwToolButton {"
             " background-color: " + SwCreatorTheme::rgb(th.surface3) + ";"
-            " border-color: " + SwCreatorTheme::rgb(th.border) + ";"
+            " background-color-hover: " + SwCreatorTheme::rgb(th.hoverBg) + ";"
+            " border-color: " + SwCreatorTheme::rgb(th.borderLight) + ";"
             " border-width: 1px;"
-            " border-radius: 10px;"
+            " border-radius: 2px;"
             " padding: 0px;"
+            " color: " + SwCreatorTheme::rgb(th.textSecondary) + ";"
             " }"
         );
 
@@ -822,10 +1059,10 @@ void SwCreatorPropertyInspector::setEditorsForRow_(const SwModelIndex& nameIndex
     edit->setStyleSheet(
         "SwLineEdit {"
         " background-color: " + SwCreatorTheme::rgb(th.surface3) + ";"
-        " border-color: " + SwCreatorTheme::rgb(th.border) + ";"
-        " border-width: 1px;"
-        " border-radius: 10px;"
-        " padding: 4px 8px;"
+        " border-color: " + SwCreatorTheme::rgb(th.borderLight) + ";"
+        " border-width: 0px; border-bottom-width: 1px;"
+        " border-radius: 0px;"
+        " padding: 2px 6px;"
         " color: " + SwCreatorTheme::rgb(th.textPrimary) + ";"
         " }"
     );

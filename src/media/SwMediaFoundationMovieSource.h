@@ -53,6 +53,7 @@
  * On non-Windows platforms this class is a stub so the headers remain usable.
  ***************************************************************************************************/
 
+#include "media/SwMediaTimelineSource.h"
 #include "media/SwVideoSource.h"
 #include "media/SwVideoPacket.h"
 #include "media/SwVideoTypes.h"
@@ -81,8 +82,9 @@ static constexpr const char* kSwLogCategory_SwMediaFoundationMovieSource = "sw.m
 #include <mfidl.h>
 #include <mfobjects.h>
 #include <mfreadwrite.h>
+#include <propvarutil.h>
 
-class SwMediaFoundationMovieSource : public SwVideoSource {
+class SwMediaFoundationMovieSource : public SwVideoSource, public SwMediaTimelineSource {
 public:
     /**
      * @brief Constructs a `SwMediaFoundationMovieSource` instance.
@@ -111,6 +113,45 @@ public:
      */
     SwString name() const override {
         return "SwMediaFoundationMovieSource";
+    }
+
+    bool isSeekable() const override {
+        SwMutexLocker lock(m_stateMutex);
+        return m_seekable;
+    }
+
+    std::int64_t durationMs() const override {
+        SwMutexLocker lock(m_stateMutex);
+        return m_durationMs;
+    }
+
+    std::int64_t positionMs() const override {
+        return m_lastPositionMs.load();
+    }
+
+    bool seek(std::int64_t positionMs) override {
+        if (positionMs < 0) {
+            positionMs = 0;
+        }
+        SwMutexLocker lock(m_stateMutex);
+        if (!m_reader || !m_seekable) {
+            return false;
+        }
+        PROPVARIANT target;
+        PropVariantInit(&target);
+        target.vt = VT_I8;
+        target.hVal.QuadPart = static_cast<LONGLONG>(positionMs) * 10000LL;
+        const HRESULT hr = m_reader->SetCurrentPosition(GUID_NULL, target);
+        PropVariantClear(&target);
+        if (FAILED(hr)) {
+            logError("SetCurrentPosition", hr);
+            return false;
+        }
+        m_havePlaybackClock = false;
+        m_startTimestamp = static_cast<LONGLONG>(positionMs) * 10000LL;
+        m_lastPositionMs.store(positionMs);
+        emitStatus(StreamState::Streaming, "Seeking");
+        return true;
     }
 
     /**
@@ -175,6 +216,36 @@ public:
             return false;
         }
 
+        PROPVARIANT durationValue;
+        PropVariantInit(&durationValue);
+        hr = m_reader->GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE,
+                                               MF_PD_DURATION,
+                                               &durationValue);
+        if (FAILED(hr)) {
+            hr = m_reader->GetPresentationAttribute(MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                                                   MF_PD_DURATION,
+                                                   &durationValue);
+        }
+        if (SUCCEEDED(hr) &&
+            (durationValue.vt == VT_I8 || durationValue.vt == VT_UI8)) {
+            const LONGLONG duration100ns =
+                (durationValue.vt == VT_UI8)
+                    ? static_cast<LONGLONG>(durationValue.uhVal.QuadPart)
+                    : durationValue.hVal.QuadPart;
+            m_durationMs = duration100ns >= 0 ? (duration100ns / 10000LL) : -1;
+        } else {
+            m_durationMs = -1;
+        }
+        PropVariantClear(&durationValue);
+
+        PROPVARIANT zeroPosition;
+        PropVariantInit(&zeroPosition);
+        zeroPosition.vt = VT_I8;
+        zeroPosition.hVal.QuadPart = 0;
+        const HRESULT seekProbeHr = m_reader->SetCurrentPosition(GUID_NULL, zeroPosition);
+        PropVariantClear(&zeroPosition);
+        m_seekable = SUCCEEDED(seekProbeHr);
+
         UINT32 width = 0;
         UINT32 height = 0;
         hr = MFGetAttributeSize(confirmedType.Get(), MF_MT_FRAME_SIZE, &width, &height);
@@ -221,6 +292,7 @@ public:
         m_frameHeight = static_cast<int>(height);
         m_defaultStride = static_cast<int>(stride);
         m_initialized = true;
+        publishTracks_();
         return true;
     }
 
@@ -233,10 +305,13 @@ public:
         if (isRunning()) {
             return;
         }
+        emitStatus(StreamState::Connecting, "Opening media file...");
         if (!initialize()) {
+            emitStatus(StreamState::Recovering, "Failed to initialize movie source");
             return;
         }
         m_havePlaybackClock = false;
+        m_lastPositionMs.store(0);
         setRunning(true);
         if (!m_captureThread) {
             m_captureThread = std::make_unique<MovieCaptureThread>(this);
@@ -272,6 +347,18 @@ public:
     }
 
 private:
+    void publishTracks_() {
+        SwMediaTrack track;
+        track.id = "file-video-0";
+        track.type = SwMediaTrack::Type::Video;
+        track.codec = "raw-bgra";
+        track.selected = true;
+        track.availability = SwMediaTrack::Availability::Available;
+        SwList<SwMediaTrack> tracks;
+        tracks.append(track);
+        setTracks(tracks);
+    }
+
     bool ensureComInitialized() {
         if (m_comInitialized) {
             return true;
@@ -303,27 +390,46 @@ private:
     }
 
     void readLoop() {
+        bool reachedEndOfFile = false;
         while (isRunning()) {
             DWORD streamIndex = 0;
             DWORD flags = 0;
             LONGLONG timestamp = 0;
             Microsoft::WRL::ComPtr<IMFSample> sample;
-            HRESULT hr = m_reader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-                                              0,
-                                              &streamIndex,
-                                              &flags,
-                                              &timestamp,
-                                              &sample);
+            HRESULT hr = S_OK;
+            {
+                SwMutexLocker lock(m_stateMutex);
+                if (!m_reader) {
+                    break;
+                }
+                hr = m_reader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                                          0,
+                                          &streamIndex,
+                                          &flags,
+                                          &timestamp,
+                                          &sample);
+            }
             if (FAILED(hr)) {
                 logError("ReadSample", hr);
+                emitStatus(StreamState::Recovering, "Movie read failed");
                 break;
             }
             if (flags & MF_SOURCE_READERF_ENDOFSTREAM) {
                 if (m_loop.load()) {
-                    m_reader->SetCurrentPosition(GUID_NULL, PROPVARIANT{});
+                    PROPVARIANT loopTarget;
+                    PropVariantInit(&loopTarget);
+                    {
+                        SwMutexLocker lock(m_stateMutex);
+                        if (m_reader) {
+                            m_reader->SetCurrentPosition(GUID_NULL, loopTarget);
+                        }
+                    }
+                    PropVariantClear(&loopTarget);
                     m_havePlaybackClock = false;
+                    m_lastPositionMs.store(0);
                     continue;
                 }
+                reachedEndOfFile = true;
                 break;
             }
             if (!sample) {
@@ -381,9 +487,13 @@ private:
                                  timestamp,
                                  true);
             packet.setRawFormat(format);
+            m_lastPositionMs.store(timestamp >= 0 ? (timestamp / 10000LL) : -1);
+            emitStatus(StreamState::Streaming, "Streaming");
             emitPacket(packet);
         }
         setRunning(false);
+        emitStatus(StreamState::Stopped,
+                   reachedEndOfFile ? SwString("End of file") : SwString("Stream stopped"));
     }
 
     bool copyFrame(IMFMediaBuffer* buffer, SwByteArray& out, int& outHeight) const {
@@ -612,6 +722,9 @@ private:
             m_comInitialized = false;
         }
         m_initialized = false;
+        m_seekable = false;
+        m_durationMs = -1;
+        m_lastPositionMs.store(-1);
     }
 
     void logError(const char* label, HRESULT hr) const {
@@ -646,7 +759,7 @@ private:
     std::wstring m_path;
     Microsoft::WRL::ComPtr<IMFSourceReader> m_reader;
     std::unique_ptr<MovieCaptureThread> m_captureThread;
-    SwMutex m_stateMutex;
+    mutable SwMutex m_stateMutex;
     int m_frameWidth{0};
     int m_frameHeight{0};
     int m_defaultStride{0};
@@ -654,15 +767,18 @@ private:
     bool m_initialized{false};
     bool m_comInitialized{false};
     bool m_mfStarted{false};
+    bool m_seekable{false};
     std::atomic<bool> m_loop{false};
+    std::atomic<std::int64_t> m_lastPositionMs{-1};
     bool m_havePlaybackClock{false};
+    std::int64_t m_durationMs{-1};
     std::chrono::steady_clock::time_point m_playbackStart{};
     LONGLONG m_startTimestamp{0};
 };
 
 #else
 
-class SwMediaFoundationMovieSource : public SwVideoSource {
+class SwMediaFoundationMovieSource : public SwVideoSource, public SwMediaTimelineSource {
 public:
     /**
      * @brief Constructs a `SwMediaFoundationMovieSource` instance.
@@ -696,6 +812,11 @@ public:
      * @details The call affects the runtime state associated with the underlying resource or service.
      */
     void stop() override {}
+
+    bool isSeekable() const override { return false; }
+    std::int64_t durationMs() const override { return -1; }
+    std::int64_t positionMs() const override { return -1; }
+    bool seek(std::int64_t) override { return false; }
 };
 
 #endif

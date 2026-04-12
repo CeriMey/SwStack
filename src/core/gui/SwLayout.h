@@ -1138,8 +1138,194 @@ public:
         updateGeometry();
     }
 
+    int rowCount() const {
+        int rows = 0;
+        int columns = 0;
+        computeDimensions_(rows, columns);
+        return rows;
+    }
+
+    int columnCount() const {
+        int rows = 0;
+        int columns = 0;
+        computeDimensions_(rows, columns);
+        return columns;
+    }
+
+    const SwVector<Cell>& cells() const {
+        return m_cells;
+    }
+
+    const Cell* cellForWidget(const SwWidgetInterface* widget) const {
+        return widget ? findCellForWidget_(widget) : nullptr;
+    }
+
+    Cell* cellForWidget(SwWidgetInterface* widget) {
+        return widget ? findCellForWidget_(widget) : nullptr;
+    }
+
+    const Cell* cellAtPosition(int row, int column) const {
+        return findCellAtPosition_(row, column, nullptr);
+    }
+
+    SwWidgetInterface* itemAtPosition(int row, int column) const {
+        const Cell* cell = cellAtPosition(row, column);
+        return (cell && cell->item) ? cell->item->widget() : nullptr;
+    }
+
+    bool isCellRangeAvailable(int row,
+                              int column,
+                              int rowSpan = 1,
+                              int columnSpan = 1,
+                              const SwWidgetInterface* ignoreWidget = nullptr) const {
+        return isCellRangeAvailable_(row, column, rowSpan, columnSpan, ignoreWidget);
+    }
+
+    bool setWidgetPosition(SwWidgetInterface* widget,
+                           int row,
+                           int column,
+                           int rowSpan = 1,
+                           int columnSpan = 1) {
+        if (!widget) {
+            return false;
+        }
+
+        Cell* existing = findCellForWidget_(widget);
+        if (!existing) {
+            if (!isCellRangeAvailable_(row, column, rowSpan, columnSpan, nullptr)) {
+                return false;
+            }
+            addItem(new SwWidgetItem(widget), row, column, rowSpan, columnSpan);
+            return true;
+        }
+
+        if (!isCellRangeAvailable_(row, column, rowSpan, columnSpan, widget)) {
+            return false;
+        }
+
+        existing->row = row;
+        existing->column = column;
+        existing->rowSpan = rowSpan;
+        existing->columnSpan = columnSpan;
+        invalidateLayout();
+        updateGeometry();
+        return true;
+    }
+
+    bool moveWidget(SwWidgetInterface* widget, int row, int column) {
+        Cell* existing = findCellForWidget_(widget);
+        if (!existing) {
+            return false;
+        }
+        return setWidgetPosition(widget, row, column, existing->rowSpan, existing->columnSpan);
+    }
+
+    bool insertRow(int row) {
+        if (row < 0) {
+            return false;
+        }
+        for (Cell& cell : m_cells) {
+            if (cell.row >= row) {
+                ++cell.row;
+            }
+        }
+        invalidateLayout();
+        updateGeometry();
+        return true;
+    }
+
+    bool insertColumn(int column) {
+        if (column < 0) {
+            return false;
+        }
+        for (Cell& cell : m_cells) {
+            if (cell.column >= column) {
+                ++cell.column;
+            }
+        }
+        invalidateLayout();
+        updateGeometry();
+        return true;
+    }
+
+    bool removeRow(int row) {
+        if (row < 0) {
+            return false;
+        }
+
+        bool changed = false;
+        for (auto it = m_cells.begin(); it != m_cells.end();) {
+            Cell& cell = *it;
+            const int cellBottom = cell.row + cell.rowSpan;
+            if (cell.row == row) {
+                delete cell.item;
+                it = m_cells.erase(it);
+                changed = true;
+                continue;
+            }
+            if (cell.row > row) {
+                --cell.row;
+                changed = true;
+            } else if (cell.row < row && cellBottom > row) {
+                cell.rowSpan = std::max(1, cell.rowSpan - 1);
+                changed = true;
+            }
+            ++it;
+        }
+
+        if (changed) {
+            invalidateLayout();
+            updateGeometry();
+        }
+        return changed;
+    }
+
+    bool removeColumn(int column) {
+        if (column < 0) {
+            return false;
+        }
+
+        bool changed = false;
+        for (auto it = m_cells.begin(); it != m_cells.end();) {
+            Cell& cell = *it;
+            const int cellRight = cell.column + cell.columnSpan;
+            if (cell.column == column) {
+                delete cell.item;
+                it = m_cells.erase(it);
+                changed = true;
+                continue;
+            }
+            if (cell.column > column) {
+                --cell.column;
+                changed = true;
+            } else if (cell.column < column && cellRight > column) {
+                cell.columnSpan = std::max(1, cell.columnSpan - 1);
+                changed = true;
+            }
+            ++it;
+        }
+
+        if (changed) {
+            invalidateLayout();
+            updateGeometry();
+        }
+        return changed;
+    }
+
+    bool cellRect(int row, int column, SwRect* outRect) const {
+        return cellRectForContentRect_(contentRect(), row, column, outRect);
+    }
+
+    bool cellRectForContentRect(const SwRect& contentRect, int row, int column, SwRect* outRect) const {
+        return cellRectForContentRect_(contentRect, row, column, outRect);
+    }
+
     void addItem(SwLayoutItem* item, int row, int column, int rowSpan = 1, int columnSpan = 1) {
         if (!item || row < 0 || column < 0 || rowSpan <= 0 || columnSpan <= 0) {
+            return;
+        }
+        if (!isCellRangeAvailable_(row, column, rowSpan, columnSpan, item->widget())) {
+            delete item;
             return;
         }
         adoptWidgetToParent_(item->widget());
@@ -1158,10 +1344,9 @@ public:
         if (!widget) {
             return;
         }
-        for (const Cell& existing : m_cells) {
-            if (existing.item && existing.item->widget() == widget) {
-                return;
-            }
+        if (findCellForWidget_(widget)) {
+            (void)setWidgetPosition(widget, row, column, rowSpan, columnSpan);
+            return;
         }
         adoptWidgetToParent_(widget);
         addItem(new SwWidgetItem(widget), row, column, rowSpan, columnSpan);
@@ -1179,9 +1364,8 @@ public:
             removed = true;
         }
         if (removed) {
-
             invalidateLayout();
-        updateGeometry();
+            updateGeometry();
         }
     }
 
@@ -1207,283 +1391,50 @@ public:
 
 protected:
     void applyLayout(const SwRect& rect) override {
-        if (m_cells.isEmpty()) {
+        GridMetrics metrics;
+        if (!buildMetrics_(rect, &metrics)) {
             return;
         }
-
-        int rows = 0;
-        int columns = 0;
-        for (const Cell& cell : m_cells) {
-            rows = std::max(rows, cell.row + cell.rowSpan);
-            columns = std::max(columns, cell.column + cell.columnSpan);
-        }
-        if (rows == 0 || columns == 0) {
-            return;
-        }
-
-        if (static_cast<size_t>(rows) > m_rowStretch.size()) {
-            m_rowStretch.resize(static_cast<size_t>(rows), 0);
-        }
-        if (static_cast<size_t>(columns) > m_columnStretch.size()) {
-            m_columnStretch.resize(static_cast<size_t>(columns), 0);
-        }
-
-        SwVector<int> rowMin(static_cast<size_t>(rows), 0);
-        SwVector<int> columnMin(static_cast<size_t>(columns), 0);
-        SwVector<bool> rowOccupied(static_cast<size_t>(rows), false);
-        SwVector<bool> columnOccupied(static_cast<size_t>(columns), false);
-        SwVector<bool> rowGrow(static_cast<size_t>(rows), false);
-        SwVector<bool> columnGrow(static_cast<size_t>(columns), false);
-
-        auto requiredSpanExtent_ = [](int totalExtent, int spacingAmount, int span) {
-            return std::max(0, totalExtent - std::max(0, span - 1) * spacingAmount);
-        };
-
-        auto ensureSpanMinimum_ = [](SwVector<int>& mins,
-                                     const SwVector<bool>& growable,
-                                     int start,
-                                     int span,
-                                     int required) {
-            if (required <= 0 || span <= 0) {
-                return;
-            }
-
-            int current = 0;
-            SwVector<int> growableIndices;
-            SwVector<int> allIndices;
-            growableIndices.reserve(static_cast<size_t>(span));
-            allIndices.reserve(static_cast<size_t>(span));
-
-            for (int i = 0; i < span; ++i) {
-                const int index = start + i;
-                if (index < 0 || static_cast<size_t>(index) >= mins.size()) {
-                    continue;
-                }
-                current += mins[static_cast<size_t>(index)];
-                allIndices.push_back(index);
-                if (growable[static_cast<size_t>(index)]) {
-                    growableIndices.push_back(index);
-                }
-            }
-
-            if (current >= required || allIndices.isEmpty()) {
-                return;
-            }
-
-            const int deficit = required - current;
-            const SwVector<int>& targetIndices = growableIndices.isEmpty() ? allIndices : growableIndices;
-            const int per = deficit / static_cast<int>(targetIndices.size());
-            int remainder = deficit % static_cast<int>(targetIndices.size());
-            for (const int index : targetIndices) {
-                mins[static_cast<size_t>(index)] += per;
-                if (remainder > 0) {
-                    ++mins[static_cast<size_t>(index)];
-                    --remainder;
-                }
-            }
-        };
-
-        auto resolveItemExtent_ = [](SwLayoutItem* item, bool horizontal, int availableExtent) {
-            if (!item) {
-                return 0;
-            }
-
-            const SwSize minimumSize = item->minimumSize();
-            const SwSize preferredSize = item->sizeHint();
-            const int minimum = std::max(0, horizontal ? minimumSize.width : minimumSize.height);
-            const int preferred = std::max(minimum, horizontal ? preferredSize.width : preferredSize.height);
-            if (SwLayoutDetail::itemCanGrowOnAxis_(item, horizontal)) {
-                return std::max(minimum, availableExtent);
-            }
-            return std::max(minimum, std::min(availableExtent, preferred));
-        };
-
         for (const Cell& cell : m_cells) {
             if (!cell.item) {
                 continue;
             }
 
-            const SwSize preferred = cell.item->sizeHint();
-            const SwSize minimum = cell.item->minimumSize();
-            const int totalHeight = std::max(minimum.height, preferred.height);
-            const int totalWidth = std::max(minimum.width, preferred.width);
-
-            for (int i = 0; i < cell.rowSpan; ++i) {
-                const int rowIndex = cell.row + i;
-                if (rowIndex < rows) {
-                    rowOccupied[static_cast<size_t>(rowIndex)] = true;
-                    if (SwLayoutDetail::itemHasExpandFlagOnAxis_(cell.item, false)) {
-                        rowGrow[static_cast<size_t>(rowIndex)] = true;
-                    }
-                }
-            }
-
-            for (int i = 0; i < cell.columnSpan; ++i) {
-                const int columnIndex = cell.column + i;
-                if (columnIndex < columns) {
-                    columnOccupied[static_cast<size_t>(columnIndex)] = true;
-                    if (SwLayoutDetail::itemHasExpandFlagOnAxis_(cell.item, true)) {
-                        columnGrow[static_cast<size_t>(columnIndex)] = true;
-                    }
-                }
-            }
-
-            if (cell.rowSpan == 1 && cell.row < rows) {
-                rowMin[static_cast<size_t>(cell.row)] = std::max(rowMin[static_cast<size_t>(cell.row)], totalHeight);
-            }
-            if (cell.columnSpan == 1 && cell.column < columns) {
-                columnMin[static_cast<size_t>(cell.column)] = std::max(columnMin[static_cast<size_t>(cell.column)], totalWidth);
-            }
-        }
-
-        for (const Cell& cell : m_cells) {
-            if (!cell.item) {
-                continue;
-            }
-
-            const SwSize preferred = cell.item->sizeHint();
-            const SwSize minimum = cell.item->minimumSize();
-            const int totalHeight = std::max(minimum.height, preferred.height);
-            const int totalWidth = std::max(minimum.width, preferred.width);
-
-            if (cell.rowSpan > 1) {
-                ensureSpanMinimum_(rowMin,
-                                   rowGrow,
-                                   cell.row,
-                                   cell.rowSpan,
-                                   requiredSpanExtent_(totalHeight, m_verticalSpacing, cell.rowSpan));
-            }
-            if (cell.columnSpan > 1) {
-                ensureSpanMinimum_(columnMin,
-                                   columnGrow,
-                                   cell.column,
-                                   cell.columnSpan,
-                                   requiredSpanExtent_(totalWidth, m_horizontalSpacing, cell.columnSpan));
-            }
-        }
-
-        auto distributeSizes = [](int available,
-                                  SwVector<int>& mins,
-                                  const SwVector<int>& stretches,
-                                  const SwVector<bool>& occupied,
-                                  const SwVector<bool>& growable,
-                                  int count) {
-            int totalMin = SwLayoutDetail::sumVector_(mins);
-            if (available < totalMin && totalMin > 0) {
-                int scaledTotal = 0;
-                for (int i = 0; i < count; ++i) {
-                    mins[static_cast<size_t>(i)] = static_cast<int>((static_cast<long long>(mins[static_cast<size_t>(i)]) * available) / totalMin);
-                    scaledTotal += mins[static_cast<size_t>(i)];
-                }
-                int remainder = available - scaledTotal;
-                for (int i = 0; remainder > 0 && i < count; ++i, --remainder) {
-                    ++mins[static_cast<size_t>(i)];
-                }
-                totalMin = available;
-            }
-
-            int extra = std::max(0, available - totalMin);
-            int stretchTotal = 0;
-            for (int i = 0; i < count; ++i) {
-                stretchTotal += std::max(0, stretches[static_cast<size_t>(i)]);
-            }
-            if (stretchTotal > 0) {
-                int remainingExtra = extra;
-                int remainingStretch = stretchTotal;
-                for (int i = 0; i < count; ++i) {
-                    const int stretch = std::max(0, stretches[static_cast<size_t>(i)]);
-                    if (stretch <= 0 || remainingExtra <= 0 || remainingStretch <= 0) {
-                        continue;
-                    }
-                    const int allocated = (remainingStretch == stretch)
-                                              ? remainingExtra
-                                              : static_cast<int>((static_cast<long long>(remainingExtra) * stretch) / remainingStretch);
-                    mins[static_cast<size_t>(i)] += allocated;
-                    remainingExtra -= allocated;
-                    remainingStretch -= stretch;
-                }
-                return;
-            }
-
-            if (extra <= 0) {
-                return;
-            }
-
-            SwVector<int> growableIndices;
-            growableIndices.reserve(static_cast<size_t>(count));
-            for (int i = 0; i < count; ++i) {
-                if (occupied[static_cast<size_t>(i)] && growable[static_cast<size_t>(i)]) {
-                    growableIndices.push_back(i);
-                }
-            }
-
-            if (!growableIndices.isEmpty()) {
-                const int per = extra / static_cast<int>(growableIndices.size());
-                int remainder = extra % static_cast<int>(growableIndices.size());
-                for (const int index : growableIndices) {
-                    mins[static_cast<size_t>(index)] += per;
-                    if (remainder > 0) {
-                        ++mins[static_cast<size_t>(index)];
-                        --remainder;
-                    }
-                }
-                return;
-            }
-
-            SW_UNUSED(extra);
-        };
-
-        const int totalVerticalSpacing = std::max(0, rows - 1) * m_verticalSpacing;
-        const int totalHorizontalSpacing = std::max(0, columns - 1) * m_horizontalSpacing;
-
-        distributeSizes(std::max(0, rect.height - totalVerticalSpacing), rowMin, m_rowStretch, rowOccupied, rowGrow, rows);
-        distributeSizes(std::max(0, rect.width - totalHorizontalSpacing), columnMin, m_columnStretch, columnOccupied, columnGrow, columns);
-
-        SwVector<int> rowPositions(static_cast<size_t>(rows), rect.y);
-        SwVector<int> columnPositions(static_cast<size_t>(columns), rect.x);
-
-        int current = rect.y;
-        for (int i = 0; i < rows; ++i) {
-            rowPositions[static_cast<size_t>(i)] = current;
-            current += rowMin[static_cast<size_t>(i)] + m_verticalSpacing;
-        }
-
-        current = rect.x;
-        for (int i = 0; i < columns; ++i) {
-            columnPositions[static_cast<size_t>(i)] = current;
-            current += columnMin[static_cast<size_t>(i)] + m_horizontalSpacing;
-        }
-
-        for (const Cell& cell : m_cells) {
-            if (!cell.item) {
-                continue;
-            }
-
-            int x = columnPositions[static_cast<size_t>(cell.column)];
-            int y = rowPositions[static_cast<size_t>(cell.row)];
-            int width = 0;
-            int height = 0;
-
-            for (int i = 0; i < cell.columnSpan && (cell.column + i) < columns; ++i) {
-                width += columnMin[static_cast<size_t>(cell.column + i)];
-            }
-            width += m_horizontalSpacing * std::max(0, cell.columnSpan - 1);
-
-            for (int i = 0; i < cell.rowSpan && (cell.row + i) < rows; ++i) {
-                height += rowMin[static_cast<size_t>(cell.row + i)];
-            }
-            height += m_verticalSpacing * std::max(0, cell.rowSpan - 1);
-
-            const int targetWidth = resolveItemExtent_(cell.item, true, width);
-            const int targetHeight = resolveItemExtent_(cell.item, false, height);
-            const int targetX = x;
-            const int targetY = y + std::max(0, (height - targetHeight) / 2);
-
+            const SwRect cellRect = spannedCellRect_(metrics, cell);
+            const int targetWidth = resolveItemExtent_(cell.item, true, cellRect.width);
+            const int targetHeight = resolveItemExtent_(cell.item, false, cellRect.height);
+            const int targetX = cellRect.x;
+            const int targetY = cellRect.y + std::max(0, (cellRect.height - targetHeight) / 2);
             cell.item->setGeometry(SwRect{targetX, targetY, targetWidth, targetHeight});
         }
     }
 
 private:
+    struct GridMetrics {
+        int rows{0};
+        int columns{0};
+        SwRect rect{0, 0, 0, 0};
+        SwVector<int> rowSizes;
+        SwVector<int> columnSizes;
+        SwVector<int> rowPositions;
+        SwVector<int> columnPositions;
+    };
+
+    static int resolveItemExtent_(SwLayoutItem* item, bool horizontal, int availableExtent) {
+        if (!item) {
+            return 0;
+        }
+
+        const SwSize minimumSize = item->minimumSize();
+        const SwSize preferredSize = item->sizeHint();
+        const int minimum = std::max(0, horizontal ? minimumSize.width : minimumSize.height);
+        const int preferred = std::max(minimum, horizontal ? preferredSize.width : preferredSize.height);
+        if (SwLayoutDetail::itemCanGrowOnAxis_(item, horizontal)) {
+            return std::max(minimum, availableExtent);
+        }
+        return std::max(minimum, std::min(availableExtent, preferred));
+    }
+
     SwSize layoutSizeHint_(bool minimum) const {
         if (m_cells.isEmpty()) {
             return {leftMargin() + rightMargin(), topMargin() + bottomMargin()};
@@ -1491,10 +1442,7 @@ private:
 
         int rows = 0;
         int columns = 0;
-        for (const Cell& cell : m_cells) {
-            rows = std::max(rows, cell.row + cell.rowSpan);
-            columns = std::max(columns, cell.column + cell.columnSpan);
-        }
+        computeDimensions_(rows, columns);
         if (rows <= 0 || columns <= 0) {
             return {leftMargin() + rightMargin(), topMargin() + bottomMargin()};
         }
@@ -1592,6 +1540,375 @@ private:
         const int totalWidth = SwLayoutDetail::sumVector_(columnSizes) +
                                std::max(0, columns - 1) * m_horizontalSpacing + leftMargin() + rightMargin();
         return {totalWidth, totalHeight};
+    }
+
+    void computeDimensions_(int& rows, int& columns) const {
+        rows = 0;
+        columns = 0;
+        for (const Cell& cell : m_cells) {
+            rows = std::max(rows, cell.row + cell.rowSpan);
+            columns = std::max(columns, cell.column + cell.columnSpan);
+        }
+    }
+
+    static bool spansOverlap_(int rowA,
+                              int columnA,
+                              int rowSpanA,
+                              int columnSpanA,
+                              int rowB,
+                              int columnB,
+                              int rowSpanB,
+                              int columnSpanB) {
+        return rowA < (rowB + rowSpanB) &&
+               (rowA + rowSpanA) > rowB &&
+               columnA < (columnB + columnSpanB) &&
+               (columnA + columnSpanA) > columnB;
+    }
+
+    const Cell* findCellForWidget_(const SwWidgetInterface* widget) const {
+        for (const Cell& cell : m_cells) {
+            if (cell.item && cell.item->widget() == widget) {
+                return &cell;
+            }
+        }
+        return nullptr;
+    }
+
+    Cell* findCellForWidget_(SwWidgetInterface* widget) {
+        for (Cell& cell : m_cells) {
+            if (cell.item && cell.item->widget() == widget) {
+                return &cell;
+            }
+        }
+        return nullptr;
+    }
+
+    const Cell* findCellAtPosition_(int row, int column, const SwWidgetInterface* ignoreWidget) const {
+        if (row < 0 || column < 0) {
+            return nullptr;
+        }
+        for (const Cell& cell : m_cells) {
+            if (!cell.item) {
+                continue;
+            }
+            if (ignoreWidget && cell.item->widget() == ignoreWidget) {
+                continue;
+            }
+            if (row >= cell.row && row < (cell.row + cell.rowSpan) &&
+                column >= cell.column && column < (cell.column + cell.columnSpan)) {
+                return &cell;
+            }
+        }
+        return nullptr;
+    }
+
+    bool isCellRangeAvailable_(int row,
+                               int column,
+                               int rowSpan,
+                               int columnSpan,
+                               const SwWidgetInterface* ignoreWidget) const {
+        if (row < 0 || column < 0 || rowSpan <= 0 || columnSpan <= 0) {
+            return false;
+        }
+        for (const Cell& cell : m_cells) {
+            if (!cell.item) {
+                continue;
+            }
+            if (ignoreWidget && cell.item->widget() == ignoreWidget) {
+                continue;
+            }
+            if (spansOverlap_(row, column, rowSpan, columnSpan,
+                              cell.row, cell.column, cell.rowSpan, cell.columnSpan)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static void ensureSpanMinimum_(SwVector<int>& mins,
+                                   const SwVector<bool>& growable,
+                                   int start,
+                                   int span,
+                                   int required) {
+        if (required <= 0 || span <= 0) {
+            return;
+        }
+
+        int current = 0;
+        SwVector<int> growableIndices;
+        SwVector<int> allIndices;
+        growableIndices.reserve(static_cast<size_t>(span));
+        allIndices.reserve(static_cast<size_t>(span));
+
+        for (int i = 0; i < span; ++i) {
+            const int index = start + i;
+            if (index < 0 || static_cast<size_t>(index) >= mins.size()) {
+                continue;
+            }
+            current += mins[static_cast<size_t>(index)];
+            allIndices.push_back(index);
+            if (growable[static_cast<size_t>(index)]) {
+                growableIndices.push_back(index);
+            }
+        }
+
+        if (current >= required || allIndices.isEmpty()) {
+            return;
+        }
+
+        const int deficit = required - current;
+        const SwVector<int>& targetIndices = growableIndices.isEmpty() ? allIndices : growableIndices;
+        const int per = deficit / static_cast<int>(targetIndices.size());
+        int remainder = deficit % static_cast<int>(targetIndices.size());
+        for (const int index : targetIndices) {
+            mins[static_cast<size_t>(index)] += per;
+            if (remainder > 0) {
+                ++mins[static_cast<size_t>(index)];
+                --remainder;
+            }
+        }
+    }
+
+    static void distributeSizes_(int available,
+                                 SwVector<int>& mins,
+                                 const SwVector<int>& stretches,
+                                 const SwVector<bool>& occupied,
+                                 const SwVector<bool>& growable,
+                                 int count) {
+        int totalMin = SwLayoutDetail::sumVector_(mins);
+        if (available < totalMin && totalMin > 0) {
+            int scaledTotal = 0;
+            for (int i = 0; i < count; ++i) {
+                mins[static_cast<size_t>(i)] = static_cast<int>((static_cast<long long>(mins[static_cast<size_t>(i)]) * available) / totalMin);
+                scaledTotal += mins[static_cast<size_t>(i)];
+            }
+            int remainder = available - scaledTotal;
+            for (int i = 0; remainder > 0 && i < count; ++i, --remainder) {
+                ++mins[static_cast<size_t>(i)];
+            }
+            totalMin = available;
+        }
+
+        int extra = std::max(0, available - totalMin);
+        int stretchTotal = 0;
+        for (int i = 0; i < count; ++i) {
+            stretchTotal += std::max(0, stretches[static_cast<size_t>(i)]);
+        }
+        if (stretchTotal > 0) {
+            int remainingExtra = extra;
+            int remainingStretch = stretchTotal;
+            for (int i = 0; i < count; ++i) {
+                const int stretch = std::max(0, stretches[static_cast<size_t>(i)]);
+                if (stretch <= 0 || remainingExtra <= 0 || remainingStretch <= 0) {
+                    continue;
+                }
+                const int allocated = (remainingStretch == stretch)
+                                          ? remainingExtra
+                                          : static_cast<int>((static_cast<long long>(remainingExtra) * stretch) / remainingStretch);
+                mins[static_cast<size_t>(i)] += allocated;
+                remainingExtra -= allocated;
+                remainingStretch -= stretch;
+            }
+            return;
+        }
+
+        if (extra <= 0) {
+            return;
+        }
+
+        SwVector<int> growableIndices;
+        growableIndices.reserve(static_cast<size_t>(count));
+        for (int i = 0; i < count; ++i) {
+            if (occupied[static_cast<size_t>(i)] && growable[static_cast<size_t>(i)]) {
+                growableIndices.push_back(i);
+            }
+        }
+
+        if (!growableIndices.isEmpty()) {
+            const int per = extra / static_cast<int>(growableIndices.size());
+            int remainder = extra % static_cast<int>(growableIndices.size());
+            for (const int index : growableIndices) {
+                mins[static_cast<size_t>(index)] += per;
+                if (remainder > 0) {
+                    ++mins[static_cast<size_t>(index)];
+                    --remainder;
+                }
+            }
+        }
+    }
+
+    bool buildMetrics_(const SwRect& rect, GridMetrics* outMetrics) const {
+        if (!outMetrics || m_cells.isEmpty()) {
+            return false;
+        }
+
+        int rows = 0;
+        int columns = 0;
+        computeDimensions_(rows, columns);
+        if (rows <= 0 || columns <= 0) {
+            return false;
+        }
+
+        SwVector<int> rowStretches = m_rowStretch;
+        SwVector<int> columnStretches = m_columnStretch;
+        if (static_cast<size_t>(rows) > rowStretches.size()) {
+            rowStretches.resize(static_cast<size_t>(rows), 0);
+        }
+        if (static_cast<size_t>(columns) > columnStretches.size()) {
+            columnStretches.resize(static_cast<size_t>(columns), 0);
+        }
+
+        SwVector<int> rowMin(static_cast<size_t>(rows), 0);
+        SwVector<int> columnMin(static_cast<size_t>(columns), 0);
+        SwVector<bool> rowOccupied(static_cast<size_t>(rows), false);
+        SwVector<bool> columnOccupied(static_cast<size_t>(columns), false);
+        SwVector<bool> rowGrow(static_cast<size_t>(rows), false);
+        SwVector<bool> columnGrow(static_cast<size_t>(columns), false);
+
+        auto requiredSpanExtent_ = [](int totalExtent, int spacingAmount, int span) {
+            return std::max(0, totalExtent - std::max(0, span - 1) * spacingAmount);
+        };
+
+        for (const Cell& cell : m_cells) {
+            if (!cell.item) {
+                continue;
+            }
+
+            const SwSize preferred = cell.item->sizeHint();
+            const SwSize minimum = cell.item->minimumSize();
+            const int totalHeight = std::max(minimum.height, preferred.height);
+            const int totalWidth = std::max(minimum.width, preferred.width);
+
+            for (int i = 0; i < cell.rowSpan; ++i) {
+                const int rowIndex = cell.row + i;
+                if (rowIndex < rows) {
+                    rowOccupied[static_cast<size_t>(rowIndex)] = true;
+                    if (SwLayoutDetail::itemHasExpandFlagOnAxis_(cell.item, false)) {
+                        rowGrow[static_cast<size_t>(rowIndex)] = true;
+                    }
+                }
+            }
+
+            for (int i = 0; i < cell.columnSpan; ++i) {
+                const int columnIndex = cell.column + i;
+                if (columnIndex < columns) {
+                    columnOccupied[static_cast<size_t>(columnIndex)] = true;
+                    if (SwLayoutDetail::itemHasExpandFlagOnAxis_(cell.item, true)) {
+                        columnGrow[static_cast<size_t>(columnIndex)] = true;
+                    }
+                }
+            }
+
+            if (cell.rowSpan == 1 && cell.row < rows) {
+                rowMin[static_cast<size_t>(cell.row)] = std::max(rowMin[static_cast<size_t>(cell.row)], totalHeight);
+            }
+            if (cell.columnSpan == 1 && cell.column < columns) {
+                columnMin[static_cast<size_t>(cell.column)] = std::max(columnMin[static_cast<size_t>(cell.column)], totalWidth);
+            }
+        }
+
+        for (const Cell& cell : m_cells) {
+            if (!cell.item) {
+                continue;
+            }
+
+            const SwSize preferred = cell.item->sizeHint();
+            const SwSize minimum = cell.item->minimumSize();
+            const int totalHeight = std::max(minimum.height, preferred.height);
+            const int totalWidth = std::max(minimum.width, preferred.width);
+
+            if (cell.rowSpan > 1) {
+                ensureSpanMinimum_(rowMin, rowGrow, cell.row, cell.rowSpan,
+                                   requiredSpanExtent_(totalHeight, m_verticalSpacing, cell.rowSpan));
+            }
+            if (cell.columnSpan > 1) {
+                ensureSpanMinimum_(columnMin, columnGrow, cell.column, cell.columnSpan,
+                                   requiredSpanExtent_(totalWidth, m_horizontalSpacing, cell.columnSpan));
+            }
+        }
+
+        const int totalVerticalSpacing = std::max(0, rows - 1) * m_verticalSpacing;
+        const int totalHorizontalSpacing = std::max(0, columns - 1) * m_horizontalSpacing;
+
+        distributeSizes_(std::max(0, rect.height - totalVerticalSpacing), rowMin, rowStretches, rowOccupied, rowGrow, rows);
+        distributeSizes_(std::max(0, rect.width - totalHorizontalSpacing), columnMin, columnStretches, columnOccupied, columnGrow, columns);
+
+        SwVector<int> rowPositions(static_cast<size_t>(rows), rect.y);
+        SwVector<int> columnPositions(static_cast<size_t>(columns), rect.x);
+
+        int current = rect.y;
+        for (int i = 0; i < rows; ++i) {
+            rowPositions[static_cast<size_t>(i)] = current;
+            current += rowMin[static_cast<size_t>(i)] + m_verticalSpacing;
+        }
+
+        current = rect.x;
+        for (int i = 0; i < columns; ++i) {
+            columnPositions[static_cast<size_t>(i)] = current;
+            current += columnMin[static_cast<size_t>(i)] + m_horizontalSpacing;
+        }
+
+        outMetrics->rows = rows;
+        outMetrics->columns = columns;
+        outMetrics->rect = rect;
+        outMetrics->rowSizes = rowMin;
+        outMetrics->columnSizes = columnMin;
+        outMetrics->rowPositions = rowPositions;
+        outMetrics->columnPositions = columnPositions;
+        return true;
+    }
+
+    SwRect spannedCellRect_(const GridMetrics& metrics, const Cell& cell) const {
+        if (cell.row < 0 || cell.column < 0 ||
+            cell.row >= metrics.rows || cell.column >= metrics.columns) {
+            return {0, 0, 0, 0};
+        }
+
+        const int x = metrics.columnPositions[static_cast<size_t>(cell.column)];
+        const int y = metrics.rowPositions[static_cast<size_t>(cell.row)];
+
+        int width = 0;
+        for (int i = 0; i < cell.columnSpan && (cell.column + i) < metrics.columns; ++i) {
+            width += metrics.columnSizes[static_cast<size_t>(cell.column + i)];
+        }
+        for (int i = 1; i < cell.columnSpan && (cell.column + i) < metrics.columns; ++i) {
+            const int prev = cell.column + i - 1;
+            const int next = cell.column + i;
+            width += std::max(0, metrics.columnPositions[static_cast<size_t>(next)] -
+                                     (metrics.columnPositions[static_cast<size_t>(prev)] + metrics.columnSizes[static_cast<size_t>(prev)]));
+        }
+
+        int height = 0;
+        for (int i = 0; i < cell.rowSpan && (cell.row + i) < metrics.rows; ++i) {
+            height += metrics.rowSizes[static_cast<size_t>(cell.row + i)];
+        }
+        for (int i = 1; i < cell.rowSpan && (cell.row + i) < metrics.rows; ++i) {
+            const int prev = cell.row + i - 1;
+            const int next = cell.row + i;
+            height += std::max(0, metrics.rowPositions[static_cast<size_t>(next)] -
+                                      (metrics.rowPositions[static_cast<size_t>(prev)] + metrics.rowSizes[static_cast<size_t>(prev)]));
+        }
+
+        return {x, y, width, height};
+    }
+
+    bool cellRectForContentRect_(const SwRect& contentRect, int row, int column, SwRect* outRect) const {
+        if (!outRect) {
+            return false;
+        }
+        GridMetrics metrics;
+        if (!buildMetrics_(contentRect, &metrics) ||
+            row < 0 || column < 0 || row >= metrics.rows || column >= metrics.columns) {
+            *outRect = {0, 0, 0, 0};
+            return false;
+        }
+        Cell cell;
+        cell.row = row;
+        cell.column = column;
+        cell.rowSpan = 1;
+        cell.columnSpan = 1;
+        *outRect = spannedCellRect_(metrics, cell);
+        return true;
     }
 
     void clearCells_() {

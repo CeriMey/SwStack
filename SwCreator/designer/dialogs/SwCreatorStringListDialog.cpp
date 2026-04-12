@@ -38,7 +38,7 @@ SwString previewButtonCss() {
            " background-color: " + SwCreatorTheme::rgb(th.surface3) + ";"
            " border-color: " + SwCreatorTheme::rgb(th.border) + ";"
            " border-width: 1px;"
-           " border-radius: 10px;"
+           " border-radius: 2px;"
            " padding: 0px;"
            " }";
 }
@@ -92,7 +92,7 @@ void SwCreatorStringListDialog::buildUi_() {
             " background-color: " + SwCreatorTheme::rgb(th.surface3) + ";"
             " border-color: " + SwCreatorTheme::rgb(th.border) + ";"
             " border-width: 1px;"
-            " border-radius: 10px;"
+            " border-radius: 2px;"
             " padding: 4px 8px;"
             " color: " + SwCreatorTheme::rgb(th.textPrimary) + ";"
             " }"
@@ -172,7 +172,7 @@ void SwCreatorStringListDialog::buildUi_() {
             " background-color: " + SwCreatorTheme::rgb(th.surface1) + ";"
             " border-color: " + SwCreatorTheme::rgb(th.border) + ";"
             " border-width: 1px;"
-            " border-radius: 12px;"
+            " border-radius: 2px;"
             " padding: 6px;"
             " }"
         );

@@ -21,6 +21,7 @@
 #include <cctype>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <set>
 
 namespace {
@@ -157,6 +158,196 @@ constexpr int kDefaultFormHeight = 720;
 constexpr int kBaseMinimumFormWidth = 320;
 constexpr int kBaseMinimumFormHeight = 240;
 constexpr int kCanvasResizeGripSize = 36;
+
+enum class GridDropAction {
+    None,
+    PlaceIntoEmptyCell,
+    InsertRowBefore,
+    InsertRowAfter,
+    InsertColumnBefore,
+    InsertColumnAfter,
+    SwapOrMove,
+};
+
+struct GridDropTarget {
+    SwWidget* parent{nullptr};
+    int row{0};
+    int column{0};
+    int rowSpan{1};
+    int columnSpan{1};
+    GridDropAction action{GridDropAction::None};
+    SwRect previewRect{0, 0, 0, 0};
+
+    bool isValid() const {
+        return parent && action != GridDropAction::None;
+    }
+};
+
+SwRect gridContentRectInCanvas_(const SwWidget* canvas, const SwWidget* parent, const SwGridLayout* grid) {
+    if (!canvas || !parent || !grid) {
+        return {0, 0, 0, 0};
+    }
+    const SwRect parentRect = widgetRectInCanvas_(canvas, parent);
+    return {
+        parentRect.x + grid->leftMargin(),
+        parentRect.y + grid->topMargin(),
+        std::max(0, parentRect.width - grid->leftMargin() - grid->rightMargin()),
+        std::max(0, parentRect.height - grid->topMargin() - grid->bottomMargin())
+    };
+}
+
+bool gridCellRectInCanvas_(const SwWidget* canvas,
+                           const SwWidget* parent,
+                           const SwGridLayout* grid,
+                           int row,
+                           int column,
+                           SwRect* outRect) {
+    if (!canvas || !parent || !grid || !outRect) {
+        return false;
+    }
+    SwRect parentRect;
+    if (!grid->cellRect(row, column, &parentRect)) {
+        *outRect = {0, 0, 0, 0};
+        return false;
+    }
+    const SwPoint topLeft = parent->mapTo(canvas, SwPoint{parentRect.x, parentRect.y});
+    *outRect = {topLeft.x, topLeft.y, parentRect.width, parentRect.height};
+    return true;
+}
+
+SwPoint firstAvailableGridCell_(const SwGridLayout* grid) {
+    if (!grid) {
+        return {0, 0};
+    }
+    const int rows = std::max(1, grid->rowCount());
+    const int columns = std::max(1, grid->columnCount());
+    for (int row = 0; row < rows; ++row) {
+        for (int column = 0; column < columns; ++column) {
+            if (!grid->itemAtPosition(row, column)) {
+                return {column, row};
+            }
+        }
+    }
+    return {0, rows};
+}
+
+GridDropTarget computeGridDropTarget_(const SwWidget* canvas,
+                                      SwWidget* parent,
+                                      SwGridLayout* grid,
+                                      int canvasX,
+                                      int canvasY,
+                                      const SwWidget* draggedWidget,
+                                      bool allowSwap) {
+    GridDropTarget out;
+    if (!canvas || !parent || !grid) {
+        return out;
+    }
+
+    out.parent = parent;
+    const SwRect contentRect = gridContentRectInCanvas_(canvas, parent, grid);
+    if (contentRect.width <= 0 || contentRect.height <= 0) {
+        return out;
+    }
+
+    const int rows = std::max(1, grid->rowCount());
+    const int columns = std::max(1, grid->columnCount());
+    if (grid->rowCount() <= 0 || grid->columnCount() <= 0) {
+        out.row = 0;
+        out.column = 0;
+        out.action = GridDropAction::PlaceIntoEmptyCell;
+        out.previewRect = contentRect;
+        return out;
+    }
+
+    int bestRow = 0;
+    int bestCol = 0;
+    int bestRowDist = std::numeric_limits<int>::max();
+    int bestColDist = std::numeric_limits<int>::max();
+    SwRect targetCell{0, 0, 0, 0};
+
+    for (int row = 0; row < rows; ++row) {
+        SwRect rowRect;
+        if (!gridCellRectInCanvas_(canvas, parent, grid, row, 0, &rowRect)) {
+            continue;
+        }
+        const int centerY = rowRect.y + rowRect.height / 2;
+        const int dist = std::abs(canvasY - centerY);
+        if (dist < bestRowDist) {
+            bestRowDist = dist;
+            bestRow = row;
+        }
+    }
+
+    for (int column = 0; column < columns; ++column) {
+        SwRect colRect;
+        if (!gridCellRectInCanvas_(canvas, parent, grid, 0, column, &colRect)) {
+            continue;
+        }
+        const int centerX = colRect.x + colRect.width / 2;
+        const int dist = std::abs(canvasX - centerX);
+        if (dist < bestColDist) {
+            bestColDist = dist;
+            bestCol = column;
+        }
+    }
+
+    if (!gridCellRectInCanvas_(canvas, parent, grid, bestRow, bestCol, &targetCell)) {
+        out.parent = nullptr;
+        return out;
+    }
+
+    out.row = bestRow;
+    out.column = bestCol;
+    out.previewRect = targetCell;
+
+    const int edgeThreshold = std::max(6, std::min(14, std::min(targetCell.width, targetCell.height) / 4));
+    const int topDist = std::abs(canvasY - targetCell.y);
+    const int bottomDist = std::abs(canvasY - (targetCell.y + targetCell.height));
+    const int leftDist = std::abs(canvasX - targetCell.x);
+    const int rightDist = std::abs(canvasX - (targetCell.x + targetCell.width));
+
+    int bestEdgeDist = edgeThreshold + 1;
+    GridDropAction bestAction = GridDropAction::None;
+    SwRect bestPreview = targetCell;
+
+    auto considerEdge = [&](int dist, GridDropAction action, const SwRect& preview) {
+        if (dist <= edgeThreshold && dist < bestEdgeDist) {
+            bestEdgeDist = dist;
+            bestAction = action;
+            bestPreview = preview;
+        }
+    };
+
+    considerEdge(topDist, GridDropAction::InsertRowBefore,
+                 {contentRect.x, targetCell.y - 1, contentRect.width, 3});
+    considerEdge(bottomDist, GridDropAction::InsertRowAfter,
+                 {contentRect.x, targetCell.y + targetCell.height - 1, contentRect.width, 3});
+    considerEdge(leftDist, GridDropAction::InsertColumnBefore,
+                 {targetCell.x - 1, contentRect.y, 3, contentRect.height});
+    considerEdge(rightDist, GridDropAction::InsertColumnAfter,
+                 {targetCell.x + targetCell.width - 1, contentRect.y, 3, contentRect.height});
+
+    if (bestAction != GridDropAction::None) {
+        out.action = bestAction;
+        out.previewRect = bestPreview;
+        return out;
+    }
+
+    SwWidgetInterface* occupant = grid->itemAtPosition(bestRow, bestCol);
+    if (!occupant || occupant == draggedWidget) {
+        out.action = GridDropAction::PlaceIntoEmptyCell;
+        return out;
+    }
+
+    if (allowSwap) {
+        out.action = GridDropAction::SwapOrMove;
+        return out;
+    }
+
+    out.parent = nullptr;
+    out.previewRect = {0, 0, 0, 0};
+    return out;
+}
 } // namespace
 
 
@@ -265,7 +456,14 @@ protected:
         m_dragWidget = nullptr;
         m_resizing = false;
         m_resizeMask = ResizeNone;
+        m_layoutDrag = false;
+        m_layoutDragDetached = false;
+        m_layoutInsertIndex = -1;
+        m_layoutDragOrigParent = nullptr;
+        removePlaceholder_();
         m_owner->m_dropTarget = nullptr;
+        m_owner->m_dropIndicatorRect = {0, 0, 0, 0};
+        m_owner->m_dropIndicatorParent = nullptr;
 
         if (w) {
             if (!managedByKnownLayout_(w)) {
@@ -287,6 +485,11 @@ protected:
                     m_startY = localRect.y;
                     setCursor(CursorType::SizeAll);
                 }
+            } else {
+                // Layout-managed widget: allow drag for reordering.
+                m_dragWidget = w;
+                m_layoutDrag = true;
+                setCursor(CursorType::SizeAll);
             }
         }
 
@@ -442,6 +645,108 @@ protected:
             return;
         }
 
+        if (m_layoutDrag) {
+            // On first drag movement, detach widget from layout and start floating.
+            if (!m_layoutDragDetached) {
+                m_layoutDragDetached = true;
+                beginLayoutDrag_(m_dragWidget);
+            }
+
+            // Move floating widget with cursor.
+            {
+                const SwRect canvasRect = m_owner->rect();
+                int newX = event->x() - m_offsetX;
+                int newY = event->y() - m_offsetY;
+                const int pad = 6;
+                newX = clampInt(newX, canvasRect.x + pad,
+                                canvasRect.x + std::max(pad, canvasRect.width - m_dragWidget->width() - pad));
+                newY = clampInt(newY, canvasRect.y + pad,
+                                canvasRect.y + std::max(pad, canvasRect.height - m_dragWidget->height() - pad));
+                m_dragWidget->move(newX, newY);
+            }
+
+            // Find which layout container the cursor is over.
+            SwWidget* container = m_owner->findContainerAt_(event->x(), event->y(), m_dragWidget);
+            SwWidget* hoverParent = container ? m_owner->dropContentParent_(container) : nullptr;
+
+            // Determine the target layout parent.
+            SwWidget* indicatorParent = nullptr;
+            if (hoverParent && hoverParent->layout()) {
+                indicatorParent = hoverParent;
+            } else if (m_layoutDragOrigParent && m_layoutDragOrigParent->layout()) {
+                // Check if cursor is still within the original parent bounds.
+                const SwRect origRect = widgetRectInCanvas_(m_owner, m_layoutDragOrigParent);
+                if (event->x() >= origRect.x && event->x() <= origRect.x + origRect.width &&
+                    event->y() >= origRect.y && event->y() <= origRect.y + origRect.height) {
+                    indicatorParent = m_layoutDragOrigParent;
+                }
+            }
+
+            if (indicatorParent) {
+                if (auto* grid = dynamic_cast<SwGridLayout*>(indicatorParent->layout())) {
+                    const bool allowSwap = (indicatorParent == m_layoutDragOrigParent && m_layoutDragOrigWasGrid);
+                    m_gridDropTarget = computeGridDropTarget_(m_owner,
+                                                              indicatorParent,
+                                                              grid,
+                                                              event->x(),
+                                                              event->y(),
+                                                              m_dragWidget,
+                                                              allowSwap);
+                    m_layoutInsertIndex = -1;
+                    m_owner->m_dropIndicatorParent = indicatorParent;
+                    m_owner->m_dropIndicatorRect = m_gridDropTarget.previewRect;
+                    removePlaceholder_();
+                } else {
+                    m_gridDropTarget = {};
+
+                    // Collect siblings in the target layout (excluding placeholder and dragged widget).
+                    std::vector<SwWidget*> siblings;
+                    for (SwObject* obj : indicatorParent->children()) {
+                        auto* child = dynamic_cast<SwWidget*>(obj);
+                        if (child && child->parent() == indicatorParent
+                            && child != m_dragWidget
+                            && child != m_layoutDragPlaceholder) {
+                            siblings.push_back(child);
+                        }
+                    }
+
+                    SwRect indicatorRect;
+                    m_layoutInsertIndex = computeLayoutInsertIndex_(
+                        m_owner, indicatorParent, siblings,
+                        event->x(), event->y(), m_dragWidget, indicatorRect);
+
+                    m_owner->m_dropIndicatorParent = indicatorParent;
+                    m_owner->m_dropIndicatorRect = {0, 0, 0, 0}; // No line indicator, placeholder does the job.
+
+                    // Move placeholder to the new position.
+                    movePlaceholderTo_(indicatorParent, m_layoutInsertIndex);
+                }
+
+                // Show container highlight if hovering a different parent.
+                SwWidget* newDropTarget = (indicatorParent != m_layoutDragOrigParent) ? container : nullptr;
+                if (newDropTarget != m_owner->m_dropTarget) {
+                    m_owner->m_dropTarget = newDropTarget;
+                }
+            } else {
+                m_gridDropTarget = {};
+                m_owner->m_dropIndicatorRect = {0, 0, 0, 0};
+                m_owner->m_dropIndicatorParent = nullptr;
+                m_layoutInsertIndex = -1;
+
+                // Remove placeholder from any layout when outside.
+                removePlaceholder_();
+
+                // Show container highlight for reparenting.
+                if (container != m_owner->m_dropTarget) {
+                    m_owner->m_dropTarget = container;
+                }
+            }
+
+            m_owner->update();
+            event->accept();
+            return;
+        }
+
         SwWidget* parentWidget = dynamic_cast<SwWidget*>(m_dragWidget->parent());
         const SwRect bounds = parentWidget ? parentWidget->rect() : m_owner->rect();
         const SwPoint currentInParent = ownerToParentPos_(m_dragWidget, event->x(), event->y());
@@ -476,16 +781,43 @@ protected:
         const bool wasDragging = m_dragging;
         const bool wasResizing = m_resizing;
         const bool wasResizingCanvas = m_resizingCanvas;
+        const bool wasLayoutDrag = m_layoutDrag;
+        const bool wasLayoutDetached = m_layoutDragDetached;
+        const int layoutInsertIndex = m_layoutInsertIndex;
+        const GridDropTarget gridDropTarget = m_gridDropTarget;
+        const bool layoutDragOrigWasGrid = m_layoutDragOrigWasGrid;
+        const int layoutDragOrigRow = m_layoutDragOrigRow;
+        const int layoutDragOrigColumn = m_layoutDragOrigColumn;
+        const int layoutDragOrigRowSpan = m_layoutDragOrigRowSpan;
+        const int layoutDragOrigColumnSpan = m_layoutDragOrigColumnSpan;
         SwWidget* dragged = m_dragWidget;
         SwWidget* dropTarget = m_owner->m_dropTarget;
+        SwWidget* indicatorParent = m_owner->m_dropIndicatorParent;
+        SwWidget* origParent = m_layoutDragOrigParent;
 
         m_pressed = false;
         m_dragging = false;
         m_resizing = false;
         m_resizingCanvas = false;
+        m_layoutDrag = false;
+        m_layoutDragDetached = false;
+        m_layoutInsertIndex = -1;
+        m_gridDropTarget = {};
+        m_layoutDragOrigParent = nullptr;
+        m_layoutDragOrigWasGrid = false;
+        m_layoutDragOrigRow = 0;
+        m_layoutDragOrigColumn = 0;
+        m_layoutDragOrigRowSpan = 1;
+        m_layoutDragOrigColumnSpan = 1;
         m_resizeMask = ResizeNone;
         m_dragWidget = nullptr;
         m_owner->m_dropTarget = nullptr;
+        m_owner->m_dropIndicatorRect = {0, 0, 0, 0};
+        m_owner->m_dropIndicatorParent = nullptr;
+
+        // Remove placeholder before any widget insertion.
+        removePlaceholder_();
+
         m_owner->update();
         setCursor(cursorForSelectionAt_(event->x(), event->y()));
 
@@ -505,85 +837,98 @@ protected:
             return;
         }
 
-        SwWidget* oldParent = dynamic_cast<SwWidget*>(dragged->parent());
-        SwWidget* effectiveDropTarget = dropTarget ? dropTarget : m_owner;
-        const SwRect ownerRect = widgetRectInCanvas_(m_owner, dragged);
+        if (wasLayoutDrag && wasLayoutDetached) {
+            // The widget is currently parented to the canvas (floating).
+            // Determine where to drop it.
+            SwWidget* targetParent = indicatorParent ? indicatorParent : origParent;
 
-        auto detachFromLayout = [](SwWidget* parent, SwWidget* w) {
-            if (!parent || !w) {
-                return;
-            }
-            if (auto* l = parent->layout()) {
-                if (auto* box = dynamic_cast<SwBoxLayout*>(l)) {
-                    box->removeWidget(w);
-                } else if (auto* grid = dynamic_cast<SwGridLayout*>(l)) {
-                    grid->removeWidget(w);
-                } else if (auto* form = dynamic_cast<SwFormLayout*>(l)) {
-                    form->removeWidget(w);
-                }
-            }
-        };
+            if (targetParent && targetParent->layout() && indicatorParent) {
+                // Drop into a layout (same or different parent).
+                dragged->setParent(targetParent);
 
-        auto attachToLayout = [](SwWidget* parent, SwWidget* w) {
-            if (!parent || !w) {
-                return;
-            }
-            if (auto* l = parent->layout()) {
-                if (auto* box = dynamic_cast<SwBoxLayout*>(l)) {
-                    box->addWidget(w);
-                } else if (auto* form = dynamic_cast<SwFormLayout*>(l)) {
-                    form->addWidget(w);
-                } else if (auto* grid = dynamic_cast<SwGridLayout*>(l)) {
-                    int count = 0;
-                    for (SwObject* obj : parent->children()) {
-                        auto* child = dynamic_cast<SwWidget*>(obj);
-                        if (!child || child->parent() != parent || child == w) {
-                            continue;
-                        }
-                        ++count;
+                if (auto* box = dynamic_cast<SwBoxLayout*>(targetParent->layout())) {
+                    int idx = (layoutInsertIndex >= 0) ? layoutInsertIndex : 0;
+                    box->insertWidget(idx, dragged);
+                } else if (auto* grid = dynamic_cast<SwGridLayout*>(targetParent->layout())) {
+                    GridDropTarget target = gridDropTarget;
+                    if (!target.isValid()) {
+                        const SwPoint fallback = firstAvailableGridCell_(grid);
+                        target.parent = targetParent;
+                        target.row = fallback.y;
+                        target.column = fallback.x;
+                        target.action = GridDropAction::PlaceIntoEmptyCell;
                     }
-                    const int idx = count;
-                    const int cols = std::max(1, static_cast<int>(std::ceil(std::sqrt(static_cast<double>(idx + 1)))));
-                    grid->addWidget(w, idx / cols, idx % cols);
+
+                    int targetRow = std::max(0, target.row);
+                    int targetColumn = std::max(0, target.column);
+                    if (target.action == GridDropAction::InsertRowBefore) {
+                        grid->insertRow(targetRow);
+                    } else if (target.action == GridDropAction::InsertRowAfter) {
+                        grid->insertRow(targetRow + 1);
+                        ++targetRow;
+                    } else if (target.action == GridDropAction::InsertColumnBefore) {
+                        grid->insertColumn(targetColumn);
+                    } else if (target.action == GridDropAction::InsertColumnAfter) {
+                        grid->insertColumn(targetColumn + 1);
+                        ++targetColumn;
+                    }
+
+                    int rowSpan = 1;
+                    int columnSpan = 1;
+                    if (layoutDragOrigWasGrid) {
+                        rowSpan = std::max(1, layoutDragOrigRowSpan);
+                        columnSpan = std::max(1, layoutDragOrigColumnSpan);
+                    }
+
+                    if (!grid->isCellRangeAvailable(targetRow, targetColumn, rowSpan, columnSpan, dragged)) {
+                        rowSpan = 1;
+                        columnSpan = 1;
+                    }
+
+                    if (target.action == GridDropAction::SwapOrMove) {
+                        if (SwWidgetInterface* occupant = grid->itemAtPosition(targetRow, targetColumn)) {
+                            if (occupant != dragged && layoutDragOrigWasGrid && indicatorParent == origParent) {
+                                if (grid->setWidgetPosition(occupant,
+                                                            layoutDragOrigRow,
+                                                            layoutDragOrigColumn,
+                                                            layoutDragOrigRowSpan,
+                                                            layoutDragOrigColumnSpan)) {
+                                    (void)grid->setWidgetPosition(dragged, targetRow, targetColumn, rowSpan, columnSpan);
+                                }
+                            }
+                        } else {
+                            (void)grid->setWidgetPosition(dragged, targetRow, targetColumn, rowSpan, columnSpan);
+                        }
+                    } else {
+                        (void)grid->setWidgetPosition(dragged, targetRow, targetColumn, rowSpan, columnSpan);
+                    }
+                } else if (auto* form = dynamic_cast<SwFormLayout*>(targetParent->layout())) {
+                    form->addWidget(dragged);
                 }
-            }
-        };
 
-        if (auto* splitter = dynamic_cast<SwSplitter*>(effectiveDropTarget)) {
-            if (oldParent != splitter) {
-                detachFromLayout(oldParent, dragged);
-                splitter->addWidget(dragged);
-                attachToLayout(splitter, dragged);
+                // Keep overlay on top.
+                if (m_owner->m_designOverlay) {
+                    m_owner->m_designOverlay->setParent(m_owner);
+                    const SwRect overlayRect = m_owner->rect();
+                    m_owner->m_designOverlay->move(0, 0);
+                    m_owner->m_designOverlay->resize(overlayRect.width, overlayRect.height);
+                }
+
                 m_owner->designWidgetsChanged();
+            } else {
+                // Drop outside any layout: reparent to canvas or container.
+                // The widget is already on the canvas; use reparentDesignWidget for proper handling.
+                m_owner->reparentDesignWidget(dragged, dropTarget);
             }
+
+            m_owner->selectionChanged(dragged);
+            m_owner->update();
             event->accept();
             return;
         }
 
-        SwWidget* newParent = (effectiveDropTarget == m_owner) ? m_owner : m_owner->dropContentParent_(effectiveDropTarget);
-        if (!newParent) {
-            event->accept();
-            return;
-        }
-
-        if (oldParent != newParent) {
-            detachFromLayout(oldParent, dragged);
-            dragged->setParent(newParent);
-            attachToLayout(newParent, dragged);
-            m_owner->designWidgetsChanged();
-        }
-
-        const SwRect bounds = newParent->rect();
-        const SwPoint localTopLeft = canvasPointToParent_(m_owner, newParent, SwPoint{ownerRect.x, ownerRect.y});
-        const int pad = 6;
-        const int x = clampInt(localTopLeft.x,
-                               bounds.x + pad,
-                               bounds.x + std::max(pad, bounds.width - ownerRect.width - pad));
-        const int y = clampInt(localTopLeft.y,
-                               bounds.y + pad,
-                               bounds.y + std::max(pad, bounds.height - ownerRect.height - pad));
-        dragged->move(x, y);
-
+        // Regular reparent (non-layout drag, or layout drag without detach).
+        m_owner->reparentDesignWidget(dragged, dropTarget);
         m_owner->selectionChanged(dragged);
         event->accept();
     }
@@ -733,11 +1078,251 @@ private:
         return CursorType::Arrow;
     }
 
+    // Collect the ordered list of sibling widgets managed by the same layout as `widget`.
+    static std::vector<SwWidget*> layoutSiblings_(SwWidget* widget) {
+        std::vector<SwWidget*> result;
+        if (!widget) return result;
+        SwWidget* parentWidget = dynamic_cast<SwWidget*>(widget->parent());
+        if (!parentWidget) return result;
+        for (SwObject* obj : parentWidget->children()) {
+            auto* child = dynamic_cast<SwWidget*>(obj);
+            if (child && child->parent() == parentWidget) {
+                result.push_back(child);
+            }
+        }
+        return result;
+    }
+
+    // Compute the insertion index and indicator rect for a layout reorder drag.
+    // Returns the index at which the dragged widget should be inserted.
+    // `indicatorRect` is set to the position (in canvas coords) where the indicator line should appear.
+    int computeLayoutInsertIndex_(const SwWidget* canvas, SwWidget* parentWidget,
+                                  const std::vector<SwWidget*>& siblings,
+                                  int canvasX, int canvasY,
+                                  const SwWidget* draggedWidget,
+                                  SwRect& indicatorRect) const {
+        if (siblings.empty() || !parentWidget || !canvas) {
+            indicatorRect = {0, 0, 0, 0};
+            return 0;
+        }
+
+        SwAbstractLayout* layout = parentWidget->layout();
+        const bool isVertical = dynamic_cast<SwVerticalLayout*>(layout) ||
+                                dynamic_cast<SwFormLayout*>(layout);
+        // SwHorizontalLayout -> horizontal
+        // SwVerticalLayout and SwFormLayout -> vertical (row-based)
+
+        // Build rects in canvas space for each sibling (excluding the dragged widget).
+        struct Entry { SwWidget* widget; SwRect rect; };
+        std::vector<Entry> entries;
+        for (SwWidget* s : siblings) {
+            if (s == draggedWidget) continue;
+            entries.push_back({s, widgetRectInCanvas_(canvas, s)});
+        }
+
+        if (entries.empty()) {
+            // Only the dragged widget is in this layout; insert at 0.
+            const SwRect parentRect = widgetRectInCanvas_(canvas, parentWidget);
+            int margin = layout ? layout->margin() : 0;
+            if (isVertical) {
+                indicatorRect = {parentRect.x + margin, parentRect.y + margin,
+                                 std::max(1, parentRect.width - 2 * margin), 3};
+            } else {
+                indicatorRect = {parentRect.x + margin, parentRect.y + margin,
+                                 3, std::max(1, parentRect.height - 2 * margin)};
+            }
+            return 0;
+        }
+
+        // Find the insertion gap closest to the cursor.
+        int bestIndex = 0;
+        int bestDist = std::numeric_limits<int>::max();
+        SwRect bestIndicator = {0, 0, 0, 0};
+
+        for (size_t i = 0; i <= entries.size(); ++i) {
+            int indicatorPos;
+            SwRect indicator;
+
+            if (isVertical) {
+                if (i == 0) {
+                    indicatorPos = entries[0].rect.y - 2;
+                } else if (i == entries.size()) {
+                    const auto& last = entries[i - 1].rect;
+                    indicatorPos = last.y + last.height + 1;
+                } else {
+                    const auto& prev = entries[i - 1].rect;
+                    const auto& next = entries[i].rect;
+                    indicatorPos = (prev.y + prev.height + next.y) / 2;
+                }
+
+                // Full width of the parent layout area.
+                const SwRect parentRect = widgetRectInCanvas_(canvas, parentWidget);
+                int margin = layout ? layout->margin() : 0;
+                indicator = {parentRect.x + margin, indicatorPos - 1,
+                             std::max(1, parentRect.width - 2 * margin), 3};
+
+                int dist = std::abs(canvasY - indicatorPos);
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    bestIndex = static_cast<int>(i);
+                    bestIndicator = indicator;
+                }
+            } else {
+                if (i == 0) {
+                    indicatorPos = entries[0].rect.x - 2;
+                } else if (i == entries.size()) {
+                    const auto& last = entries[i - 1].rect;
+                    indicatorPos = last.x + last.width + 1;
+                } else {
+                    const auto& prev = entries[i - 1].rect;
+                    const auto& next = entries[i].rect;
+                    indicatorPos = (prev.x + prev.width + next.x) / 2;
+                }
+
+                const SwRect parentRect = widgetRectInCanvas_(canvas, parentWidget);
+                int margin = layout ? layout->margin() : 0;
+                indicator = {indicatorPos - 1, parentRect.y + margin,
+                             3, std::max(1, parentRect.height - 2 * margin)};
+
+                int dist = std::abs(canvasX - indicatorPos);
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    bestIndex = static_cast<int>(i);
+                    bestIndicator = indicator;
+                }
+            }
+        }
+
+        indicatorRect = bestIndicator;
+        return bestIndex;
+    }
+
+    // --- Layout drag placeholder management ---
+
+    void beginLayoutDrag_(SwWidget* w) {
+        if (!w || !m_owner) return;
+        SwWidget* parentWidget = dynamic_cast<SwWidget*>(w->parent());
+        if (!parentWidget) return;
+
+        m_layoutDragOrigParent = parentWidget;
+        m_layoutDragWidgetSize = SwSize{w->width(), w->height()};
+        m_layoutDragOrigWasGrid = false;
+        m_layoutDragOrigRow = 0;
+        m_layoutDragOrigColumn = 0;
+        m_layoutDragOrigRowSpan = 1;
+        m_layoutDragOrigColumnSpan = 1;
+
+        if (auto* grid = dynamic_cast<SwGridLayout*>(parentWidget->layout())) {
+            if (const SwGridLayout::Cell* cell = grid->cellForWidget(w)) {
+                m_layoutDragOrigWasGrid = true;
+                m_layoutDragOrigRow = cell->row;
+                m_layoutDragOrigColumn = cell->column;
+                m_layoutDragOrigRowSpan = cell->rowSpan;
+                m_layoutDragOrigColumnSpan = cell->columnSpan;
+            }
+        }
+
+        // Detach the widget from the layout (siblings close the gap).
+        SwCreatorFormCanvas::detachFromParentLayout_(parentWidget, w);
+
+        if (!m_layoutDragOrigWasGrid) {
+            // Create a placeholder that occupies the widget's slot in the layout.
+            m_layoutDragPlaceholder = new SwWidget(parentWidget);
+            m_layoutDragPlaceholder->setObjectName(SwString("__layoutDragPlaceholder"));
+            m_layoutDragPlaceholder->setStyleSheet(
+                "SwWidget { background-color: rgba(59,130,246,40); "
+                "border-width: 2px; border-color: rgba(59,130,246,120); border-radius: 4px; }");
+            m_layoutDragPlaceholder->resize(w->width(), w->height());
+            m_layoutDragPlaceholder->setMinimumSize(w->width(), w->height());
+            m_layoutDragPlaceholder->show();
+
+            // Insert placeholder at the widget's original position in the layout.
+            insertPlaceholderAt_(parentWidget, computeOriginalIndex_(parentWidget, w));
+        }
+
+        // Reparent widget to canvas so it floats on top.
+        const SwRect posInCanvas = widgetRectInCanvas_(m_owner, w);
+        w->setParent(m_owner);
+        w->move(posInCanvas.x, posInCanvas.y);
+        w->show();
+
+        // Keep overlay above everything.
+        if (m_owner->m_designOverlay) {
+            m_owner->m_designOverlay->setParent(m_owner);
+            const SwRect overlayRect = m_owner->rect();
+            m_owner->m_designOverlay->move(0, 0);
+            m_owner->m_designOverlay->resize(overlayRect.width, overlayRect.height);
+        }
+
+        // Save offset for drag.
+        const SwPoint pressInCanvas = SwPoint{m_pressX, m_pressY};
+        m_offsetX = pressInCanvas.x - posInCanvas.x;
+        m_offsetY = pressInCanvas.y - posInCanvas.y;
+    }
+
+    void movePlaceholderTo_(SwWidget* layoutParent, int insertIndex) {
+        if (!m_layoutDragPlaceholder) return;
+
+        SwWidget* currentParent = dynamic_cast<SwWidget*>(m_layoutDragPlaceholder->parent());
+
+        if (currentParent != layoutParent) {
+            // Move placeholder to a different layout parent.
+            if (currentParent) {
+                SwCreatorFormCanvas::detachFromParentLayout_(currentParent, m_layoutDragPlaceholder);
+            }
+            m_layoutDragPlaceholder->setParent(layoutParent);
+        } else {
+            // Remove from current position in same layout.
+            SwCreatorFormCanvas::detachFromParentLayout_(currentParent, m_layoutDragPlaceholder);
+        }
+
+        insertPlaceholderAt_(layoutParent, insertIndex);
+    }
+
+    void removePlaceholder_() {
+        if (!m_layoutDragPlaceholder) return;
+        SwWidget* parent = dynamic_cast<SwWidget*>(m_layoutDragPlaceholder->parent());
+        if (parent) {
+            SwCreatorFormCanvas::detachFromParentLayout_(parent, m_layoutDragPlaceholder);
+        }
+        delete m_layoutDragPlaceholder;
+        m_layoutDragPlaceholder = nullptr;
+    }
+
+    void insertPlaceholderAt_(SwWidget* layoutParent, int index) {
+        if (!m_layoutDragPlaceholder || !layoutParent) return;
+        auto* l = layoutParent->layout();
+        if (auto* box = dynamic_cast<SwBoxLayout*>(l)) {
+            box->insertWidget(index, m_layoutDragPlaceholder);
+        } else if (auto* grid = dynamic_cast<SwGridLayout*>(l)) {
+            const SwPoint slot = firstAvailableGridCell_(grid);
+            (void)grid->setWidgetPosition(m_layoutDragPlaceholder, slot.y, slot.x, 1, 1);
+        } else if (auto* form = dynamic_cast<SwFormLayout*>(l)) {
+            form->addWidget(m_layoutDragPlaceholder);
+        }
+    }
+
+    static int computeOriginalIndex_(SwWidget* parent, SwWidget* w) {
+        if (!parent || !w) return 0;
+        int idx = 0;
+        for (SwObject* obj : parent->children()) {
+            auto* child = dynamic_cast<SwWidget*>(obj);
+            if (!child || child->parent() != parent) continue;
+            if (child == w) return idx;
+            ++idx;
+        }
+        return idx;
+    }
+
     SwCreatorFormCanvas* m_owner{nullptr};
     bool m_pressed{false};
     bool m_dragging{false};
     bool m_resizing{false};
     bool m_resizingCanvas{false};
+    bool m_layoutDrag{false};
+    bool m_layoutDragDetached{false};
+    int m_layoutInsertIndex{-1};
+    GridDropTarget m_gridDropTarget;
     int m_resizeMask{ResizeNone};
     SwRect m_resizeStartRect;
     SwSize m_canvasResizeStartSize;
@@ -748,6 +1333,14 @@ private:
     int m_startX{0};
     int m_startY{0};
     SwWidget* m_dragWidget{nullptr};
+    SwWidget* m_layoutDragPlaceholder{nullptr};
+    SwWidget* m_layoutDragOrigParent{nullptr};
+    bool m_layoutDragOrigWasGrid{false};
+    int m_layoutDragOrigRow{0};
+    int m_layoutDragOrigColumn{0};
+    int m_layoutDragOrigRowSpan{1};
+    int m_layoutDragOrigColumnSpan{1};
+    SwSize m_layoutDragWidgetSize{0, 0};
 };
 
 class SwCreatorFormCanvas::RegistryPopup final : public SwFrame {
@@ -837,7 +1430,7 @@ public:
                 background-color: rgb(255, 255, 255);
                 border-color: rgb(220, 224, 232);
                 border-width: 1px;
-                border-radius: 14px;
+                border-radius: 2px;
             }
         )");
 
@@ -847,7 +1440,7 @@ public:
                 background-color: rgb(248, 250, 252);
                 border-color: rgb(226, 232, 240);
                 border-width: 1px;
-                border-radius: 12px;
+                border-radius: 2px;
                 padding: 6px 10px;
                 color: rgb(15, 23, 42);
             }
@@ -1076,14 +1669,17 @@ SwSize SwCreatorFormCanvas::defaultFormSize() {
 SwCreatorFormCanvas::SwCreatorFormCanvas(SwWidget* parent)
     : SwFrame(parent) {
     setFrameShape(SwFrame::Shape::StyledPanel);
-    setStyleSheet(R"(
-            SwCreatorFormCanvas {
-                background-color: rgb(255, 255, 255);
-                border-color: rgb(226, 232, 240);
-                border-width: 1px;
-                border-radius: 14px;
-            }
-        )");
+    {
+        const auto& th = SwCreatorTheme::current();
+        setStyleSheet(
+            "SwCreatorFormCanvas {"
+            " background-color: rgb(255, 255, 255);"
+            " border-color: " + SwCreatorTheme::rgb(th.borderLight) + ";"
+            " border-width: 1px;"
+            " border-radius: 2px;"
+            " box-shadow: 0 4px 20px rgba(0, 0, 0, 0.28);"
+            " }");
+    }
     setMinimumSize(kBaseMinimumFormWidth, kBaseMinimumFormHeight);
     resize(kDefaultFormWidth, kDefaultFormHeight);
 
@@ -1147,6 +1743,39 @@ SwSize SwCreatorFormCanvas::computeMinimumFormSize_() const {
     return SwSize{minWidth, minHeight};
 }
 
+void SwCreatorFormCanvas::detachFromParentLayout_(SwWidget* parent, SwWidget* w) {
+    if (!parent || !w) {
+        return;
+    }
+    if (auto* l = parent->layout()) {
+        if (auto* box = dynamic_cast<SwBoxLayout*>(l)) {
+            box->removeWidget(w);
+        } else if (auto* grid = dynamic_cast<SwGridLayout*>(l)) {
+            grid->removeWidget(w);
+        } else if (auto* form = dynamic_cast<SwFormLayout*>(l)) {
+            form->removeWidget(w);
+        }
+    }
+}
+
+void SwCreatorFormCanvas::attachToParentLayout_(SwWidget* parent, SwWidget* w) {
+    if (!parent || !w) {
+        return;
+    }
+    if (auto* l = parent->layout()) {
+        if (auto* box = dynamic_cast<SwBoxLayout*>(l)) {
+            box->addWidget(w);
+        } else if (auto* form = dynamic_cast<SwFormLayout*>(l)) {
+            form->addWidget(w);
+        } else if (auto* grid = dynamic_cast<SwGridLayout*>(l)) {
+            const SwPoint slot = firstAvailableGridCell_(grid);
+            if (!grid->setWidgetPosition(w, slot.y, slot.x, 1, 1)) {
+                grid->addWidget(w, slot.y, slot.x);
+            }
+        }
+    }
+}
+
 void SwCreatorFormCanvas::registerDesignWidget(SwWidget* w) {
     registerDesignWidget_(w, true);
 }
@@ -1173,26 +1802,8 @@ void SwCreatorFormCanvas::registerDesignWidget_(SwWidget* w, bool attachToParent
     }
 
     if (attachToParentLayout) {
-        // If a known layout is active on the widget's parent, also register the widget with it.
         if (auto* parentWidget = dynamic_cast<SwWidget*>(w->parent())) {
-            auto* l = parentWidget->layout();
-            if (auto* box = dynamic_cast<SwBoxLayout*>(l)) {
-                box->addWidget(w);
-            } else if (auto* grid = dynamic_cast<SwGridLayout*>(l)) {
-                int count = 0;
-                for (SwObject* obj : parentWidget->children()) {
-                    auto* child = dynamic_cast<SwWidget*>(obj);
-                    if (!child || child->parent() != parentWidget || child == w) {
-                        continue;
-                    }
-                    ++count;
-                }
-                const int idx = count;
-                const int cols = std::max(1, static_cast<int>(std::ceil(std::sqrt(static_cast<double>(idx + 1)))));
-                grid->addWidget(w, idx / cols, idx % cols);
-            } else if (auto* form = dynamic_cast<SwFormLayout*>(l)) {
-                form->addWidget(w);
-            }
+            attachToParentLayout_(parentWidget, w);
         }
     }
 
@@ -1231,15 +1842,7 @@ bool SwCreatorFormCanvas::removeDesignWidget(SwWidget* w) {
     };
 
     if (auto* parentWidget = dynamic_cast<SwWidget*>(w->parent())) {
-        if (auto* l = parentWidget->layout()) {
-            if (auto* box = dynamic_cast<SwBoxLayout*>(l)) {
-                box->removeWidget(w);
-            } else if (auto* grid = dynamic_cast<SwGridLayout*>(l)) {
-                grid->removeWidget(w);
-            } else if (auto* form = dynamic_cast<SwFormLayout*>(l)) {
-                form->removeWidget(w);
-            }
-        }
+        detachFromParentLayout_(parentWidget, w);
     }
 
     if (m_selected == w || (m_selected && isDescendantOf(m_selected, w))) {
@@ -1291,51 +1894,11 @@ bool SwCreatorFormCanvas::reparentDesignWidget(SwWidget* w, SwWidget* container)
     SwWidget* effectiveDropTarget = container ? container : this;
     const SwRect ownerRect = widgetRectInCanvas_(this, w);
 
-    auto detachFromLayout = [](SwWidget* parent, SwWidget* ww) {
-        if (!parent || !ww) {
-            return;
-        }
-        if (auto* l = parent->layout()) {
-            if (auto* box = dynamic_cast<SwBoxLayout*>(l)) {
-                box->removeWidget(ww);
-            } else if (auto* grid = dynamic_cast<SwGridLayout*>(l)) {
-                grid->removeWidget(ww);
-            } else if (auto* form = dynamic_cast<SwFormLayout*>(l)) {
-                form->removeWidget(ww);
-            }
-        }
-    };
-
-    auto attachToLayout = [](SwWidget* parent, SwWidget* ww) {
-        if (!parent || !ww) {
-            return;
-        }
-        if (auto* l = parent->layout()) {
-            if (auto* box = dynamic_cast<SwBoxLayout*>(l)) {
-                box->addWidget(ww);
-            } else if (auto* form = dynamic_cast<SwFormLayout*>(l)) {
-                form->addWidget(ww);
-            } else if (auto* grid = dynamic_cast<SwGridLayout*>(l)) {
-                int count = 0;
-                for (SwObject* obj : parent->children()) {
-                    auto* child = dynamic_cast<SwWidget*>(obj);
-                    if (!child || child->parent() != parent || child == ww) {
-                        continue;
-                    }
-                    ++count;
-                }
-                const int idx = count;
-                const int cols = std::max(1, static_cast<int>(std::ceil(std::sqrt(static_cast<double>(idx + 1)))));
-                grid->addWidget(ww, idx / cols, idx % cols);
-            }
-        }
-    };
-
     if (auto* splitter = dynamic_cast<SwSplitter*>(effectiveDropTarget)) {
         if (oldParent != splitter) {
-            detachFromLayout(oldParent, w);
+            detachFromParentLayout_(oldParent, w);
             splitter->addWidget(w);
-            attachToLayout(splitter, w);
+            attachToParentLayout_(splitter, w);
             designWidgetsChanged();
         }
         update();
@@ -1348,22 +1911,40 @@ bool SwCreatorFormCanvas::reparentDesignWidget(SwWidget* w, SwWidget* container)
     }
 
     if (oldParent != newParent) {
-        detachFromLayout(oldParent, w);
+        detachFromParentLayout_(oldParent, w);
         w->setParent(newParent);
-        attachToLayout(newParent, w);
+        attachToParentLayout_(newParent, w);
+
+        // Keep the overlay above direct children of the canvas.
+        if (newParent == this && m_designOverlay) {
+            m_designOverlay->setParent(this);
+            const SwRect overlayRect = rect();
+            m_designOverlay->move(0, 0);
+            m_designOverlay->resize(overlayRect.width, overlayRect.height);
+        }
+
         designWidgetsChanged();
     }
 
-    const SwRect bounds = newParent->rect();
-    const SwPoint localTopLeft = canvasPointToParent_(this, newParent, SwPoint{ownerRect.x, ownerRect.y});
-    const int pad = 6;
-    const int nx = clampInt(localTopLeft.x,
-                            bounds.x + pad,
-                            bounds.x + std::max(pad, bounds.width - ownerRect.width - pad));
-    const int ny = clampInt(localTopLeft.y,
-                            bounds.y + pad,
-                            bounds.y + std::max(pad, bounds.height - ownerRect.height - pad));
-    w->move(nx, ny);
+    // If the new parent has a known layout, the layout manages positioning.
+    // Otherwise, preserve the widget's visual position via absolute coords.
+    SwAbstractLayout* activeLayout = newParent->layout();
+    const bool managedByLayout = activeLayout &&
+                                 (dynamic_cast<SwBoxLayout*>(activeLayout) ||
+                                  dynamic_cast<SwGridLayout*>(activeLayout) ||
+                                  dynamic_cast<SwFormLayout*>(activeLayout));
+    if (!managedByLayout) {
+        const SwRect bounds = newParent->rect();
+        const SwPoint localTopLeft = canvasPointToParent_(this, newParent, SwPoint{ownerRect.x, ownerRect.y});
+        const int pad = 6;
+        const int nx = clampInt(localTopLeft.x,
+                                bounds.x + pad,
+                                bounds.x + std::max(pad, bounds.width - ownerRect.width - pad));
+        const int ny = clampInt(localTopLeft.y,
+                                bounds.y + pad,
+                                bounds.y + std::max(pad, bounds.height - ownerRect.height - pad));
+        w->move(nx, ny);
+    }
 
     update();
     return true;
@@ -1588,12 +2169,21 @@ void SwCreatorFormCanvas::applyLayout_(const SwString& layoutName) {
     if (layoutName == "SwGridLayout") {
         auto* l = new SwGridLayout(target);
         target->setLayout(l);
+        std::sort(children.begin(), children.end(), [](const SwWidget* a, const SwWidget* b) {
+            if (!a || !b) {
+                return a < b;
+            }
+            const int ay = a->geometry().y;
+            const int by = b->geometry().y;
+            if (ay != by) {
+                return ay < by;
+            }
+            return a->geometry().x < b->geometry().x;
+        });
         const int count = static_cast<int>(children.size());
-        m_gridColumns = std::max(1, static_cast<int>(std::ceil(std::sqrt(static_cast<double>(std::max(1, count))))));
+        const int columns = std::max(1, static_cast<int>(std::ceil(std::sqrt(static_cast<double>(std::max(1, count))))));
         for (int i = 0; i < count; ++i) {
-            const int row = i / m_gridColumns;
-            const int col = i % m_gridColumns;
-            l->addWidget(children[static_cast<size_t>(i)], row, col);
+            l->addWidget(children[static_cast<size_t>(i)], i / columns, i % columns);
         }
         return;
     }
@@ -1612,7 +2202,29 @@ void SwCreatorFormCanvas::breakLayout_() {
     if (!target) {
         return;
     }
+
+    // Snapshot each child's current visual position before removing the layout,
+    // so widgets don't collapse to (0,0) after the layout is destroyed.
+    struct ChildSnapshot {
+        SwWidget* widget;
+        SwRect geometry;
+    };
+    std::vector<ChildSnapshot> snapshots;
+    for (SwObject* obj : target->children()) {
+        auto* w = dynamic_cast<SwWidget*>(obj);
+        if (w && w->parent() == target) {
+            snapshots.push_back({w, w->geometry()});
+        }
+    }
+
     target->setLayout(nullptr);
+
+    for (const auto& snap : snapshots) {
+        snap.widget->move(snap.geometry.x, snap.geometry.y);
+        snap.widget->resize(snap.geometry.width, snap.geometry.height);
+    }
+
+    designWidgetsChanged();
 }
 
 void SwCreatorFormCanvas::setCreateClass(const SwString& className) {
@@ -1663,10 +2275,12 @@ void SwCreatorFormCanvas::updateDropPreview(int globalX, int globalY, const SwWi
 }
 
 void SwCreatorFormCanvas::clearDropPreview() {
-    if (!m_dropTarget) {
+    if (!m_dropTarget && m_dropIndicatorRect.width == 0 && m_dropIndicatorRect.height == 0) {
         return;
     }
     m_dropTarget = nullptr;
+    m_dropIndicatorRect = {0, 0, 0, 0};
+    m_dropIndicatorParent = nullptr;
     update();
 }
 
@@ -1694,13 +2308,14 @@ void SwCreatorFormCanvas::paintEvent(PaintEvent* event) {
 
     SwPainter* painter = event->painter();
 
-    // --- Dot grid (Qt Designer style) ---
+    // --- Dot grid (subtle) ---
     {
         const SwRect cr = rect();
-        const SwColor dotColor{185, 190, 200};
-        const int step = 10;
-        for (int y = cr.y; y < cr.y + cr.height; y += step) {
-            for (int x = cr.x; x < cr.x + cr.width; x += step) {
+        const SwColor dotColor{200, 205, 212};
+        const int step = 12;
+        const int inset = 4;
+        for (int y = cr.y + inset; y < cr.y + cr.height - inset; y += step) {
+            for (int x = cr.x + inset; x < cr.x + cr.width - inset; x += step) {
                 painter->drawLine(x, y, x + 1, y, dotColor, 1);
             }
         }
@@ -1722,11 +2337,11 @@ void SwCreatorFormCanvas::paintEvent(PaintEvent* event) {
                 containers.insert(pw);
             }
         }
-        const SwColor layoutColor{227, 0, 0};
+        const SwColor layoutColor{180, 90, 90};
         for (SwWidget* c : containers) {
             const SwRect r = layoutContainerOverlayRect_(this, c);
             if (r.width > 0 && r.height > 0)
-                painter->drawDashedRect(r, layoutColor, 1);
+                painter->drawDashedRect(r, layoutColor, 1, 4, 3);
         }
     }
 
@@ -1911,18 +2526,35 @@ void SwCreatorFormCanvas::paintEvent(PaintEvent* event) {
         painter->drawRect(r, SwColor{59, 130, 246}, 3);
     }
 
+    // --- Layout reorder drop indicator (blue bar) ---
+    if (m_dropIndicatorRect.width > 0 && m_dropIndicatorRect.height > 0) {
+        const SwRect ind = clipToCanvas(m_dropIndicatorRect);
+        if (ind.width > 0 && ind.height > 0) {
+            const SwColor indicatorColor{59, 130, 246};
+            if (ind.width > 10 && ind.height > 10) {
+                painter->fillRect(ind, indicatorColor, indicatorColor, 0);
+                painter->drawRect(ind, indicatorColor, 2);
+            } else {
+                painter->fillRect(ind, indicatorColor, indicatorColor, 0);
+            }
+        }
+    }
+
     if (m_selected && m_selected != this) {
         const SwCreatorTheme& theme = SwCreatorTheme::current();
-        const SwColor accentBlue = SwCreatorTheme::current().accentSecondary;
-        const SwColor selColor = blendColor_(theme.borderStrong, accentBlue, 0.30f);
-        const SwColor handleFill = blendColor_(theme.surface1, accentBlue, 0.12f);
-        const SwColor handleBorder = blendColor_(theme.borderStrong, accentBlue, 0.68f);
+        const SwColor accentBlue = theme.accentSecondary;
+        const SwColor selOutline = accentBlue;
+        const SwColor handleFill = {255, 255, 255};
+        const SwColor handleBorder = accentBlue;
+
         SwRect r = widgetRectInCanvas_(this, m_selected);
         r.x -= 1;
         r.y -= 1;
         r.width += 2;
         r.height += 2;
-        painter->drawRect(r, selColor, 1);
+
+        // Selection outline — accent blue, 2px
+        painter->drawRect(r, selOutline, 2);
 
         SwWidget* parentWidget = dynamic_cast<SwWidget*>(m_selected->parent());
         SwAbstractLayout* activeLayout = parentWidget ? parentWidget->layout() : nullptr;
@@ -1931,7 +2563,7 @@ void SwCreatorFormCanvas::paintEvent(PaintEvent* event) {
                                            dynamic_cast<SwGridLayout*>(activeLayout) ||
                                            dynamic_cast<SwFormLayout*>(activeLayout));
         if (!managedByKnownLayout) {
-            const int handleSize = 4;
+            const int handleSize = 8;
             const int half = handleSize / 2;
             const int left = r.x;
             const int top = r.y;
@@ -1940,20 +2572,21 @@ void SwCreatorFormCanvas::paintEvent(PaintEvent* event) {
             const int midX = (left + right) / 2;
             const int midY = (top + bottom) / 2;
 
-            auto handleRect = [&](int cx, int cy) {
-                return SwRect{cx - half, cy - half, handleSize, handleSize};
+            auto drawHandle = [&](int cx, int cy) {
+                const SwRect hr{cx - half, cy - half, handleSize, handleSize};
+                painter->fillRoundedRect(hr, 2, handleFill, handleBorder, 2);
             };
 
-            painter->fillRect(handleRect(left, top), handleFill, handleBorder, 1);
-            painter->fillRect(handleRect(midX, top), handleFill, handleBorder, 1);
-            painter->fillRect(handleRect(right, top), handleFill, handleBorder, 1);
+            drawHandle(left, top);
+            drawHandle(midX, top);
+            drawHandle(right, top);
 
-            painter->fillRect(handleRect(left, midY), handleFill, handleBorder, 1);
-            painter->fillRect(handleRect(right, midY), handleFill, handleBorder, 1);
+            drawHandle(left, midY);
+            drawHandle(right, midY);
 
-            painter->fillRect(handleRect(left, bottom), handleFill, handleBorder, 1);
-            painter->fillRect(handleRect(midX, bottom), handleFill, handleBorder, 1);
-            painter->fillRect(handleRect(right, bottom), handleFill, handleBorder, 1);
+            drawHandle(left, bottom);
+            drawHandle(midX, bottom);
+            drawHandle(right, bottom);
         }
     }
 
@@ -2280,6 +2913,31 @@ SwWidget* SwCreatorFormCanvas::createWidgetAt_(const SwString& className, int gl
         }
     }
 
+    if (auto* grid = dynamic_cast<SwGridLayout*>(activeLayout)) {
+        GridDropTarget target = computeGridDropTarget_(this, layoutHost, grid, globalX, globalY, nullptr, false);
+        if (!target.isValid()) {
+            const SwPoint slot = firstAvailableGridCell_(grid);
+            target.parent = layoutHost;
+            target.row = slot.y;
+            target.column = slot.x;
+            target.action = GridDropAction::PlaceIntoEmptyCell;
+        }
+        int row = std::max(0, target.row);
+        int column = std::max(0, target.column);
+        if (target.action == GridDropAction::InsertRowBefore) {
+            grid->insertRow(row);
+        } else if (target.action == GridDropAction::InsertRowAfter) {
+            grid->insertRow(row + 1);
+            ++row;
+        } else if (target.action == GridDropAction::InsertColumnBefore) {
+            grid->insertColumn(column);
+        } else if (target.action == GridDropAction::InsertColumnAfter) {
+            grid->insertColumn(column + 1);
+            ++column;
+        }
+        (void)grid->setWidgetPosition(w, row, column, 1, 1);
+    }
+
     if (!managedByKnownLayout) {
         const SwRect bounds = layoutHost->rect();
         const SwPoint parentPos = layoutHost->mapFrom(this, SwPoint{globalX, globalY});
@@ -2335,6 +2993,30 @@ SwWidget* SwCreatorFormCanvas::createLayoutContainerAt_(const SwString& layoutCl
                                        (dynamic_cast<SwBoxLayout*>(activeLayout) ||
                                         dynamic_cast<SwGridLayout*>(activeLayout) ||
                                         dynamic_cast<SwFormLayout*>(activeLayout)));
+    if (auto* grid = dynamic_cast<SwGridLayout*>(activeLayout)) {
+        GridDropTarget target = computeGridDropTarget_(this, layoutHost, grid, globalX, globalY, nullptr, false);
+        if (!target.isValid()) {
+            const SwPoint slot = firstAvailableGridCell_(grid);
+            target.parent = layoutHost;
+            target.row = slot.y;
+            target.column = slot.x;
+            target.action = GridDropAction::PlaceIntoEmptyCell;
+        }
+        int row = std::max(0, target.row);
+        int column = std::max(0, target.column);
+        if (target.action == GridDropAction::InsertRowBefore) {
+            grid->insertRow(row);
+        } else if (target.action == GridDropAction::InsertRowAfter) {
+            grid->insertRow(row + 1);
+            ++row;
+        } else if (target.action == GridDropAction::InsertColumnBefore) {
+            grid->insertColumn(column);
+        } else if (target.action == GridDropAction::InsertColumnAfter) {
+            grid->insertColumn(column + 1);
+            ++column;
+        }
+        (void)grid->setWidgetPosition(frame, row, column, 1, 1);
+    }
     if (!managedByKnownLayout) {
         const SwRect bounds = layoutHost->rect();
         const SwPoint parentPos = layoutHost->mapFrom(this, SwPoint{globalX, globalY});

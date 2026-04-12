@@ -71,6 +71,12 @@ class SwTcpSocket : public SwAbstractSocket {
     SW_OBJECT(SwTcpSocket, SwAbstractSocket)
 
 public:
+    struct ResolvedAddress {
+        sockaddr_storage storage{};
+        socklen_t length{0};
+        int family{AF_UNSPEC};
+    };
+
     explicit SwTcpSocket(SwObject* parent = nullptr)
         : SwAbstractSocket(parent) {
         socketTrafficState_ = swSocketTrafficRegisterSocket(this, SwSocketTrafficTransportKind::Tcp);
@@ -90,76 +96,115 @@ public:
         m_lastHost = host;
         m_remoteClosed = false;
 
-#if defined(_WIN32)
-        m_socket = ::WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, nullptr, 0, WSA_FLAG_OVERLAPPED);
-        if (m_socket == INVALID_SOCKET) {
-            const int err = WSAGetLastError();
-            emit errorOccurred(err);
-            return false;
-        }
-
-        u_long mode = 1;
-        if (::ioctlsocket(m_socket, FIONBIO, &mode) == SOCKET_ERROR) {
-            const int err = WSAGetLastError();
-            emit errorOccurred(err);
-            close();
-            return false;
-        }
-
-        m_event = ::WSACreateEvent();
-        if (m_event == WSA_INVALID_EVENT) {
-            const int err = WSAGetLastError();
-            emit errorOccurred(err);
-            close();
-            return false;
-        }
-
-        if (::WSAEventSelect(m_socket, m_event, FD_CONNECT | FD_READ | FD_WRITE | FD_CLOSE) == SOCKET_ERROR) {
-            const int err = WSAGetLastError();
-            emit errorOccurred(err);
-            close();
-            return false;
-        }
-#else
         struct addrinfo hints {};
-        hints.ai_family = AF_INET;
+        hints.ai_family = AF_UNSPEC;
         hints.ai_socktype = SOCK_STREAM;
         hints.ai_protocol = IPPROTO_TCP;
 
         struct addrinfo* result = nullptr;
-        if (::getaddrinfo(host.toStdString().c_str(),
-                          SwString::number(port).toStdString().c_str(),
-                          &hints,
-                          &result) != 0 || !result) {
+        const int resolveRc = ::getaddrinfo(host.toStdString().c_str(),
+                                            SwString::number(port).toStdString().c_str(),
+                                            &hints,
+                                            &result);
+        if (resolveRc != 0 || !result) {
+#if defined(_WIN32)
+            emit errorOccurred(WSAHOST_NOT_FOUND);
+#else
             emit errorOccurred(errno);
+#endif
             return false;
         }
 
+        int lastError = 0;
+        bool connectedImmediately = false;
+
+#if defined(_WIN32)
+        for (auto* ptr = result; ptr != nullptr; ptr = ptr->ai_next) {
+            SOCKET candidateSocket =
+                ::WSASocketW(ptr->ai_family, ptr->ai_socktype, ptr->ai_protocol, nullptr, 0, WSA_FLAG_OVERLAPPED);
+            if (candidateSocket == INVALID_SOCKET) {
+                lastError = WSAGetLastError();
+                continue;
+            }
+
+            u_long mode = 1;
+            if (::ioctlsocket(candidateSocket, FIONBIO, &mode) == SOCKET_ERROR) {
+                lastError = WSAGetLastError();
+                ::closesocket(candidateSocket);
+                continue;
+            }
+
+            WSAEVENT candidateEvent = ::WSACreateEvent();
+            if (candidateEvent == WSA_INVALID_EVENT) {
+                lastError = WSAGetLastError();
+                ::closesocket(candidateSocket);
+                continue;
+            }
+
+            if (::WSAEventSelect(candidateSocket, candidateEvent, FD_CONNECT | FD_READ | FD_WRITE | FD_CLOSE) ==
+                SOCKET_ERROR) {
+                lastError = WSAGetLastError();
+                ::WSACloseEvent(candidateEvent);
+                ::closesocket(candidateSocket);
+                continue;
+            }
+
+            const int connectResult = ::connect(candidateSocket,
+                                                ptr->ai_addr,
+                                                static_cast<int>(ptr->ai_addrlen));
+            if (connectResult == 0) {
+                m_socket = candidateSocket;
+                m_event = candidateEvent;
+                connectedImmediately = true;
+                break;
+            }
+
+            lastError = WSAGetLastError();
+            if (lastError == WSAEWOULDBLOCK || lastError == WSAEINPROGRESS) {
+                m_socket = candidateSocket;
+                m_event = candidateEvent;
+                break;
+            }
+
+            ::WSACloseEvent(candidateEvent);
+            ::closesocket(candidateSocket);
+        }
+#else
         int fd = -1;
         for (auto* ptr = result; ptr != nullptr; ptr = ptr->ai_next) {
             fd = ::socket(ptr->ai_family, ptr->ai_socktype, ptr->ai_protocol);
             if (fd < 0) {
+                lastError = errno;
                 continue;
             }
             setNonBlocking_(fd);
             if (::connect(fd, ptr->ai_addr, ptr->ai_addrlen) == 0) {
                 m_connecting = false;
+                connectedImmediately = true;
                 break;
             }
             if (errno == EINPROGRESS) {
                 m_connecting = true;
                 break;
             }
+            lastError = errno;
             ::close(fd);
             fd = -1;
         }
-
+        m_socket = fd;
+#endif
         ::freeaddrinfo(result);
-        if (fd < 0) {
-            emit errorOccurred(errno);
+
+#if defined(_WIN32)
+        if (m_socket == INVALID_SOCKET) {
+            emit errorOccurred(lastError);
             return false;
         }
-        m_socket = fd;
+#else
+        if (m_socket < 0) {
+            emit errorOccurred(lastError);
+            return false;
+        }
 #endif
 
         if (!registerDispatcher_()) {
@@ -169,37 +214,16 @@ public:
 
         setState(ConnectingState);
 
-#if defined(_WIN32)
-        struct addrinfo hints {};
-        hints.ai_family = AF_INET;
-        hints.ai_socktype = SOCK_STREAM;
-        hints.ai_protocol = IPPROTO_TCP;
-
-        struct addrinfo* result = nullptr;
-        const int rc = ::getaddrinfo(host.toStdString().c_str(),
-                                     SwString::number(port).toStdString().c_str(),
-                                     &hints,
-                                     &result);
-        if (rc != 0 || !result) {
-            emit errorOccurred(-1);
-            close();
-            return false;
+#if !defined(_WIN32)
+        updateDispatcherInterest_();
+        if (m_connecting) {
+            return true;
         }
-
-        const int connectResult = ::connect(m_socket, result->ai_addr, static_cast<int>(result->ai_addrlen));
-        ::freeaddrinfo(result);
-        if (connectResult == SOCKET_ERROR) {
-            const int err = WSAGetLastError();
-            if (err != WSAEWOULDBLOCK && err != WSAEINPROGRESS) {
-                emit errorOccurred(err);
-                close();
-                return false;
-            }
+        if (!connectedImmediately) {
             return true;
         }
 #else
-        updateDispatcherInterest_();
-        if (m_connecting) {
+        if (!connectedImmediately) {
             return true;
         }
 #endif
@@ -368,7 +392,7 @@ public:
     }
 
     SwString localAddress() const {
-        sockaddr_in address {};
+        sockaddr_storage address {};
         if (!querySocketAddress_(false, address)) {
             return SwString();
         }
@@ -376,15 +400,15 @@ public:
     }
 
     uint16_t localPort() const {
-        sockaddr_in address {};
+        sockaddr_storage address {};
         if (!querySocketAddress_(false, address)) {
             return 0;
         }
-        return ntohs(address.sin_port);
+        return socketAddressPort_(address);
     }
 
     SwString peerAddress() const {
-        sockaddr_in address {};
+        sockaddr_storage address {};
         if (!querySocketAddress_(true, address)) {
             return SwString();
         }
@@ -392,11 +416,11 @@ public:
     }
 
     uint16_t peerPort() const {
-        sockaddr_in address {};
+        sockaddr_storage address {};
         if (!querySocketAddress_(true, address)) {
             return 0;
         }
-        return ntohs(address.sin_port);
+        return socketAddressPort_(address);
     }
 
     bool shutdownWrite(int lingerSeconds = 5) {
@@ -618,17 +642,50 @@ protected:
     }
 
 private:
-    SwString socketAddressToString_(const sockaddr_in& address) const {
-        char buffer[INET_ADDRSTRLEN] = {0};
+    SwString socketAddressToString_(const sockaddr_storage& address) const {
+        char buffer[INET6_ADDRSTRLEN] = {0};
+        if (address.ss_family == AF_INET) {
+            const sockaddr_in* ipv4 = reinterpret_cast<const sockaddr_in*>(&address);
 #if defined(_WIN32)
-        InetNtopA(AF_INET, const_cast<IN_ADDR*>(&address.sin_addr), buffer, sizeof(buffer));
+            InetNtopA(AF_INET, const_cast<IN_ADDR*>(&ipv4->sin_addr), buffer, sizeof(buffer));
 #else
-        inet_ntop(AF_INET, const_cast<in_addr*>(&address.sin_addr), buffer, sizeof(buffer));
+            inet_ntop(AF_INET, const_cast<in_addr*>(&ipv4->sin_addr), buffer, sizeof(buffer));
 #endif
-        return SwString(buffer);
+            return SwString(buffer);
+        }
+        if (address.ss_family == AF_INET6) {
+            const sockaddr_in6* ipv6 = reinterpret_cast<const sockaddr_in6*>(&address);
+            if (IN6_IS_ADDR_V4MAPPED(&ipv6->sin6_addr)) {
+                in_addr mapped{};
+                std::memcpy(&mapped, ipv6->sin6_addr.s6_addr + 12, sizeof(mapped));
+#if defined(_WIN32)
+                InetNtopA(AF_INET, &mapped, buffer, sizeof(buffer));
+#else
+                inet_ntop(AF_INET, &mapped, buffer, sizeof(buffer));
+#endif
+                return SwString(buffer);
+            }
+#if defined(_WIN32)
+            InetNtopA(AF_INET6, const_cast<IN6_ADDR*>(&ipv6->sin6_addr), buffer, sizeof(buffer));
+#else
+            inet_ntop(AF_INET6, const_cast<in6_addr*>(&ipv6->sin6_addr), buffer, sizeof(buffer));
+#endif
+            return SwString(buffer);
+        }
+        return SwString();
     }
 
-    bool querySocketAddress_(bool peer, sockaddr_in& address) const {
+    uint16_t socketAddressPort_(const sockaddr_storage& address) const {
+        if (address.ss_family == AF_INET) {
+            return ntohs(reinterpret_cast<const sockaddr_in*>(&address)->sin_port);
+        }
+        if (address.ss_family == AF_INET6) {
+            return ntohs(reinterpret_cast<const sockaddr_in6*>(&address)->sin6_port);
+        }
+        return 0;
+    }
+
+    bool querySocketAddress_(bool peer, sockaddr_storage& address) const {
         if (!isSocketValid_()) {
             return false;
         }

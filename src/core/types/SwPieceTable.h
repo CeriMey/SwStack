@@ -267,7 +267,11 @@ public:
             return SwString();
         }
         // Fast path: single original piece, no edits
-        if (m_pieces.size() == 1 && m_pieces[0].buffer == Original && !m_isMapped) {
+        if (m_pieces.size() == 1 &&
+            m_pieces[0].buffer == Original &&
+            m_pieces[0].start == 0 &&
+            m_pieces[0].length == m_originalSize &&
+            !m_isMapped) {
             return m_originalOwned;
         }
         SwString result;
@@ -348,8 +352,8 @@ public:
         const size_t removeLen = removeEnd - removeStart;
 
         // Split at boundaries so they align with piece boundaries
-        const int endIdx = splitPieceAt_(removeEnd);
         const int startIdx = splitPieceAt_(removeStart);
+        const int endIdx = splitPieceAt_(removeEnd);
 
         // Count newlines being removed
         int removedNewlines = 0;
@@ -396,8 +400,11 @@ public:
             // Last line: from start to end of document
             return m_totalLength - start;
         }
-        // Subtract 1 for the '\n' between this line and next
-        return (nextStart > start) ? (nextStart - start - 1) : 0;
+        size_t length = nextStart - start;
+        if (length > 0 && nextStart <= m_totalLength && charAt(nextStart - 1) == '\n') {
+            --length;
+        }
+        return length;
     }
 
     SwString lineContent(int lineIdx) const {

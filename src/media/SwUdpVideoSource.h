@@ -32,6 +32,9 @@ public:
         m_tsDemux.setPacketCallback([this](const SwMediaPacket& packet) {
             emitProgramVideoPacket_(packet);
         });
+        m_tsDemux.setTracksChangedCallback([this](const SwList<SwMediaTrack>& tracks) {
+            setTracks(tracks);
+        });
         SwObject::connect(m_socket, &SwUdpSocket::readyRead, m_callbackContext, [this]() {
             readPendingDatagrams_();
         });
@@ -59,8 +62,9 @@ public:
                                         : static_cast<uint16_t>(m_options.mediaUrl.port() > 0
                                                                      ? m_options.mediaUrl.port()
                                                                      : 5004);
-        const SwString bindAddress =
-            m_options.bindAddress.isEmpty() ? SwString("0.0.0.0") : m_options.bindAddress;
+        const SwString bindAddress = m_options.multicastGroup.isEmpty()
+                                         ? m_options.bindAddress
+                                         : wildcardBindAddressForGroup_(m_options.multicastGroup);
         const auto bindMode = static_cast<SwUdpSocket::BindMode>(SwUdpSocket::ShareAddress |
                                                                  SwUdpSocket::ReuseAddressHint);
         emitStatus(StreamState::Connecting, "Opening UDP source...");
@@ -69,6 +73,15 @@ public:
                 << "[SwUdpVideoSource] Failed to bind UDP socket "
                 << bindAddress << ":" << listenPort;
             emitStatus(StreamState::Recovering, "Failed to bind UDP socket");
+            return;
+        }
+        if (!m_options.multicastGroup.isEmpty() &&
+            !m_socket->joinMulticastGroup(m_options.multicastGroup, m_options.bindAddress)) {
+            swCError(kSwLogCategory_SwUdpVideoSource)
+                << "[SwUdpVideoSource] Failed to join multicast group "
+                << m_options.multicastGroup;
+            m_socket->close();
+            emitStatus(StreamState::Recovering, "Failed to join multicast group");
             return;
         }
         setRunning(true);
@@ -91,6 +104,10 @@ public:
     }
 
 private:
+    static SwString wildcardBindAddressForGroup_(const SwString& group) {
+        return group.contains(":") ? SwString("::") : SwString("0.0.0.0");
+    }
+
     static bool hasStartCodeH264Idr_(const SwByteArray& payload) {
         std::vector<uint8_t> bytes(payload.begin(), payload.end());
         return SwTsProgramDemux::hasStartCodeH264Idr(bytes);
@@ -110,6 +127,7 @@ private:
 
     void emitProgramVideoPacket_(const SwMediaPacket& packet) {
         if (packet.type() != SwMediaPacket::Type::Video) {
+            emitMediaPacket(packet);
             return;
         }
         emitStatus(StreamState::Streaming, "Streaming");

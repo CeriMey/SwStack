@@ -138,7 +138,7 @@ public:
     }
 
     SwString authority() const {
-        SwString result = m_host;
+        SwString result = hostForUri_(m_host);
         if (m_port >= 0) {
             result += ":";
             result += SwString::number(m_port);
@@ -159,7 +159,7 @@ public:
             result += m_userInfo;
             result += "@";
         }
-        result += m_host;
+        result += hostForUri_(m_host);
         if (m_port >= 0) {
             result += ":";
             result += SwString::number(m_port);
@@ -188,6 +188,9 @@ private:
     static int defaultPortForScheme_(const SwString& scheme) {
         if (scheme == "rtsp") {
             return 554;
+        }
+        if (scheme == "rtsps") {
+            return 322;
         }
         if (scheme == "http") {
             return 80;
@@ -246,6 +249,19 @@ private:
             }
         }
         return SwString(decoded);
+    }
+
+    static bool shouldBracketHost_(const SwString& host) {
+        const std::string text = host.toStdString();
+        return !text.empty() && text.find(':') != std::string::npos &&
+               text.front() != '[' && text.back() != ']';
+    }
+
+    static SwString hostForUri_(const SwString& host) {
+        if (!shouldBracketHost_(host)) {
+            return host;
+        }
+        return SwString("[") + host + SwString("]");
     }
 
     static void parseQuery_(const SwString& rawQuery, SwMap<SwString, SwString>& out) {

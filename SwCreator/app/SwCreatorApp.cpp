@@ -71,7 +71,7 @@ int main(int argc, char** argv) {
 
     auto* shell = new SwCreatorShell(mainWindow.centralWidget());
 
-    auto* statusBar = new SwStatusBar(mainWindow.centralWidget());
+    auto* statusBar = mainWindow.statusBar();
     statusBar->setStyleSheet(
         "SwStatusBar {"
         " background-color: " + SwCreatorTheme::rgb(th.surface0)
@@ -90,7 +90,6 @@ int main(int argc, char** argv) {
         layout->setMargin(0);
         layout->setSpacing(0);
         layout->addWidget(shell, 1, 0);
-        layout->addWidget(statusBar, 0, th.statusBarHeight);
         mainWindow.setLayout(layout);
     }
 

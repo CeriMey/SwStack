@@ -26,6 +26,23 @@
 namespace {
 constexpr int kMainPanelInset = 0;
 constexpr int kPanelInnerInset = 0;
+
+SwTreeView::TreeColors darkTreeColors() {
+    const auto& th = SwCreatorTheme::current();
+    SwTreeView::TreeColors c;
+    c.background       = th.surface2;
+    c.backgroundBorder = th.surface2;
+    c.altFill          = th.surface3;
+    c.selFill          = th.selectionBg;
+    c.selBorder        = th.accentPrimary;
+    c.hoverFill        = th.hoverBg;
+    c.text             = th.textPrimary;
+    c.toggleStroke     = th.textSecondary;
+    c.gridLine         = th.borderLight;
+    c.bgRadius         = 0;
+    c.selRadius        = 2;
+    return c;
+}
 }
 
 SwCreatorMainPanel::SwCreatorMainPanel(SwWidget* parent)
@@ -34,13 +51,17 @@ SwCreatorMainPanel::SwCreatorMainPanel(SwWidget* parent)
     setStyleSheet("SwCreatorMainPanel { background-color: " + SwCreatorTheme::rgb(th.surface1) + "; border-width: 0px; }");
 
     m_splitter = new SwSplitter(SwSplitter::Orientation::Horizontal, this);
-    m_splitter->setHandleWidth(4);
+    m_splitter->setHandleWidth(1);
     m_splitter->setChildrenCollapsible(false);
+    m_splitter->setStyleSheet(
+        "SwSplitter { background-color: " + SwCreatorTheme::rgb(th.borderLight) + "; border-width: 0px; }");
 
     m_palettePanel = new SwFrame(this);
     m_palettePanel->setFrameShape(SwFrame::Shape::NoFrame);
     m_palettePanel->setStyleSheet(
-        "SwFrame { background-color: " + SwCreatorTheme::rgb(th.surface2) + "; border-width: 0px; border-radius: 0px; }");
+        "SwFrame { background-color: " + SwCreatorTheme::rgb(th.surface2)
+        + "; border-width: 0px; border-right-width: 1px; border-color: "
+        + SwCreatorTheme::rgb(th.borderLight) + "; border-radius: 0px; }");
 
     m_palette = new SwCreatorWidgetPalette(m_palettePanel);
 
@@ -49,27 +70,35 @@ SwCreatorMainPanel::SwCreatorMainPanel(SwWidget* parent)
     m_inspectorPanel = new SwFrame(this);
     m_inspectorPanel->setFrameShape(SwFrame::Shape::NoFrame);
     m_inspectorPanel->setStyleSheet(
-        "SwFrame { background-color: " + SwCreatorTheme::rgb(th.surface2) + "; border-width: 0px; border-radius: 0px; }");
+        "SwFrame { background-color: " + SwCreatorTheme::rgb(th.surface2)
+        + "; border-width: 0px; border-left-width: 1px; border-color: "
+        + SwCreatorTheme::rgb(th.borderLight) + "; border-radius: 0px; }");
 
     m_inspectorSplitter = new SwSplitter(SwSplitter::Orientation::Vertical, m_inspectorPanel);
-    m_inspectorSplitter->setHandleWidth(4);
+    m_inspectorSplitter->setHandleWidth(1);
     m_inspectorSplitter->setChildrenCollapsible(false);
+    m_inspectorSplitter->setStyleSheet(
+        "SwSplitter { background-color: " + SwCreatorTheme::rgb(th.borderLight) + "; border-width: 0px; }");
 
     m_hierarchyTree = new SwTreeWidget(2, m_inspectorSplitter);
     m_hierarchyTree->setHeaderLabels(SwList<SwString>{"Object", "Class"});
     m_hierarchyTree->setColumnsFitToWidth(true);
     m_hierarchyTree->setColumnStretch(0, 2);
     m_hierarchyTree->setColumnStretch(1, 1);
+    m_hierarchyTree->setTreeColors(darkTreeColors());
+    m_hierarchyTree->setTreeFont(th.uiBody);
+    m_hierarchyTree->setRowHeight(26);
     if (m_hierarchyTree->header()) {
         m_hierarchyTree->header()->setStyleSheet(
             "SwHeaderView {"
             " background-color: " + SwCreatorTheme::rgb(th.surface2)
-            + "; border-color: " + SwCreatorTheme::rgb(th.surface2)
-            + "; border-width: 0px; border-radius: 0px;"
-            " padding: 0px 6px;"
-            " color: " + SwCreatorTheme::rgb(th.textPrimary)
+            + "; border-color: " + SwCreatorTheme::rgb(th.borderLight)
+            + "; border-width: 0px; border-bottom-width: 1px; border-radius: 0px;"
+            " padding: 0px 10px;"
+            " color: " + SwCreatorTheme::rgb(th.textSecondary)
             + "; divider-color: " + SwCreatorTheme::rgb(th.borderLight)
-            + "; indicator-color: " + SwCreatorTheme::rgb(th.textSecondary) + "; }");
+            + "; indicator-color: " + SwCreatorTheme::rgb(th.textMuted)
+            + "; font-size: 11px; }");
     }
 
     m_propertyInspector = new SwCreatorPropertyInspector(m_inspectorSplitter);
@@ -304,13 +333,18 @@ void SwCreatorMainPanel::scheduleDeferredLayoutRefresh_(int passes) {
 
         if (m_splitter) {
             const SwVector<int> sizes = m_splitter->sizes();
-            if (sizes.size() > 0) {
+            // If sidebars collapsed to 0 (startup race), force them open.
+            if (sizes.size() >= 3 && sizes[0] <= 0 && sizes[2] <= 0) {
+                m_splitter->setSizes(SwVector<int>{190, 1000, 250});
+            } else if (sizes.size() > 0) {
                 m_splitter->setSizes(sizes);
             }
         }
         if (m_inspectorSplitter) {
             const SwVector<int> sizes = m_inspectorSplitter->sizes();
-            if (sizes.size() > 0) {
+            if (sizes.size() >= 2 && sizes[0] <= 0 && sizes[1] <= 0) {
+                m_inspectorSplitter->setSizes(SwVector<int>{300, 360});
+            } else if (sizes.size() > 0) {
                 m_inspectorSplitter->setSizes(sizes);
             }
         }

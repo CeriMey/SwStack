@@ -44,9 +44,9 @@ private:
     std::vector<SwCreatorPaletteEntry> m_entries;
     std::vector<SwCreatorPaletteItem*> m_buttons;
     SwString m_filter;
-    int m_itemHeight{24};
-    int m_itemGap{0};
-    int m_pad{0};
+    int m_itemHeight{32};
+    int m_itemGap{2};
+    int m_pad{4};
     bool m_inUpdateLayout{false};
     SwWidget* m_resizeParent{nullptr};
 };

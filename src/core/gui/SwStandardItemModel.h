@@ -277,6 +277,10 @@ public:
         item->attachToParent(this, row, column);
     }
 
+    void removeAllChildren() {
+        clearChildren();
+    }
+
 private:
     friend class SwStandardItemModel;
 

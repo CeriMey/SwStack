@@ -60,6 +60,10 @@
 #include "media/SwVideoPacket.h"
 #include "media/rtp/SwRtpSession.h"
 #include "media/rtp/SwRtpSessionDescriptor.h"
+#include "media/rtsp/SwRtspAuth.h"
+#include "media/rtsp/SwRtspHeaderUtils.h"
+#include "core/io/SwAbstractSocket.h"
+#include "core/io/SwSslSocket.h"
 #include "core/io/SwTcpSocket.h"
 #include "core/runtime/SwThread.h"
 #include "core/runtime/SwTimer.h"
@@ -76,6 +80,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <functional>
+#include <iomanip>
 #include <iterator>
 #include <limits>
 #include <map>
@@ -97,25 +102,26 @@ class SwRtspUdpSource : public SwVideoSource {
 public:
     /**
      * @brief Constructs a `SwRtspUdpSource` instance.
-     * @param url Value passed to the method.
+     * @param options Value passed to the method.
      * @param parent Optional parent object that owns this instance.
-     * @param url Value passed to the method.
      *
      * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
      */
-    SwRtspUdpSource(const SwString& url, SwObject* parent = nullptr)
-        : m_url(url) {
+    SwRtspUdpSource(const SwMediaOpenOptions& options, SwObject* parent = nullptr)
+        : m_openOptions(options)
+        , m_url(options.sourceUrl()) {
         SW_UNUSED(parent);
+        applyOpenOptions_();
         parseUrl();
         m_sourceThread = new SwThread("SwRtspUdpSourceThread");
         m_sourceThread->start();
         m_callbackContext = new SwObject();
         m_trackGraph = std::make_unique<SwRtspTrackGraph>();
-        m_rtspSocket = new SwTcpSocket();
+        m_rtspSocket = createControlSocket_();
         m_reconnectTimer = new SwTimer(m_reconnectDelayMs);
         m_reconnectTimer->setSingleShot(true);
         SwObject::connect(m_reconnectTimer, &SwTimer::timeout, m_callbackContext, [this]() { attemptReconnect(); });
-        m_keepAliveTimer = new SwTimer(15000);
+        m_keepAliveTimer = new SwTimer(m_keepAliveIntervalMs);
         m_monitorTimer = new SwTimer(100);
 
         SwObject::connect(m_keepAliveTimer, &SwTimer::timeout, m_callbackContext, [this]() { sendKeepAlive(); });
@@ -123,30 +129,7 @@ public:
             maybeSendRtcpKeepAlive();
             checkRtpTimeout();
         });
-
-        SwObject::connect(m_rtspSocket, &SwTcpSocket::connected, m_callbackContext, [this]() {
-            m_cseq = 0;
-            m_sessionId.clear();
-            m_state = RtspStep::Options;
-            sendOptions();
-        });
-        SwObject::connect(m_rtspSocket, &SwTcpSocket::readyRead, m_callbackContext, [this]() {
-            readControlSocket();
-            handleControlBuffer();
-        });
-        SwObject::connect(m_rtspSocket, &SwTcpSocket::disconnected, m_callbackContext, [this]() {
-            if (m_rtspDisconnectSuppress.load() > 0) {
-                return;
-            }
-            swCWarning(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] RTSP disconnected";
-            stopStreaming(false);
-            scheduleReconnect("RTSP disconnected");
-        });
-        SwObject::connect(m_rtspSocket, &SwTcpSocket::errorOccurred, m_callbackContext, [this](int code) {
-            swCError(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] RTSP socket error: " << code;
-            stopStreaming(false);
-            scheduleReconnect("RTSP socket error");
-        });
+        connectControlSocket_();
 
         if (m_sourceThread) {
             m_callbackContext->moveToThread(m_sourceThread);
@@ -158,6 +141,9 @@ public:
 
         configureTrackGraph_();
     }
+
+    SwRtspUdpSource(const SwString& url, SwObject* parent = nullptr)
+        : SwRtspUdpSource(SwMediaOpenOptions::fromUrl(url), parent) {}
 
     /**
      * @brief Performs the `base64Decode` operation.
@@ -361,16 +347,46 @@ public:
      *
      * @details Call this method to replace the currently stored value with the caller-provided one.
      */
-    void setLocalAddress(const SwString& addr) { m_bindAddress = addr; }
-    void setEnableAudio(bool enable) { m_enableAudio = enable; }
-    void setEnableMetadata(bool enable) { m_enableMetadata = enable; }
+    void setLocalAddress(const SwString& addr) {
+        m_bindAddress = addr;
+        m_openOptions.bindAddress = addr;
+    }
+    void setEnableAudio(bool enable) {
+        m_enableAudio = enable;
+        m_openOptions.enableAudio = enable;
+    }
+    void setEnableMetadata(bool enable) {
+        m_enableMetadata = enable;
+        m_openOptions.enableMetadata = enable;
+    }
     /**
      * @brief Sets the use Tcp Transport.
      * @param enable Value passed to the method.
      *
      * @details Call this method to replace the currently stored value with the caller-provided one.
      */
-    void setUseTcpTransport(bool enable) { m_useTcpTransport = enable; }
+    void setUseTcpTransport(bool enable) {
+        m_useTcpTransport = enable;
+        m_openOptions.transport = enable ? SwMediaOpenOptions::TransportPreference::Tcp
+                                         : SwMediaOpenOptions::TransportPreference::Udp;
+    }
+
+    void setCredentials(const SwString& userName, const SwString& password) {
+        m_openOptions.userName = userName;
+        m_openOptions.password = password;
+        m_rtspUserName = userName.toStdString();
+        m_rtspPassword = password.toStdString();
+    }
+
+    void setTrustedCaFile(const SwString& path) {
+        m_openOptions.trustedCaFile = path;
+        m_trustedCaFile = path;
+        if (m_useTls && m_rtspSocket && !isRunning()) {
+            if (auto* sslSocket = dynamic_cast<SwSslSocket*>(m_rtspSocket)) {
+                sslSocket->setTrustedCaFile(path);
+            }
+        }
+    }
 
     void setLowLatencyMode(bool enabled, int latencyTargetMs = 500) {
         m_lowLatencyDrop = enabled;
@@ -405,6 +421,9 @@ public:
         m_bindAddress = addr;
         m_forcedClientRtpPort = rtpPort;
         m_forcedClientRtcpPort = rtcpPort;
+        m_openOptions.bindAddress = addr;
+        m_openOptions.rtpPort = rtpPort;
+        m_openOptions.rtcpPort = rtcpPort;
     }
 
     /**
@@ -470,7 +489,10 @@ private:
         std::vector<std::pair<std::string, std::string>> headers;
         std::string body;
         int retries{0};
+        int authRetries{0};
     };
+
+    using RtspAuthChallenge = SwRtspAuthChallenge;
 
     struct RtspTrack {
         std::string mediaType;
@@ -489,25 +511,96 @@ private:
     enum class RtspStep { None, Options, Describe, Setup, Play, Playing };
     enum class SetupTarget { Video, Audio, Metadata };
 
-    struct TransportInfo {
-        uint16_t serverRtpPort{0};
-        uint16_t serverRtcpPort{0};
-        uint8_t interleavedRtpChannel{0};
-        uint8_t interleavedRtcpChannel{1};
-    };
+    using TransportInfo = SwRtspTransportInfo;
+
+    void applyOpenOptions_() {
+        const SwMediaUrl& parsed = m_openOptions.mediaUrl;
+        const SwString scheme = parsed.scheme().toLower();
+        m_useTls = (scheme == "rtsps");
+        m_rtspUserName = m_openOptions.userName.toStdString();
+        m_rtspPassword = m_openOptions.password.toStdString();
+        m_trustedCaFile = m_openOptions.trustedCaFile;
+        m_enableAudio = m_openOptions.enableAudio;
+        m_enableMetadata = m_openOptions.enableMetadata;
+        m_bindAddress = m_openOptions.bindAddress;
+        if (m_openOptions.rtpPort != 0) {
+            m_forcedClientRtpPort = m_openOptions.rtpPort;
+            m_forcedClientRtcpPort =
+                m_openOptions.rtcpPort != 0
+                    ? m_openOptions.rtcpPort
+                    : static_cast<uint16_t>(m_openOptions.rtpPort + 1);
+        }
+        if (m_openOptions.transport == SwMediaOpenOptions::TransportPreference::Tcp) {
+            m_useTcpTransport = true;
+        }
+        setLowLatencyMode(m_openOptions.lowLatency, 500);
+    }
+
+    static std::string hostForRtspUri_(const SwString& host) {
+        const std::string text = host.toStdString();
+        if (text.find(':') != std::string::npos &&
+            (text.empty() || text.front() != '[' || text.back() != ']')) {
+            return "[" + text + "]";
+        }
+        return text;
+    }
 
     void parseUrl() {
-        const SwMediaUrl parsed = SwMediaUrl::parse(m_url);
+        const SwMediaUrl& parsed = m_openOptions.mediaUrl;
+        const SwString scheme = parsed.scheme().isEmpty() ? SwString("rtsp") : parsed.scheme().toLower();
         m_host = parsed.host();
-        m_port = parsed.port() > 0 ? parsed.port() : 554;
+        m_port = parsed.port() > 0 ? parsed.port() : (scheme == "rtsps" ? 322 : 554);
         m_path = parsed.pathWithQuery();
         if (m_path.isEmpty()) {
             m_path = "/";
         }
-        m_baseUrl = "rtsp://" + m_host.toStdString();
-        if (m_port != 554) {
+        m_rtspScheme = scheme.toStdString();
+        m_baseUrl = m_rtspScheme + "://" + hostForRtspUri_(m_host);
+        const int defaultPort = (scheme == "rtsps") ? 322 : 554;
+        if (m_port != defaultPort) {
             m_baseUrl += ":" + std::to_string(m_port);
         }
+    }
+
+    SwAbstractSocket* createControlSocket_() {
+        if (m_useTls) {
+            auto* sslSocket = new SwSslSocket();
+            sslSocket->setPeerHostName(m_host);
+            if (!m_trustedCaFile.isEmpty()) {
+                sslSocket->setTrustedCaFile(m_trustedCaFile);
+            }
+            return sslSocket;
+        }
+        return new SwTcpSocket();
+    }
+
+    void connectControlSocket_() {
+        if (!m_rtspSocket) {
+            return;
+        }
+        SwObject::connect(m_rtspSocket, &SwAbstractSocket::connected, m_callbackContext, [this]() {
+            m_cseq = 0;
+            m_sessionId.clear();
+            m_state = RtspStep::Options;
+            sendOptions();
+        });
+        SwObject::connect(m_rtspSocket, &SwIODevice::readyRead, m_callbackContext, [this]() {
+            readControlSocket();
+            handleControlBuffer();
+        });
+        SwObject::connect(m_rtspSocket, &SwAbstractSocket::disconnected, m_callbackContext, [this]() {
+            if (m_rtspDisconnectSuppress.load() > 0) {
+                return;
+            }
+            swCWarning(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] RTSP disconnected";
+            stopStreaming(false);
+            scheduleReconnect("RTSP disconnected");
+        });
+        SwObject::connect(m_rtspSocket, &SwAbstractSocket::errorOccurred, m_callbackContext, [this](int code) {
+            swCError(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] RTSP socket error: " << code;
+            stopStreaming(false);
+            scheduleReconnect("RTSP socket error");
+        });
     }
 
     void resetStreamState() {
@@ -522,7 +615,15 @@ private:
         m_audioTrackControl.clear();
         m_metadataTrackControl.clear();
         m_sessionControl.clear();
+        m_controlBaseUrl.clear();
         m_sessionId.clear();
+        m_pendingRequests.clear();
+        m_authChallenge = RtspAuthChallenge{};
+        m_authNonceCount = 0;
+        m_authRetrySerial = 0;
+        m_keepAliveUsesGetParameter = false;
+        m_sessionTimeoutSeconds = 60;
+        m_keepAliveIntervalMs = 15000;
         m_state = RtspStep::None;
         m_cseq = 0;
         m_serverRtpPort = 0;
@@ -565,6 +666,7 @@ private:
         closeRtspSocket();
         if (m_keepAliveTimer) {
             m_keepAliveTimer->stop();
+            m_keepAliveTimer->setInterval(m_keepAliveIntervalMs);
         }
         m_localSsrc = generateSsrc();
         m_remoteSsrc = 0;
@@ -590,6 +692,7 @@ private:
         if (m_keepAliveTimer) {
             m_keepAliveTimer->stop();
         }
+        sendTeardownBestEffort_();
         if (m_udpSession) {
             m_udpSession->stop();
             m_udpSession.reset();
@@ -607,6 +710,7 @@ private:
         if (m_trackGraph) {
             m_trackGraph->reset();
         }
+        m_pendingRequests.clear();
         if (hardStop) {
             setRunning(false);
         }
@@ -696,12 +800,20 @@ private:
         int status = parseStatusCode(header);
         int cseq = parseCSeq(header);
         auto pendingIt = m_pendingRequests.find(cseq);
+        const bool hasPending = (pendingIt != m_pendingRequests.end());
+        const RtspRequest pendingRequest = hasPending ? pendingIt->second : RtspRequest{};
         std::string method = (pendingIt != m_pendingRequests.end()) ? pendingIt->second.method : std::string();
         logRtspResponse(method, cseq, status, header, body);
         if (status != 200) {
+            if (status == 401 && hasPending) {
+                m_pendingRequests.erase(pendingIt);
+                if (retryWithAuthentication_(header, pendingRequest)) {
+                    return;
+                }
+            }
             bool shouldRetry = (status >= 500);
-            if (shouldRetry && pendingIt != m_pendingRequests.end()) {
-                RtspRequest req = pendingIt->second;
+            if (shouldRetry && hasPending) {
+                RtspRequest req = pendingRequest;
                 m_pendingRequests.erase(pendingIt);
                 if (req.retries < m_maxRequestRetries) {
                     swCWarning(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Retrying " << req.method << " after status " << status;
@@ -721,16 +833,18 @@ private:
             swCError(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] RTSP error status: " << status;
             return;
         }
-        if (pendingIt != m_pendingRequests.end()) {
+        if (hasPending) {
             m_pendingRequests.erase(pendingIt);
         }
         if (m_state == RtspStep::Options) {
+            m_keepAliveUsesGetParameter = supportsRtspMethod_(header, "GET_PARAMETER");
             m_state = RtspStep::Describe;
             sendDescribe();
             return;
         }
         if (m_state == RtspStep::Describe) {
             m_sdp = body;
+            m_controlBaseUrl = parseControlBaseUrl_(header);
             swCDebug(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] SDP:\n" << body;
             if (!parseSdp(body)) {
                 swCError(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Failed to parse SDP";
@@ -906,76 +1020,103 @@ private:
             swCDebug(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] <<< (CSeq " << cseq
                       << ", method=" << (method.empty() ? "?" : method)
                       << ", status=" << status << ")\n"
-                      << header;
+                      << sanitizeRtspMessageForLog_(header);
             return;
         }
 
         swCDebug(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] <<< (CSeq " << cseq
                   << ", method=" << (method.empty() ? "?" : method)
                   << ", status=" << status << ")\n"
-                  << header
+                  << sanitizeRtspMessageForLog_(header)
                   << "\n--BODY--\n" << body;
     }
 
+    static std::string sanitizeRtspMessageForLog_(const std::string& message) {
+        return SwRtspHeaderUtils::sanitizeMessageForLog(message);
+    }
+
+    static bool hasHeader_(const std::vector<std::pair<std::string, std::string>>& headers,
+                           const char* name) {
+        if (!name || !*name) {
+            return false;
+        }
+        const std::string needle = toLower(name);
+        for (const auto& header : headers) {
+            if (toLower(header.first) == needle) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     void resendRequest(const RtspRequest& req) {
-        sendRtsp(req.method, req.url, req.headers, req.body, req.retries + 1);
+        sendRtsp(req.method, req.url, req.headers, req.body, req.retries + 1, req.authRetries);
+    }
+
+    std::vector<std::string> headerValues_(const std::string& header, const char* key) const {
+        return SwRtspHeaderUtils::headerValues(header, key);
+    }
+
+    std::string headerValue_(const std::string& header, const char* key) const {
+        return SwRtspHeaderUtils::headerValue(header, key);
+    }
+
+    std::string parseControlBaseUrl_(const std::string& header) const {
+        return SwRtspHeaderUtils::parseControlBaseUrl(header);
+    }
+
+    bool supportsRtspMethod_(const std::string& header, const char* method) const {
+        return SwRtspHeaderUtils::supportsMethod(header, method);
+    }
+
+    std::string buildAuthorizationHeader_(const std::string& method, const std::string& url) {
+        return SwRtspAuth::buildAuthorizationHeader(m_authChallenge,
+                                                    m_rtspUserName,
+                                                    m_rtspPassword,
+                                                    method,
+                                                    url,
+                                                    m_authNonceCount);
+    }
+
+    bool retryWithAuthentication_(const std::string& header, const RtspRequest& request) {
+        if (request.authRetries >= 2 || m_rtspUserName.empty()) {
+            return false;
+        }
+        RtspAuthChallenge challenge;
+        if (!SwRtspAuth::selectChallenge(header, challenge)) {
+            return false;
+        }
+        if (challenge.nonce != m_authChallenge.nonce || challenge.algorithm != m_authChallenge.algorithm) {
+            m_authNonceCount = 0;
+        }
+        m_authChallenge = challenge;
+        sendRtsp(request.method,
+                 request.url,
+                 request.headers,
+                 request.body,
+                 request.retries,
+                 request.authRetries + 1);
+        return true;
     }
 
     void parseSession(const std::string& header) {
-        std::istringstream iss(header);
-        std::string line;
-        while (std::getline(iss, line)) {
-            if (line.size() > 0 && line.back() == '\r') {
-                line.pop_back();
-            }
-            std::string lower = toLower(line);
-            const std::string key = "session:";
-            if (lower.find(key) == 0) {
-                auto semicolon = line.find(';');
-                m_sessionId = (semicolon == std::string::npos) ? line.substr(key.size()) : line.substr(key.size(), semicolon - key.size());
-                trim(m_sessionId);
-                break;
+        SwRtspSessionInfo sessionInfo;
+        if (!SwRtspHeaderUtils::parseSessionInfo(header, sessionInfo)) {
+            return;
+        }
+        m_sessionId = sessionInfo.sessionId;
+        if (sessionInfo.timeoutSeconds > 0) {
+            m_sessionTimeoutSeconds = sessionInfo.timeoutSeconds;
+            m_keepAliveIntervalMs =
+                SwRtspHeaderUtils::keepAliveIntervalMsForTimeoutSeconds(sessionInfo.timeoutSeconds);
+            if (m_keepAliveTimer && !m_keepAliveTimer->isActive()) {
+                m_keepAliveTimer->setInterval(m_keepAliveIntervalMs);
             }
         }
     }
 
     void parseTransportInfo(const std::string& header, TransportInfo& info) {
-        std::istringstream iss(header);
-        std::string line;
-        while (std::getline(iss, line)) {
-            if (line.size() > 0 && line.back() == '\r') {
-                line.pop_back();
-            }
-            std::string lower = toLower(line);
-            const std::string key = "transport:";
-            if (lower.find(key) == 0) {
-                auto pos = lower.find("server_port=");
-                if (pos != std::string::npos) {
-                    int rtp = 0;
-                    int rtcp = 0;
-#if defined(_MSC_VER)
-                    ::sscanf_s(lower.c_str() + pos, "server_port=%d-%d", &rtp, &rtcp);
-#else
-                    std::sscanf(lower.c_str() + pos, "server_port=%d-%d", &rtp, &rtcp);
-#endif
-                    info.serverRtpPort = static_cast<uint16_t>(rtp);
-                    info.serverRtcpPort = static_cast<uint16_t>(rtcp);
-                }
-                pos = lower.find("interleaved=");
-                if (pos != std::string::npos) {
-                    int rtp = 0;
-                    int rtcp = 1;
-#if defined(_MSC_VER)
-                    ::sscanf_s(lower.c_str() + pos, "interleaved=%d-%d", &rtp, &rtcp);
-#else
-                    std::sscanf(lower.c_str() + pos, "interleaved=%d-%d", &rtp, &rtcp);
-#endif
-                    info.interleavedRtpChannel = static_cast<uint8_t>(rtp);
-                    info.interleavedRtcpChannel = static_cast<uint8_t>(rtcp);
-                }
-                break;
-            }
-        }
+        SwRtspHeaderUtils::parseTransportInfo(header, info);
     }
 
     bool parseSdp(const std::string& body) {
@@ -1506,13 +1647,11 @@ private:
             transport << "RTP/AVP/TCP;unicast;interleaved="
                       << static_cast<int>(interleavedRtpChannel)
                       << "-"
-                      << static_cast<int>(interleavedRtcpChannel)
-                      << ";mode=\"PLAY\"";
+                      << static_cast<int>(interleavedRtcpChannel);
         } else {
             transport << "RTP/AVP;unicast;client_port="
                       << clientRtpPort << "-"
-                      << clientRtcpPort
-                      << ";mode=\"PLAY\"";
+                      << clientRtcpPort;
         }
         headers.emplace_back("Transport", transport.str());
         if (!m_sessionId.empty()) {
@@ -1535,7 +1674,48 @@ private:
             return;
         }
         std::vector<std::pair<std::string, std::string>> headers = {{"Session", m_sessionId}};
-        sendRtsp("OPTIONS", fullUrl(), headers);
+        std::string keepAliveUrl = aggregatePlayUrl();
+        if (keepAliveUrl.empty()) {
+            keepAliveUrl = playUrl();
+        }
+        if (keepAliveUrl.empty()) {
+            keepAliveUrl = fullUrl();
+        }
+        if (m_keepAliveUsesGetParameter) {
+            sendRtsp("GET_PARAMETER", keepAliveUrl, headers);
+        } else {
+            sendRtsp("OPTIONS", keepAliveUrl, headers);
+        }
+    }
+
+    void sendTeardownBestEffort_() {
+        if (!m_rtspSocket || !m_rtspSocket->isOpen() || m_sessionId.empty()) {
+            return;
+        }
+        std::string url = aggregatePlayUrl();
+        if (url.empty()) {
+            url = playUrl();
+        }
+        if (url.empty()) {
+            url = fullUrl();
+        }
+        std::ostringstream oss;
+        oss << "TEARDOWN " << url << " RTSP/1.0\r\n";
+        oss << "CSeq: " << (++m_cseq) << "\r\n";
+        oss << "User-Agent: SwRtspUdpSource/1.0\r\n";
+        std::string hostHeader = hostForRtspUri_(m_host);
+        const int defaultPort = m_useTls ? 322 : 554;
+        if (m_port > 0 && m_port != defaultPort) {
+            hostHeader += ":" + std::to_string(m_port);
+        }
+        oss << "Host: " << hostHeader << "\r\n";
+        const std::string authorization = buildAuthorizationHeader_("TEARDOWN", url);
+        if (!authorization.empty()) {
+            oss << "Authorization: " << authorization << "\r\n";
+        }
+        oss << "Session: " << m_sessionId << "\r\n\r\n";
+        m_rtspSocket->write(SwString(oss.str()));
+        m_rtspSocket->waitForBytesWritten(200);
     }
 
     void configureUdpSockets() {
@@ -1622,7 +1802,14 @@ private:
                    m_framesEmitted.load() > 0 ? SwString("Reconnecting RTSP session...")
                                               : SwString("Connecting RTSP session..."));
         resetStreamState();
-        if (!m_rtspSocket->connectToHost(m_host, static_cast<uint16_t>(m_port))) {
+        bool connectOk = false;
+        if (m_useTls) {
+            auto* sslSocket = dynamic_cast<SwSslSocket*>(m_rtspSocket);
+            connectOk = sslSocket && sslSocket->connectToHostEncrypted(m_host, static_cast<uint16_t>(m_port));
+        } else {
+            connectOk = m_rtspSocket->connectToHost(m_host, static_cast<uint16_t>(m_port));
+        }
+        if (!connectOk) {
             swCError(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Failed to connect to " << m_host.toStdString()
                       << ":" << m_port;
             scheduleReconnect("connectToHost failed");
@@ -1702,16 +1889,30 @@ private:
                   const std::string& url,
                   const std::vector<std::pair<std::string, std::string>>& headers,
                   const std::string& body = std::string(),
-                  int retryCount = 0) {
+                  int retryCount = 0,
+                  int authRetryCount = 0) {
         if (!m_rtspSocket || !m_rtspSocket->isOpen()) {
             return;
+        }
+        std::vector<std::pair<std::string, std::string>> effectiveHeaders = headers;
+        if (!hasHeader_(effectiveHeaders, "Host")) {
+            std::string hostHeader = hostForRtspUri_(m_host);
+            const int defaultPort = m_useTls ? 322 : 554;
+            if (m_port > 0 && m_port != defaultPort) {
+                hostHeader += ":" + std::to_string(m_port);
+            }
+            effectiveHeaders.emplace_back("Host", hostHeader);
+        }
+        const std::string authorization = buildAuthorizationHeader_(method, url);
+        if (!authorization.empty() && !hasHeader_(effectiveHeaders, "Authorization")) {
+            effectiveHeaders.emplace_back("Authorization", authorization);
         }
         std::ostringstream oss;
         oss << method << " " << url << " RTSP/1.0\r\n";
         int cseq = ++m_cseq;
         oss << "CSeq: " << cseq << "\r\n";
         oss << "User-Agent: SwRtspUdpSource/1.0\r\n";
-        for (const auto& h : headers) {
+        for (const auto& h : effectiveHeaders) {
             oss << h.first << ": " << h.second << "\r\n";
         }
         if (!body.empty()) {
@@ -1722,9 +1923,13 @@ private:
             oss << body;
         }
         if (retryCount > 0) {
-            swCDebug(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] >>> (CSeq " << cseq << ", retry " << retryCount << ")\n" << oss.str();
+            swCDebug(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] >>> (CSeq " << cseq
+                      << ", retry " << retryCount << ", authRetry " << authRetryCount << ")\n"
+                      << sanitizeRtspMessageForLog_(oss.str());
         } else {
-            swCDebug(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] >>> (CSeq " << cseq << ")\n" << oss.str();
+            swCDebug(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] >>> (CSeq " << cseq
+                      << ", authRetry " << authRetryCount << ")\n"
+                      << sanitizeRtspMessageForLog_(oss.str());
         }
         m_rtspSocket->write(SwString(oss.str()));
         RtspRequest req;
@@ -1733,6 +1938,7 @@ private:
         req.headers = headers;
         req.body = body;
         req.retries = retryCount;
+        req.authRetries = authRetryCount;
         m_pendingRequests[cseq] = req;
     }
 
@@ -1740,17 +1946,21 @@ private:
         return m_baseUrl + m_path.toStdString();
     }
 
+    std::string controlBaseUrl_() const {
+        return m_controlBaseUrl.empty() ? fullUrl() : m_controlBaseUrl;
+    }
+
     std::string resolveControlUrl(const std::string& control) const {
         if (control.empty() || control == "*") {
-            return fullUrl();
+            return controlBaseUrl_();
         }
-        if (control.find("rtsp://") == 0) {
+        if (control.find("rtsp://") == 0 || control.find("rtsps://") == 0) {
             return control;
         }
         if (!control.empty() && control.front() == '/') {
             return m_baseUrl + control;
         }
-        std::string base = fullUrl();
+        std::string base = controlBaseUrl_();
         if (!base.empty() && base.back() != '/') {
             base.push_back('/');
         }
@@ -1762,10 +1972,20 @@ private:
     std::string metadataTrackUrl() const { return resolveControlUrl(m_metadataTrackControl); }
     std::string aggregatePlayUrl() const { return resolveControlUrl(m_sessionControl); }
     std::string playUrl() const {
-        if (!m_sessionControl.empty() || m_setupTargets.size() > 1) {
+        if (!m_sessionControl.empty() || !m_controlBaseUrl.empty() || m_setupTargets.size() > 1) {
             return aggregatePlayUrl();
         }
         return trackUrl();
+    }
+
+    static uint16_t nextPreferredClientRtpPort_() {
+        static std::atomic<unsigned int> nextSlot{0};
+        static constexpr uint16_t kFirstPort = 37700;
+        static constexpr uint16_t kLastPort = 64998;
+        static constexpr unsigned int kPortCount =
+            static_cast<unsigned int>(((kLastPort - kFirstPort) / 2) + 1);
+        const unsigned int slot = nextSlot.fetch_add(1, std::memory_order_relaxed);
+        return static_cast<uint16_t>(kFirstPort + ((slot % kPortCount) * 2));
     }
 
     SetupTarget currentSetupTarget_() const {
@@ -1791,7 +2011,7 @@ private:
         if (m_useTcpTransport) {
             return true; // no UDP ports needed
         }
-        SwString bindAddr = m_bindAddress.isEmpty() ? SwString("0.0.0.0") : m_bindAddress;
+        const SwString bindAddr = m_bindAddress;
         auto tryBindPair = [this, &bindAddr](uint16_t base) -> bool {
             if (base == 0) {
                 return false;
@@ -1817,11 +2037,14 @@ private:
                       << bindAddr.toStdString() << ":" << m_forcedClientRtpPort << "/" << m_forcedClientRtcpPort;
             return false;
         }
-        // Prefer the range around 37700 if it is free.
-        if (tryBindPair(37700)) {
+        const uint16_t preferredBase = nextPreferredClientRtpPort_();
+        if (tryBindPair(preferredBase)) {
             return true;
         }
-        for (uint16_t base = 50000; base < 65000; base += 2) {
+        for (uint16_t base = 37700; base < 65000; base += 2) {
+            if (base == preferredBase) {
+                continue;
+            }
             if (tryBindPair(base)) {
                 return true;
             } else {
@@ -1836,7 +2059,7 @@ private:
         if (m_useTcpTransport || m_selectedAudioTrackIndex < 0 || m_audioTrackControl.empty()) {
             return true;
         }
-        SwString bindAddr = m_bindAddress.isEmpty() ? SwString("0.0.0.0") : m_bindAddress;
+        const SwString bindAddr = m_bindAddress;
         auto tryBindPair = [this, &bindAddr](uint16_t base) -> bool {
             if (base == 0 || base == m_clientRtpPort) {
                 return false;
@@ -1864,7 +2087,7 @@ private:
         if (m_useTcpTransport || m_selectedMetadataTrackIndex < 0 || m_metadataTrackControl.empty()) {
             return true;
         }
-        SwString bindAddr = m_bindAddress.isEmpty() ? SwString("0.0.0.0") : m_bindAddress;
+        const SwString bindAddr = m_bindAddress;
         auto tryBindPair = [this, &bindAddr](uint16_t base) -> bool {
             const uint16_t rtcpPort = static_cast<uint16_t>(base + 1);
             if (base == 0 ||
@@ -2377,19 +2600,24 @@ private:
         return out;
     }
 
+    SwMediaOpenOptions m_openOptions{};
     SwString m_url;
     SwString m_host;
     int m_port{554};
     SwString m_path{"/"};
     SwString m_bindAddress{};
+    SwString m_trustedCaFile{};
     std::string m_baseUrl;
+    std::string m_rtspScheme{"rtsp"};
+    std::string m_rtspUserName{};
+    std::string m_rtspPassword{};
     std::map<int, RtspRequest> m_pendingRequests;
     int m_maxRequestRetries{1};
 
     SwObject* m_callbackContext{nullptr};
     SwThread* m_sourceThread{nullptr};
     std::unique_ptr<SwRtspTrackGraph> m_trackGraph{};
-    SwTcpSocket* m_rtspSocket{nullptr};
+    SwAbstractSocket* m_rtspSocket{nullptr};
     std::unique_ptr<SwRtpSession> m_udpSession{};
     std::unique_ptr<SwRtpSession> m_audioUdpSession{};
     std::unique_ptr<SwRtpSession> m_metadataUdpSession{};
@@ -2407,9 +2635,15 @@ private:
     std::string m_audioTrackControl;
     std::string m_metadataTrackControl;
     std::string m_sessionControl;
+    std::string m_controlBaseUrl;
     std::string m_sessionId;
+    RtspAuthChallenge m_authChallenge{};
     RtspStep m_state{RtspStep::None};
     int m_cseq{0};
+    uint32_t m_authNonceCount{0};
+    int m_authRetrySerial{0};
+    int m_sessionTimeoutSeconds{60};
+    int m_keepAliveIntervalMs{15000};
     int m_payloadType{96};
     int m_clockRate{90000};
     int m_audioPayloadType{-1};
@@ -2424,9 +2658,11 @@ private:
     bool m_enableAudio{false};
     bool m_enableMetadata{false};
     std::atomic<bool> m_loggedUnsupportedCodec{false};
+    bool m_useTls{false};
     bool m_useTcpTransport{false};
     bool m_triedTcpFallback{false};
     bool m_autoTcpFallbackActive{false};
+    bool m_keepAliveUsesGetParameter{false};
     std::atomic<bool> m_autoReconnect{false};
 
     uint16_t m_clientRtpPort{0};

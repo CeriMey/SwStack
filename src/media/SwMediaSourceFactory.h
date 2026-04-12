@@ -8,14 +8,19 @@
 
 #include "media/SwFileVideoSource.h"
 #include "media/SwHttpMjpegSource.h"
+#include "media/SwMediaFoundationMovieSource.h"
 #include "media/SwMediaOpenOptions.h"
-#include "media/SwRtpVideoSource.h"
-#include "media/SwRtspUdpSource.h"
-#include "media/SwUdpVideoSource.h"
 #include "media/SwMediaSource.h"
+#include "media/SwRtpVideoSource.h"
+#include "media/SwRtspSource.h"
+#include "media/SwUdpVideoSource.h"
 #include "media/SwVideoSource.h"
 
+#include <algorithm>
+#include <array>
+#include <cctype>
 #include <memory>
+#include <string>
 
 class SwMediaSourceFactory {
 public:
@@ -24,37 +29,10 @@ public:
     }
 
     static std::shared_ptr<SwMediaSource> createMediaSource(const SwMediaOpenOptions& options) {
-        return std::dynamic_pointer_cast<SwMediaSource>(createVideoSource(options));
-    }
-
-    static std::shared_ptr<SwVideoSource> createVideoSource(const SwString& rawUrl) {
-        return createVideoSource(SwMediaOpenOptions::fromUrl(rawUrl));
-    }
-
-    static std::shared_ptr<SwVideoSource> createVideoSource(const SwMediaOpenOptions& options) {
         const SwString scheme = options.mediaUrl.scheme().toLower();
 
-        if (scheme == "rtsp") {
-            auto source = std::make_shared<SwRtspUdpSource>(options.sourceUrl());
-            source->setLowLatencyMode(options.lowLatency, 500);
-            source->setEnableAudio(options.enableAudio);
-            source->setEnableMetadata(options.enableMetadata);
-            if (!options.bindAddress.isEmpty()) {
-                source->setLocalAddress(options.bindAddress);
-            }
-            if (options.rtpPort != 0) {
-                const uint16_t rtcpPort =
-                    options.rtcpPort != 0 ? options.rtcpPort
-                                          : static_cast<uint16_t>(options.rtpPort + 1);
-                source->forceLocalBind(options.bindAddress.isEmpty() ? SwString("0.0.0.0")
-                                                                     : options.bindAddress,
-                                       options.rtpPort,
-                                       rtcpPort);
-            }
-            if (options.transport == SwMediaOpenOptions::TransportPreference::Tcp) {
-                source->setUseTcpTransport(true);
-            }
-            return source;
+        if (scheme == "rtsp" || scheme == "rtsps") {
+            return std::make_shared<SwRtspSource>(options);
         }
 
         if (scheme == "http") {
@@ -73,10 +51,72 @@ public:
         }
 
         if (scheme == "file" || scheme.isEmpty()) {
-            return std::make_shared<SwFileVideoSource>(options.mediaUrl.path().toStdString(),
-                                                       options.codec);
+            return createFileMediaSource_(options);
         }
 
-        return std::shared_ptr<SwVideoSource>();
+        return std::shared_ptr<SwMediaSource>();
+    }
+
+    static std::shared_ptr<SwVideoSource> createVideoSource(const SwString& rawUrl) {
+        return createVideoSource(SwMediaOpenOptions::fromUrl(rawUrl));
+    }
+
+    static std::shared_ptr<SwVideoSource> createVideoSource(const SwMediaOpenOptions& options) {
+        return std::dynamic_pointer_cast<SwVideoSource>(createMediaSource(options));
+    }
+
+private:
+    static SwString localFilePath_(const SwMediaOpenOptions& options) {
+        std::string path = options.mediaUrl.path().toStdString();
+#if defined(_WIN32)
+        if (path.size() > 2U &&
+            path[0] == '/' &&
+            std::isalpha(static_cast<unsigned char>(path[1])) &&
+            path[2] == ':') {
+            path.erase(path.begin());
+        }
+#endif
+        return SwString(path);
+    }
+
+    static bool shouldUseMediaFoundationFileSource_(const SwMediaOpenOptions& options,
+                                                    const SwString& filePath) {
+#if defined(_WIN32)
+        if (options.codec != SwVideoPacket::Codec::Unknown) {
+            return false;
+        }
+        std::string lowerPath = filePath.toStdString();
+        std::transform(lowerPath.begin(),
+                       lowerPath.end(),
+                       lowerPath.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        const std::size_t dotPos = lowerPath.find_last_of('.');
+        if (dotPos == std::string::npos) {
+            return false;
+        }
+        const std::string extension = lowerPath.substr(dotPos);
+        static const std::array<const char*, 11> kContainerExtensions = {{
+            ".mp4", ".mov", ".m4v", ".mkv", ".avi", ".wmv",
+            ".asf", ".mpg", ".mpeg", ".webm", ".ts"
+        }};
+        return std::find(kContainerExtensions.begin(),
+                         kContainerExtensions.end(),
+                         extension) != kContainerExtensions.end();
+#else
+        (void)options;
+        (void)filePath;
+        return false;
+#endif
+    }
+
+    static std::shared_ptr<SwMediaSource> createFileMediaSource_(const SwMediaOpenOptions& options) {
+        const SwString filePath = localFilePath_(options);
+#if defined(_WIN32)
+        if (shouldUseMediaFoundationFileSource_(options, filePath)) {
+            return std::make_shared<SwMediaFoundationMovieSource>(filePath.toStdWString());
+        }
+#endif
+        return std::make_shared<SwFileVideoSource>(filePath.toStdString(),
+                                                   options.codec);
     }
 };

@@ -67,6 +67,11 @@ struct SwCreatorTheme {
     SwColor cardBg;
     SwColor cardBorder;
 
+    // ── Workspace / Canvas ───────────────────────────────────────────────
+    SwColor workspaceBg;        // darker bg behind the canvas
+    SwColor canvasShadow;       // shadow colour for the elevated canvas
+    SwColor canvasGridDot;      // subtle dot-grid on the canvas
+
     // ── Fonts ─────────────────────────────────────────────────────────────
     SwFont  codeFont;
     SwFont  uiBody;
@@ -82,9 +87,9 @@ struct SwCreatorTheme {
     int     spacingLg   = 16;
     int     spacingXl   = 24;
 
-    int     borderRadiusSm = 4;
-    int     borderRadiusMd = 8;
-    int     borderRadiusLg = 12;
+    int     borderRadiusSm = 2;
+    int     borderRadiusMd = 2;
+    int     borderRadiusLg = 2;
 
     int     sidebarWidth   = 48;
     int     sidebarBtnSize = 36;
@@ -177,6 +182,11 @@ struct SwCreatorTheme {
         t.cardBg            = {37, 39, 44};
         t.cardBorder        = {55, 59, 68};
 
+        // Workspace / Canvas
+        t.workspaceBg       = {30, 30, 34};
+        t.canvasShadow      = {0, 0, 0};
+        t.canvasGridDot     = {50, 53, 60};
+
         // Fonts
         t.codeFont          = SwFont(L"Consolas", 10, Medium);
         t.uiBody            = SwFont(L"Segoe UI", 11, Normal);
@@ -241,6 +251,11 @@ struct SwCreatorTheme {
         // Cards
         t.cardBg            = {255, 255, 255};
         t.cardBorder        = {225, 230, 232};
+
+        // Workspace / Canvas
+        t.workspaceBg       = {235, 238, 242};
+        t.canvasShadow      = {0, 0, 0};
+        t.canvasGridDot     = {210, 214, 220};
 
         // Fonts
         t.codeFont          = SwFont(L"Consolas", 10, Medium);

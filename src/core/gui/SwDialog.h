@@ -1149,7 +1149,9 @@ private:
         }
 
         SwWidget* root = findRootWidget(this);
-        SwWidgetPlatformHandle ownerHandle = root ? root->platformHandle() : SwWidgetPlatformHandle{};
+        const bool shouldUseOwnerWindow = m_modal;
+        SwWidgetPlatformHandle ownerHandle =
+            (shouldUseOwnerWindow && root) ? root->platformHandle() : SwWidgetPlatformHandle{};
         if (m_activePresentation != Presentation::NativeWindow) {
             m_originalParent = parent();
             m_originalRect = frameGeometry();
@@ -1165,7 +1167,7 @@ private:
         options.resizable = false;
         options.minimizable = false;
         options.maximizable = false;
-        options.showInTaskbar = false;
+        options.showInTaskbar = !shouldUseOwnerWindow;
         options.frameless = m_frameless;
 
         const std::string title = toUtf8_(m_title);
@@ -1205,11 +1207,15 @@ private:
         update();
         m_nativePlatformWindow->show();
 #if defined(_WIN32)
-        if (m_nativeIcon) {
-            HWND hwnd = static_cast<HWND>(m_nativePlatformWindow->nativeHandle());
-            if (hwnd) {
+        HWND hwnd = static_cast<HWND>(m_nativePlatformWindow->nativeHandle());
+        if (hwnd) {
+            if (m_nativeIcon) {
                 SendMessage(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(m_nativeIcon));
                 SendMessage(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(m_nativeIcon));
+            }
+            if (!m_modal) {
+                SetForegroundWindow(hwnd);
+                SetActiveWindow(hwnd);
             }
         }
 #endif

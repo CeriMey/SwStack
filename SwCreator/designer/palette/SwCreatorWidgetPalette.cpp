@@ -41,8 +41,8 @@ SwCreatorWidgetPalette::SwCreatorWidgetPalette(SwWidget* parent)
 
 SwSize SwCreatorWidgetPalette::minimumSizeHint() const {
     SwSize hint = SwWidget::minimumSizeHint();
-    const int pad = 0;
-    const int gap = 6;
+    const int pad = 8;
+    const int gap = 8;
     const int searchH = 34;
     const SwSize searchMin = m_search ? m_search->minimumSizeHint() : SwSize{0, searchH};
     const SwSize contentMin = m_toolBoxScroll
@@ -67,7 +67,7 @@ void SwCreatorWidgetPalette::buildUi_() {
     m_search->setStyleSheet(
         "SwLineEdit { background-color: " + SwCreatorTheme::rgb(th.surface3)
         + "; border-color: " + SwCreatorTheme::rgb(th.border)
-        + "; border-width: 1px; border-radius: 8px; padding: 4px 10px;"
+        + "; border-width: 1px; border-radius: 2px; padding: 4px 10px;"
         " color: " + SwCreatorTheme::rgb(th.textPrimary) + "; }");
 
     m_toolBoxScroll = new SwScrollArea(this);
@@ -80,22 +80,23 @@ void SwCreatorWidgetPalette::buildUi_() {
     m_toolBox->setExclusive(false);
     m_toolBox->setContentsMargin(0);
     m_toolBox->setSpacing(0);
-    m_toolBox->setHeaderHeight(26);
+    m_toolBox->setHeaderHeight(32);
     m_toolBox->setStyleSheet(
         "SwToolBox { background-color: " + SwCreatorTheme::rgb(th.surface2) + "; border-width: 0px; border-radius: 0px; }");
     m_toolBox->setHeaderStyleSheet(
         "SwToolButton {"
-        " background-color: " + SwCreatorTheme::rgb(th.surface3)
+        " background-color: " + SwCreatorTheme::rgb(th.surface2)
         + "; background-color-hover: " + SwCreatorTheme::rgb(th.hoverBg)
         + "; background-color-pressed: " + SwCreatorTheme::rgb(th.pressedBg)
-        + "; background-color-checked: " + SwCreatorTheme::rgb(th.hoverBg)
-        + "; border-color: " + SwCreatorTheme::rgb(th.border)
-        + "; border-width: 0px; border-radius: 0px;"
-        " color: " + SwCreatorTheme::rgb(th.textPrimary)
+        + "; background-color-checked: " + SwCreatorTheme::rgb(th.surface2)
+        + "; border-color: " + SwCreatorTheme::rgb(th.borderLight)
+        + "; border-width: 0px; border-bottom-width: 1px; border-radius: 0px;"
+        " color: " + SwCreatorTheme::rgb(th.textSecondary)
         + "; color-disabled: " + SwCreatorTheme::rgb(th.textMuted)
-        + "; indicator-color: " + SwCreatorTheme::rgb(th.textSecondary)
+        + "; indicator-color: " + SwCreatorTheme::rgb(th.textMuted)
         + "; indicator-color-disabled: " + SwCreatorTheme::rgb(th.textMuted)
-        + "; padding: 3px 10px; }");
+        + "; padding: 4px 12px;"
+        " font-size: 11px; }");
 
     m_toolBoxScroll->setWidget(m_toolBox);
 
@@ -217,8 +218,8 @@ void SwCreatorWidgetPalette::buildPages_() {
 
 void SwCreatorWidgetPalette::updateLayout_() {
     const SwRect r = rect();
-    const int pad = 0;
-    const int gap = 6;
+    const int pad = 8;
+    const int gap = 8;
     const int searchH = 34;
 
     if (m_search) {

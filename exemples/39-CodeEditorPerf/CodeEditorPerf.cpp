@@ -42,6 +42,51 @@ public:
         m_selectionStart = m_selectionEnd = m_cursorPos;
         insertTextAt(m_cursorPos, text);
     }
+
+    void benchBackspaceAt(size_t pos) {
+        m_cursorPos = std::min(pos, m_pieceTable.totalLength());
+        m_selectionStart = m_selectionEnd = m_cursorPos;
+        backspace();
+    }
+
+    void benchDeleteAt(size_t pos) {
+        m_cursorPos = std::min(pos, m_pieceTable.totalLength());
+        m_selectionStart = m_selectionEnd = m_cursorPos;
+        deleteForward();
+    }
+
+    SwString consistencyError() const {
+        if (!document()) {
+            return "missing-document";
+        }
+        if (toPlainText() != document()->toPlainText()) {
+            const SwString piece = toPlainText();
+            const SwString doc = document()->toPlainText();
+            size_t mismatch = 0;
+            const size_t compareLen = std::min(piece.size(), doc.size());
+            while (mismatch < compareLen && piece[mismatch] == doc[mismatch]) {
+                ++mismatch;
+            }
+            std::cerr << "piece-len=" << piece.size()
+                      << " doc-len=" << doc.size()
+                      << " mismatch=" << mismatch
+                      << " piece-head=" << piece.substr(0, std::min<size_t>(40, piece.size())).toStdString()
+                      << " doc-head=" << doc.substr(0, std::min<size_t>(40, doc.size())).toStdString()
+                      << std::endl;
+            return "text-mismatch";
+        }
+        if (m_pieceTable.lineCount() != document()->blockCount()) {
+            return "line-count-mismatch";
+        }
+        if (m_cursorPos > m_pieceTable.totalLength()) {
+            return "cursor-out-of-range";
+        }
+        const CursorInfo ci = cursorInfo();
+        if (ci.line < 0 || ci.line >= m_pieceTable.lineCount()) {
+            return "cursor-line-invalid";
+        }
+        return SwString();
+    }
 };
 
 static void appendLine_(GeneratedDocument& doc, const SwString& line) {
@@ -102,6 +147,44 @@ static void printMetric_(const char* name, long long value, const char* unit) {
     std::cout << name << ": " << value << " " << unit << std::endl;
 }
 
+static bool runDeletionConsistencyTest_() {
+    const SwString baseText =
+        "class Sample {\n"
+        "public:\n"
+        "    void run() {\n"
+        "        int value = 10;\n"
+        "        value += 1;\n"
+        "    }\n"
+        "};\n";
+
+    for (size_t pos = 0; pos <= baseText.size(); ++pos) {
+        {
+            PerfCodeEditor editor;
+            editor.setPlainText(baseText);
+            editor.benchBackspaceAt(pos);
+            const SwString error = editor.consistencyError();
+            if (!error.isEmpty()) {
+                std::cerr << "deletion-consistency: FAIL backspace@" << pos
+                          << " (" << error.toStdString() << ")" << std::endl;
+                return false;
+            }
+        }
+        {
+            PerfCodeEditor editor;
+            editor.setPlainText(baseText);
+            editor.benchDeleteAt(pos);
+            const SwString error = editor.consistencyError();
+            if (!error.isEmpty()) {
+                std::cerr << "deletion-consistency: FAIL delete@" << pos
+                          << " (" << error.toStdString() << ")" << std::endl;
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
 } // namespace
 
 int main() {
@@ -157,6 +240,7 @@ int main() {
     const long long setTextMs = measureMs_([&]() {
         editor.setPlainText(generated.text);
     });
+    const bool deletionConsistency = runDeletionConsistencyTest_();
     const long long highlightMs = measureMs_([&]() {
         highlighter->rehighlight();
     });
@@ -219,11 +303,13 @@ int main() {
     printMetric_("typing-max", typingMaxUs, "us");
     printMetric_("reindex-after-typing", reindexAfterTypingMs, "ms");
     printMetric_("bulk-paste", bulkPasteMs, "ms");
+    std::cout << "deletion-consistency: " << (deletionConsistency ? "PASS" : "FAIL") << std::endl;
     std::cout << "index-scopes: " << stats.scopeCount << std::endl;
     std::cout << "index-types: " << stats.typeCount << std::endl;
     std::cout << "index-symbols: " << stats.symbolCount << std::endl;
 
     const bool fluent =
+        deletionConsistency &&
         typingAvgUs <= 2500 &&
         typingMaxUs <= 8000 &&
         completionAvgUs <= 1500 &&
