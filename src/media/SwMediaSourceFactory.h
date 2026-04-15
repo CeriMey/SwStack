@@ -8,9 +8,9 @@
 
 #include "media/SwFileVideoSource.h"
 #include "media/SwHttpMjpegSource.h"
-#include "media/SwMediaFoundationMovieSource.h"
 #include "media/SwMediaOpenOptions.h"
 #include "media/SwMediaSource.h"
+#include "media/SwPlatformMovieSource.h"
 #include "media/SwRtpVideoSource.h"
 #include "media/SwRtspSource.h"
 #include "media/SwUdpVideoSource.h"
@@ -79,8 +79,8 @@ private:
         return SwString(path);
     }
 
-    static bool shouldUseMediaFoundationFileSource_(const SwMediaOpenOptions& options,
-                                                    const SwString& filePath) {
+    static bool shouldUsePlatformFileSource_(const SwMediaOpenOptions& options,
+                                             const SwString& filePath) {
 #if defined(_WIN32)
         if (options.codec != SwVideoPacket::Codec::Unknown) {
             return false;
@@ -112,8 +112,8 @@ private:
     static std::shared_ptr<SwMediaSource> createFileMediaSource_(const SwMediaOpenOptions& options) {
         const SwString filePath = localFilePath_(options);
 #if defined(_WIN32)
-        if (shouldUseMediaFoundationFileSource_(options, filePath)) {
-            return std::make_shared<SwMediaFoundationMovieSource>(filePath.toStdWString());
+        if (shouldUsePlatformFileSource_(options, filePath)) {
+            return std::make_shared<SwPlatformMovieSource>(filePath.toStdWString());
         }
 #endif
         return std::make_shared<SwFileVideoSource>(filePath.toStdString(),

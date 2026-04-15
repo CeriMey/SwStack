@@ -58,6 +58,7 @@
 #include <vector>
 
 class SwImage;
+class SwVideoFrame;
 
 class SwPainter {
 public:
@@ -266,6 +267,41 @@ public:
     }
 
     /**
+     * @brief Uploads a tightly packed BGRA32 frame to the native paint target.
+     * @param targetRect Destination rectangle in painter coordinates.
+     * @param pixels Pointer to the first BGRA pixel.
+     * @param width Source width in pixels.
+     * @param height Source height in pixels.
+     * @param stride Source stride in bytes.
+     * @return `true` when the native backend consumed the frame; otherwise `false`.
+     */
+    virtual bool drawBgra32(const SwRect& targetRect,
+                            const uint8_t* pixels,
+                            int width,
+                            int height,
+                            int stride) {
+        SW_UNUSED(targetRect)
+        SW_UNUSED(pixels)
+        SW_UNUSED(width)
+        SW_UNUSED(height)
+        SW_UNUSED(stride)
+        return false;
+    }
+
+    /**
+     * @brief Draws a platform-native video frame when the painter can consume it directly.
+     * @param targetRect Destination rectangle in painter coordinates.
+     * @param frame Native frame to present.
+     * @return `true` when the native backend presented the frame; otherwise `false`.
+     */
+    virtual bool drawNativeVideoFrame(const SwRect& targetRect,
+                                      const SwVideoFrame& frame) {
+        SW_UNUSED(targetRect)
+        SW_UNUSED(frame)
+        return false;
+    }
+
+    /**
      * @brief Performs the `drawText` operation.
      * @param rect Rectangle used by the operation.
      * @param text Value passed to the method.
@@ -450,6 +486,31 @@ public:
         r.x += m_dx;
         r.y += m_dy;
         m_base->drawImage(r, image, sourceRect);
+    }
+
+    bool drawBgra32(const SwRect& targetRect,
+                    const uint8_t* pixels,
+                    int width,
+                    int height,
+                    int stride) override {
+        if (!m_base) {
+            return false;
+        }
+        SwRect r = targetRect;
+        r.x += m_dx;
+        r.y += m_dy;
+        return m_base->drawBgra32(r, pixels, width, height, stride);
+    }
+
+    bool drawNativeVideoFrame(const SwRect& targetRect,
+                              const SwVideoFrame& frame) override {
+        if (!m_base) {
+            return false;
+        }
+        SwRect r = targetRect;
+        r.x += m_dx;
+        r.y += m_dy;
+        return m_base->drawNativeVideoFrame(r, frame);
     }
 
     void drawText(const SwRect& rect,

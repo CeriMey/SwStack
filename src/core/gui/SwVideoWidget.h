@@ -48,12 +48,13 @@
 
 #include "SwWidget.h"
 #include "SwPainter.h"
+#include "graphics/SwImage.h"
 #include "core/object/SwPointer.h"
 
 #include "media/SwVideoFrame.h"
 #include "media/SwVideoSink.h"
 #if defined(_WIN32)
-#include "media/SwMediaFoundationVideoDecoder.h"
+#include "media/SwPlatformVideoDecoder.h"
 #include "platform/win/SwD3D11VideoInterop.h"
 #endif
 #include "SwGuiApplication.h"
@@ -126,6 +127,70 @@ public:
         return true;
     }
 };
+
+class SwImageVideoRenderer : public SwVideoRenderer {
+public:
+    bool render(SwPainter* painter,
+                const SwVideoFrame& frame,
+                const SwRect& targetRect) override {
+        if (!painter || !frame.isValid() || frame.pixelFormat() != SwVideoPixelFormat::BGRA32 ||
+            !frame.planeData(0) || frame.planeStride(0) < frame.width() * 4) {
+            return false;
+        }
+
+        SwImage image(frame.width(), frame.height(), SwImage::Format_ARGB32);
+        if (image.isNull()) {
+            return false;
+        }
+
+        const uint8_t* src = frame.planeData(0);
+        const int srcStride = frame.planeStride(0);
+        const std::size_t copyBytes = static_cast<std::size_t>(frame.width()) * 4;
+        for (int y = 0; y < frame.height(); ++y) {
+            uint8_t* dstRow = reinterpret_cast<uint8_t*>(image.scanLine(y));
+            if (!dstRow) {
+                return false;
+            }
+            const uint8_t* srcRow = src + static_cast<std::size_t>(y) * srcStride;
+            std::memcpy(dstRow, srcRow, copyBytes);
+        }
+
+        painter->drawImage(targetRect, image, nullptr);
+        return true;
+    }
+};
+
+#if !defined(_WIN32)
+class SwNativeFrameVideoRenderer : public SwVideoRenderer {
+public:
+    bool render(SwPainter* painter,
+                const SwVideoFrame& frame,
+                const SwRect& targetRect) override {
+        if (!painter || !frame.isValid() || !frame.isNative()) {
+            return false;
+        }
+        return painter->drawNativeVideoFrame(targetRect, frame);
+    }
+};
+
+class SwNativeVideoUploadRenderer : public SwVideoRenderer {
+public:
+    bool render(SwPainter* painter,
+                const SwVideoFrame& frame,
+                const SwRect& targetRect) override {
+        if (!painter || !frame.isValid() || frame.pixelFormat() != SwVideoPixelFormat::BGRA32 ||
+            !frame.planeData(0) || frame.planeStride(0) < frame.width() * 4) {
+            return false;
+        }
+
+        return painter->drawBgra32(targetRect,
+                                   frame.planeData(0),
+                                   frame.width(),
+                                   frame.height(),
+                                   frame.planeStride(0));
+    }
+};
+#endif
 
 #if defined(_WIN32)
 class SwD3D11VideoRenderer : public SwVideoRenderer {
@@ -625,6 +690,10 @@ class SwVideoWidget : public SwWidget {
 public:
     using FrameCallback = std::function<void(const SwVideoFrame&)>;
 
+#ifdef None
+#undef None
+#endif
+
     enum class ScalingMode {
         Fit,
         Fill,
@@ -635,6 +704,9 @@ public:
     enum class RenderPath {
         None,
         GPUZeroCopy,
+        NativePlatformSurface,
+        NativePlatformUpload,
+        CpuPainterImage,
         CpuD2DUpload,
         CpuGdiFallback,
         Placeholder
@@ -879,7 +951,8 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     SwVideoFrame currentFrame() const {
-        return m_videoSink ? m_videoSink->currentFrame() : SwVideoFrame();
+        std::lock_guard<std::mutex> lock(m_frameMutex);
+        return m_currentFrame;
     }
 
     /**
@@ -889,7 +962,8 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     std::chrono::steady_clock::time_point lastFrameTime() const {
-        return m_videoSink ? m_videoSink->lastFrameTime() : std::chrono::steady_clock::time_point{};
+        std::lock_guard<std::mutex> lock(m_frameMutex);
+        return m_lastFrameTime;
     }
 
     /**
@@ -932,8 +1006,46 @@ public:
                 }
             }
 #endif
+#if !defined(_WIN32)
+            if (!rendered && frame.isNative()) {
+                auto nativeFrameRenderer = ensureNativeFrameRenderer_();
+                if (nativeFrameRenderer) {
+                    rendered = nativeFrameRenderer->render(painter, frame, target);
+                    if (rendered) {
+                        if (m_useAutomaticRenderer) {
+                            m_renderer = nativeFrameRenderer;
+                        }
+                        recordRenderPath_(RenderPath::NativePlatformSurface);
+                    }
+                }
+            }
             if (!rendered && isTightBGRAFrame_(frame)) {
+                auto nativeRenderer = ensureNativeUploadRenderer_();
+                if (nativeRenderer) {
+                    rendered = nativeRenderer->render(painter, frame, target);
+                    if (rendered) {
+                        if (m_useAutomaticRenderer) {
+                            m_renderer = nativeRenderer;
+                        }
+                        recordRenderPath_(RenderPath::NativePlatformUpload);
+                    }
+                }
+            }
+            if (!rendered && isTightBGRAFrame_(frame)) {
+                auto imageRenderer = ensureImageRenderer_();
+                if (imageRenderer) {
+                    rendered = imageRenderer->render(painter, frame, target);
+                    if (rendered) {
+                        if (m_useAutomaticRenderer) {
+                            m_renderer = imageRenderer;
+                        }
+                        recordRenderPath_(RenderPath::CpuPainterImage);
+                    }
+                }
+            }
+#endif
 #if defined(_WIN32)
+            if (!rendered && isTightBGRAFrame_(frame)) {
                 auto d2dRenderer = ensureD2DRenderer_();
                 if (d2dRenderer) {
                     rendered = d2dRenderer->render(painter, frame, target);
@@ -944,9 +1056,7 @@ public:
                         recordRenderPath_(RenderPath::CpuD2DUpload);
                     }
                 }
-#endif
             }
-#if defined(_WIN32)
             if (!rendered) {
                 auto gdiRenderer = ensureGdiRenderer_();
                 if (gdiRenderer) {
@@ -1226,6 +1336,29 @@ private:
         return m_fallbackRenderer;
     }
 
+    std::shared_ptr<SwVideoRenderer> ensureImageRenderer_() {
+        if (!m_imageRenderer) {
+            m_imageRenderer = std::make_shared<SwImageVideoRenderer>();
+        }
+        return m_imageRenderer;
+    }
+
+#if !defined(_WIN32)
+    std::shared_ptr<SwVideoRenderer> ensureNativeFrameRenderer_() {
+        if (!m_nativeFrameRenderer) {
+            m_nativeFrameRenderer = std::make_shared<SwNativeFrameVideoRenderer>();
+        }
+        return m_nativeFrameRenderer;
+    }
+
+    std::shared_ptr<SwVideoRenderer> ensureNativeUploadRenderer_() {
+        if (!m_nativeUploadRenderer) {
+            m_nativeUploadRenderer = std::make_shared<SwNativeVideoUploadRenderer>();
+        }
+        return m_nativeUploadRenderer;
+    }
+#endif
+
 #if defined(_WIN32)
     std::shared_ptr<SwVideoRenderer> ensureGpuRenderer_() {
         if (!m_gpuRenderer) {
@@ -1259,6 +1392,12 @@ private:
         switch (path) {
         case RenderPath::GPUZeroCopy:
             return "GPU zero-copy";
+        case RenderPath::NativePlatformSurface:
+            return "native platform surface";
+        case RenderPath::NativePlatformUpload:
+            return "native platform upload";
+        case RenderPath::CpuPainterImage:
+            return "CPU painter image";
         case RenderPath::CpuD2DUpload:
             return "CPU D2D upload";
         case RenderPath::CpuGdiFallback:
@@ -1502,6 +1641,11 @@ private:
     std::shared_ptr<SwVideoRenderer> m_d2dRenderer;
     std::shared_ptr<SwVideoRenderer> m_gdiRenderer;
 #endif
+#if !defined(_WIN32)
+    std::shared_ptr<SwVideoRenderer> m_nativeFrameRenderer;
+    std::shared_ptr<SwVideoRenderer> m_nativeUploadRenderer;
+#endif
+    std::shared_ptr<SwVideoRenderer> m_imageRenderer;
     std::shared_ptr<SwVideoRenderer> m_fallbackRenderer;
     ScalingMode m_scalingMode{ScalingMode::Fit};
     SwColor m_backgroundColor{0, 0, 0};

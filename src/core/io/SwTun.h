@@ -62,7 +62,7 @@
 #  include <unistd.h>
 #  include <sys/ioctl.h>
 #  include <sys/select.h>
-#  include <linux/if.h>
+#  include <net/if.h>
 #  include <linux/if_tun.h>
 #  include <arpa/inet.h>
 #endif

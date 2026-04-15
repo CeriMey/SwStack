@@ -46,6 +46,7 @@
 
 
 #include "media/SwMediaSource.h"
+#include "media/SwPlatformVideoDecoderIds.h"
 #include "media/SwVideoDecoder.h"
 #include "media/SwVideoPacket.h"
 #include "SwDebug.h"
@@ -519,15 +520,15 @@ public:
 
 private:
     static bool isHardwareDecoderId_(const SwString& decoderId) {
-        return decoderId == "media-foundation-hardware";
+        return swIsPlatformHardwareVideoDecoderId(decoderId);
     }
 
     static bool isSoftwareDecoderId_(const SwString& decoderId) {
-        return decoderId == "media-foundation-software";
+        return swIsPlatformSoftwareVideoDecoderId(decoderId);
     }
 
-    static bool isAutoMediaFoundationDecoderId_(const SwString& decoderId) {
-        return decoderId.isEmpty() || decoderId == "media-foundation";
+    static bool isAutoPlatformDecoderId_(const SwString& decoderId) {
+        return swIsPlatformAutoVideoDecoderId(decoderId);
     }
 
     static bool usesMediaFoundationFixedStartupResolution_(SwVideoPacket::Codec codec) {
@@ -562,10 +563,10 @@ private:
         }
         const SwString decoderName(decoder->name());
         if (decoderName.contains("DecoderHW")) {
-            return "media-foundation-hardware";
+            return swPlatformHardwareVideoDecoderId();
         }
         if (decoderName.contains("DecoderSW")) {
-            return "media-foundation-software";
+            return swPlatformSoftwareVideoDecoderId();
         }
         return "auto";
     }
@@ -580,7 +581,7 @@ private:
 
     SwString probeConcreteDecoderSelectionLocked_(SwVideoPacket::Codec codec,
                                                   const SwString& requestedDecoderId) const {
-        const SwString hardwareDecoderId("media-foundation-hardware");
+        const SwString hardwareDecoderId = swPlatformHardwareVideoDecoderId();
         if (SwVideoDecoderFactory::instance().contains(codec, hardwareDecoderId)) {
             std::shared_ptr<SwVideoDecoder> decoder =
                 SwVideoDecoderFactory::instance().create(codec, hardwareDecoderId);
@@ -596,7 +597,7 @@ private:
             }
         }
 
-        const SwString softwareDecoderId("media-foundation-software");
+        const SwString softwareDecoderId = swPlatformSoftwareVideoDecoderId();
         if (SwVideoDecoderFactory::instance().contains(codec, softwareDecoderId)) {
             std::shared_ptr<SwVideoDecoder> decoder =
                 SwVideoDecoderFactory::instance().create(codec, softwareDecoderId);
@@ -624,7 +625,7 @@ private:
         const SwString primaryDecoderId = primaryDecoderSelectionLocked_(codec);
         SwString resolvedDecoderId = primaryDecoderId;
         if (usesMediaFoundationFixedStartupResolution_(codec) &&
-            isAutoMediaFoundationDecoderId_(primaryDecoderId)) {
+            isAutoPlatformDecoderId_(primaryDecoderId)) {
             resolvedDecoderId = probeConcreteDecoderSelectionLocked_(codec, primaryDecoderId);
         }
         if (!resolvedDecoderId.isEmpty()) {
@@ -685,7 +686,7 @@ private:
             return;
         }
         DecoderRoutingState& state = m_decoderRoutingStates[codec];
-        state.temporaryOverrideDecoderId = "media-foundation-software";
+        state.temporaryOverrideDecoderId = swPlatformSoftwareVideoDecoderId();
         state.retryPrimaryOnNextRecoveryKeyFrame = true;
         state.pendingPrimaryRetry = false;
         state.temporaryOverrideBridged = false;

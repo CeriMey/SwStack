@@ -2,6 +2,7 @@
 
 #include "media/SwMediaOpenOptions.h"
 #include "media/SwMediaSourceFactory.h"
+#include "media/SwPlatformVideoDecoderIds.h"
 #include "runtime/SwTimer.h"
 
 #include <cstdlib>
@@ -47,6 +48,46 @@ static bool shouldAutoOpenRtsp_() {
     enabled = value;
 #endif
     return enabled == "1" || enabled == "true" || enabled == "TRUE" || enabled == "yes" || enabled == "YES";
+}
+
+static SwString configuredRtspUrl_() {
+    std::string url;
+#if defined(_WIN32)
+    char* value = nullptr;
+    std::size_t valueSize = 0;
+    if (_dupenv_s(&value, &valueSize, "SW_RTSP_URL") != 0 || !value) {
+        return "rtsp://127.0.0.1:8554/test";
+    }
+    url.assign(value, valueSize > 0 ? valueSize - 1 : 0);
+    std::free(value);
+#else
+    const char* value = std::getenv("SW_RTSP_URL");
+    if (!value || !*value) {
+        return "rtsp://127.0.0.1:8554/test";
+    }
+    url = value;
+#endif
+    return url.empty() ? SwString("rtsp://127.0.0.1:8554/test") : SwString(url);
+}
+
+static SwString configuredDecoderId_() {
+    std::string decoderId;
+#if defined(_WIN32)
+    char* value = nullptr;
+    std::size_t valueSize = 0;
+    if (_dupenv_s(&value, &valueSize, "SW_RTSP_DECODER_ID") != 0 || !value) {
+        return SwString();
+    }
+    decoderId.assign(value, valueSize > 0 ? valueSize - 1 : 0);
+    std::free(value);
+#else
+    const char* value = std::getenv("SW_RTSP_DECODER_ID");
+    if (!value || !*value) {
+        return SwString();
+    }
+    decoderId = value;
+#endif
+    return decoderId.empty() ? SwString() : SwString(decoderId);
 }
 
 } // namespace
@@ -152,7 +193,7 @@ void SocketTrafficRtspPlayerWidget::stopPlayback() {
 }
 
 SwString SocketTrafficRtspPlayerWidget::defaultRtspUrl_() {
-    return "rtsp://127.0.0.1:8554/test";
+    return configuredRtspUrl_();
 }
 
 void SocketTrafficRtspPlayerWidget::buildUi_() {
@@ -289,10 +330,13 @@ void SocketTrafficRtspPlayerWidget::configureLiveVideoPipeline_(const SwMediaOpe
 
     SwString decoderId = openOptions.decoderId.trimmed();
     if (decoderId.isEmpty()) {
+        decoderId = configuredDecoderId_().trimmed();
+    }
+    if (decoderId.isEmpty()) {
         sink->setPreferredVideoDecoder(SwVideoPacket::Codec::H264,
-                                       "media-foundation");
+                                       swPlatformVideoDecoderId());
         sink->setPreferredVideoDecoder(SwVideoPacket::Codec::H265,
-                                       "media-foundation");
+                                       swPlatformVideoDecoderId());
         return;
     }
     sink->setPreferredVideoDecoder(SwVideoPacket::Codec::H264, decoderId);

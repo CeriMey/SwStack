@@ -158,6 +158,8 @@ sw_add_example_subdirectory(exemples/56-LoadingOverlayDemo OFF)
 sw_add_example_subdirectory(exemples/57-TableDbSelfTest OFF)
 sw_add_example_subdirectory(exemples/58-WidgetPerfSelfTest OFF)
 sw_add_example_subdirectory(exemples/59-GridLayoutSelfTest OFF)
+sw_add_example_subdirectory(exemples/60-FuturePromiseSelfTest OFF)
+sw_add_example_subdirectory(exemples/61-PlatformVideoDecoderSelfTest ON)
 sw_add_example_subdirectory(sandbox/SwMainWindowApplication OFF)
 endif()
 

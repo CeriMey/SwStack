@@ -55,6 +55,8 @@
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#include <dlfcn.h>
+#include <unistd.h>
 #include <cstdint>
 #include <map>
 #include <mutex>
@@ -66,7 +68,21 @@
 #include "core/gui/graphics/SwImage.h"
 #include "core/types/SwString.h"
 #include "core/gui/SwWidgetPlatformAdapter.h"
+#include "media/SwVideoFrame.h"
 #include "platform/SwPlatformIntegration.h"
+
+#if defined(__has_include)
+#  if __has_include(<va/va.h>) && __has_include(<va/va_x11.h>) && __has_include(<va/va_drmcommon.h>)
+#    include <va/va.h>
+#    include <va/va_x11.h>
+#    include <va/va_drmcommon.h>
+#    define SW_PLATFORM_X11_HAS_VAAPI_PRESENT_HEADERS 1
+#  else
+#    define SW_PLATFORM_X11_HAS_VAAPI_PRESENT_HEADERS 0
+#  endif
+#else
+#  define SW_PLATFORM_X11_HAS_VAAPI_PRESENT_HEADERS 0
+#endif
 
 class SwX11Painter : public SwPlatformPainter {
 public:
@@ -87,6 +103,7 @@ public:
     }
 
     static void releaseSharedBackbuffer(Display* display, ::Window window);
+    static Pixmap sharedBackbufferHandle(Display* display, ::Window window);
 
     void begin(const SwPlatformPaintEvent& event) override {
         end();
@@ -680,6 +697,110 @@ public:
         XDestroyImage(ximg);
     }
 
+    bool drawBgra32(const SwRect& targetRect,
+                    const uint8_t* pixels,
+                    int width,
+                    int height,
+                    int stride) override {
+        if (!ensureDrawable() || !pixels || width <= 0 || height <= 0 || targetRect.width <= 0 ||
+            targetRect.height <= 0 || stride < width * 4) {
+            return false;
+        }
+
+        const int screen = DefaultScreen(m_display);
+        const int depth = DefaultDepth(m_display, screen);
+        Visual* visual = DefaultVisual(m_display, screen);
+        if (!visual) {
+            return false;
+        }
+
+        const VisualPacking packing = makeVisualPacking_(visual);
+        const int dstW = targetRect.width;
+        const int dstH = targetRect.height;
+        const int srcW = width;
+        const int srcH = height;
+
+        std::lock_guard<std::mutex> lock(sharedBackbufferMutex_());
+        SharedBackbufferMap::iterator it =
+            sharedBackbuffers_().find(sharedBackbufferKey_(m_display, m_window));
+        if (it == sharedBackbuffers_().end()) {
+            return false;
+        }
+
+        SharedBackbuffer& shared = it->second;
+        const std::size_t pixelCount = static_cast<std::size_t>(dstW) * static_cast<std::size_t>(dstH);
+        if (shared.videoUploadPixels.size() != pixelCount) {
+            shared.videoUploadPixels.resize(pixelCount);
+        }
+
+        uint32_t* dstPixels = shared.videoUploadPixels.data();
+        if (srcW == dstW && srcH == dstH) {
+            for (int y = 0; y < dstH; ++y) {
+                const uint8_t* srcRow = pixels + static_cast<std::size_t>(y) * static_cast<std::size_t>(stride);
+                uint32_t* dstRow = dstPixels + static_cast<std::size_t>(y) * static_cast<std::size_t>(dstW);
+                for (int x = 0; x < dstW; ++x) {
+                    const uint8_t* srcPixel = srcRow + static_cast<std::size_t>(x) * 4u;
+                    dstRow[x] = packRgbPixel_(packing, srcPixel[2], srcPixel[1], srcPixel[0]);
+                }
+            }
+        } else {
+            for (int y = 0; y < dstH; ++y) {
+                const int srcY = std::min(srcH - 1, (y * srcH) / dstH);
+                const uint8_t* srcRow =
+                    pixels + static_cast<std::size_t>(srcY) * static_cast<std::size_t>(stride);
+                uint32_t* dstRow = dstPixels + static_cast<std::size_t>(y) * static_cast<std::size_t>(dstW);
+                for (int x = 0; x < dstW; ++x) {
+                    const int srcX = std::min(srcW - 1, (x * srcW) / dstW);
+                    const uint8_t* srcPixel = srcRow + static_cast<std::size_t>(srcX) * 4u;
+                    dstRow[x] = packRgbPixel_(packing, srcPixel[2], srcPixel[1], srcPixel[0]);
+                }
+            }
+        }
+
+        XImage* ximg = XCreateImage(m_display,
+                                    visual,
+                                    static_cast<unsigned int>(depth),
+                                    ZPixmap,
+                                    0,
+                                    reinterpret_cast<char*>(dstPixels),
+                                    static_cast<unsigned int>(dstW),
+                                    static_cast<unsigned int>(dstH),
+                                    32,
+                                    dstW * 4);
+        if (!ximg) {
+            return false;
+        }
+
+        XPutImage(m_display,
+                  targetDrawable(),
+                  m_gc,
+                  ximg,
+                  0,
+                  0,
+                  targetRect.x,
+                  targetRect.y,
+                  static_cast<unsigned int>(dstW),
+                  static_cast<unsigned int>(dstH));
+
+        ximg->data = nullptr;
+        XDestroyImage(ximg);
+        return true;
+    }
+
+    bool drawNativeVideoFrame(const SwRect& targetRect,
+                              const SwVideoFrame& frame) override {
+#if !SW_PLATFORM_X11_HAS_VAAPI_PRESENT_HEADERS
+        SW_UNUSED(targetRect)
+        SW_UNUSED(frame)
+        return false;
+#else
+        if (!ensureDrawable() || !frame.isNativeVaapiPrime()) {
+            return false;
+        }
+        return drawVaapiPrimeFrame_(targetRect, frame);
+#endif
+    }
+
     /**
      * @brief Performs the `drawText` operation.
      * @param rect Rectangle used by the operation.
@@ -768,12 +889,65 @@ public:
     }
 
 private:
+    struct ChannelPacking {
+        unsigned long mask{0};
+        int shift{0};
+        unsigned long maxValue{0};
+    };
+
+    struct VisualPacking {
+        ChannelPacking red{};
+        ChannelPacking green{};
+        ChannelPacking blue{};
+    };
+
+#if SW_PLATFORM_X11_HAS_VAAPI_PRESENT_HEADERS
+    struct VaapiX11LibraryState {
+        void* vaLibrary{nullptr};
+        void* vaX11Library{nullptr};
+        bool attempted{false};
+        bool loaded{false};
+        VADisplay (*vaGetDisplayFn)(Display*){nullptr};
+        VAStatus (*vaInitializeFn)(VADisplay, int*, int*){nullptr};
+        VAStatus (*vaTerminateFn)(VADisplay){nullptr};
+        VAStatus (*vaCreateSurfacesFn)(VADisplay,
+                                       unsigned int,
+                                       unsigned int,
+                                       unsigned int,
+                                       VASurfaceID*,
+                                       unsigned int,
+                                       VASurfaceAttrib*,
+                                       unsigned int){nullptr};
+        VAStatus (*vaDestroySurfacesFn)(VADisplay, VASurfaceID*, int){nullptr};
+        VAStatus (*vaPutSurfaceFn)(VADisplay,
+                                   VASurfaceID,
+                                   Drawable,
+                                   short,
+                                   short,
+                                   unsigned short,
+                                   unsigned short,
+                                   short,
+                                   short,
+                                   unsigned short,
+                                   unsigned short,
+                                   VARectangle*,
+                                   unsigned int,
+                                   unsigned int){nullptr};
+    };
+
+    struct SharedVaapiDisplay {
+        VADisplay vaDisplay{nullptr};
+        bool initialized{false};
+    };
+#endif
+
     struct SharedBackbuffer {
         Pixmap backBuffer{0};
         GC gc{0};
         GC presentGC{0};
         int width{0};
         int height{0};
+        std::vector<uint32_t> videoUploadPixels;
     };
 
     using SharedBackbufferKey = std::pair<std::uintptr_t, std::uintptr_t>;
@@ -792,6 +966,279 @@ private:
     static std::mutex& sharedBackbufferMutex_() {
         static std::mutex mutex;
         return mutex;
+    }
+
+#if SW_PLATFORM_X11_HAS_VAAPI_PRESENT_HEADERS
+    using SharedVaapiDisplayMap = std::map<std::uintptr_t, SharedVaapiDisplay>;
+
+    static std::uintptr_t sharedVaapiDisplayKey_(Display* display) {
+        return reinterpret_cast<std::uintptr_t>(display);
+    }
+
+    static SharedVaapiDisplayMap& sharedVaapiDisplays_() {
+        static SharedVaapiDisplayMap displays;
+        return displays;
+    }
+
+    static std::mutex& sharedVaapiDisplayMutex_() {
+        static std::mutex mutex;
+        return mutex;
+    }
+
+    static VaapiX11LibraryState& vaapiX11Library_() {
+        static VaapiX11LibraryState state;
+        return state;
+    }
+
+    static bool ensureVaapiX11Library_() {
+        VaapiX11LibraryState& state = vaapiX11Library_();
+        if (state.loaded) {
+            return true;
+        }
+        if (state.attempted) {
+            return false;
+        }
+        state.attempted = true;
+
+        static const char* kVaCandidates[] = {"libva.so.2", "libva.so"};
+        static const char* kVaX11Candidates[] = {"libva-x11.so.2", "libva-x11.so"};
+        for (std::size_t i = 0; i < (sizeof(kVaCandidates) / sizeof(kVaCandidates[0])); ++i) {
+            state.vaLibrary = dlopen(kVaCandidates[i], RTLD_NOW | RTLD_LOCAL);
+            if (state.vaLibrary) {
+                break;
+            }
+        }
+        for (std::size_t i = 0; i < (sizeof(kVaX11Candidates) / sizeof(kVaX11Candidates[0])); ++i) {
+            state.vaX11Library = dlopen(kVaX11Candidates[i], RTLD_NOW | RTLD_LOCAL);
+            if (state.vaX11Library) {
+                break;
+            }
+        }
+        if (!state.vaLibrary || !state.vaX11Library) {
+            return false;
+        }
+
+        state.vaGetDisplayFn = reinterpret_cast<VADisplay(*)(Display*)>(
+            dlsym(state.vaX11Library, "vaGetDisplay"));
+        state.vaInitializeFn = reinterpret_cast<VAStatus(*)(VADisplay, int*, int*)>(
+            dlsym(state.vaLibrary, "vaInitialize"));
+        state.vaTerminateFn = reinterpret_cast<VAStatus(*)(VADisplay)>(
+            dlsym(state.vaLibrary, "vaTerminate"));
+        state.vaCreateSurfacesFn = reinterpret_cast<VAStatus(*)(VADisplay,
+                                                                unsigned int,
+                                                                unsigned int,
+                                                                unsigned int,
+                                                                VASurfaceID*,
+                                                                unsigned int,
+                                                                VASurfaceAttrib*,
+                                                                unsigned int)>(
+            dlsym(state.vaLibrary, "vaCreateSurfaces"));
+        state.vaDestroySurfacesFn = reinterpret_cast<VAStatus(*)(VADisplay, VASurfaceID*, int)>(
+            dlsym(state.vaLibrary, "vaDestroySurfaces"));
+        state.vaPutSurfaceFn = reinterpret_cast<VAStatus(*)(VADisplay,
+                                                            VASurfaceID,
+                                                            Drawable,
+                                                            short,
+                                                            short,
+                                                            unsigned short,
+                                                            unsigned short,
+                                                            short,
+                                                            short,
+                                                            unsigned short,
+                                                            unsigned short,
+                                                            VARectangle*,
+                                                            unsigned int,
+                                                            unsigned int)>(
+            dlsym(state.vaX11Library, "vaPutSurface"));
+        state.loaded = state.vaGetDisplayFn && state.vaInitializeFn && state.vaTerminateFn &&
+                       state.vaCreateSurfacesFn && state.vaDestroySurfacesFn &&
+                       state.vaPutSurfaceFn;
+        return state.loaded;
+    }
+
+    VADisplay ensureVaapiDisplay_() {
+        if (!m_display || !ensureVaapiX11Library_()) {
+            return nullptr;
+        }
+
+        std::lock_guard<std::mutex> lock(sharedVaapiDisplayMutex_());
+        SharedVaapiDisplay& shared = sharedVaapiDisplays_()[sharedVaapiDisplayKey_(m_display)];
+        if (shared.initialized && shared.vaDisplay) {
+            return shared.vaDisplay;
+        }
+
+        VaapiX11LibraryState& lib = vaapiX11Library_();
+        shared.vaDisplay = lib.vaGetDisplayFn ? lib.vaGetDisplayFn(m_display) : nullptr;
+        if (!shared.vaDisplay) {
+            return nullptr;
+        }
+        int major = 0;
+        int minor = 0;
+        if (!lib.vaInitializeFn || lib.vaInitializeFn(shared.vaDisplay, &major, &minor) != VA_STATUS_SUCCESS) {
+            shared.vaDisplay = nullptr;
+            shared.initialized = false;
+            return nullptr;
+        }
+        shared.initialized = true;
+        return shared.vaDisplay;
+    }
+
+    static unsigned int inferVaapiRtFormat_(const SwVideoFrame& frame,
+                                            const SwVideoFrame::NativeVaapiPrimeStorage& storage) {
+        if (storage.rtFormat != 0u) {
+            return storage.rtFormat;
+        }
+        switch (frame.pixelFormat()) {
+        case SwVideoPixelFormat::NV12:
+        case SwVideoPixelFormat::YUV420P:
+            return VA_RT_FORMAT_YUV420;
+        case SwVideoPixelFormat::P010:
+#ifdef VA_RT_FORMAT_YUV420_10BPP
+            return VA_RT_FORMAT_YUV420_10BPP;
+#else
+            return 0u;
+#endif
+        default:
+            return 0u;
+        }
+    }
+
+    bool drawVaapiPrimeFrame_(const SwRect& targetRect, const SwVideoFrame& frame) {
+        const SwVideoFrame::NativeVaapiPrimeStorage* storage = frame.nativeVaapiPrimeStorage();
+        if (!storage || storage->numObjects == 0 || storage->numLayers == 0) {
+            return false;
+        }
+
+        VADisplay vaDisplay = ensureVaapiDisplay_();
+        if (!vaDisplay) {
+            return false;
+        }
+
+        const unsigned int rtFormat = inferVaapiRtFormat_(frame, *storage);
+        if (rtFormat == 0u) {
+            return false;
+        }
+
+        VADRMPRIMESurfaceDescriptor descriptor;
+        std::memset(&descriptor, 0, sizeof(descriptor));
+        descriptor.fourcc = storage->fourcc;
+        descriptor.width = storage->width;
+        descriptor.height = storage->height;
+        descriptor.num_objects = storage->numObjects;
+        descriptor.num_layers = storage->numLayers;
+        for (std::size_t i = 0; i < storage->objects.size(); ++i) {
+            descriptor.objects[i].fd = storage->objects[i].fd;
+            descriptor.objects[i].size = storage->objects[i].size;
+            descriptor.objects[i].drm_format_modifier = storage->objects[i].drmFormatModifier;
+        }
+        for (std::size_t i = 0; i < storage->layers.size(); ++i) {
+            descriptor.layers[i].drm_format = storage->layers[i].drmFormat;
+            descriptor.layers[i].num_planes = storage->layers[i].numPlanes;
+            for (int plane = 0; plane < 4; ++plane) {
+                descriptor.layers[i].object_index[plane] = storage->layers[i].objectIndex[plane];
+                descriptor.layers[i].offset[plane] = storage->layers[i].offset[plane];
+                descriptor.layers[i].pitch[plane] = storage->layers[i].pitch[plane];
+            }
+        }
+
+        VASurfaceAttrib attrs[2];
+        std::memset(attrs, 0, sizeof(attrs));
+        attrs[0].type = VASurfaceAttribMemoryType;
+        attrs[0].flags = VA_SURFACE_ATTRIB_SETTABLE;
+        attrs[0].value.type = VAGenericValueTypeInteger;
+        attrs[0].value.value.i = VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2;
+        attrs[1].type = VASurfaceAttribExternalBufferDescriptor;
+        attrs[1].flags = VA_SURFACE_ATTRIB_SETTABLE;
+        attrs[1].value.type = VAGenericValueTypePointer;
+        attrs[1].value.value.p = &descriptor;
+
+        VASurfaceID importedSurface = VA_INVALID_SURFACE;
+        VaapiX11LibraryState& lib = vaapiX11Library_();
+        if (!lib.vaCreateSurfacesFn ||
+            lib.vaCreateSurfacesFn(vaDisplay,
+                                   rtFormat,
+                                   storage->width,
+                                   storage->height,
+                                   &importedSurface,
+                                   1,
+                                   attrs,
+                                   2) != VA_STATUS_SUCCESS ||
+            importedSurface == VA_INVALID_SURFACE) {
+            return false;
+        }
+
+        const bool ok =
+            lib.vaPutSurfaceFn &&
+            lib.vaPutSurfaceFn(vaDisplay,
+                               importedSurface,
+                               targetDrawable(),
+                               0,
+                               0,
+                               static_cast<unsigned short>(storage->width),
+                               static_cast<unsigned short>(storage->height),
+                               static_cast<short>(targetRect.x),
+                               static_cast<short>(targetRect.y),
+                               static_cast<unsigned short>(targetRect.width),
+                               static_cast<unsigned short>(targetRect.height),
+                               nullptr,
+                               0,
+                               0) == VA_STATUS_SUCCESS;
+
+        if (lib.vaDestroySurfacesFn) {
+            (void)lib.vaDestroySurfacesFn(vaDisplay, &importedSurface, 1);
+        }
+        return ok;
+    }
+#endif
+
+    static ChannelPacking makeChannelPacking_(unsigned long mask) {
+        ChannelPacking packing;
+        packing.mask = mask;
+        if (!mask) {
+            return packing;
+        }
+
+        while (((mask >> packing.shift) & 0x1ul) == 0x0ul) {
+            ++packing.shift;
+        }
+
+        unsigned long trimmedMask = mask >> packing.shift;
+        while (trimmedMask != 0) {
+            ++packing.maxValue;
+            trimmedMask >>= 1;
+        }
+        packing.maxValue = packing.maxValue ? ((1ul << packing.maxValue) - 1ul) : 0ul;
+        return packing;
+    }
+
+    static VisualPacking makeVisualPacking_(const Visual* visual) {
+        VisualPacking packing;
+        if (!visual) {
+            return packing;
+        }
+        packing.red = makeChannelPacking_(visual->red_mask);
+        packing.green = makeChannelPacking_(visual->green_mask);
+        packing.blue = makeChannelPacking_(visual->blue_mask);
+        return packing;
+    }
+
+    static unsigned long packChannel_(const ChannelPacking& packing, uint8_t value) {
+        if (!packing.mask || !packing.maxValue) {
+            return 0ul;
+        }
+        const unsigned long scaled =
+            (static_cast<unsigned long>(value) * packing.maxValue + 127ul) / 255ul;
+        return (scaled << packing.shift) & packing.mask;
+    }
+
+    static uint32_t packRgbPixel_(const VisualPacking& packing,
+                                  uint8_t r,
+                                  uint8_t g,
+                                  uint8_t b) {
+        const unsigned long pixel = packChannel_(packing.red, r) |
+                                    packChannel_(packing.green, g) |
+                                    packChannel_(packing.blue, b);
+        return static_cast<uint32_t>(pixel);
     }
 
     static void clearBackbuffer_(Display* display, Pixmap backBuffer, int width, int height) {
@@ -962,6 +1409,20 @@ inline void SwX11Painter::releaseSharedBackbuffer(Display* display, ::Window win
         XFreePixmap(display, it->second.backBuffer);
     }
     sharedBackbuffers_().erase(it);
+}
+
+inline Pixmap SwX11Painter::sharedBackbufferHandle(Display* display, ::Window window) {
+    if (!display || !window) {
+        return 0;
+    }
+
+    std::lock_guard<std::mutex> lock(sharedBackbufferMutex_());
+    SharedBackbufferMap::const_iterator it =
+        sharedBackbuffers_().find(sharedBackbufferKey_(display, window));
+    if (it == sharedBackbuffers_().end()) {
+        return 0;
+    }
+    return it->second.backBuffer;
 }
 
 #endif

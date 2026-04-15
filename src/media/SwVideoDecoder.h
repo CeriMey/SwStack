@@ -59,6 +59,11 @@
 #include <vector>
 #include <algorithm>
 
+// X11 defines `None` as a macro, which breaks scoped enums such as RuntimeHealthEventKind::None.
+#ifdef None
+#undef None
+#endif
+
 class SwVideoDecoder {
 public:
     using FrameCallback = std::function<void(const SwVideoFrame&)>;
@@ -444,6 +449,4 @@ private:
     std::map<SwVideoPacket::Codec, int> m_anonymousIds;
 };
 
-#if defined(_WIN32)
-#include "media/SwMediaFoundationVideoDecoder.h"
-#endif
+#include "media/SwPlatformVideoDecoder.h"

@@ -242,7 +242,7 @@ public:
         }
     }
 
-    static BoxEdges parseBoxEdges(const SwString& value, const BoxEdges& defaults = BoxEdges()) {
+    static BoxEdges parseBoxEdges(const SwString& value, const BoxEdges& defaults) {
         BoxEdges edges = defaults;
         const std::vector<std::string> tokens = splitSpace_(value.toStdString());
         if (tokens.empty()) {
@@ -267,6 +267,10 @@ public:
             edges.left = parsePixelValue(SwString(tokens[3]), edges.left);
         }
         return edges;
+    }
+
+    static BoxEdges parseBoxEdges(const SwString& value) {
+        return parseBoxEdges(value, BoxEdges{});
     }
 
     static FontWeight parseFontWeightValue(const SwString& value, FontWeight fallback) {

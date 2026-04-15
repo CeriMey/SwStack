@@ -116,7 +116,7 @@ public:
         m_sourceThread = new SwThread("SwRtspUdpSourceThread");
         m_sourceThread->start();
         m_callbackContext = new SwObject();
-        m_trackGraph = std::make_unique<SwRtspTrackGraph>();
+        m_trackGraph.reset(new SwRtspTrackGraph());
         m_rtspSocket = createControlSocket_();
         m_reconnectTimer = new SwTimer(m_reconnectDelayMs);
         m_reconnectTimer->setSingleShot(true);
@@ -2139,7 +2139,7 @@ private:
             descriptor.fmtp = SwString(m_tracks[static_cast<std::size_t>(m_selectedTrackIndex)].fmtpLine);
         }
         descriptor.lowLatency = m_lowLatencyDrop;
-        m_udpSession = std::make_unique<SwRtpSession>(descriptor);
+        m_udpSession.reset(new SwRtpSession(descriptor));
         m_udpSession->setPacketCallback([this](const SwRtpSession::Packet& packet) {
             handleUdpSessionPacket_(packet);
         });
@@ -2176,7 +2176,7 @@ private:
         }
         descriptor.allowKeyFrameRequests = false;
         descriptor.lowLatency = m_lowLatencyDrop;
-        m_audioUdpSession = std::make_unique<SwRtpSession>(descriptor);
+        m_audioUdpSession.reset(new SwRtpSession(descriptor));
         m_audioUdpSession->setPacketCallback([this](const SwRtpSession::Packet& packet) {
             handleAudioUdpSessionPacket_(packet);
         });
@@ -2214,7 +2214,7 @@ private:
             descriptor.fmtp =
                 SwString(m_tracks[static_cast<std::size_t>(m_selectedMetadataTrackIndex)].fmtpLine);
         }
-        m_metadataUdpSession = std::make_unique<SwRtpSession>(descriptor);
+        m_metadataUdpSession.reset(new SwRtpSession(descriptor));
         m_metadataUdpSession->setPacketCallback([this](const SwRtpSession::Packet& packet) {
             handleMetadataUdpSessionPacket_(packet);
         });

@@ -63,6 +63,7 @@
  * drains decoded output, and publishes frames as BGRA32 SwVideoFrame objects.
  */
 
+#include "media/SwPlatformVideoDecoderIds.h"
 #include "media/SwVideoDecoder.h"
 #include "media/SwVideoPacket.h"
 #include "SwDebug.h"
@@ -1851,99 +1852,172 @@ protected:
 };
 
 // Registration helpers
+template <typename AutoCreator, typename HardwareCreator, typename SoftwareCreator>
+inline void swRegisterMediaFoundationDecoderAliases(SwVideoPacket::Codec codec,
+                                                    AutoCreator autoCreator,
+                                                    HardwareCreator hardwareCreator,
+                                                    SoftwareCreator softwareCreator,
+                                                    bool available) {
+    SwVideoDecoderFactory::instance().registerDecoder(codec,
+                                                      swPlatformVideoDecoderId(),
+                                                      "Platform Decoder",
+                                                      autoCreator,
+                                                      100,
+                                                      false,
+                                                      available);
+    SwVideoDecoderFactory::instance().registerDecoder(codec,
+                                                      "media-foundation",
+                                                      "Media Foundation",
+                                                      autoCreator,
+                                                      95,
+                                                      false,
+                                                      available);
+    SwVideoDecoderFactory::instance().registerDecoder(codec,
+                                                      swPlatformHardwareVideoDecoderId(),
+                                                      "Platform Decoder Hardware",
+                                                      hardwareCreator,
+                                                      90,
+                                                      false,
+                                                      available);
+    SwVideoDecoderFactory::instance().registerDecoder(codec,
+                                                      "media-foundation-hardware",
+                                                      "Media Foundation Hardware",
+                                                      hardwareCreator,
+                                                      85,
+                                                      false,
+                                                      available);
+    SwVideoDecoderFactory::instance().registerDecoder(codec,
+                                                      swPlatformSoftwareVideoDecoderId(),
+                                                      "Platform Decoder Software",
+                                                      softwareCreator,
+                                                      80,
+                                                      false,
+                                                      available);
+    SwVideoDecoderFactory::instance().registerDecoder(codec,
+                                                      "media-foundation-software",
+                                                      "Media Foundation Software",
+                                                      softwareCreator,
+                                                      75,
+                                                      false,
+                                                      available);
+}
+
 static bool g_registerMFH264Decoder = []() {
-    SwVideoDecoderFactory::instance().registerDecoder(
+    swRegisterMediaFoundationDecoderAliases(
         SwVideoPacket::Codec::H264,
-        "media-foundation",
-        "Media Foundation",
         []() { return std::make_shared<SwMediaFoundationH264Decoder>(); },
-        100);
-    SwVideoDecoderFactory::instance().registerDecoder(
-        SwVideoPacket::Codec::H264,
-        "media-foundation-hardware",
-        "Media Foundation Hardware",
         []() {
             return std::make_shared<SwMediaFoundationH264Decoder>(
                 SwMediaFoundationDecoderBase::DecoderMode::HardwareOnly,
                 "SwMediaFoundationH264DecoderHW");
         },
-        90);
-    SwVideoDecoderFactory::instance().registerDecoder(
-        SwVideoPacket::Codec::H264,
-        "media-foundation-software",
-        "Media Foundation Software",
         []() {
             return std::make_shared<SwMediaFoundationH264Decoder>(
                 SwMediaFoundationDecoderBase::DecoderMode::SoftwareOnly,
                 "SwMediaFoundationH264DecoderSW");
         },
-        80);
+        true);
     return true;
 }();
 
 static bool g_registerMFH265Decoder = []() {
-    SwVideoDecoderFactory::instance().registerDecoder(
+    swRegisterMediaFoundationDecoderAliases(
         SwVideoPacket::Codec::H265,
-        "media-foundation",
-        "Media Foundation",
         []() { return std::make_shared<SwMediaFoundationH265Decoder>(); },
-        100);
-    SwVideoDecoderFactory::instance().registerDecoder(
-        SwVideoPacket::Codec::H265,
-        "media-foundation-hardware",
-        "Media Foundation Hardware",
         []() {
             return std::make_shared<SwMediaFoundationH265Decoder>(
                 SwMediaFoundationDecoderBase::DecoderMode::HardwareOnly,
                 "SwMediaFoundationH265DecoderHW");
         },
-        90);
-    SwVideoDecoderFactory::instance().registerDecoder(
-        SwVideoPacket::Codec::H265,
-        "media-foundation-software",
-        "Media Foundation Software",
         []() {
             return std::make_shared<SwMediaFoundationH265Decoder>(
                 SwMediaFoundationDecoderBase::DecoderMode::SoftwareOnly,
                 "SwMediaFoundationH265DecoderSW");
         },
-        80);
+        true);
     return true;
 }();
 
 static bool g_registerMFAv1Decoder = []() {
-    SwVideoDecoderFactory::instance().registerDecoder(
+    swRegisterMediaFoundationDecoderAliases(
         SwVideoPacket::Codec::AV1,
-        "media-foundation",
-        "Media Foundation",
         []() { return std::make_shared<SwMediaFoundationAv1Decoder>(); },
-        100);
-    SwVideoDecoderFactory::instance().registerDecoder(
-        SwVideoPacket::Codec::AV1,
-        "media-foundation-hardware",
-        "Media Foundation Hardware",
         []() {
             return std::make_shared<SwMediaFoundationAv1Decoder>(
                 SwMediaFoundationDecoderBase::DecoderMode::HardwareOnly,
                 "SwMediaFoundationAv1DecoderHW");
         },
-        90);
-    SwVideoDecoderFactory::instance().registerDecoder(
-        SwVideoPacket::Codec::AV1,
-        "media-foundation-software",
-        "Media Foundation Software",
         []() {
             return std::make_shared<SwMediaFoundationAv1Decoder>(
                 SwMediaFoundationDecoderBase::DecoderMode::SoftwareOnly,
                 "SwMediaFoundationAv1DecoderSW");
         },
-        80);
+        true);
     return true;
 }();
 
 #else
 
 // Stub for non-Windows platforms
+class SwMediaFoundationDecoderBase {
+public:
+    enum class DecoderMode {
+        Auto,
+        HardwareOnly,
+        SoftwareOnly
+    };
+};
+
+template <typename AutoCreator, typename HardwareCreator, typename SoftwareCreator>
+inline void swRegisterMediaFoundationDecoderAliases(SwVideoPacket::Codec codec,
+                                                    AutoCreator autoCreator,
+                                                    HardwareCreator hardwareCreator,
+                                                    SoftwareCreator softwareCreator,
+                                                    bool available) {
+    SwVideoDecoderFactory::instance().registerDecoder(codec,
+                                                      swPlatformVideoDecoderId(),
+                                                      "Platform Decoder",
+                                                      autoCreator,
+                                                      100,
+                                                      false,
+                                                      available);
+    SwVideoDecoderFactory::instance().registerDecoder(codec,
+                                                      "media-foundation",
+                                                      "Media Foundation",
+                                                      autoCreator,
+                                                      95,
+                                                      false,
+                                                      available);
+    SwVideoDecoderFactory::instance().registerDecoder(codec,
+                                                      swPlatformHardwareVideoDecoderId(),
+                                                      "Platform Decoder Hardware",
+                                                      hardwareCreator,
+                                                      90,
+                                                      false,
+                                                      available);
+    SwVideoDecoderFactory::instance().registerDecoder(codec,
+                                                      "media-foundation-hardware",
+                                                      "Media Foundation Hardware",
+                                                      hardwareCreator,
+                                                      85,
+                                                      false,
+                                                      available);
+    SwVideoDecoderFactory::instance().registerDecoder(codec,
+                                                      swPlatformSoftwareVideoDecoderId(),
+                                                      "Platform Decoder Software",
+                                                      softwareCreator,
+                                                      80,
+                                                      false,
+                                                      available);
+    SwVideoDecoderFactory::instance().registerDecoder(codec,
+                                                      "media-foundation-software",
+                                                      "Media Foundation Software",
+                                                      softwareCreator,
+                                                      75,
+                                                      false,
+                                                      available);
+}
+
 class SwMediaFoundationH264Decoder : public SwVideoDecoder {
 public:
     explicit SwMediaFoundationH264Decoder(SwMediaFoundationDecoderBase::DecoderMode = SwMediaFoundationDecoderBase::DecoderMode::Auto,
@@ -1999,109 +2073,55 @@ public:
 };
 
 static bool g_registerMFH264Decoder = []() {
-    SwVideoDecoderFactory::instance().registerDecoder(
+    swRegisterMediaFoundationDecoderAliases(
         SwVideoPacket::Codec::H264,
-        "media-foundation",
-        "Media Foundation",
         []() { return std::make_shared<SwMediaFoundationH264Decoder>(); },
-        100,
-        false,
-        false);
-    SwVideoDecoderFactory::instance().registerDecoder(
-        SwVideoPacket::Codec::H264,
-        "media-foundation-hardware",
-        "Media Foundation Hardware",
         []() {
             return std::make_shared<SwMediaFoundationH264Decoder>(
                 SwMediaFoundationDecoderBase::DecoderMode::HardwareOnly,
                 "SwMediaFoundationH264DecoderHWStub");
         },
-        90,
-        false,
-        false);
-    SwVideoDecoderFactory::instance().registerDecoder(
-        SwVideoPacket::Codec::H264,
-        "media-foundation-software",
-        "Media Foundation Software",
         []() {
             return std::make_shared<SwMediaFoundationH264Decoder>(
                 SwMediaFoundationDecoderBase::DecoderMode::SoftwareOnly,
                 "SwMediaFoundationH264DecoderSWStub");
         },
-        80,
-        false,
         false);
     return true;
 }();
 
 static bool g_registerMFH265Decoder = []() {
-    SwVideoDecoderFactory::instance().registerDecoder(
+    swRegisterMediaFoundationDecoderAliases(
         SwVideoPacket::Codec::H265,
-        "media-foundation",
-        "Media Foundation",
         []() { return std::make_shared<SwMediaFoundationH265Decoder>(); },
-        100,
-        false,
-        false);
-    SwVideoDecoderFactory::instance().registerDecoder(
-        SwVideoPacket::Codec::H265,
-        "media-foundation-hardware",
-        "Media Foundation Hardware",
         []() {
             return std::make_shared<SwMediaFoundationH265Decoder>(
                 SwMediaFoundationDecoderBase::DecoderMode::HardwareOnly,
                 "SwMediaFoundationH265DecoderHWStub");
         },
-        90,
-        false,
-        false);
-    SwVideoDecoderFactory::instance().registerDecoder(
-        SwVideoPacket::Codec::H265,
-        "media-foundation-software",
-        "Media Foundation Software",
         []() {
             return std::make_shared<SwMediaFoundationH265Decoder>(
                 SwMediaFoundationDecoderBase::DecoderMode::SoftwareOnly,
                 "SwMediaFoundationH265DecoderSWStub");
         },
-        80,
-        false,
         false);
     return true;
 }();
 
 static bool g_registerMFAv1Decoder = []() {
-    SwVideoDecoderFactory::instance().registerDecoder(
+    swRegisterMediaFoundationDecoderAliases(
         SwVideoPacket::Codec::AV1,
-        "media-foundation",
-        "Media Foundation",
         []() { return std::make_shared<SwMediaFoundationAv1Decoder>(); },
-        100,
-        false,
-        false);
-    SwVideoDecoderFactory::instance().registerDecoder(
-        SwVideoPacket::Codec::AV1,
-        "media-foundation-hardware",
-        "Media Foundation Hardware",
         []() {
             return std::make_shared<SwMediaFoundationAv1Decoder>(
                 SwMediaFoundationDecoderBase::DecoderMode::HardwareOnly,
                 "SwMediaFoundationAv1DecoderHWStub");
         },
-        90,
-        false,
-        false);
-    SwVideoDecoderFactory::instance().registerDecoder(
-        SwVideoPacket::Codec::AV1,
-        "media-foundation-software",
-        "Media Foundation Software",
         []() {
             return std::make_shared<SwMediaFoundationAv1Decoder>(
                 SwMediaFoundationDecoderBase::DecoderMode::SoftwareOnly,
                 "SwMediaFoundationAv1DecoderSWStub");
         },
-        80,
-        false,
         false);
     return true;
 }();

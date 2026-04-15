@@ -66,6 +66,10 @@
 #include <functional>
 #include <memory>
 
+#if defined(__linux__)
+#include <unistd.h>
+#endif
+
 #if defined(_WIN32)
 #include "platform/win/SwWindows.h"
 #include <d3d11.h>
@@ -84,10 +88,89 @@ class SwVideoFrame {
 public:
     enum class StorageKind {
         Cpu,
+#if defined(__linux__)
+        NativeVaapiPrime,
+#endif
 #if defined(_WIN32)
         NativeD3D11
 #endif
     };
+
+#if defined(__linux__)
+    struct NativeVaapiPrimeObject {
+        int fd{-1};
+        uint32_t size{0};
+        uint64_t drmFormatModifier{0};
+    };
+
+    struct NativeVaapiPrimeLayer {
+        uint32_t drmFormat{0};
+        uint32_t numPlanes{0};
+        uint32_t objectIndex[4] = {0, 0, 0, 0};
+        uint32_t offset[4] = {0, 0, 0, 0};
+        uint32_t pitch[4] = {0, 0, 0, 0};
+    };
+
+    struct NativeVaapiPrimeStorage {
+        uint32_t fourcc{0};
+        uint32_t width{0};
+        uint32_t height{0};
+        uint32_t rtFormat{0};
+        uint32_t numObjects{0};
+        std::array<NativeVaapiPrimeObject, 4> objects{};
+        uint32_t numLayers{0};
+        std::array<NativeVaapiPrimeLayer, 4> layers{};
+
+        NativeVaapiPrimeStorage() = default;
+        NativeVaapiPrimeStorage(const NativeVaapiPrimeStorage&) = delete;
+        NativeVaapiPrimeStorage& operator=(const NativeVaapiPrimeStorage&) = delete;
+
+        NativeVaapiPrimeStorage(NativeVaapiPrimeStorage&& other) noexcept {
+            *this = std::move(other);
+        }
+
+        NativeVaapiPrimeStorage& operator=(NativeVaapiPrimeStorage&& other) noexcept {
+            if (this == &other) {
+                return *this;
+            }
+            closeOwnedFds_();
+            fourcc = other.fourcc;
+            width = other.width;
+            height = other.height;
+            rtFormat = other.rtFormat;
+            numObjects = other.numObjects;
+            objects = other.objects;
+            numLayers = other.numLayers;
+            layers = other.layers;
+            for (std::size_t i = 0; i < other.objects.size(); ++i) {
+                other.objects[i].fd = -1;
+                other.objects[i].size = 0;
+                other.objects[i].drmFormatModifier = 0;
+            }
+            other.fourcc = 0;
+            other.width = 0;
+            other.height = 0;
+            other.rtFormat = 0;
+            other.numObjects = 0;
+            other.numLayers = 0;
+            return *this;
+        }
+
+        ~NativeVaapiPrimeStorage() {
+            closeOwnedFds_();
+        }
+
+    private:
+        void closeOwnedFds_() {
+            for (std::size_t i = 0; i < objects.size(); ++i) {
+                if (objects[i].fd >= 0) {
+                    ::close(objects[i].fd);
+                    objects[i].fd = -1;
+                }
+            }
+        }
+    };
+#endif
 
 #if defined(_WIN32)
     struct NativeD3D11Storage {
@@ -172,6 +255,20 @@ public:
         frame.m_bufferSize = size;
         return frame;
     }
+
+#if defined(__linux__)
+    static SwVideoFrame wrapNativeVaapiPrime(const SwVideoFormatInfo& info,
+                                             std::shared_ptr<NativeVaapiPrimeStorage> storage) {
+        SwVideoFrame frame;
+        if (!info.isValid() || !storage || storage->numObjects == 0 || storage->numLayers == 0) {
+            return frame;
+        }
+        frame.m_info = info;
+        frame.m_storageKind = StorageKind::NativeVaapiPrime;
+        frame.m_nativeVaapiPrime = std::move(storage);
+        return frame;
+    }
+#endif
 
 #if defined(_WIN32)
     static SwVideoFrame wrapNativeD3D11(const SwVideoFormatInfo& info,
@@ -369,6 +466,9 @@ public:
      */
     void clear() {
         m_buffer.reset();
+#if defined(__linux__)
+        m_nativeVaapiPrime.reset();
+#endif
 #if defined(_WIN32)
         m_nativeD3D11.reset();
 #endif
@@ -408,6 +508,19 @@ public:
      */
     std::size_t bufferSize() const { return m_bufferSize; }
 
+#if defined(__linux__)
+    bool isNativeVaapiPrime() const {
+        return m_storageKind == StorageKind::NativeVaapiPrime &&
+               m_nativeVaapiPrime &&
+               m_nativeVaapiPrime->numObjects > 0 &&
+               m_nativeVaapiPrime->numLayers > 0;
+    }
+
+    const NativeVaapiPrimeStorage* nativeVaapiPrimeStorage() const {
+        return m_nativeVaapiPrime.get();
+    }
+#endif
+
 #if defined(_WIN32)
     bool isNativeD3D11() const {
         return m_storageKind == StorageKind::NativeD3D11 && m_nativeD3D11 && m_nativeD3D11->texture;
@@ -436,6 +549,11 @@ public:
 
 private:
     bool hasNativeStorage() const {
+#if defined(__linux__)
+        if (m_nativeVaapiPrime && m_nativeVaapiPrime->numObjects > 0 && m_nativeVaapiPrime->numLayers > 0) {
+            return true;
+        }
+#endif
 #if defined(_WIN32)
         return m_nativeD3D11 && m_nativeD3D11->texture;
 #else
@@ -454,6 +572,9 @@ private:
         m_bytes = static_cast<uint8_t*>(m_buffer.get());
         m_bufferSize = bytes;
         m_storageKind = StorageKind::Cpu;
+#if defined(__linux__)
+        m_nativeVaapiPrime.reset();
+#endif
 #if defined(_WIN32)
         m_nativeD3D11.reset();
 #endif
@@ -462,6 +583,9 @@ private:
     SwVideoFormatInfo m_info{};
     StorageKind m_storageKind{StorageKind::Cpu};
     std::shared_ptr<void> m_buffer;
+#if defined(__linux__)
+    std::shared_ptr<NativeVaapiPrimeStorage> m_nativeVaapiPrime;
+#endif
 #if defined(_WIN32)
     std::shared_ptr<NativeD3D11Storage> m_nativeD3D11;
 #endif

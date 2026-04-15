@@ -26,7 +26,7 @@ public:
         : m_options(options)
         , m_descriptor(SwRtpSessionDescriptor::fromOpenOptions(options)) {
         SW_UNUSED(parent);
-        m_session = std::make_unique<SwRtpSession>(m_descriptor);
+        m_session.reset(new SwRtpSession(m_descriptor));
         m_session->setPacketCallback([this](const SwRtpSession::Packet& packet) {
             handleRtpPacket_(packet);
         });

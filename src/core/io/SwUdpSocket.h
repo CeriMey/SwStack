@@ -1176,7 +1176,8 @@ private:
             return false;
         }
 
-        std::memset(&out, 0, sizeof(out));
+        // ResolvedAddress owns a SwString, so raw memset would corrupt its internals.
+        out = ResolvedAddress{};
         std::memcpy(&out.storage, best->ai_addr, static_cast<size_t>(best->ai_addrlen));
         out.length = static_cast<socklen_t>(best->ai_addrlen);
         out.family = best->ai_family;

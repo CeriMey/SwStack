@@ -257,6 +257,4 @@ inline bool swRegisterBuiltinAudioDecoders() {
 
 static const bool g_swBuiltinAudioDecodersRegistered = swRegisterBuiltinAudioDecoders();
 
-#if defined(_WIN32)
-#include "media/SwMediaFoundationAudioDecoder.h"
-#endif
+#include "media/SwPlatformAudioDecoder.h"

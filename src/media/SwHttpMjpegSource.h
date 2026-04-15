@@ -65,7 +65,9 @@
 #include <cctype>
 #include <chrono>
 #include <cstring>
+#if defined(_WIN32)
 #include <gdiplus.h>
+#endif
 #include <iostream>
 #include "core/fs/SwMutex.h"
 #include <sstream>
@@ -74,7 +76,9 @@
 static constexpr const char* kSwLogCategory_SwHttpMjpegSource = "sw.media.swhttpmjpegsource";
 
 
+#if defined(_WIN32)
 #pragma comment(lib, "gdiplus.lib")
+#endif
 
 class SwHttpMjpegSource : public SwVideoSource {
 public:
@@ -373,6 +377,13 @@ private:
         if (jpeg.empty()) {
             return;
         }
+#if !defined(_WIN32)
+        if (!m_loggedUnsupportedDecoder.exchange(true)) {
+            swCWarning(kSwLogCategory_SwHttpMjpegSource)
+                << "[SwHttpMjpegSource] JPEG decode backend unavailable on this platform";
+        }
+        return;
+#else
         IStream* stream = nullptr;
         HGLOBAL hMem = ::GlobalAlloc(GMEM_MOVEABLE, jpeg.size());
         if (!hMem) {
@@ -440,6 +451,7 @@ private:
             }
         }
         bitmap.UnlockBits(&data);
+#endif
     }
 
     SwObject* m_parent{nullptr};
@@ -462,6 +474,7 @@ private:
     std::atomic<bool> m_stopping{false};
     std::atomic<bool> m_connecting{false};
     std::atomic<bool> m_placeholderSent{false};
+    std::atomic<bool> m_loggedUnsupportedDecoder{false};
     std::chrono::steady_clock::time_point m_lastDataTime{};
     std::chrono::steady_clock::time_point m_lastFrameTime{};
 

@@ -1,5 +1,8 @@
 #include "media/SwRtspTrackGraph.h"
+#include "media/SwVideoDecoder.h"
+#include "media/SwPlatformVideoDecoderIds.h"
 #include "media/rtp/SwRtpDepacketizerH264.h"
+#include "media/rtp/SwRtpDepacketizerH265.h"
 
 #include <atomic>
 #include <chrono>
@@ -76,6 +79,11 @@ void appendBytes(SwByteArray& payload, std::initializer_list<uint8_t> bytes) {
 void appendNalToAggregation(SwByteArray& payload, std::initializer_list<uint8_t> nal) {
     appendUint16Be(payload, static_cast<uint16_t>(nal.size()));
     appendBytes(payload, nal);
+}
+
+void appendNalToAggregation(SwByteArray& payload, const SwByteArray& nal) {
+    appendUint16Be(payload, static_cast<uint16_t>(nal.size()));
+    payload.append(nal);
 }
 
 bool byteArrayContains(const SwByteArray& data, std::initializer_list<uint8_t> pattern) {
@@ -186,17 +194,45 @@ SwRtpSession::Packet makeH265Packet(uint16_t sequenceNumber,
                                     uint32_t timestamp,
                                     bool keyFrame,
                                     int payloadSize = 3) {
+    auto makeNal = [](uint8_t nalType, int targetSize, uint8_t seed) {
+        SwByteArray nal;
+        const int nalSize = std::max(2, targetSize);
+        nal.reserve(static_cast<size_t>(nalSize));
+        appendByte(nal, static_cast<uint8_t>(nalType << 1U));
+        appendByte(nal, 0x01U);
+        while (static_cast<int>(nal.size()) < nalSize) {
+            appendByte(nal, static_cast<uint8_t>(seed + (nal.size() & 0x3FU)));
+        }
+        return nal;
+    };
+
     SwRtpSession::Packet packet;
     packet.payloadType = 96;
     packet.sequenceNumber = sequenceNumber;
     packet.timestamp = timestamp;
     packet.marker = true;
-    const char bytes[3] = {
-        static_cast<char>((keyFrame ? 19U : 1U) << 1U),
-        0x01,
-        0x55
-    };
-    packet.payload = makeSizedPayload(makePayload(bytes, 3), payloadSize);
+    if (!keyFrame) {
+        packet.payload = makeSizedPayload(makeNal(1U, 2, 0x55U), payloadSize);
+        return packet;
+    }
+
+    const SwByteArray vps = makeNal(32U, 4, 0x20U);
+    const SwByteArray sps = makeNal(33U, 4, 0x30U);
+    const SwByteArray pps = makeNal(34U, 4, 0x40U);
+    const int fixedBytes =
+        2 + (2 + static_cast<int>(vps.size())) + (2 + static_cast<int>(sps.size())) +
+        (2 + static_cast<int>(pps.size())) + 2;
+    const SwByteArray idr = makeNal(19U, std::max(2, payloadSize - fixedBytes), 0x50U);
+
+    SwByteArray payload;
+    payload.reserve(static_cast<size_t>(fixedBytes + idr.size()));
+    appendByte(payload, static_cast<uint8_t>(48U << 1U));
+    appendByte(payload, 0x01U);
+    appendNalToAggregation(payload, vps);
+    appendNalToAggregation(payload, sps);
+    appendNalToAggregation(payload, pps);
+    appendNalToAggregation(payload, idr);
+    packet.payload = payload;
     return packet;
 }
 
@@ -537,6 +573,51 @@ bool runH264GapRecoveryScenario() {
     return true;
 }
 
+bool runH265AggregationDepacketizerScenario() {
+    SwRtpDepacketizerH265 depacketizer;
+    std::vector<DepacketizedObservation> frames;
+
+    depacketizer.setPacketCallback([&](const SwVideoPacket& packet) {
+        DepacketizedObservation observation;
+        observation.pts = packet.pts();
+        observation.keyFrame = packet.isKeyFrame();
+        observation.discontinuity = packet.isDiscontinuity();
+        observation.payload = packet.payload();
+        frames.push_back(observation);
+    });
+
+    depacketizer.push(makeH265Packet(1, 1000, true, 64));
+    depacketizer.push(makeH265Packet(2, 2000, false, 16));
+
+    const bool firstFrameOk =
+        frames.size() >= 1U &&
+        frames[0].pts == 1000 &&
+        frames[0].keyFrame &&
+        frames[0].discontinuity &&
+        byteArrayContains(frames[0].payload, {0x00U, 0x00U, 0x00U, 0x01U, 0x40U}) &&
+        byteArrayContains(frames[0].payload, {0x00U, 0x00U, 0x00U, 0x01U, 0x42U}) &&
+        byteArrayContains(frames[0].payload, {0x00U, 0x00U, 0x00U, 0x01U, 0x44U}) &&
+        byteArrayContains(frames[0].payload, {0x00U, 0x00U, 0x00U, 0x01U, 0x26U});
+    const bool secondFrameOk =
+        frames.size() >= 2U &&
+        frames[1].pts == 2000 &&
+        !frames[1].keyFrame &&
+        !frames[1].discontinuity &&
+        byteArrayContains(frames[1].payload, {0x00U, 0x00U, 0x00U, 0x01U, 0x02U});
+
+    if (frames.size() != 2U || !firstFrameOk || !secondFrameOk) {
+        std::cerr << "[H265 depacketizer aggregation] FAIL"
+                  << " frameCount=" << frames.size()
+                  << " firstFrameOk=" << (firstFrameOk ? 1 : 0)
+                  << " secondFrameOk=" << (secondFrameOk ? 1 : 0)
+                  << "\n";
+        return false;
+    }
+
+    std::cout << "[H265 depacketizer aggregation] PASS\n";
+    return true;
+}
+
 bool runPressureCooldownScenario() {
     SwRtspTrackGraph graph;
     SwRtspTrackGraph::VideoConfig config;
@@ -735,12 +816,136 @@ bool runFragmentBurstNoFalsePressureScenario() {
     return true;
 }
 
+bool runPlatformDecoderRegistrationScenario() {
+    const bool h264PlatformListed =
+        SwVideoDecoderFactory::instance().contains(SwVideoPacket::Codec::H264,
+                                                   swPlatformVideoDecoderId(),
+                                                   false);
+    const bool h264PlatformHardwareListed =
+        SwVideoDecoderFactory::instance().contains(SwVideoPacket::Codec::H264,
+                                                   swPlatformHardwareVideoDecoderId(),
+                                                   false);
+    const bool h264PlatformSoftwareListed =
+        SwVideoDecoderFactory::instance().contains(SwVideoPacket::Codec::H264,
+                                                   swPlatformSoftwareVideoDecoderId(),
+                                                   false);
+    const bool h265PlatformListed =
+        SwVideoDecoderFactory::instance().contains(SwVideoPacket::Codec::H265,
+                                                   swPlatformVideoDecoderId(),
+                                                   false);
+    const bool h265PlatformHardwareListed =
+        SwVideoDecoderFactory::instance().contains(SwVideoPacket::Codec::H265,
+                                                   swPlatformHardwareVideoDecoderId(),
+                                                   false);
+
+    if (!h264PlatformListed || !h264PlatformHardwareListed || !h264PlatformSoftwareListed ||
+        !h265PlatformListed || !h265PlatformHardwareListed) {
+        std::cerr << "[Platform decoder registration] FAIL"
+                  << " h264PlatformListed=" << (h264PlatformListed ? 1 : 0)
+                  << " h264PlatformHardwareListed=" << (h264PlatformHardwareListed ? 1 : 0)
+                  << " h264PlatformSoftwareListed=" << (h264PlatformSoftwareListed ? 1 : 0)
+                  << " h265PlatformListed=" << (h265PlatformListed ? 1 : 0)
+                  << " h265PlatformHardwareListed=" << (h265PlatformHardwareListed ? 1 : 0)
+                  << "\n";
+        return false;
+    }
+
+#if defined(_WIN32)
+    const bool expectedH264PlatformAvailable = true;
+    const bool expectedH264HardwareAvailable = true;
+    const bool expectedH264SoftwareAvailable = true;
+    const bool expectedH265PlatformAvailable = true;
+    const bool expectedH265HardwareAvailable = true;
+#elif defined(__linux__)
+    const bool expectedH264PlatformAvailable = swLinuxH264DecoderRuntimeAvailable();
+    const bool expectedH264HardwareAvailable = false;
+    const bool expectedH264SoftwareAvailable = swLinuxOpenH264RuntimeAvailable();
+    const bool expectedH265PlatformAvailable = swLinuxH265DecoderRuntimeAvailable();
+    const bool expectedH265HardwareAvailable = false;
+#else
+    const bool expectedH264PlatformAvailable = false;
+    const bool expectedH264HardwareAvailable = false;
+    const bool expectedH264SoftwareAvailable = false;
+    const bool expectedH265PlatformAvailable = false;
+    const bool expectedH265HardwareAvailable = false;
+#endif
+
+    const bool h264PlatformAvailable =
+        SwVideoDecoderFactory::instance().contains(SwVideoPacket::Codec::H264,
+                                                   swPlatformVideoDecoderId());
+    const bool h264PlatformHardwareAvailable =
+        SwVideoDecoderFactory::instance().contains(SwVideoPacket::Codec::H264,
+                                                   swPlatformHardwareVideoDecoderId());
+    const bool h264PlatformSoftwareAvailable =
+        SwVideoDecoderFactory::instance().contains(SwVideoPacket::Codec::H264,
+                                                   swPlatformSoftwareVideoDecoderId());
+    const bool h265PlatformAvailable =
+        SwVideoDecoderFactory::instance().contains(SwVideoPacket::Codec::H265,
+                                                   swPlatformVideoDecoderId());
+    const bool h265PlatformHardwareAvailable =
+        SwVideoDecoderFactory::instance().contains(SwVideoPacket::Codec::H265,
+                                                   swPlatformHardwareVideoDecoderId());
+
+    if (h264PlatformAvailable != expectedH264PlatformAvailable ||
+        h264PlatformHardwareAvailable != expectedH264HardwareAvailable ||
+        h264PlatformSoftwareAvailable != expectedH264SoftwareAvailable ||
+        h265PlatformAvailable != expectedH265PlatformAvailable ||
+        h265PlatformHardwareAvailable != expectedH265HardwareAvailable) {
+        std::cerr << "[Platform decoder availability] FAIL"
+                  << " h264PlatformAvailable=" << (h264PlatformAvailable ? 1 : 0)
+                  << " expectedH264PlatformAvailable=" << (expectedH264PlatformAvailable ? 1 : 0)
+                  << " h264PlatformHardwareAvailable=" << (h264PlatformHardwareAvailable ? 1 : 0)
+                  << " expectedH264HardwareAvailable=" << (expectedH264HardwareAvailable ? 1 : 0)
+                  << " h264PlatformSoftwareAvailable=" << (h264PlatformSoftwareAvailable ? 1 : 0)
+                  << " expectedH264SoftwareAvailable=" << (expectedH264SoftwareAvailable ? 1 : 0)
+                  << " h265PlatformAvailable=" << (h265PlatformAvailable ? 1 : 0)
+                  << " expectedH265PlatformAvailable=" << (expectedH265PlatformAvailable ? 1 : 0)
+                  << " h265PlatformHardwareAvailable=" << (h265PlatformHardwareAvailable ? 1 : 0)
+                  << " expectedH265HardwareAvailable=" << (expectedH265HardwareAvailable ? 1 : 0)
+                  << "\n";
+        return false;
+    }
+
+    if (h264PlatformAvailable) {
+        auto decoder =
+            SwVideoDecoderFactory::instance().create(SwVideoPacket::Codec::H264,
+                                                     swPlatformVideoDecoderId());
+        if (!decoder || !decoder->open(SwVideoFormatInfo())) {
+            std::cerr << "[Platform decoder creation] FAIL h264 auto open\n";
+            return false;
+        }
+    }
+    if (h264PlatformSoftwareAvailable) {
+        auto decoder =
+            SwVideoDecoderFactory::instance().create(SwVideoPacket::Codec::H264,
+                                                     swPlatformSoftwareVideoDecoderId());
+        if (!decoder || !decoder->open(SwVideoFormatInfo())) {
+            std::cerr << "[Platform decoder creation] FAIL h264 software open\n";
+            return false;
+        }
+    }
+    if (h265PlatformAvailable) {
+        auto decoder =
+            SwVideoDecoderFactory::instance().create(SwVideoPacket::Codec::H265,
+                                                     swPlatformVideoDecoderId());
+        if (!decoder) {
+            std::cerr << "[Platform decoder creation] FAIL h265 auto create\n";
+            return false;
+        }
+    }
+
+    std::cout << "[Platform decoder registration] PASS\n";
+    return true;
+}
+
 } // namespace
 
 int main() {
     bool ok = true;
+    ok = runPlatformDecoderRegistrationScenario() && ok;
     ok = runH264InterleavedDepacketizerScenario() && ok;
     ok = runH264GapRecoveryScenario() && ok;
+    ok = runH265AggregationDepacketizerScenario() && ok;
     ok = runScenario("H264 GOP jump", SwVideoPacket::Codec::H264, makeH264Packet) && ok;
     ok = runScenario("H265 GOP jump", SwVideoPacket::Codec::H265, makeH265Packet) && ok;
     ok = runScenario("H265 consumer pressure jump",

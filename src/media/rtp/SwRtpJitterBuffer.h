@@ -98,7 +98,10 @@ public:
             ++m_latePackets;
             return InsertResult::Late;
         }
-        auto inserted = m_buffer.emplace(sequenceNumber, Entry{datagram, arrivalTime});
+        Entry entry;
+        entry.datagram = datagram;
+        entry.arrivalTime = arrivalTime;
+        auto inserted = m_buffer.emplace(sequenceNumber, entry);
         if (!inserted.second) {
             inserted.first->second.arrivalTime = arrivalTime;
             inserted.first->second.datagram = datagram;

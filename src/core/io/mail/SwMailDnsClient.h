@@ -215,7 +215,7 @@ private:
         }
 #else
         SwFile file("/etc/resolv.conf");
-        if (file.open(SwIODevice::Read)) {
+        if (file.open(SwFile::Read)) {
             const SwString content = file.read();
             file.close();
             const std::string text = content.toStdString();

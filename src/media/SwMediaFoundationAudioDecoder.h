@@ -667,13 +667,30 @@ inline bool swRegisterMediaFoundationAudioDecoders() {
     registered = true;
     SwAudioDecoderFactory::instance().registerDecoder(
         SwAudioPacket::Codec::Opus,
+        "platform",
+        "Platform Decoder",
+        []() -> std::shared_ptr<SwAudioDecoder> {
+            return std::make_shared<SwMediaFoundationOpusDecoder>();
+        },
+        100,
+#if defined(_WIN32)
+        true);
+#else
+        false);
+#endif
+    SwAudioDecoderFactory::instance().registerDecoder(
+        SwAudioPacket::Codec::Opus,
         "media-foundation",
         "Media Foundation",
         []() -> std::shared_ptr<SwAudioDecoder> {
             return std::make_shared<SwMediaFoundationOpusDecoder>();
         },
         90,
+#if defined(_WIN32)
         true);
+#else
+        false);
+#endif
     return true;
 }
 
