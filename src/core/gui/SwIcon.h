@@ -103,7 +103,7 @@ public:
 
     // -- Query --
 
-    bool isNull() const { return m_entries.empty(); }
+    bool isNull() const { return m_entries.empty() && m_filePath.isEmpty() && !m_exeIcon; }
 
     /** @brief Number of available resolutions. */
     int availableSizeCount() const { return static_cast<int>(m_entries.size()); }
@@ -164,6 +164,12 @@ public:
      * Caller does NOT own the handle — it is cached internally.
      */
     HICON toHICON(int size = 0) const {
+        if (m_exeIcon) {
+            const int iconSize = (size > 0) ? size : GetSystemMetrics(SM_CXSMICON);
+            HICON h = loadApplicationHIcon_(iconSize);
+            if (h) return h;
+        }
+
         // If loaded from .ico file, use LoadImage for best quality
         if (!m_filePath.isEmpty()) {
             int cx = (size > 0) ? size : GetSystemMetrics(SM_CXSMICON);
@@ -187,15 +193,7 @@ public:
 
     static SwIcon applicationIcon() {
 #ifdef _WIN32
-        // Extract icon from current exe
-        wchar_t exePath[MAX_PATH];
-        GetModuleFileNameW(nullptr, exePath, MAX_PATH);
         SwIcon icon;
-        // Use the exe itself as icon source
-        HICON hLarge = nullptr, hSmall = nullptr;
-        ExtractIconExW(exePath, 0, &hLarge, &hSmall, 1);
-        // We can't easily convert HICON back to SwImage, so store the path
-        // and let toHICON() handle it via ExtractIcon
         icon.m_exeIcon = true;
         return icon;
 #else
@@ -317,6 +315,40 @@ private:
     }
 
 #ifdef _WIN32
+    static HICON loadApplicationHIcon_(int size) {
+        wchar_t exePath[MAX_PATH] = {};
+        const DWORD length = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+        if (length == 0 || length >= MAX_PATH) {
+            return nullptr;
+        }
+
+        HICON extracted = nullptr;
+        const UINT extractedCount = PrivateExtractIconsW(exePath,
+                                                         0,
+                                                         size,
+                                                         size,
+                                                         &extracted,
+                                                         nullptr,
+                                                         1,
+                                                         0);
+        if (extractedCount > 0 && extracted) {
+            return extracted;
+        }
+
+        HICON largeIcon = nullptr;
+        HICON smallIcon = nullptr;
+        const UINT iconCount = ExtractIconExW(exePath, 0, &largeIcon, &smallIcon, 1);
+        if (iconCount == 0) {
+            return nullptr;
+        }
+
+        const int smallMetric = GetSystemMetrics(SM_CXSMICON);
+        if (size <= smallMetric && smallIcon) {
+            return smallIcon;
+        }
+        return largeIcon ? largeIcon : smallIcon;
+    }
+
     static HICON createHIconFromImage_(const SwImage& img) {
         int w = img.width();
         int h = img.height();

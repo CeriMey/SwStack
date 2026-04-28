@@ -49,6 +49,7 @@
 #include "SwObject.h"
 #include "SwAbstractSocket.h"
 #include "SwPointer.h"
+#include "SwTcpSocket.h"
 #include "SwTimer.h"
 #include "SwFile.h"
 #include "SwDebug.h"
@@ -246,9 +247,14 @@ private slots:
                 return;
             }
 
+            SwTcpSocket* tcpSocket = dynamic_cast<SwTcpSocket*>(m_socket);
+            const SwString peerAddress = tcpSocket ? tcpSocket->peerAddress() : SwString();
+            const uint16_t peerPort = tcpSocket ? tcpSocket->peerPort() : 0;
             for (std::size_t i = 0; i < parsedRequests.size(); ++i) {
                 parsedRequests[i].isTls = m_isTls;
                 parsedRequests[i].localPort = m_localPort;
+                parsedRequests[i].peerAddress = peerAddress;
+                parsedRequests[i].peerPort = peerPort;
                 m_pendingRequests.append(parsedRequests[i]);
                 if (m_pendingRequests.size() > m_limits.maxPipelinedRequests) {
                     sendErrorAndClose_(400, "Too many pipelined requests");

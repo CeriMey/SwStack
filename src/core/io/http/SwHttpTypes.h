@@ -108,6 +108,8 @@ struct SwHttpRequest {
     bool isMultipartFormData = false;
     bool isTls = false;
     uint16_t localPort = 0;
+    SwString peerAddress;
+    uint16_t peerPort = 0;
 
     struct MultipartPart {
         SwMap<SwString, SwString> headers;

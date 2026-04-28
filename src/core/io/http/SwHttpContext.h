@@ -143,6 +143,14 @@ public:
         return m_request.localPort;
     }
 
+    SwString peerAddress() const {
+        return m_request.peerAddress;
+    }
+
+    uint16_t peerPort() const {
+        return m_request.peerPort;
+    }
+
     /**
      * @brief Performs the `queryValue` operation.
      * @param key Value passed to the method.

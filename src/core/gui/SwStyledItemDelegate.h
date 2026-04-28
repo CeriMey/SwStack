@@ -59,6 +59,8 @@
 
 #include "graphics/SwFontMetrics.h"
 
+class SwWidget;
+
 struct SwStyleOptionViewItem {
     SwRect rect{};
     SwFont font{};
@@ -154,5 +156,60 @@ public:
         const int outW = w + padX;
         const int outH = ((h + padY) > minH) ? (h + padY) : minH;
         return SwSize{outW, outH};
+    }
+
+    /**
+     * @brief Creates an editor widget for an editable item.
+     * @param parent Parent widget that should own the editor.
+     * @param option Style option associated with the edited item.
+     * @param index Model index being edited.
+     * @return Newly created editor widget, or `nullptr` when the item is not editor-backed.
+     */
+    virtual SwWidget* createEditor(SwWidget* parent,
+                                   const SwStyleOptionViewItem& option,
+                                   const SwModelIndex& index) const {
+        SW_UNUSED(parent)
+        SW_UNUSED(option)
+        SW_UNUSED(index)
+        return nullptr;
+    }
+
+    /**
+     * @brief Populates an editor with the current model value.
+     * @param editor Editor widget created by `createEditor`.
+     * @param index Model index being edited.
+     */
+    virtual void setEditorData(SwWidget* editor,
+                               const SwModelIndex& index) const {
+        SW_UNUSED(editor)
+        SW_UNUSED(index)
+    }
+
+    /**
+     * @brief Pushes the editor state back into the model.
+     * @param editor Editor widget created by `createEditor`.
+     * @param model Model to update.
+     * @param index Model index being edited.
+     */
+    virtual void setModelData(SwWidget* editor,
+                              SwAbstractItemModel* model,
+                              const SwModelIndex& index) const {
+        SW_UNUSED(editor)
+        SW_UNUSED(model)
+        SW_UNUSED(index)
+    }
+
+    /**
+     * @brief Updates the editor geometry for the edited cell.
+     * @param editor Editor widget created by `createEditor`.
+     * @param option Style option associated with the edited item.
+     * @param index Model index being edited.
+     */
+    virtual void updateEditorGeometry(SwWidget* editor,
+                                      const SwStyleOptionViewItem& option,
+                                      const SwModelIndex& index) const {
+        SW_UNUSED(editor)
+        SW_UNUSED(option)
+        SW_UNUSED(index)
     }
 };

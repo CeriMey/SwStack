@@ -79,6 +79,7 @@ typedef void* WINTUN_SESSION_HANDLE;
 
 typedef WINTUN_ADAPTER_HANDLE (WINAPI *WintunCreateAdapter_t)(
     const WCHAR* Name, const WCHAR* TunnelType, const GUID* RequestedGUID);
+typedef WINTUN_ADAPTER_HANDLE (WINAPI *WintunOpenAdapter_t)(const WCHAR* Name);
 typedef void    (WINAPI *WintunCloseAdapter_t)(WINTUN_ADAPTER_HANDLE);
 typedef WINTUN_SESSION_HANDLE (WINAPI *WintunStartSession_t)(
     WINTUN_ADAPTER_HANDLE Adapter, DWORD Capacity);
@@ -499,6 +500,7 @@ private:
         }
 
         m_fnCreate   = (WintunCreateAdapter_t)  GetProcAddress(m_wintunDll, "WintunCreateAdapter");
+        m_fnOpen     = (WintunOpenAdapter_t)    GetProcAddress(m_wintunDll, "WintunOpenAdapter");
         m_fnClose    = (WintunCloseAdapter_t)    GetProcAddress(m_wintunDll, "WintunCloseAdapter");
         m_fnStart    = (WintunStartSession_t)    GetProcAddress(m_wintunDll, "WintunStartSession");
         m_fnEnd      = (WintunEndSession_t)      GetProcAddress(m_wintunDll, "WintunEndSession");
@@ -523,9 +525,18 @@ private:
         MultiByteToWideChar(CP_UTF8, 0, nameUtf8.c_str(), -1, &wName[0], wLen);
         std::wstring wType(L"SwStack");
 
-        m_adapter = m_fnCreate(wName.c_str(), wType.c_str(), nullptr);
+        if (m_fnOpen) {
+            m_adapter = m_fnOpen(wName.c_str());
+            if (m_adapter) {
+                swCDebug(kSwLogCategory_SwTun) << "[SwTun] Reusing existing adapter '" << name << "'";
+            }
+        }
+
         if (!m_adapter) {
-            swCError(kSwLogCategory_SwTun) << "[SwTun] WintunCreateAdapter failed (err=" << GetLastError() << ")";
+            m_adapter = m_fnCreate(wName.c_str(), wType.c_str(), nullptr);
+        }
+        if (!m_adapter) {
+            swCError(kSwLogCategory_SwTun) << "[SwTun] Unable to open/create adapter (err=" << GetLastError() << ")";
             emit errorOccurred(static_cast<int>(GetLastError()));
             FreeLibrary(m_wintunDll);
             m_wintunDll = nullptr;
@@ -671,6 +682,7 @@ private:
     HANDLE                 m_readEvent = nullptr;
 
     WintunCreateAdapter_t          m_fnCreate  = nullptr;
+    WintunOpenAdapter_t            m_fnOpen    = nullptr;
     WintunCloseAdapter_t           m_fnClose   = nullptr;
     WintunStartSession_t           m_fnStart   = nullptr;
     WintunEndSession_t             m_fnEnd     = nullptr;

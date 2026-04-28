@@ -46,10 +46,15 @@
  ***************************************************************************************************/
 
 #include "SwAbstractItemModel.h"
+#include "SwCheckBox.h"
+#include "SwComboBox.h"
 #include "SwHeaderView.h"
 #include "SwItemSelectionModel.h"
+#include "SwLineEdit.h"
 #include "SwScrollBar.h"
 #include "SwScrollBarPolicy.h"
+#include "SwStyledItemDelegate.h"
+#include "SwTimer.h"
 #include "SwWidget.h"
 #include "SwWidgetPlatformAdapter.h"
 #include "SwDragDrop.h"
@@ -89,6 +94,7 @@ public:
             return;
         }
 
+        closeEditor();
         clearIndexWidgets();
 
         if (m_model) {
@@ -110,15 +116,20 @@ public:
 
         if (m_model) {
             SwObject::connect(m_model, &SwAbstractItemModel::modelReset, this, [this]() {
+                closeEditor();
                 validateSortStateAfterModelReset();
                 remapCurrentIndexAfterModelReset();
                 remapSelectionAfterModelReset();
                 remapIndexWidgetsAfterModelReset();
+                remapEditorAfterModelReset();
                 resetScrollBars();
                 updateIndexWidgetsGeometry();
                 update();
             });
             SwObject::connect(m_model, &SwAbstractItemModel::dataChanged, this, [this](const SwModelIndex&, const SwModelIndex&) {
+                if (m_editIndex.isValid()) {
+                    updateEditorGeometryForIndex_(m_editIndex);
+                }
                 update();
             });
         }
@@ -152,7 +163,12 @@ public:
         m_selectionModel = selectionModel;
         if (m_selectionModel) {
             SwObject::connect(m_selectionModel, &SwItemSelectionModel::selectionChanged, this, [this]() { update(); });
-            SwObject::connect(m_selectionModel, &SwItemSelectionModel::currentChanged, this, [this](const SwModelIndex&, const SwModelIndex&) { update(); });
+            SwObject::connect(m_selectionModel, &SwItemSelectionModel::currentChanged, this, [this](const SwModelIndex& current, const SwModelIndex&) {
+                if (m_editIndex.isValid() && current != m_editIndex) {
+                    commitAndCloseEditor_(true);
+                }
+                update();
+            });
         }
         update();
     }
@@ -287,10 +303,138 @@ public:
             m_indexWidgets[i].widget = nullptr;
         }
         m_indexWidgets.clear();
+        m_editorWidget = nullptr;
+        m_editIndex = SwModelIndex();
         update();
     }
 
+    /**
+     * @brief Sets the item Delegate.
+     * @param delegate Value passed to the method.
+     *
+     * @details Call this method to replace the currently stored value with the caller-provided one.
+     */
+    void setItemDelegate(SwStyledItemDelegate* delegate) {
+        if (m_delegate == delegate) {
+            return;
+        }
+        if (delegate && !delegate->parent()) {
+            delegate->setParent(this);
+        }
+        m_delegate = delegate;
+        ensureDefaultDelegate_();
+        update();
+    }
+
+    /**
+     * @brief Returns the current item Delegate.
+     * @return The current item Delegate.
+     *
+     * @details The returned value reflects the state currently stored by the instance.
+     */
+    SwStyledItemDelegate* itemDelegate() const { return m_delegate; }
+
+    /**
+     * @brief Performs the `indexAt` operation.
+     * @param px Value passed to the method.
+     * @param py Value passed to the method.
+     * @return The requested index At.
+     */
+    SwModelIndex indexAt(int px, int py) const {
+        return indexAt_(px, py);
+    }
+
+    /**
+     * @brief Performs the `visualRect` operation.
+     * @param index Value passed to the method.
+     * @return The requested visual Rect.
+     */
+    SwRect visualRect(const SwModelIndex& index) const {
+        if (!m_model || !index.isValid() || index.model() != m_model) {
+            return SwRect{};
+        }
+
+        const SwRect bounds = rect();
+        const SwRect viewport = contentViewportRect(bounds);
+        if (viewport.width <= 0 || viewport.height <= 0) {
+            return SwRect{};
+        }
+
+        const int headerH = std::min(m_headerHeight, viewport.height);
+        const int offsetX = m_hBar ? m_hBar->value() : 0;
+        const int offsetY = m_vBar ? m_vBar->value() : 0;
+        const int colW = columnWidthInternal(index.column());
+        const int cellX = viewport.x + columnStartX(index.column()) - offsetX;
+        const int cellY = viewport.y + headerH + index.row() * m_rowHeight - offsetY;
+        return SwRect{cellX, cellY, colW, m_rowHeight};
+    }
+
+    /**
+     * @brief Performs the `scrollTo` operation.
+     * @param index Value passed to the method.
+     */
+    void scrollTo(const SwModelIndex& index) {
+        ensureIndexVisible(index);
+    }
+
+    /**
+     * @brief Starts editing the given index using the current delegate.
+     * @param index Model index to edit.
+     * @return `true` when an editor was opened; otherwise `false`.
+     */
+    bool edit(const SwModelIndex& index) {
+        if (!m_model || !m_delegate || !index.isValid() || index.model() != m_model) {
+            return false;
+        }
+        if (!isIndexEditable_(index)) {
+            return false;
+        }
+        if (m_editorWidget && m_editIndex == index) {
+            m_editorWidget->setFocus(true);
+            updateEditorGeometryForIndex_(index);
+            return true;
+        }
+
+        closeEditor();
+
+        const SwStyleOptionViewItem option = styleOptionForIndex_(index);
+        SwWidget* editor = m_delegate->createEditor(this, option, index);
+        if (!editor) {
+            return false;
+        }
+        if (!editor->parent()) {
+            editor->setParent(this);
+        }
+
+        m_editIndex = index;
+        m_editorWidget = editor;
+        setIndexWidget(index, editor);
+        m_delegate->setEditorData(editor, index);
+        updateEditorGeometryForIndex_(index);
+        hookEditorSignals_(editor);
+        ensureIndexVisible(index);
+        editor->setFocus(true);
+        update();
+        return true;
+    }
+
+    /**
+     * @brief Commits and closes the active editor, if any.
+     */
+    void closeEditor() {
+        commitAndCloseEditor_(true);
+    }
+
+    /**
+     * @brief Returns the currently edited index.
+     * @return The currently edited index.
+     */
+    SwModelIndex editingIndex() const { return m_editIndex; }
+
 signals:
+    DECLARE_SIGNAL(clicked, const SwModelIndex&);
+    DECLARE_SIGNAL(doubleClicked, const SwModelIndex&);
+    DECLARE_SIGNAL(activated, const SwModelIndex&);
     DECLARE_SIGNAL(contextMenuRequested, const SwModelIndex&, int, int);
     DECLARE_SIGNAL(dragStarted, const SwModelIndex&);
     DECLARE_SIGNAL(dragMoved, const SwModelIndex&, int, int);
@@ -795,6 +939,9 @@ protected:
             return;
         }
         if (!isPointInside(event->x(), event->y())) {
+            if (m_editIndex.isValid()) {
+                commitAndCloseEditor_(true);
+            }
             SwWidget::mousePressEvent(event);
             return;
         }
@@ -817,6 +964,9 @@ protected:
         const SwRect bounds = rect();
         const SwRect viewport = contentViewportRect(bounds);
         if (!containsPoint(viewport, event->x(), event->y())) {
+            if (m_editIndex.isValid()) {
+                commitAndCloseEditor_(true);
+            }
             SwWidget::mousePressEvent(event);
             return;
         }
@@ -854,6 +1004,9 @@ protected:
 
         const SwModelIndex idx = m_model->index(row, column, SwModelIndex());
         if (idx.isValid()) {
+            if (m_editIndex.isValid() && idx != m_editIndex) {
+                commitAndCloseEditor_(true);
+            }
             const SwModelIndex rowIdx = m_model->index(row, 0, SwModelIndex());
             if (event->button() == SwMouseButton::Right) {
                 if (rowIdx.isValid() && m_selectionModel->isSelected(rowIdx)) {
@@ -926,6 +1079,7 @@ protected:
             m_pressIndex = idx;
             m_dragIndex = SwModelIndex();
             m_dropIndex = SwModelIndex();
+            clicked(idx);
             event->accept();
             update();
             return;
@@ -1064,6 +1218,50 @@ protected:
     }
 
     /**
+     * @brief Handles the mouse Double Click Event forwarded by the framework.
+     * @param event Event object forwarded by the framework.
+     *
+     * @details Override this hook when the default framework behavior needs to be extended or replaced.
+     */
+    void mouseDoubleClickEvent(MouseEvent* event) override {
+        if (!event) {
+            return;
+        }
+        if (!isPointInside(event->x(), event->y())) {
+            SwWidget::mouseDoubleClickEvent(event);
+            return;
+        }
+
+        if (!m_model || !m_selectionModel) {
+            SwWidget::mouseDoubleClickEvent(event);
+            return;
+        }
+
+        const SwModelIndex idx = indexAt_(event->x(), event->y());
+        if (!idx.isValid()) {
+            SwWidget::mouseDoubleClickEvent(event);
+            return;
+        }
+
+        const SwModelIndex rowIdx = m_model->index(idx.row(), 0, SwModelIndex());
+        SwList<SwModelIndex> selection;
+        if (rowIdx.isValid()) {
+            selection.append(rowIdx);
+        }
+        m_selectionModel->setSelectedIndexes(selection);
+        m_selectionModel->setCurrentIndex(idx, false, false);
+        m_selectionModel->setAnchorIndex(rowIdx);
+        ensureIndexVisible(idx);
+        if (isIndexEditable_(idx)) {
+            edit(idx);
+        }
+        doubleClicked(idx);
+        activated(idx);
+        event->accept();
+        update();
+    }
+
+    /**
      * @brief Handles the wheel Event forwarded by the framework.
      * @param event Event object forwarded by the framework.
      *
@@ -1151,6 +1349,16 @@ protected:
         SwModelIndex current = m_selectionModel->currentIndex();
         int row = current.isValid() ? current.row() : 0;
         int col = current.isValid() ? current.column() : 0;
+
+        if (SwWidgetPlatformAdapter::isReturnKey(event->key()) &&
+            current.isValid() &&
+            !m_editorWidget &&
+            isIndexEditable_(current)) {
+            if (edit(current)) {
+                event->accept();
+                return;
+            }
+        }
 
         if (event->isCtrlPressed() && SwWidgetPlatformAdapter::matchesShortcutKey(event->key(), 'A')) {
             SwList<SwModelIndex> selection;
@@ -1260,6 +1468,113 @@ private:
                inner.y >= outer.y &&
                (inner.x + inner.width) <= (outer.x + outer.width) &&
                (inner.y + inner.height) <= (outer.y + outer.height);
+    }
+
+    bool isIndexEditable_(const SwModelIndex& index) const {
+        if (!m_model || !index.isValid() || index.model() != m_model) {
+            return false;
+        }
+        const SwItemFlags flags = m_model->flags(index);
+        return flags.testFlag(SwItemFlag::ItemIsEnabled) &&
+               flags.testFlag(SwItemFlag::ItemIsEditable);
+    }
+
+    SwStyleOptionViewItem styleOptionForIndex_(const SwModelIndex& index) const {
+        SwStyleOptionViewItem option;
+        option.rect = visualRect(index);
+        option.font = SwFont(L"Segoe UI", 9, Normal);
+        option.enabled = m_model && m_model->flags(index).testFlag(SwItemFlag::ItemIsEnabled);
+        const SwModelIndex rowIdx = m_model ? m_model->index(index.row(), 0, SwModelIndex()) : SwModelIndex();
+        option.selected = m_selectionModel && rowIdx.isValid() && m_selectionModel->isSelected(rowIdx);
+        option.hovered = (m_hoverIndex.isValid() &&
+                          m_hoverIndex.row() == index.row() &&
+                          m_hoverIndex.column() == index.column());
+        option.hasFocus = getFocus();
+        option.alternate = m_alternating && ((index.row() % 2) == 1);
+        return option;
+    }
+
+    void updateEditorGeometryForIndex_(const SwModelIndex& index) {
+        if (!m_delegate || !m_editorWidget || !index.isValid() || index != m_editIndex) {
+            return;
+        }
+        const SwStyleOptionViewItem option = styleOptionForIndex_(index);
+        m_delegate->updateEditorGeometry(m_editorWidget, option, index);
+    }
+
+    void hookEditorSignals_(SwWidget* editor) {
+        if (!editor) {
+            return;
+        }
+
+        SwObject::connect(editor, &SwWidget::FocusChanged, this, [this, editor](const bool& focus) {
+            if (focus) {
+                return;
+            }
+            SwTimer::singleShot(0, [this, editor]() {
+                if (editor == m_editorWidget && m_editIndex.isValid() && (!m_editorWidget || !m_editorWidget->getFocus())) {
+                    commitAndCloseEditor_(true);
+                }
+            });
+        });
+
+        if (auto* lineEdit = dynamic_cast<SwLineEdit*>(editor)) {
+            SwObject::connect(lineEdit, &SwLineEdit::TextChanged, this, [this, editor](const SwString&) {
+                if (editor == m_editorWidget) {
+                    commitAndCloseEditor_(false);
+                }
+            });
+        }
+
+        if (auto* combo = dynamic_cast<SwComboBox*>(editor)) {
+            SwObject::connect(combo, &SwComboBox::currentIndexChanged, this, [this, editor](int) {
+                if (editor == m_editorWidget) {
+                    commitAndCloseEditor_(false);
+                }
+            });
+            SwObject::connect(combo, &SwComboBox::activated, this, [this, editor](int) {
+                SwTimer::singleShot(0, [this, editor]() {
+                    if (editor == m_editorWidget) {
+                        commitAndCloseEditor_(true);
+                    }
+                });
+            });
+        }
+
+        if (auto* checkBox = dynamic_cast<SwCheckBox*>(editor)) {
+            SwObject::connect(checkBox, &SwCheckBox::toggled, this, [this, editor](bool) {
+                SwTimer::singleShot(0, [this, editor]() {
+                    if (editor == m_editorWidget) {
+                        commitAndCloseEditor_(true);
+                    }
+                });
+            });
+        }
+    }
+
+    void commitAndCloseEditor_(bool closeEditor) {
+        if (!m_editorWidget || !m_editIndex.isValid() || m_committingEditor) {
+            return;
+        }
+
+        m_committingEditor = true;
+        SwWidget* editor = m_editorWidget;
+        const SwModelIndex editedIndex = m_editIndex;
+        if (m_delegate && m_model && editedIndex.isValid() && editedIndex.model() == m_model) {
+            m_delegate->setModelData(editor, m_model, editedIndex);
+        }
+        m_committingEditor = false;
+
+        if (!closeEditor) {
+            updateEditorGeometryForIndex_(m_editIndex);
+            update();
+            return;
+        }
+
+        m_editorWidget = nullptr;
+        m_editIndex = SwModelIndex();
+        setIndexWidget(editedIndex, nullptr);
+        update();
     }
 
     bool hitRowResizeHandle_(int px, int py) const {
@@ -1455,10 +1770,28 @@ private:
         }
     }
 
+    void remapEditorAfterModelReset() {
+        if (!m_model || !m_editorWidget || !m_editIndex.isValid() || m_editIndex.model() != m_model) {
+            return;
+        }
+
+        SwModelIndex remapped = findIndexForInternalPointer(m_editIndex.internalPointer(), m_editIndex.column());
+        if (!remapped.isValid()) {
+            m_editorWidget = nullptr;
+            m_editIndex = SwModelIndex();
+            return;
+        }
+
+        m_editIndex = remapped;
+        updateEditorGeometryForIndex_(m_editIndex);
+    }
+
     void initDefaults() {
         setStyleSheet(R"(
             SwTableView { background-color: rgba(0,0,0,0); border-width: 0px; }
         )");
+
+        ensureDefaultDelegate_();
 
         m_header = new SwHeaderView(SwOrientation::Horizontal, this);
         m_header->setShowGrid(m_showGrid);
@@ -1653,7 +1986,7 @@ private:
 
         const int cols = columnCount();
         const int rows = rowCount();
-        if (!m_model || cols <= 0 || rows <= 0) {
+        if (!m_model || !m_delegate || cols <= 0 || rows <= 0) {
             return;
         }
 
@@ -1666,8 +1999,6 @@ private:
         const int yWithin = (m_rowHeight > 0) ? (offsetY - firstRow * m_rowHeight) : 0;
 
         int y = dataArea.y - yWithin;
-        const SwColor textColor{30, 41, 59};
-        const SwColor gridColor{226, 232, 240};
         const SwColor altFill{248, 250, 252};
         const SwColor selFill{219, 234, 254};
         const SwColor selBorder{147, 197, 253};
@@ -1699,18 +2030,21 @@ private:
                 const SwModelIndex idx = m_model->index(r, c, SwModelIndex());
                 const bool hasWidget = idx.isValid() && indexWidget(idx);
                 if (!hasWidget) {
-                    SwAny v = m_model->data(idx, SwItemDataRole::DisplayRole);
-                    SwString text = v.toString();
-
-                    SwRect textRect{cell.x + 10, cell.y, std::max(0, cell.width - 20), cell.height};
-                    painter->drawText(textRect,
-                                      text,
-                                      DrawTextFormats(DrawTextFormat::Left | DrawTextFormat::VCenter | DrawTextFormat::SingleLine),
-                                      textColor,
-                                      font);
+                    SwStyleOptionViewItem opt;
+                    opt.rect = cell;
+                    opt.font = font;
+                    opt.enabled = m_model->flags(idx).testFlag(SwItemFlag::ItemIsEnabled);
+                    opt.selected = rowSelected;
+                    opt.hovered = (m_hoverIndex.isValid() &&
+                                   m_hoverIndex.row() == r &&
+                                   m_hoverIndex.column() == c);
+                    opt.hasFocus = getFocus();
+                    opt.alternate = m_alternating && ((r % 2) == 1);
+                    m_delegate->paint(painter, opt, idx);
                 }
 
                 if (m_showGrid) {
+                    const SwColor gridColor{226, 232, 240};
                     painter->drawLine(cell.x, cell.y + cell.height, cell.x + cell.width, cell.y + cell.height, gridColor, 1);
                     painter->drawLine(cell.x + cell.width, cell.y, cell.x + cell.width, cell.y + cell.height, gridColor, 1);
                 }
@@ -1720,6 +2054,13 @@ private:
 
             y += m_rowHeight;
         }
+    }
+
+    void ensureDefaultDelegate_() {
+        if (m_delegate) {
+            return;
+        }
+        m_delegate = new SwStyledItemDelegate(this);
     }
 
     int columnAtContentX(int x) const {
@@ -1806,6 +2147,13 @@ private:
                 continue;
             }
 
+            if (w == m_editorWidget && idx == m_editIndex && m_delegate) {
+                const SwStyleOptionViewItem option = styleOptionForIndex_(idx);
+                m_delegate->updateEditorGeometry(w, option, idx);
+                w->show();
+                continue;
+            }
+
             const int padX = 8;
             const int padY = 4;
             int newW = w->frameGeometry().width;
@@ -1843,6 +2191,7 @@ private:
 
     SwAbstractItemModel* m_model{nullptr};
     SwItemSelectionModel* m_selectionModel{nullptr};
+    SwStyledItemDelegate* m_delegate{nullptr};
     SwHeaderView* m_header{nullptr};
     SwScrollBar* m_hBar{nullptr};
     SwScrollBar* m_vBar{nullptr};
@@ -1872,6 +2221,9 @@ private:
     SwModelIndex m_dragIndex;
     SwModelIndex m_dropIndex;
     SwModelIndex m_hoverIndex;
+    SwModelIndex m_editIndex;
+    SwWidget* m_editorWidget{nullptr};
+    bool m_committingEditor{false};
 
     SwList<IndexWidgetEntry> m_indexWidgets;
 };
