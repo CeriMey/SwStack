@@ -1575,12 +1575,10 @@ private:
         SwList<SwString> localRecipients;
         SwList<SwString> remoteRecipients;
         for (std::size_t i = 0; i < m_recipients.size(); ++i) {
-            SwString localPart;
-            SwString domain;
-            if (!swMailDetail::splitAddress(m_recipients[i], localPart, domain)) {
-                continue;
-            }
-            if (domain == m_service->config().domain) {
+            SwList<SwString> single;
+            single.append(m_recipients[i]);
+            SwList<SwString> resolved;
+            if (m_service->store().resolveLocalRecipients(single, &resolved).ok()) {
                 localRecipients.append(m_recipients[i]);
             } else {
                 remoteRecipients.append(m_recipients[i]);

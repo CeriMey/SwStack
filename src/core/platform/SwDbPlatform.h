@@ -567,18 +567,10 @@ public:
         }
         return true;
 #else
-#if defined(_POSIX_C_SOURCE) && (_POSIX_C_SOURCE >= 200112L)
-        const int rc = ::posix_fallocate(fd_, 0, static_cast<off_t>(bytes));
-        if (rc != 0) {
-            if (errOut) {
-                *errOut = SwString("posix_fallocate failed: ") + SwString(std::strerror(rc));
-            }
-            return false;
-        }
-#else
+        // This helper must reserve physical space without changing logical EOF.
+        // posix_fallocate() extends st_size, which breaks append-only WAL replay.
         (void)bytes;
         (void)errOut;
-#endif
         return true;
 #endif
     }

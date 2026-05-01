@@ -68,25 +68,46 @@ public:
         const char* end = walBytes.data() + walBytes.size();
         while (cur < end) {
             if (end - cur < 16 || std::memcmp(cur, swEmbeddedDbDetail::kWalMagic_, 8) != 0) {
-                break;
+                const char* next = findNextWalMagic_(cur + 1, end);
+                if (next == end) {
+                    break;
+                }
+                cur = next;
+                continue;
             }
+            const char* frameStart = cur;
             cur += 8;
             unsigned int payloadBytes = 0;
             unsigned int crc = 0;
             if (!swEmbeddedDbDetail::readU32LE_(cur, end, payloadBytes) ||
                 !swEmbeddedDbDetail::readU32LE_(cur, end, crc) ||
                 static_cast<std::size_t>(end - cur) < payloadBytes) {
-                break;
+                const char* next = findNextWalMagic_(frameStart + 1, end);
+                if (next == end) {
+                    break;
+                }
+                cur = next;
+                continue;
             }
             SwByteArray payload(cur, payloadBytes);
             if (swEmbeddedDbDetail::crc32Bytes_(payload) != crc) {
-                break;
+                const char* next = findNextWalMagic_(frameStart + 1, end);
+                if (next == end) {
+                    break;
+                }
+                cur = next;
+                continue;
             }
             cur += payloadBytes;
             unsigned long long sequence = 0;
             SwDbWriteBatch batch;
             if (!decodeWalPayload(payload, sequence, batch)) {
-                break;
+                const char* next = findNextWalMagic_(frameStart + 1, end);
+                if (next == end) {
+                    break;
+                }
+                cur = next;
+                continue;
             }
             if (sequence <= db_.manifest_.maxSequence) {
                 continue;
@@ -195,6 +216,13 @@ public:
     }
 
 private:
+    static const char* findNextWalMagic_(const char* begin, const char* end) {
+        if (!begin || begin >= end) {
+            return end;
+        }
+        return std::search(begin, end, swEmbeddedDbDetail::kWalMagic_, swEmbeddedDbDetail::kWalMagic_ + 8);
+    }
+
     static void writeU8To_(char*& out, unsigned int value) {
         *out++ = static_cast<char>(value & 0xffu);
     }

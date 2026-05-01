@@ -314,10 +314,12 @@ private:
         if (!allowCreate) {
             fd = ::shm_open(nameA.c_str(), O_RDWR, 0666);
             if (fd < 0) throw std::runtime_error("shm_open(existing) failed");
+            detail::ensureSharedMemoryPermissions_(fd);
         } else {
             fd = ::shm_open(nameA.c_str(), O_RDWR | O_CREAT | O_EXCL, 0666);
             if (fd >= 0) {
                 createdOut = true;
+                detail::ensureSharedMemoryPermissions_(fd);
                 if (createBytes == 0) {
                     ::close(fd);
                     ::shm_unlink(nameA.c_str());
@@ -331,6 +333,7 @@ private:
             } else if (errno == EEXIST) {
                 fd = ::shm_open(nameA.c_str(), O_RDWR, 0666);
                 if (fd < 0) throw std::runtime_error("shm_open(existing) failed");
+                detail::ensureSharedMemoryPermissions_(fd);
             } else {
                 throw std::runtime_error("shm_open failed");
             }

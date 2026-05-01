@@ -544,7 +544,9 @@ inline void SwHttpAcmeManager::scheduleRenewFromStoredCertificate_() {
     }
 
     long long delayMs = delaySeconds * 1000LL;
-    const long long maxDelayMs = 2147483647LL;
+    // SwCore timers are backed by int microsecond intervals. Keep each ACME
+    // wake-up inside that range and re-evaluate the certificate on each tick.
+    const long long maxDelayMs = 30LL * 60LL * 1000LL;
     if (delayMs > maxDelayMs) {
         delayMs = maxDelayMs;
     }

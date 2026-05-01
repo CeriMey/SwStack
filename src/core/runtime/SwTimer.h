@@ -48,6 +48,7 @@
 #include "SwObject.h"
 #include "SwCoreApplication.h"
 #include <chrono>
+#include <limits>
 
 /**
  * @class SwTimer
@@ -116,7 +117,10 @@ public:
      */
     void setInterval(int ms) {
         if (!m_running) {
-            m_interval = ms * 1000;
+            m_interval = static_cast<long long>(ms) * 1000LL;
+            if (m_interval < 1) {
+                m_interval = 1;
+            }
         }
     }
 
@@ -124,7 +128,11 @@ public:
      * @brief Returns the current interval in milliseconds.
      */
     int interval() const {
-        return static_cast<int>(m_interval / 1000);
+        const long long intervalMs = m_interval / 1000LL;
+        if (intervalMs > static_cast<long long>((std::numeric_limits<int>::max)())) {
+            return (std::numeric_limits<int>::max)();
+        }
+        return static_cast<int>(intervalMs);
     }
 
     /**
@@ -164,6 +172,14 @@ public:
             m_startTime = std::chrono::steady_clock::now();
 
              auto* self = this;
+             long long intervalUs = m_interval;
+             if (intervalUs < 1) {
+                 intervalUs = 1;
+             }
+             if (intervalUs > static_cast<long long>((std::numeric_limits<int>::max)())) {
+                 intervalUs = static_cast<long long>((std::numeric_limits<int>::max)());
+             }
+
              m_timerId = SwCoreApplication::instance()->addTimer([self]() {
                  if (!SwObject::isLive(self)) {
                      return;
@@ -171,7 +187,7 @@ public:
                  // Update internal state before emitting: slots may delete this timer.
                  self->m_startTime = std::chrono::steady_clock::now();
                  self->timeout();
-             }, static_cast<int>(m_interval), m_singleShot);
+             }, static_cast<int>(intervalUs), m_singleShot);
          }
      }
 
@@ -239,7 +255,14 @@ public:
         auto now = std::chrono::steady_clock::now();
         auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(now - m_startTime).count();
         auto remaining_us = m_interval - elapsed_us;
-        return remaining_us > 0 ? static_cast<int>(remaining_us / 1000) : 0;
+        if (remaining_us <= 0) {
+            return 0;
+        }
+        const long long remainingMs = remaining_us / 1000LL;
+        if (remainingMs > static_cast<long long>((std::numeric_limits<int>::max)())) {
+            return (std::numeric_limits<int>::max)();
+        }
+        return static_cast<int>(remainingMs);
     }
 
     /**

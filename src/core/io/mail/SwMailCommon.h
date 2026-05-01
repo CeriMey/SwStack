@@ -127,6 +127,8 @@ struct SwMailMessageEntry {
     SwString subject;
     SwString from;
     SwList<SwString> to;
+    SwList<SwString> cc;
+    SwList<SwString> bcc;
     SwString messageId;
     unsigned long long sizeBytes = 0;
     SwByteArray rawMessage;

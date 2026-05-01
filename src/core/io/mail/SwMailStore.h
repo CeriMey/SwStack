@@ -66,10 +66,6 @@ public:
         if (!swMailDetail::splitAddress(address, localPart, domain)) {
             return SwDbStatus(SwDbStatus::InvalidArgument, "Invalid account address");
         }
-        if (domain != m_config.domain) {
-            return SwDbStatus(SwDbStatus::InvalidArgument, "Account domain does not match store domain");
-        }
-
         SwMailAccount existing;
         const SwDbStatus existingStatus = loadAccountLocked_(swMailDetail::canonicalAddress(address), existing);
         if (existingStatus.ok()) {
@@ -360,6 +356,8 @@ public:
         entry.subject = headers.value("subject");
         entry.from = swMailDetail::canonicalAddress(headers.value("from"));
         entry.to = swMailDetail::normalizeRecipients(swMailDetail::parseAddressListHeader(headers.value("to")));
+        entry.cc = swMailDetail::normalizeRecipients(swMailDetail::parseAddressListHeader(headers.value("cc")));
+        entry.bcc = swMailDetail::normalizeRecipients(swMailDetail::parseAddressListHeader(headers.value("bcc")));
         entry.messageId = headers.value("message-id");
         if (entry.messageId.isEmpty()) {
             entry.messageId = swMailDetail::generateMessageId(m_config);
@@ -1000,6 +998,8 @@ private:
         object["subject"] = entry.subject.toStdString();
         object["from"] = entry.from.toStdString();
         object["to"] = swMailDetail::toJsonArray(entry.to);
+        object["cc"] = swMailDetail::toJsonArray(entry.cc);
+        object["bcc"] = swMailDetail::toJsonArray(entry.bcc);
         object["messageId"] = entry.messageId.toStdString();
         object["sizeBytes"] = static_cast<long long>(entry.sizeBytes);
         object["raw"] = entry.rawMessage.toBase64().toStdString();
@@ -1016,6 +1016,8 @@ private:
         entry.subject = object.value("subject").toString().c_str();
         entry.from = object.value("from").toString().c_str();
         entry.to = swMailDetail::fromJsonStringArray(object.value("to"));
+        entry.cc = swMailDetail::fromJsonStringArray(object.value("cc"));
+        entry.bcc = swMailDetail::fromJsonStringArray(object.value("bcc"));
         entry.messageId = object.value("messageId").toString().c_str();
         entry.sizeBytes = static_cast<unsigned long long>(object.value("sizeBytes").toInteger(0));
         entry.rawMessage = SwByteArray::fromBase64(SwByteArray(object.value("raw").toString()));

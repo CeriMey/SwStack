@@ -101,6 +101,14 @@ namespace ipc {
 
 namespace detail {
 
+#ifndef _WIN32
+inline void ensureSharedMemoryPermissions_(int fd) {
+    if (fd >= 0) {
+        (void)::fchmod(fd, 0666);
+    }
+}
+#endif
+
 inline uint64_t fnv1a64(const std::string& s) {
     uint64_t h = 1469598103934665603ull;
     for (size_t i = 0; i < s.size(); ++i) {
@@ -727,6 +735,7 @@ private:
         const std::string nameA = appsRegistryName_().toStdString();
         int fd = ::shm_open(nameA.c_str(), O_RDWR | O_CREAT, 0666);
         if (fd < 0) return std::shared_ptr<Mapping>();
+        ensureSharedMemoryPermissions_(fd);
         if (::ftruncate(fd, sizeof(Layout)) != 0) {
             ::close(fd);
             return std::shared_ptr<Mapping>();
@@ -1269,6 +1278,7 @@ private:
         const std::string nameA = registryName_(domain).toStdString();
         int fd = ::shm_open(nameA.c_str(), O_RDWR | O_CREAT, 0666);
         if (fd < 0) return std::shared_ptr<Mapping>();
+        ensureSharedMemoryPermissions_(fd);
         if (::ftruncate(fd, sizeof(Layout)) != 0) {
             ::close(fd);
             return std::shared_ptr<Mapping>();
@@ -1797,6 +1807,7 @@ private:
         const std::string nameA = registryName_(domain).toStdString();
         int fd = ::shm_open(nameA.c_str(), O_RDWR | O_CREAT, 0666);
         if (fd < 0) return std::shared_ptr<Mapping>();
+        ensureSharedMemoryPermissions_(fd);
         if (::ftruncate(fd, sizeof(Layout)) != 0) {
             ::close(fd);
             return std::shared_ptr<Mapping>();
@@ -2265,6 +2276,7 @@ struct LoopPollerDispatchRegistry {
             s_fd = ::shm_open(shmName.c_str(), O_RDWR | O_CREAT, 0666);
         }
         if (s_fd < 0) return nullptr;
+        ensureSharedMemoryPermissions_(s_fd);
         if (::ftruncate(s_fd, static_cast<off_t>(sizeof(Table))) != 0) return nullptr;
         void* mem = ::mmap(NULL, sizeof(Table), PROT_READ | PROT_WRITE, MAP_SHARED, s_fd, 0);
         if (mem == MAP_FAILED) return nullptr;
@@ -2844,6 +2856,7 @@ public:
         int fd = ::shm_open(nameA.c_str(), O_RDWR | O_CREAT | O_EXCL, 0666);
         if (fd >= 0) {
             created = true;
+            detail::ensureSharedMemoryPermissions_(fd);
             if (::ftruncate(fd, sizeof(Layout)) != 0) {
                 ::close(fd);
                 ::shm_unlink(nameA.c_str());
@@ -2852,6 +2865,7 @@ public:
         } else if (errno == EEXIST) {
             fd = ::shm_open(nameA.c_str(), O_RDWR, 0666);
             if (fd < 0) throw std::runtime_error("shm_open(existing) failed");
+            detail::ensureSharedMemoryPermissions_(fd);
         } else {
             throw std::runtime_error("shm_open failed");
         }
@@ -3075,6 +3089,7 @@ public:
         int fd = ::shm_open(nameA.c_str(), O_RDWR | O_CREAT | O_EXCL, 0666);
         if (fd >= 0) {
             created = true;
+            detail::ensureSharedMemoryPermissions_(fd);
             if (::ftruncate(fd, sizeof(Layout)) != 0) {
                 ::close(fd);
                 ::shm_unlink(nameA.c_str());
@@ -3083,6 +3098,7 @@ public:
         } else if (errno == EEXIST) {
             fd = ::shm_open(nameA.c_str(), O_RDWR, 0666);
             if (fd < 0) throw std::runtime_error("shm_open(existing) failed");
+            detail::ensureSharedMemoryPermissions_(fd);
         } else {
             throw std::runtime_error("shm_open failed");
         }
@@ -4670,6 +4686,7 @@ private:
         int fd = ::shm_open(nameA.c_str(), O_RDWR | O_CREAT | O_EXCL, 0666);
         if (fd >= 0) {
             created = true;
+            detail::ensureSharedMemoryPermissions_(fd);
             if (::ftruncate(fd, static_cast<off_t>(expectedTotalSize)) != 0) {
                 ::close(fd);
                 ::shm_unlink(nameA.c_str());
@@ -4678,6 +4695,7 @@ private:
         } else if (errno == EEXIST) {
             fd = ::shm_open(nameA.c_str(), O_RDWR, 0666);
             if (fd < 0) throw std::runtime_error("shm_open(existing) failed");
+            detail::ensureSharedMemoryPermissions_(fd);
         } else {
             throw std::runtime_error("shm_open failed");
         }
