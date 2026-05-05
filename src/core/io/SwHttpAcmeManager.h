@@ -399,7 +399,17 @@ inline bool SwHttpAcmeManager::start(SwHttpApp* app) {
     loadAccountState_();
     ensureAccountKeyPem_();
 
-    if (!m_app->listenHttp(m_config.httpPort)) {
+    if (m_app->isHttpListening()) {
+        if (m_app->httpPort() != m_config.httpPort) {
+            m_started = false;
+            m_app = nullptr;
+            emitError_("ACME HTTP port conflict: app already listens on " +
+                       SwString::number(static_cast<int>(m_app->httpPort())) +
+                       " but manager requires " +
+                       SwString::number(static_cast<int>(m_config.httpPort)));
+            return false;
+        }
+    } else if (!m_app->listenHttp(m_config.httpPort)) {
         m_started = false;
         m_app = nullptr;
         emitError_("Unable to listen on ACME HTTP port " + SwString::number(static_cast<int>(m_config.httpPort)));
@@ -1088,7 +1098,21 @@ inline bool SwHttpAcmeManager::enableHttpsFromStorage_() {
         return false;
     }
     if (m_certificateActivationHandler) {
-        return m_certificateActivationHandler(certificateFilePath_(), certificateKeyFilePath_());
+        const SwString certPath = certificateFilePath_();
+        const SwString keyPath = certificateKeyFilePath_();
+        SwHttpAcmeManager* self = this;
+        SwTimer::singleShot(0, [self, certPath, keyPath]() {
+            if (!SwObject::isLive(self) || !self->m_started || !self->m_certificateActivationHandler) {
+                return;
+            }
+            if (self->m_certificateActivationHandler(certPath, keyPath)) {
+                self->certificateUpdated(certPath, keyPath);
+                return;
+            }
+            self->emitError_("Failed to activate stored ACME certificate");
+            self->scheduleRetry_();
+        });
+        return true;
     }
     if (m_app->isHttpsListening() && m_app->httpsPort() == m_config.httpsPort) {
         return m_app->reloadHttpsCredentials(m_config.httpsPort, certificateFilePath_(), certificateKeyFilePath_());

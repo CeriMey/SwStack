@@ -51,6 +51,7 @@
 #include <atomic>
 #include <cstring>
 #include <cstdint>
+#include <string>
 
 #if defined(_WIN32)
 #  include <windows.h>
@@ -578,6 +579,26 @@ private:
             if (!runNetshCommand_(arguments, 5000, &netshExitCode)) {
                 swCWarning(kSwLogCategory_SwTun)
                     << "[SwTun] netsh interface setup failed or timed out (code="
+                    << static_cast<long long>(netshExitCode)
+                    << ", err=" << static_cast<long long>(GetLastError())
+                    << ")";
+                m_fnClose(m_adapter);
+                m_adapter = nullptr;
+                FreeLibrary(m_wintunDll);
+                m_wintunDll = nullptr;
+                return false;
+            }
+
+            const std::wstring mtuArguments =
+                std::wstring(L"interface ipv4 set subinterface \"") +
+                std::wstring(wName.c_str()) +
+                L"\" mtu=" +
+                std::to_wstring(m_mtu) +
+                L" store=active";
+            netshExitCode = 0;
+            if (!runNetshCommand_(mtuArguments, 5000, &netshExitCode)) {
+                swCWarning(kSwLogCategory_SwTun)
+                    << "[SwTun] netsh interface MTU setup failed or timed out (code="
                     << static_cast<long long>(netshExitCode)
                     << ", err=" << static_cast<long long>(GetLastError())
                     << ")";
