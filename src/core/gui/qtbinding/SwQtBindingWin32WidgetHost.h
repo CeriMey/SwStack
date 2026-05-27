@@ -239,6 +239,7 @@ private:
         painter.finalize();
         painter.flush();
         EndPaint(hwnd, &ps);
+        SwWidgetPlatformAdapter::notePainted(hostHandle_);
     }
 
     void dispatchMouseButton_(const MSG* msg, EventType type) {

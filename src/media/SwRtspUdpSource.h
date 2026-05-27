@@ -89,6 +89,7 @@
 #include <random>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 static constexpr const char* kSwLogCategory_SwRtspUdpSource = "sw.media.swrtspudpsource";
 
@@ -354,10 +355,25 @@ public:
     void setEnableAudio(bool enable) {
         m_enableAudio = enable;
         m_openOptions.enableAudio = enable;
+        m_audioTrackDeliveryEnabled =
+            m_enableAudio &&
+            m_selectedAudioTrackIndex >= 0 &&
+            !m_audioCodecName.empty() &&
+            isAudioCodecSupported_(m_audioCodecName);
+        if (!m_tracks.empty()) {
+            publishTracks_();
+        }
     }
     void setEnableMetadata(bool enable) {
         m_enableMetadata = enable;
         m_openOptions.enableMetadata = enable;
+        m_metadataTrackDeliveryEnabled =
+            m_enableMetadata &&
+            m_selectedMetadataTrackIndex >= 0 &&
+            !m_metadataCodecName.empty();
+        if (!m_tracks.empty()) {
+            publishTracks_();
+        }
     }
     /**
      * @brief Sets the use Tcp Transport.
@@ -500,6 +516,7 @@ private:
         int payloadType{96};
         int clockRate{90000};
         int channelCount{0};
+        double frameRate{0.0};
         std::string codecName;
         std::string fmtpLine;
 
@@ -522,7 +539,15 @@ private:
         m_trustedCaFile = m_openOptions.trustedCaFile;
         m_enableAudio = m_openOptions.enableAudio;
         m_enableMetadata = m_openOptions.enableMetadata;
+        m_udpPunch = m_openOptions.udpPunch;
         m_bindAddress = m_openOptions.bindAddress;
+        m_latencyTargetExplicit = m_openOptions.latencyTargetExplicit;
+        m_latencyTargetMs =
+            m_openOptions.latencyTargetMs > 0 ? m_openOptions.latencyTargetMs : 500;
+        m_rtpJitterDelayMs =
+            m_openOptions.rtpJitterDelayMs > 0 ? m_openOptions.rtpJitterDelayMs : 0;
+        m_rtpJitterMaxPackets =
+            m_openOptions.rtpJitterMaxPackets > 0 ? m_openOptions.rtpJitterMaxPackets : 0;
         if (m_openOptions.rtpPort != 0) {
             m_forcedClientRtpPort = m_openOptions.rtpPort;
             m_forcedClientRtcpPort =
@@ -533,7 +558,7 @@ private:
         if (m_openOptions.transport == SwMediaOpenOptions::TransportPreference::Tcp) {
             m_useTcpTransport = true;
         }
-        setLowLatencyMode(m_openOptions.lowLatency, 500);
+        setLowLatencyMode(m_openOptions.lowLatency, m_latencyTargetMs);
     }
 
     static std::string hostForRtspUri_(const SwString& host) {
@@ -546,7 +571,7 @@ private:
     }
 
     void parseUrl() {
-        const SwMediaUrl& parsed = m_openOptions.mediaUrl;
+        const SwMediaUrl parsed = SwMediaUrl::parse(m_url);
         const SwString scheme = parsed.scheme().isEmpty() ? SwString("rtsp") : parsed.scheme().toLower();
         m_host = parsed.host();
         m_port = parsed.port() > 0 ? parsed.port() : (scheme == "rtsps" ? 322 : 554);
@@ -611,6 +636,8 @@ private:
         m_selectedTrackIndex = -1;
         m_selectedAudioTrackIndex = -1;
         m_selectedMetadataTrackIndex = -1;
+        m_audioTrackDeliveryEnabled = false;
+        m_metadataTrackDeliveryEnabled = false;
         m_trackControl.clear();
         m_audioTrackControl.clear();
         m_metadataTrackControl.clear();
@@ -642,6 +669,7 @@ private:
         m_audioPayloadType = -1;
         m_audioClockRate = 0;
         m_audioChannelCount = 0;
+        m_audioCodecName.clear();
         m_metadataPayloadType = -1;
         m_metadataClockRate = 0;
         m_metadataCodecName.clear();
@@ -863,6 +891,7 @@ private:
                 m_audioPayloadType = -1;
                 m_audioClockRate = 0;
                 m_audioChannelCount = 0;
+                m_audioTrackDeliveryEnabled = false;
                 publishTracks_();
             }
             if (m_selectedMetadataTrackIndex >= 0 && !allocateMetadataClientPorts()) {
@@ -873,15 +902,25 @@ private:
                 m_metadataCodecName.clear();
                 m_metadataPayloadType = -1;
                 m_metadataClockRate = 0;
+                m_metadataTrackDeliveryEnabled = false;
                 publishTracks_();
             }
             m_setupTargets.clear();
             m_setupTargets.push_back(SetupTarget::Video);
+            std::vector<std::pair<int, SetupTarget>> auxiliaryTargets;
             if (m_selectedAudioTrackIndex >= 0 && !m_audioTrackControl.empty()) {
-                m_setupTargets.push_back(SetupTarget::Audio);
+                auxiliaryTargets.emplace_back(m_selectedAudioTrackIndex, SetupTarget::Audio);
             }
             if (m_selectedMetadataTrackIndex >= 0 && !m_metadataTrackControl.empty()) {
-                m_setupTargets.push_back(SetupTarget::Metadata);
+                auxiliaryTargets.emplace_back(m_selectedMetadataTrackIndex, SetupTarget::Metadata);
+            }
+            std::sort(auxiliaryTargets.begin(),
+                      auxiliaryTargets.end(),
+                      [](const auto& lhs, const auto& rhs) {
+                          return lhs.first < rhs.first;
+                      });
+            for (const auto& target : auxiliaryTargets) {
+                m_setupTargets.push_back(target.second);
             }
             m_setupTargetIndex = 0;
             m_state = RtspStep::Setup;
@@ -1119,6 +1158,27 @@ private:
         SwRtspHeaderUtils::parseTransportInfo(header, info);
     }
 
+    void applyAdaptiveUdpBufferingForTrack_(const RtspTrack& track) {
+        m_videoFrameRate = track.frameRate;
+        if (!m_latencyTargetExplicit && track.frameRate >= 50.0) {
+            m_latencyTargetMs = std::max(m_latencyTargetMs, 1000);
+        }
+        if (m_rtpJitterDelayMs <= 0) {
+            if (!m_lowLatencyDrop) {
+                m_rtpJitterDelayMs = 250;
+            } else {
+                m_rtpJitterDelayMs = track.frameRate >= 50.0 ? 180 : 120;
+            }
+        }
+        if (m_rtpJitterMaxPackets <= 0) {
+            if (!m_lowLatencyDrop) {
+                m_rtpJitterMaxPackets = 512;
+            } else {
+                m_rtpJitterMaxPackets = track.frameRate >= 50.0 ? 256 : 128;
+            }
+        }
+    }
+
     bool parseSdp(const std::string& body) {
         std::istringstream iss(body);
         std::string line;
@@ -1170,6 +1230,11 @@ private:
             }
             if (line.rfind("a=control:", 0) == 0) {
                 currentTrack.control = line.substr(std::strlen("a=control:"));
+                continue;
+            }
+            if (line.rfind("a=framerate:", 0) == 0) {
+                currentTrack.frameRate =
+                    std::atof(line.substr(std::strlen("a=framerate:")).c_str());
                 continue;
             }
             if (line.rfind("a=rtpmap:", 0) == 0) {
@@ -1250,6 +1315,22 @@ private:
             }
             return 50;
         };
+        auto audioSetupTrackScore = [](const RtspTrack& track) -> int {
+            if (!track.isAudio()) {
+                return -1;
+            }
+            const std::string codec = toLower(track.codecName);
+            if (codec == "pcmu" || codec == "pcma") {
+                return 300;
+            }
+            if (codec == "opus") {
+                return 250;
+            }
+            if (codec == "mpeg4-generic" || codec == "mp4a-latm" || codec == "aac") {
+                return 200;
+            }
+            return 50;
+        };
         auto metadataTrackScore = [](const RtspTrack& track) -> int {
             if (!track.isMetadata()) {
                 return -1;
@@ -1264,6 +1345,8 @@ private:
         m_selectedTrackIndex = -1;
         m_selectedAudioTrackIndex = -1;
         m_selectedMetadataTrackIndex = -1;
+        m_audioTrackDeliveryEnabled = false;
+        m_metadataTrackDeliveryEnabled = false;
         int bestScore = -1;
         for (std::size_t i = 0; i < m_tracks.size(); ++i) {
             int score = trackScore(m_tracks[i]);
@@ -1272,26 +1355,37 @@ private:
                 m_selectedTrackIndex = static_cast<int>(i);
             }
         }
-        if (m_enableAudio) {
-            bestScore = -1;
-            for (std::size_t i = 0; i < m_tracks.size(); ++i) {
-                int score = audioTrackScore(m_tracks[i]);
-                if (score > bestScore) {
-                    bestScore = score;
-                    m_selectedAudioTrackIndex = static_cast<int>(i);
-                }
+        int bestAudioDeliveryIndex = -1;
+        int bestAudioDeliveryScore = -1;
+        int bestAudioSetupIndex = -1;
+        int bestAudioSetupScore = -1;
+        for (std::size_t i = 0; i < m_tracks.size(); ++i) {
+            int score = audioTrackScore(m_tracks[i]);
+            if (score > bestAudioDeliveryScore) {
+                bestAudioDeliveryScore = score;
+                bestAudioDeliveryIndex = static_cast<int>(i);
+            }
+            score = audioSetupTrackScore(m_tracks[i]);
+            if (score > bestAudioSetupScore) {
+                bestAudioSetupScore = score;
+                bestAudioSetupIndex = static_cast<int>(i);
             }
         }
-        if (m_enableMetadata) {
-            bestScore = -1;
-            for (std::size_t i = 0; i < m_tracks.size(); ++i) {
-                int score = metadataTrackScore(m_tracks[i]);
-                if (score > bestScore) {
-                    bestScore = score;
-                    m_selectedMetadataTrackIndex = static_cast<int>(i);
-                }
+        if (m_enableAudio && bestAudioDeliveryIndex >= 0) {
+            m_selectedAudioTrackIndex = bestAudioDeliveryIndex;
+            m_audioTrackDeliveryEnabled = true;
+        } else {
+            m_selectedAudioTrackIndex = bestAudioSetupIndex;
+        }
+        bestScore = -1;
+        for (std::size_t i = 0; i < m_tracks.size(); ++i) {
+            int score = metadataTrackScore(m_tracks[i]);
+            if (score > bestScore) {
+                bestScore = score;
+                m_selectedMetadataTrackIndex = static_cast<int>(i);
             }
         }
+        m_metadataTrackDeliveryEnabled = m_enableMetadata && m_selectedMetadataTrackIndex >= 0;
         if (m_selectedTrackIndex < 0) {
             return false;
         }
@@ -1309,6 +1403,7 @@ private:
         if (m_codecName.empty()) {
             return false;
         }
+        applyAdaptiveUdpBufferingForTrack_(selectedTrack);
         if (m_selectedAudioTrackIndex >= 0 &&
             static_cast<std::size_t>(m_selectedAudioTrackIndex) < m_tracks.size()) {
             const RtspTrack& audioTrack = m_tracks[static_cast<std::size_t>(m_selectedAudioTrackIndex)];
@@ -1323,6 +1418,7 @@ private:
             m_audioClockRate = 0;
             m_audioCodecName.clear();
             m_audioChannelCount = 0;
+            m_audioTrackDeliveryEnabled = false;
         }
         if (m_selectedMetadataTrackIndex >= 0 &&
             static_cast<std::size_t>(m_selectedMetadataTrackIndex) < m_tracks.size()) {
@@ -1337,6 +1433,7 @@ private:
             m_metadataPayloadType = -1;
             m_metadataClockRate = 0;
             m_metadataCodecName.clear();
+            m_metadataTrackDeliveryEnabled = false;
         }
         if (m_codecName == "h264") {
             parseH264Fmtp(selectedTrack.fmtpLine);
@@ -1347,12 +1444,18 @@ private:
                     << m_selectedTrackIndex
                     << " codec=" << m_codecName
                     << " payload=" << m_payloadType << " clock=" << m_clockRate
+                    << " fps=" << selectedTrack.frameRate
+                    << " latencyTargetMs=" << m_latencyTargetMs
+                    << " jitterPackets=" << m_rtpJitterMaxPackets
+                    << " jitterDelayMs=" << m_rtpJitterDelayMs
                     << " control=" << m_trackControl
                     << " tracks=" << m_tracks.size()
                     << " transport=" << (m_useTcpTransport ? "tcp" : "udp");
         if (!m_audioCodecName.empty()) {
             swCWarning(kSwLogCategory_SwRtspUdpSource)
-                << "[SwRtspUdpSource] Selected SDP audio track index=" << m_selectedAudioTrackIndex
+                << "[SwRtspUdpSource] "
+                << (m_audioTrackDeliveryEnabled ? "Selected" : "SETUP-only")
+                << " SDP audio track index=" << m_selectedAudioTrackIndex
                 << " codec=" << m_audioCodecName
                 << " payload=" << m_audioPayloadType
                 << " clock=" << m_audioClockRate
@@ -1381,7 +1484,9 @@ private:
         }
         if (!m_metadataCodecName.empty()) {
             swCWarning(kSwLogCategory_SwRtspUdpSource)
-                << "[SwRtspUdpSource] Selected SDP metadata track index=" << m_selectedMetadataTrackIndex
+                << "[SwRtspUdpSource] "
+                << (m_metadataTrackDeliveryEnabled ? "Selected" : "SETUP-only")
+                << " SDP metadata track index=" << m_selectedMetadataTrackIndex
                 << " codec=" << m_metadataCodecName
                 << " payload=" << m_metadataPayloadType
                 << " clock=" << m_metadataClockRate
@@ -1436,8 +1541,10 @@ private:
             mediaTrack.control = SwString(track.control);
             mediaTrack.fmtp = SwString(track.fmtpLine);
             mediaTrack.selected = (static_cast<int>(i) == m_selectedTrackIndex) ||
-                                  (static_cast<int>(i) == m_selectedAudioTrackIndex) ||
-                                  (static_cast<int>(i) == m_selectedMetadataTrackIndex);
+                                  (m_audioTrackDeliveryEnabled &&
+                                   static_cast<int>(i) == m_selectedAudioTrackIndex) ||
+                                  (m_metadataTrackDeliveryEnabled &&
+                                   static_cast<int>(i) == m_selectedMetadataTrackIndex);
             if (track.isAudio() && !isAudioCodecSupported_(track.codecName)) {
                 mediaTrack.availability = SwMediaTrack::Availability::Unsupported;
             } else {
@@ -1649,7 +1756,7 @@ private:
                       << "-"
                       << static_cast<int>(interleavedRtcpChannel);
         } else {
-            transport << "RTP/AVP;unicast;client_port="
+            transport << "RTP/AVP/UDP;unicast;client_port="
                       << clientRtpPort << "-"
                       << clientRtcpPort;
         }
@@ -1701,7 +1808,8 @@ private:
         }
         std::ostringstream oss;
         oss << "TEARDOWN " << url << " RTSP/1.0\r\n";
-        oss << "CSeq: " << (++m_cseq) << "\r\n";
+        const int teardownCseq = ++m_cseq;
+        oss << "CSeq: " << teardownCseq << "\r\n";
         oss << "User-Agent: SwRtspUdpSource/1.0\r\n";
         std::string hostHeader = hostForRtspUri_(m_host);
         const int defaultPort = m_useTls ? 322 : 554;
@@ -1715,14 +1823,68 @@ private:
         }
         oss << "Session: " << m_sessionId << "\r\n\r\n";
         m_rtspSocket->write(SwString(oss.str()));
-        m_rtspSocket->waitForBytesWritten(200);
+        if (!m_rtspSocket->waitForBytesWritten(500)) {
+            swCWarning(kSwLogCategory_SwRtspUdpSource)
+                << "[SwRtspUdpSource] Timed out while writing RTSP TEARDOWN";
+            return;
+        }
+        waitForRtspResponse_(teardownCseq, 800, "TEARDOWN");
+    }
+
+    bool waitForRtspResponse_(int expectedCseq, int timeoutMs, const char* methodName) {
+        if (!m_rtspSocket || !m_rtspSocket->isOpen()) {
+            return false;
+        }
+        std::string buffer;
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(std::max(0, timeoutMs));
+        while (std::chrono::steady_clock::now() < deadline) {
+            for (;;) {
+                SwString chunk = m_rtspSocket->read(4096);
+                if (chunk.isEmpty()) {
+                    break;
+                }
+                buffer.append(chunk.toStdString());
+            }
+
+            while (true) {
+                const auto headerEnd = buffer.find("\r\n\r\n");
+                if (headerEnd == std::string::npos) {
+                    break;
+                }
+                const std::string header = buffer.substr(0, headerEnd);
+                const int contentLength = parseContentLength(header);
+                const std::size_t messageSize =
+                    headerEnd + 4 + static_cast<std::size_t>(std::max(0, contentLength));
+                if (buffer.size() < messageSize) {
+                    break;
+                }
+                buffer.erase(0, messageSize);
+                const int cseq = parseCSeq(header);
+                if (cseq != expectedCseq) {
+                    continue;
+                }
+                const int status = parseStatusCode(header);
+                swCWarning(kSwLogCategory_SwRtspUdpSource)
+                    << "[SwRtspUdpSource] RTSP "
+                    << (methodName ? methodName : "request")
+                    << " completed status=" << status;
+                return status >= 200 && status < 300;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        swCWarning(kSwLogCategory_SwRtspUdpSource)
+            << "[SwRtspUdpSource] Timed out waiting RTSP "
+            << (methodName ? methodName : "response")
+            << " response";
+        return false;
     }
 
     void configureUdpSockets() {
         if (m_useTcpTransport) {
             return;
         }
-        if (m_udpSession && m_udpSession->isRunning()) {
+        if (m_udpPunch && m_udpSession && m_udpSession->isRunning()) {
             m_udpSession->sendUdpPunch(m_host, m_serverRtpPort, m_serverRtcpPort);
         }
     }
@@ -1818,6 +1980,12 @@ private:
     }
 
     void triggerTcpFallback(const char* reason) {
+        if (m_openOptions.transportExplicit &&
+            m_openOptions.transport == SwMediaOpenOptions::TransportPreference::Udp) {
+            swCWarning(kSwLogCategory_SwRtspUdpSource)
+                << "[SwRtspUdpSource] UDP stalled but TCP fallback is disabled by explicit transport=udp";
+            return;
+        }
         if (m_useTcpTransport || m_triedTcpFallback || !isRunning()) {
             return;
         }
@@ -2139,6 +2307,8 @@ private:
             descriptor.fmtp = SwString(m_tracks[static_cast<std::size_t>(m_selectedTrackIndex)].fmtpLine);
         }
         descriptor.lowLatency = m_lowLatencyDrop;
+        descriptor.jitterMaxDelayMs = m_rtpJitterDelayMs;
+        descriptor.jitterMaxPackets = m_rtpJitterMaxPackets;
         m_udpSession.reset(new SwRtpSession(descriptor));
         m_udpSession->setPacketCallback([this](const SwRtpSession::Packet& packet) {
             handleUdpSessionPacket_(packet);
@@ -2176,6 +2346,8 @@ private:
         }
         descriptor.allowKeyFrameRequests = false;
         descriptor.lowLatency = m_lowLatencyDrop;
+        descriptor.jitterMaxDelayMs = m_rtpJitterDelayMs;
+        descriptor.jitterMaxPackets = m_rtpJitterMaxPackets;
         m_audioUdpSession.reset(new SwRtpSession(descriptor));
         m_audioUdpSession->setPacketCallback([this](const SwRtpSession::Packet& packet) {
             handleAudioUdpSessionPacket_(packet);
@@ -2209,6 +2381,8 @@ private:
         descriptor.format = SwMediaOpenOptions::UdpPayloadFormat::Rtp;
         descriptor.allowKeyFrameRequests = false;
         descriptor.lowLatency = m_lowLatencyDrop;
+        descriptor.jitterMaxDelayMs = m_rtpJitterDelayMs;
+        descriptor.jitterMaxPackets = m_rtpJitterMaxPackets;
         if (m_selectedMetadataTrackIndex >= 0 &&
             static_cast<std::size_t>(m_selectedMetadataTrackIndex) < m_tracks.size()) {
             descriptor.fmtp =
@@ -2259,7 +2433,9 @@ private:
     }
 
     void handleAudioUdpSessionPacket_(const SwRtpSession::Packet& packet) {
-        if (m_selectedAudioTrackIndex < 0 || m_audioCodecName.empty()) {
+        if (!m_audioTrackDeliveryEnabled ||
+            m_selectedAudioTrackIndex < 0 ||
+            m_audioCodecName.empty()) {
             return;
         }
         if (m_trackGraph) {
@@ -2268,7 +2444,9 @@ private:
     }
 
     void handleMetadataUdpSessionPacket_(const SwRtpSession::Packet& packet) {
-        if (m_selectedMetadataTrackIndex < 0 || m_metadataCodecName.empty()) {
+        if (!m_metadataTrackDeliveryEnabled ||
+            m_selectedMetadataTrackIndex < 0 ||
+            m_metadataCodecName.empty()) {
             return;
         }
         if (m_trackGraph) {
@@ -2280,7 +2458,7 @@ private:
         if (m_useTcpTransport || !m_audioUdpSession || !m_audioUdpSession->isRunning()) {
             return;
         }
-        if (m_audioServerRtpPort != 0 || m_audioServerRtcpPort != 0) {
+        if (m_udpPunch && (m_audioServerRtpPort != 0 || m_audioServerRtcpPort != 0)) {
             m_audioUdpSession->sendUdpPunch(m_host, m_audioServerRtpPort, m_audioServerRtcpPort);
         }
     }
@@ -2289,7 +2467,7 @@ private:
         if (m_useTcpTransport || !m_metadataUdpSession || !m_metadataUdpSession->isRunning()) {
             return;
         }
-        if (m_metadataServerRtpPort != 0 || m_metadataServerRtcpPort != 0) {
+        if (m_udpPunch && (m_metadataServerRtpPort != 0 || m_metadataServerRtcpPort != 0)) {
             m_metadataUdpSession->sendUdpPunch(m_host, m_metadataServerRtpPort, m_metadataServerRtcpPort);
         }
     }
@@ -2657,6 +2835,9 @@ private:
     std::string m_metadataCodecName{};
     bool m_enableAudio{false};
     bool m_enableMetadata{false};
+    bool m_audioTrackDeliveryEnabled{false};
+    bool m_metadataTrackDeliveryEnabled{false};
+    bool m_udpPunch{false};
     std::atomic<bool> m_loggedUnsupportedCodec{false};
     bool m_useTls{false};
     bool m_useTcpTransport{false};
@@ -2693,6 +2874,10 @@ private:
     std::atomic<uint64_t> m_sequenceDiscontinuities{0};
     bool m_lowLatencyDrop{true};
     int m_latencyTargetMs{500};
+    bool m_latencyTargetExplicit{false};
+    int m_rtpJitterDelayMs{0};
+    int m_rtpJitterMaxPackets{0};
+    double m_videoFrameRate{0.0};
     std::atomic<int> m_rtspDisconnectSuppress{0};
     std::chrono::steady_clock::time_point m_lastRtpTime{};
     std::atomic<long long> m_lastLoggedRtpTimeoutSec{-1};

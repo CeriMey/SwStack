@@ -26,7 +26,7 @@ public:
     SwVideoSink()
         : m_pipeline(std::make_shared<SwVideoPipeline>()) {
         m_pipeline->setAsyncDecode(true);
-        m_pipeline->setQueueLimits(12, 2 * 1024 * 1024);
+        m_pipeline->setQueueLimits(64, 8 * 1024 * 1024);
         installPipelineFrameCallback_();
         m_pipeline->useDecoderFactory(true);
     }
@@ -102,6 +102,7 @@ public:
         if (m_pipeline) {
             m_pipeline->stop();
         }
+        clearCurrentFrame_();
     }
 
     void setDedicatedDecodeThreadEnabled(bool enabled) {
@@ -307,6 +308,13 @@ private:
         if (frameCallback) {
             frameCallback(frame);
         }
+    }
+
+    void clearCurrentFrame_() {
+        std::lock_guard<std::mutex> lock(m_frameMutex);
+        m_currentFrame = SwVideoFrame();
+        m_firstFrameTime = std::chrono::steady_clock::time_point{};
+        m_lastFrameTime = std::chrono::steady_clock::time_point{};
     }
 
     std::shared_ptr<SwVideoPipeline> m_pipeline;

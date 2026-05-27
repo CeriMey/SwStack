@@ -243,7 +243,7 @@ private:
         if (!name || !name[0]) {
             return std::string();
         }
-#if defined(_WIN32)
+#if defined(_MSC_VER)
         char* value = nullptr;
         size_t len = 0;
         if (_dupenv_s(&value, &len, name) != 0 || !value) {

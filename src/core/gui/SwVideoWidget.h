@@ -62,6 +62,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
+#include <deque>
 #include <cstring>
 #include <functional>
 #include <memory>
@@ -737,9 +739,10 @@ public:
         m_callbackGuard.reset();
         clearPendingFrameDispatch_();
         setRealtimePresentationActive_(false);
-        detachVideoSink(m_videoSink);
-        m_videoSink.reset();
         stop();
+        detachVideoSink(m_videoSink);
+        clearCurrentFrame_();
+        m_videoSink.reset();
     }
 
     void setVideoSink(const std::shared_ptr<SwVideoSink>& sink) {
@@ -891,7 +894,12 @@ public:
         if (m_videoSink) {
             m_videoSink->stop();
         }
+        clearPendingFrameDispatch_();
+        clearCurrentFrame_();
         setRealtimePresentationActive_(false);
+        if (!m_repaintPending.exchange(true)) {
+            update();
+        }
     }
 
     /**
@@ -955,6 +963,10 @@ public:
         return m_currentFrame;
     }
 
+    void pumpFramePresentation() {
+        presentQueuedFrameOnUiThread_();
+    }
+
     /**
      * @brief Returns the current last Frame Time.
      * @return The current last Frame Time.
@@ -985,7 +997,14 @@ public:
         const SwRect rect = this->rect();
         painter->fillRect(rect, m_backgroundColor, m_backgroundColor, 0);
 
-        SwVideoFrame frame = currentFrame();
+        SwVideoFrame frame;
+        std::chrono::steady_clock::time_point frameTime;
+        {
+            std::lock_guard<std::mutex> lock(m_frameMutex);
+            frame = m_currentFrame;
+            frameTime = m_lastFrameTime;
+        }
+        recordPaintCadence_(frame, frameTime);
         bool rendered = false;
         if (frame.isValid()) {
             const SwRect target = computeTargetRect(rect, frame);
@@ -1162,11 +1181,24 @@ private:
     }
 
     void queueIncomingFrame_(const SwVideoFrame& frame) {
+        if (!frame.isValid()) {
+            return;
+        }
+        const std::int64_t frameTimestamp = frame.timestamp();
+        const std::int64_t lastPresentedTimestamp =
+            m_lastPresentedFrameTimestamp.load();
+        if (frameTimestamp >= 0 &&
+            lastPresentedTimestamp >= 0 &&
+            frameTimestamp <= lastPresentedTimestamp) {
+            return;
+        }
         bool shouldPost = false;
+        const auto now = std::chrono::steady_clock::now();
         {
             std::lock_guard<std::mutex> lock(m_pendingFrameMutex);
-            m_pendingFrame = frame;
-            m_hasPendingFrame = frame.isValid();
+            updateEstimatedPresentationIntervalLocked_(frame, now);
+            m_pendingFrames.clear();
+            m_pendingFrames.push_back({frame, now});
             if (!m_frameDispatchPending) {
                 m_frameDispatchPending = true;
                 shouldPost = true;
@@ -1181,28 +1213,31 @@ private:
     }
 
     void dispatchPendingFrameOnUiThread_() {
-        SwVideoFrame frame;
         {
             std::lock_guard<std::mutex> lock(m_pendingFrameMutex);
-            if (!m_hasPendingFrame) {
-                m_frameDispatchPending = false;
-                return;
-            }
-            frame = m_pendingFrame;
-            m_pendingFrame = SwVideoFrame();
-            m_hasPendingFrame = false;
             m_frameDispatchPending = false;
         }
-        if (frame.isValid()) {
-            handleIncomingFrame(frame);
-        }
+        presentQueuedFrameOnUiThread_();
     }
 
     void clearPendingFrameDispatch_() {
         std::lock_guard<std::mutex> lock(m_pendingFrameMutex);
-        m_pendingFrame = SwVideoFrame();
-        m_hasPendingFrame = false;
+        m_pendingFrames.clear();
         m_frameDispatchPending = false;
+        m_lastPresentationPumpTime = std::chrono::steady_clock::time_point{};
+        m_lastQueuedFrameTime = std::chrono::steady_clock::time_point{};
+        m_lastQueuedFrameTimestamp = -1;
+        m_estimatedPresentationIntervalMs = 16;
+        m_lastPresentedFrameTimestamp.store(-1);
+    }
+
+    void clearCurrentFrame_() {
+        std::lock_guard<std::mutex> lock(m_frameMutex);
+        m_currentFrame = SwVideoFrame();
+        m_lastFrameTime = std::chrono::steady_clock::time_point{};
+        m_lastPresentCadenceTime = std::chrono::steady_clock::time_point{};
+        m_lastPaintCadenceTime = std::chrono::steady_clock::time_point{};
+        m_lastPresentedFrameTimestamp.store(-1);
     }
 
     void setStreamStatus(const SwVideoSource::StreamStatus& status) {
@@ -1211,6 +1246,12 @@ private:
             m_streamStatus = status;
         }
         setRealtimePresentationActive_(status.state == SwVideoSource::StreamState::Streaming);
+        if (status.state == SwVideoSource::StreamState::Connecting ||
+            status.state == SwVideoSource::StreamState::Recovering ||
+            status.state == SwVideoSource::StreamState::Stopped) {
+            clearPendingFrameDispatch_();
+            clearCurrentFrame_();
+        }
         if (!m_repaintPending.exchange(true)) {
             update();
         }
@@ -1656,10 +1697,17 @@ private:
     SwVideoFrame m_currentFrame;
     std::chrono::steady_clock::time_point m_lastFrameTime{};
     std::function<void(const SwVideoFrame&)> m_frameArrived;
+    struct PendingPresentationFrame_ {
+        SwVideoFrame frame;
+        std::chrono::steady_clock::time_point queuedAt;
+    };
     mutable std::mutex m_pendingFrameMutex;
-    SwVideoFrame m_pendingFrame;
-    bool m_hasPendingFrame{false};
+    std::deque<PendingPresentationFrame_> m_pendingFrames;
     bool m_frameDispatchPending{false};
+    std::chrono::steady_clock::time_point m_lastPresentationPumpTime{};
+    std::chrono::steady_clock::time_point m_lastQueuedFrameTime{};
+    std::int64_t m_lastQueuedFrameTimestamp{-1};
+    int m_estimatedPresentationIntervalMs{16};
     mutable std::mutex m_streamStatusMutex;
     SwVideoSource::StreamStatus m_streamStatus{};
     std::shared_ptr<int> m_callbackGuard{std::make_shared<int>(0)};
@@ -1667,6 +1715,9 @@ private:
     std::atomic<bool> m_realtimePresentationActive{false};
     std::atomic<bool> m_loggedFirstPresentedFrame{false};
     std::atomic<uint64_t> m_presentedFrameCount{0};
+    std::atomic<std::int64_t> m_lastPresentedFrameTimestamp{-1};
+    std::chrono::steady_clock::time_point m_lastPresentCadenceTime{};
+    std::chrono::steady_clock::time_point m_lastPaintCadenceTime{};
 #if defined(_WIN32)
     void boostGuiThreadPriority() {
         static bool boosted = false;
@@ -1679,8 +1730,156 @@ private:
     }
 #endif
 
+    void recordPresentCadence_(const SwVideoFrame& frame, uint64_t count) {
+        const auto now = std::chrono::steady_clock::now();
+        if (m_lastPresentCadenceTime.time_since_epoch().count() != 0) {
+            const long long deltaMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - m_lastPresentCadenceTime).count();
+            if (deltaMs >= 90) {
+                swCWarning(kSwLogCategory_SwVideoWidget)
+                    << "[SwVideoWidget] Present cadence gap ms=" << deltaMs
+                    << " count=" << count
+                    << " ts=" << frame.timestamp()
+                    << " fmt=" << static_cast<int>(frame.pixelFormat());
+            }
+        }
+        m_lastPresentCadenceTime = now;
+    }
+
+    void recordPaintCadence_(const SwVideoFrame& frame,
+                             std::chrono::steady_clock::time_point frameTime) {
+        if (!frame.isValid()) {
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (m_lastPaintCadenceTime.time_since_epoch().count() != 0) {
+            const long long deltaMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - m_lastPaintCadenceTime).count();
+            if (deltaMs >= 90) {
+                long long frameAgeMs = -1;
+                if (frameTime.time_since_epoch().count() != 0) {
+                    frameAgeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now - frameTime).count();
+                }
+                swCWarning(kSwLogCategory_SwVideoWidget)
+                    << "[SwVideoWidget] Paint cadence gap ms=" << deltaMs
+                    << " frameAgeMs=" << frameAgeMs
+                    << " count=" << m_presentedFrameCount.load()
+                    << " ts=" << frame.timestamp()
+                    << " fmt=" << static_cast<int>(frame.pixelFormat());
+            }
+        }
+        m_lastPaintCadenceTime = now;
+    }
+
+    static constexpr int kPresentationTargetBufferMs_ = 100;
+    static constexpr int kPresentationMaxBufferMs_ = 220;
+
+    int estimatedPresentationIntervalLocked_() const {
+        return std::max(8, std::min(80, m_estimatedPresentationIntervalMs));
+    }
+
+    std::size_t presentationTargetFramesLocked_() const {
+        const int intervalMs = estimatedPresentationIntervalLocked_();
+        return static_cast<std::size_t>(
+            std::max(2, std::min(10, (kPresentationTargetBufferMs_ + intervalMs - 1) / intervalMs)));
+    }
+
+    std::size_t presentationMaxFramesLocked_() const {
+        const int intervalMs = estimatedPresentationIntervalLocked_();
+        return static_cast<std::size_t>(
+            std::max(8, std::min(30, (kPresentationMaxBufferMs_ + intervalMs - 1) / intervalMs)));
+    }
+
+    void updateEstimatedPresentationIntervalLocked_(
+        const SwVideoFrame& frame,
+        std::chrono::steady_clock::time_point now) {
+        int sampleMs = 0;
+        const std::int64_t timestamp = frame.timestamp();
+        if (m_lastQueuedFrameTimestamp >= 0 && timestamp > m_lastQueuedFrameTimestamp) {
+            const std::int64_t delta = timestamp - m_lastQueuedFrameTimestamp;
+            const std::int64_t hnsMs = delta / 10000;
+            if (hnsMs >= 5 && hnsMs <= 80) {
+                sampleMs = static_cast<int>(hnsMs);
+            }
+        }
+        if (sampleMs == 0 && m_lastQueuedFrameTime.time_since_epoch().count() != 0) {
+            const long long arrivalMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - m_lastQueuedFrameTime).count();
+            if (arrivalMs >= 5 && arrivalMs <= 80) {
+                sampleMs = static_cast<int>(arrivalMs);
+            }
+        }
+        if (sampleMs > 0) {
+            m_estimatedPresentationIntervalMs =
+                ((m_estimatedPresentationIntervalMs * 7) + sampleMs + 4) / 8;
+        }
+        if (timestamp >= 0) {
+            m_lastQueuedFrameTimestamp = timestamp;
+        }
+        m_lastQueuedFrameTime = now;
+    }
+
+    void trimPresentationQueueLocked_() {
+        const std::size_t maxFrames = presentationMaxFramesLocked_();
+        while (m_pendingFrames.size() > maxFrames) {
+            m_pendingFrames.pop_front();
+        }
+        const std::size_t liveEdgeFrames = presentationTargetFramesLocked_() + 2U;
+        while (m_pendingFrames.size() > liveEdgeFrames) {
+            m_pendingFrames.pop_front();
+        }
+    }
+
+    void dropFramesOlderThanLastPresentedLocked_() {
+        const std::int64_t lastPresentedTimestamp =
+            m_lastPresentedFrameTimestamp.load();
+        if (lastPresentedTimestamp < 0) {
+            return;
+        }
+        while (!m_pendingFrames.empty()) {
+            const std::int64_t timestamp = m_pendingFrames.front().frame.timestamp();
+            if (timestamp < 0 || timestamp > lastPresentedTimestamp) {
+                break;
+            }
+            m_pendingFrames.pop_front();
+        }
+    }
+
+    bool presentQueuedFrameOnUiThread_() {
+        SwVideoFrame frame;
+        {
+            std::lock_guard<std::mutex> lock(m_pendingFrameMutex);
+            dropFramesOlderThanLastPresentedLocked_();
+            if (m_pendingFrames.empty()) {
+                return false;
+            }
+            const auto now = std::chrono::steady_clock::now();
+            frame = m_pendingFrames.back().frame;
+            m_pendingFrames.clear();
+            m_lastPresentationPumpTime = now;
+        }
+        if (!frame.isValid()) {
+            return false;
+        }
+        handleIncomingFrame(frame);
+        return true;
+    }
+
     void presentFrame(const SwVideoFrame& frame) {
+        const std::int64_t frameTimestamp = frame.timestamp();
+        const std::int64_t lastPresentedTimestamp =
+            m_lastPresentedFrameTimestamp.load();
+        if (frameTimestamp >= 0 &&
+            lastPresentedTimestamp >= 0 &&
+            frameTimestamp <= lastPresentedTimestamp) {
+            return;
+        }
+        if (frameTimestamp >= 0) {
+            m_lastPresentedFrameTimestamp.store(frameTimestamp);
+        }
         auto presented = ++m_presentedFrameCount;
+        recordPresentCadence_(frame, presented);
         {
             std::lock_guard<std::mutex> lock(m_frameMutex);
             m_currentFrame = frame;

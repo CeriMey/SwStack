@@ -1013,7 +1013,17 @@ private:
             attributes->SetUINT32(MF_LOW_LATENCY, TRUE);
         }
         Microsoft::WRL::ComPtr<ICodecAPI> codecApi;
-        if (SUCCEEDED(m_decoder.As(&codecApi)) && codecApi) {
+#if defined(__MINGW32__) || defined(__MINGW64__)
+        static const GUID kSwIIDICodecAPI =
+            {0x901db4c7, 0x31ce, 0x41a2, {0x85, 0xdc, 0x8f, 0xa0, 0xbf, 0x41, 0xb8, 0xda}};
+        const bool hasCodecApi =
+            SUCCEEDED(m_decoder->QueryInterface(kSwIIDICodecAPI,
+                                                reinterpret_cast<void**>(codecApi.GetAddressOf()))) &&
+            codecApi;
+#else
+        const bool hasCodecApi = SUCCEEDED(m_decoder.As(&codecApi)) && codecApi;
+#endif
+        if (hasCodecApi) {
             VARIANT value;
             VariantInit(&value);
             value.vt = VT_UI4;

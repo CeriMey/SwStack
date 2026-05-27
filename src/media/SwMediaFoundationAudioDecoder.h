@@ -26,6 +26,11 @@
 #include <limits>
 #include <memory>
 
+#if defined(__MINGW32__) || defined(__MINGW64__)
+static const GUID CLSID_MSOpusDecoder =
+    {0x63e17c10, 0x2d43, 0x4c42, {0x8f, 0xe3, 0x8d, 0x8b, 0x63, 0xe4, 0x6a, 0x6a}};
+#endif
+
 static constexpr const char* kSwLogCategory_SwMediaFoundationAudioDecoder =
     "sw.media.swmediafoundationaudiodecoder";
 

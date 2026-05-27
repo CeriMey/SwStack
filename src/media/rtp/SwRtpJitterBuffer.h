@@ -121,7 +121,7 @@ public:
         return InsertResult::AcceptedOutOfOrder;
     }
 
-    PopResult popReady(bool /*allowGapAdvance*/) {
+    PopResult popReady(bool allowGapAdvance) {
         PopResult result;
         if (m_buffer.empty()) {
             clearBlockedState_();
@@ -168,7 +168,7 @@ public:
             }
             const bool sizeExceeded = m_buffer.size() >= m_maxPackets;
             const bool ageExceeded = ageMs >= m_maxDelayMs;
-            if (!sizeExceeded && !ageExceeded) {
+            if (!sizeExceeded && (!allowGapAdvance || !ageExceeded)) {
                 updateBlockedState_(m_expectedSequence, nextIt->first, now);
                 return result;
             }

@@ -47,9 +47,25 @@ struct SwMediaOpenOptions {
     SwString sourceAddressFilter{};
     SwString multicastGroup{};
     uint16_t sourceRtcpPort{0};
+    SwString sdpText{};
+    SwString sdpFile{};
+    int latencyTargetMs{0};
+    int rtpJitterDelayMs{0};
+    int rtpJitterMaxPackets{0};
     bool lowLatency{true};
     bool enableAudio{false};
     bool enableMetadata{false};
+    bool udpPunch{true};
+    bool transportExplicit{false};
+    bool udpFormatExplicit{false};
+    bool codecExplicit{false};
+    bool payloadTypeExplicit{false};
+    bool clockRateExplicit{false};
+    bool latencyTargetExplicit{false};
+    bool rtpJitterDelayExplicit{false};
+    bool rtpJitterMaxPacketsExplicit{false};
+    bool rtpPacketized{false};
+    bool sdpApplied{false};
 
     SwString sourceUrl() const {
         const SwString scheme = mediaUrl.scheme();
@@ -90,6 +106,36 @@ struct SwMediaOpenOptions {
     static SwMediaOpenOptions fromUrl(const SwString& rawUrl) {
         SwMediaOpenOptions options;
         options.mediaUrl = SwMediaUrl::parse(rawUrl);
+        options.transportExplicit = hasAnyQueryValue_(options.mediaUrl, {"transport"});
+        options.udpFormatExplicit = hasAnyQueryValue_(options.mediaUrl, {"format"});
+        options.codecExplicit = hasAnyQueryValue_(options.mediaUrl, {"codec"});
+        options.payloadTypeExplicit =
+            hasAnyQueryValue_(options.mediaUrl, {"pt", "payload", "payloadtype"});
+        options.clockRateExplicit =
+            hasAnyQueryValue_(options.mediaUrl, {"clock", "clockrate"});
+        options.latencyTargetExplicit =
+            hasAnyQueryValue_(options.mediaUrl, {"latency",
+                                                 "latency_ms",
+                                                 "latency-ms",
+                                                 "latency_target",
+                                                 "latency-target",
+                                                 "latency_target_ms",
+                                                 "latency-target-ms"});
+        options.rtpJitterDelayExplicit =
+            hasAnyQueryValue_(options.mediaUrl, {"jitter",
+                                                 "jitter_ms",
+                                                 "jitter-ms",
+                                                 "rtp_jitter",
+                                                 "rtp-jitter",
+                                                 "rtp_jitter_ms",
+                                                 "rtp-jitter-ms",
+                                                 "reorder_delay",
+                                                 "reorder-delay"});
+        options.rtpJitterMaxPacketsExplicit =
+            hasAnyQueryValue_(options.mediaUrl, {"jitter_packets",
+                                                 "jitter-packets",
+                                                 "rtp_jitter_packets",
+                                                 "rtp-jitter-packets"});
         options.transport = transportFromString(firstQueryValue_(options.mediaUrl,
                                                                  {"transport"}));
         options.udpFormat = udpFormatFromString(firstQueryValue_(options.mediaUrl,
@@ -98,6 +144,32 @@ struct SwMediaOpenOptions {
                                                          {"codec"}));
         options.payloadType = queryInt_(options.mediaUrl, {"pt", "payload", "payloadtype"}, -1);
         options.clockRate = queryInt_(options.mediaUrl, {"clock", "clockrate"}, 0);
+        options.latencyTargetMs = queryInt_(options.mediaUrl,
+                                            {"latency",
+                                             "latency_ms",
+                                             "latency-ms",
+                                             "latency_target",
+                                             "latency-target",
+                                             "latency_target_ms",
+                                             "latency-target-ms"},
+                                            0);
+        options.rtpJitterDelayMs = queryInt_(options.mediaUrl,
+                                             {"jitter",
+                                              "jitter_ms",
+                                              "jitter-ms",
+                                              "rtp_jitter",
+                                              "rtp-jitter",
+                                              "rtp_jitter_ms",
+                                              "rtp-jitter-ms",
+                                              "reorder_delay",
+                                              "reorder-delay"},
+                                             0);
+        options.rtpJitterMaxPackets = queryInt_(options.mediaUrl,
+                                                {"jitter_packets",
+                                                 "jitter-packets",
+                                                 "rtp_jitter_packets",
+                                                 "rtp-jitter-packets"},
+                                                0);
         options.bindAddress = firstQueryValue_(options.mediaUrl,
                                                {"bind", "local", "listen", "local-address"});
         options.rtpPort = static_cast<uint16_t>(
@@ -109,6 +181,10 @@ struct SwMediaOpenOptions {
         options.sourceRtcpPort = static_cast<uint16_t>(
             queryInt_(options.mediaUrl, {"source_rtcp", "remote_rtcp", "source-rtcp"}, 0));
         options.fmtp = firstQueryValue_(options.mediaUrl, {"fmtp"});
+        options.sdpText = firstQueryValue_(options.mediaUrl,
+                                           {"sdp", "sdp_text", "sdp-text"});
+        options.sdpFile = firstQueryValue_(options.mediaUrl,
+                                           {"sdp_file", "sdp-file", "sdp_path", "sdp-path"});
         options.decoderId = firstQueryValue_(options.mediaUrl, {"decoder"});
         options.audioDecoderId = firstQueryValue_(options.mediaUrl, {"audio_decoder", "audio-decoder"});
         options.preferredAudioTrackId = firstQueryValue_(options.mediaUrl, {"audio_track", "audio-track"});
@@ -122,6 +198,8 @@ struct SwMediaOpenOptions {
         options.enableAudio = queryBool_(options.mediaUrl, {"audio", "enable_audio", "enable-audio"}, false);
         options.enableMetadata =
             queryBool_(options.mediaUrl, {"metadata", "enable_metadata", "enable-metadata", "klv"}, false);
+        options.udpPunch =
+            queryBool_(options.mediaUrl, {"udp_punch", "udp-punch", "rtsp_udp_punch", "rtsp-udp-punch"}, true);
         if ((!options.userName.isEmpty() || !options.password.isEmpty()) &&
             options.mediaUrl.userInfo().isEmpty()) {
             return finalizeDerived_(options);
@@ -136,9 +214,9 @@ private:
             options.udpFormat == UdpPayloadFormat::Auto) {
             options.udpFormat = UdpPayloadFormat::Rtp;
         }
-        if ((options.mediaUrl.scheme() == "udp") &&
-            options.udpFormat == UdpPayloadFormat::Auto) {
-            options.udpFormat = UdpPayloadFormat::MpegTs;
+        if (options.mediaUrl.scheme() == "rtp" ||
+            options.udpFormat == UdpPayloadFormat::Rtp) {
+            options.rtpPacketized = true;
         }
         if (options.udpFormat == UdpPayloadFormat::AnnexBH264) {
             options.codec = SwVideoPacket::Codec::H264;
@@ -246,6 +324,16 @@ private:
         return SwString();
     }
 
+    static bool hasAnyQueryValue_(const SwMediaUrl& url,
+                                  std::initializer_list<const char*> keys) {
+        for (const char* key : keys) {
+            if (url.hasQueryValue(SwString(key))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     static int queryInt_(const SwMediaUrl& url,
                          std::initializer_list<const char*> keys,
                          int fallback) {
@@ -333,6 +421,26 @@ private:
                key == "payloadtype" ||
                key == "clock" ||
                key == "clockrate" ||
+               key == "latency" ||
+               key == "latency_ms" ||
+               key == "latency-ms" ||
+               key == "latency_target" ||
+               key == "latency-target" ||
+               key == "latency_target_ms" ||
+               key == "latency-target-ms" ||
+               key == "jitter" ||
+               key == "jitter_ms" ||
+               key == "jitter-ms" ||
+               key == "rtp_jitter" ||
+               key == "rtp-jitter" ||
+               key == "rtp_jitter_ms" ||
+               key == "rtp-jitter-ms" ||
+               key == "reorder_delay" ||
+               key == "reorder-delay" ||
+               key == "jitter_packets" ||
+               key == "jitter-packets" ||
+               key == "rtp_jitter_packets" ||
+               key == "rtp-jitter-packets" ||
                key == "bind" ||
                key == "local" ||
                key == "listen" ||
@@ -349,6 +457,13 @@ private:
                key == "remote_rtcp" ||
                key == "source-rtcp" ||
                key == "fmtp" ||
+               key == "sdp" ||
+               key == "sdp_text" ||
+               key == "sdp-text" ||
+               key == "sdp_file" ||
+               key == "sdp-file" ||
+               key == "sdp_path" ||
+               key == "sdp-path" ||
                key == "decoder" ||
                key == "audio_decoder" ||
                key == "audio-decoder" ||
@@ -374,6 +489,10 @@ private:
                key == "metadata" ||
                key == "enable_metadata" ||
                key == "enable-metadata" ||
-               key == "klv";
+               key == "klv" ||
+               key == "udp_punch" ||
+               key == "udp-punch" ||
+               key == "rtsp_udp_punch" ||
+               key == "rtsp-udp-punch";
     }
 };

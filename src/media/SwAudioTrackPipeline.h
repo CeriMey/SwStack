@@ -6,8 +6,8 @@
  * @brief Declares the asynchronous live audio packet pipeline used by SwMediaPlayer.
  */
 
-#include "media/SwAudioOutput.h"
 #include "media/SwAudioPipeline.h"
+#include "media/SwAudioOutput.h"
 #include "media/SwMediaPacket.h"
 #include "media/SwMediaSource.h"
 #include "media/SwMediaTrackQueue.h"

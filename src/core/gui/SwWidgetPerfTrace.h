@@ -44,7 +44,7 @@
 #include <string>
 #include <vector>
 
-#ifdef _WIN32
+#ifdef _MSC_VER
 #include <cstdio>  // _dupenv_s
 #endif
 
@@ -60,7 +60,7 @@ struct Metric {
 
 inline bool enabled() {
     static const bool value = []() {
-#ifdef _WIN32
+#ifdef _MSC_VER
         char* raw = nullptr;
         std::size_t rawSize = 0;
         const errno_t status = _dupenv_s(&raw, &rawSize, "SW_WIDGET_PERF_TRACE");

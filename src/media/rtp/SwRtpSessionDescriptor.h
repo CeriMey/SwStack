@@ -17,12 +17,14 @@ struct SwRtpSessionDescriptor {
     uint16_t sourceRtpPort{0};
     uint16_t sourceRtcpPort{0};
     SwVideoPacket::Codec codec{SwVideoPacket::Codec::Unknown};
-    int payloadType{96};
+    int payloadType{-1};
     int clockRate{90000};
     SwMediaOpenOptions::UdpPayloadFormat format{SwMediaOpenOptions::UdpPayloadFormat::Rtp};
     SwString fmtp{};
     bool allowKeyFrameRequests{true};
     bool lowLatency{true};
+    int jitterMaxPackets{0};
+    int jitterMaxDelayMs{0};
 
     static SwRtpSessionDescriptor fromOpenOptions(const SwMediaOpenOptions& options) {
         SwRtpSessionDescriptor descriptor;
@@ -42,7 +44,7 @@ struct SwRtpSessionDescriptor {
         descriptor.codec = options.codec == SwVideoPacket::Codec::Unknown
                                ? SwVideoPacket::Codec::H264
                                : options.codec;
-        descriptor.payloadType = options.payloadType >= 0 ? options.payloadType : 96;
+        descriptor.payloadType = options.payloadType >= 0 ? options.payloadType : -1;
         descriptor.clockRate = options.clockRate > 0 ? options.clockRate : 90000;
         descriptor.format =
             options.udpFormat == SwMediaOpenOptions::UdpPayloadFormat::Auto
@@ -50,6 +52,8 @@ struct SwRtpSessionDescriptor {
                 : options.udpFormat;
         descriptor.fmtp = options.fmtp;
         descriptor.lowLatency = options.lowLatency;
+        descriptor.jitterMaxPackets = options.rtpJitterMaxPackets;
+        descriptor.jitterMaxDelayMs = options.rtpJitterDelayMs;
         if (!descriptor.multicastGroup.isEmpty()) {
             descriptor.allowKeyFrameRequests = false;
         }

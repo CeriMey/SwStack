@@ -77,6 +77,12 @@
 #pragma comment(lib, "windowscodecs.lib")
 #pragma comment(lib, "msimg32.lib")
 
+#if defined(__MINGW32__) || defined(__MINGW64__)
+#define SW_WIN32PAINTER_HAS_DWRITE_FACTORY8 0
+#else
+#define SW_WIN32PAINTER_HAS_DWRITE_FACTORY8 1
+#endif
+
 class SwWin32Painter : public SwPlatformPainter {
 public:
     SwWin32Painter() = default;
@@ -848,7 +854,9 @@ private:
     using ComPtrDWriteFactory = Microsoft::WRL::ComPtr<IDWriteFactory>;
     using ComPtrDWriteFactory2 = Microsoft::WRL::ComPtr<IDWriteFactory2>;
     using ComPtrDWriteFactory4 = Microsoft::WRL::ComPtr<IDWriteFactory4>;
+#if SW_WIN32PAINTER_HAS_DWRITE_FACTORY8
     using ComPtrDWriteFactory8 = Microsoft::WRL::ComPtr<IDWriteFactory8>;
+#endif
     using ComPtrDWriteGdiInterop = Microsoft::WRL::ComPtr<IDWriteGdiInterop>;
     using ComPtrDWriteRenderingParams = Microsoft::WRL::ComPtr<IDWriteRenderingParams>;
     using ComPtrWicFactory = Microsoft::WRL::ComPtr<IWICImagingFactory>;
@@ -922,6 +930,7 @@ private:
         return s_factory4;
     }
 
+#if SW_WIN32PAINTER_HAS_DWRITE_FACTORY8
     static ComPtrDWriteFactory8& sharedDWriteFactory8_() {
         static ComPtrDWriteFactory8 s_factory8;
         static std::once_flag once;
@@ -938,6 +947,7 @@ private:
         });
         return s_factory8;
     }
+#endif
 
     static ComPtrDWriteGdiInterop& sharedDWriteGdiInterop_() {
         static ComPtrDWriteGdiInterop s_interop;
@@ -1093,6 +1103,7 @@ private:
         return true;
     }
 
+#if SW_WIN32PAINTER_HAS_DWRITE_FACTORY8
     class BitmapColorTextRenderer final : public IDWriteTextRenderer {
     public:
         /**
@@ -1445,6 +1456,15 @@ private:
                                         blend);
         return blended != FALSE;
     }
+#else
+    bool drawTextColorEmoji_(const SwRect&,
+                             const std::wstring&,
+                             DrawTextFormats,
+                             const SwColor&,
+                             const SwFont&) {
+        return false;
+    }
+#endif
 
     struct PngGlyphCacheKey {
         std::uintptr_t fontFacePtr{0};

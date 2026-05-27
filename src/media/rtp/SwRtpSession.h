@@ -50,11 +50,18 @@ public:
         m_rtcpSocket->setReceiveBufferSize(1 * 1024 * 1024);
         m_rtcpSocket->setMaxDatagramSize(4096);
         m_rtcpSocket->setMaxPendingDatagrams(128);
-        if (m_descriptor.lowLatency) {
-            m_jitterBuffer.setLimits(64, 30);
-        } else {
-            m_jitterBuffer.setLimits(128, 60);
-        }
+        const int defaultJitterPackets = m_descriptor.lowLatency ? 128 : 512;
+        const int defaultJitterDelayMs = m_descriptor.lowLatency ? 80 : 250;
+        m_effectiveJitterPackets =
+            m_descriptor.jitterMaxPackets > 0
+                ? m_descriptor.jitterMaxPackets
+                : defaultJitterPackets;
+        m_effectiveJitterDelayMs =
+            m_descriptor.jitterMaxDelayMs > 0
+                ? m_descriptor.jitterMaxDelayMs
+                : defaultJitterDelayMs;
+        m_jitterBuffer.setLimits(static_cast<std::size_t>(m_effectiveJitterPackets),
+                                 m_effectiveJitterDelayMs);
 
         SwObject::connect(m_rtpSocket, &SwUdpSocket::readyRead, m_callbackContext, [this]() {
             readRtpPackets_();
@@ -71,12 +78,15 @@ public:
     }
 
     ~SwRtpSession() {
-        delete m_callbackContext;
-        m_callbackContext = nullptr;
         stop();
         delete m_monitorTimer;
+        m_monitorTimer = nullptr;
         delete m_rtpSocket;
+        m_rtpSocket = nullptr;
         delete m_rtcpSocket;
+        m_rtcpSocket = nullptr;
+        delete m_callbackContext;
+        m_callbackContext = nullptr;
     }
 
     void setPacketCallback(PacketCallback callback) { m_packetCallback = std::move(callback); }
@@ -116,17 +126,25 @@ public:
 
     SwRtpStatsSnapshot stats() const { return m_stats.snapshot(); }
 
+    void setRemoteEndpoint(const SwString& host, uint16_t rtpPort, uint16_t rtcpPort) {
+        if (!host.isEmpty()) {
+            m_configuredRemoteAddress = host;
+        }
+        if (rtpPort != 0) {
+            m_configuredRemoteRtpPort = rtpPort;
+        }
+        if (rtcpPort != 0) {
+            m_configuredRemoteRtcpPort = rtcpPort;
+        }
+    }
+
     void sendUdpPunch(const SwString& host, uint16_t rtpPort, uint16_t rtcpPort) {
         if (!m_running.load()) {
             return;
         }
-        static const char payload[] = "ping";
-        if (m_rtpSocket && rtpPort != 0) {
-            m_rtpSocket->writeDatagram(payload, sizeof(payload) - 1, host, rtpPort);
-        }
-        if (m_rtcpSocket && rtcpPort != 0) {
-            m_rtcpSocket->writeDatagram(payload, sizeof(payload) - 1, host, rtcpPort);
-        }
+        setRemoteEndpoint(host, rtpPort, rtcpPort);
+        sendRtpProbe_(host, rtpPort);
+        sendReceiverReport_();
     }
 
     void requestKeyFrame(const SwString& reason = SwString()) {
@@ -232,8 +250,12 @@ private:
         m_detectedRtcpSenderAddress.clear();
         m_detectedRtpSenderPort = 0;
         m_detectedRtcpSenderPort = 0;
+        m_configuredRemoteAddress.clear();
+        m_configuredRemoteRtpPort = 0;
+        m_configuredRemoteRtcpPort = 0;
         m_remoteSsrc = 0;
         m_sentStartupPli = false;
+        m_probeSequence = 0;
         m_lastRtpTime = {};
         m_lastPliTime = {};
         m_lastReceiverReportTime = {};
@@ -258,8 +280,10 @@ private:
             m_descriptor.multicastGroup.isEmpty()
                 ? m_descriptor.bindAddress
                 : wildcardBindAddressForGroup_(m_descriptor.multicastGroup);
-        const auto bindMode = static_cast<SwUdpSocket::BindMode>(SwUdpSocket::ShareAddress |
-                                                                 SwUdpSocket::ReuseAddressHint);
+        const auto bindMode = static_cast<SwUdpSocket::BindMode>(
+            m_descriptor.multicastGroup.isEmpty()
+                ? SwUdpSocket::DontShareAddress
+                : (SwUdpSocket::ShareAddress | SwUdpSocket::ReuseAddressHint));
         if (!m_rtpSocket->bind(bindAddress, m_descriptor.localRtpPort, bindMode)) {
             swCError(kSwLogCategory_SwRtpSession)
                 << "[SwRtpSession] Failed to bind RTP socket "
@@ -293,7 +317,10 @@ private:
             << " (rtcp=" << m_descriptor.localRtcpPort
             << ", codec=" << SwMediaOpenOptions::codecToString(m_descriptor.codec)
             << ", pt=" << m_descriptor.payloadType
-            << ", clock=" << m_descriptor.clockRate << ")";
+            << ", clock=" << m_descriptor.clockRate
+            << ", jitterPackets=" << m_effectiveJitterPackets
+            << ", jitterDelayMs=" << m_effectiveJitterDelayMs
+            << ")";
         return true;
     }
 
@@ -338,6 +365,7 @@ private:
                 maybeLogOutOfOrderPacket_(sequenceNumber, outOfOrderCount);
             }
             drainBufferedPackets_(false);
+            drainBufferedPacketsPastDelay_();
         }
     }
 
@@ -387,6 +415,14 @@ private:
         }
     }
 
+    void drainBufferedPacketsPastDelay_() {
+        const auto snapshot = m_jitterBuffer.snapshot();
+        if (!snapshot.blocked || snapshot.blockedAgeMs < m_effectiveJitterDelayMs) {
+            return;
+        }
+        drainBufferedPackets_(true);
+    }
+
     void maybeLogLatePacket_(uint16_t sequenceNumber, uint64_t lateCount) {
         if (!shouldLogCounter_(lateCount)) {
             return;
@@ -415,8 +451,10 @@ private:
 
     void maybeLogOutOfOrderPacket_(uint16_t sequenceNumber, uint64_t outOfOrderCount) {
         const auto snapshot = m_jitterBuffer.snapshot();
-        const bool stressed = snapshot.blocked || snapshot.queuedPackets >= 16;
-        if (!stressed && !shouldLogCounter_(outOfOrderCount)) {
+        const bool queueMilestone =
+            snapshot.queuedPackets >= 16 &&
+            (snapshot.queuedPackets & (snapshot.queuedPackets - 1U)) == 0U;
+        if (!queueMilestone && !shouldLogCounter_(outOfOrderCount)) {
             return;
         }
         swCWarning(kSwLogCategory_SwRtpSession)
@@ -622,6 +660,35 @@ private:
         }
     }
 
+    void sendRtpProbe_(const SwString& host, uint16_t rtpPort) {
+        if (!m_rtpSocket || host.isEmpty() || rtpPort == 0 ||
+            !m_descriptor.multicastGroup.isEmpty()) {
+            return;
+        }
+
+        uint8_t packet[12] = {0};
+        packet[0] = 0x80;
+        packet[1] = static_cast<uint8_t>(
+            m_descriptor.payloadType >= 0 ? (m_descriptor.payloadType & 0x7F) : 96);
+        const uint16_t sequence = ++m_probeSequence;
+        packet[2] = static_cast<uint8_t>((sequence >> 8) & 0xFF);
+        packet[3] = static_cast<uint8_t>(sequence & 0xFF);
+        const uint32_t mySsrc = localSsrc_();
+        packet[8] = static_cast<uint8_t>((mySsrc >> 24) & 0xFF);
+        packet[9] = static_cast<uint8_t>((mySsrc >> 16) & 0xFF);
+        packet[10] = static_cast<uint8_t>((mySsrc >> 8) & 0xFF);
+        packet[11] = static_cast<uint8_t>(mySsrc & 0xFF);
+        const int64_t written =
+            m_rtpSocket->writeDatagram(reinterpret_cast<const char*>(packet), 12, host, rtpPort);
+        if (written > 0) {
+            swCDebug(kSwLogCategory_SwRtpSession)
+                << "[SwRtpSession] Sent RTP startup probe"
+                << " pt=" << static_cast<int>(packet[1])
+                << " seq=" << sequence
+                << " port=" << rtpPort;
+        }
+    }
+
     void checkTimeout_() {
         if (!m_running.load() || m_lastRtpTime.time_since_epoch().count() == 0) {
             return;
@@ -731,6 +798,9 @@ private:
         if (!m_detectedRtpSenderAddress.isEmpty()) {
             return m_detectedRtpSenderAddress;
         }
+        if (!m_configuredRemoteAddress.isEmpty()) {
+            return m_configuredRemoteAddress;
+        }
         return m_descriptor.sourceAddressFilter;
     }
 
@@ -744,8 +814,14 @@ private:
         if (m_descriptor.sourceRtcpPort != 0) {
             return m_descriptor.sourceRtcpPort;
         }
+        if (m_configuredRemoteRtcpPort != 0) {
+            return m_configuredRemoteRtcpPort;
+        }
         if (m_detectedRtpSenderPort != 0) {
             return static_cast<uint16_t>(m_detectedRtpSenderPort + 1);
+        }
+        if (m_configuredRemoteRtpPort != 0) {
+            return static_cast<uint16_t>(m_configuredRemoteRtpPort + 1);
         }
         return 0;
     }
@@ -767,6 +843,8 @@ private:
     SwUdpSocket* m_rtcpSocket{nullptr};
     SwTimer* m_monitorTimer{nullptr};
     SwRtpJitterBuffer m_jitterBuffer{};
+    int m_effectiveJitterPackets{0};
+    int m_effectiveJitterDelayMs{0};
     SwRtpStats m_stats{};
     PacketCallback m_packetCallback{};
     GapCallback m_gapCallback{};
@@ -776,9 +854,13 @@ private:
     SwString m_detectedRtcpSenderAddress{};
     uint16_t m_detectedRtpSenderPort{0};
     uint16_t m_detectedRtcpSenderPort{0};
+    SwString m_configuredRemoteAddress{};
+    uint16_t m_configuredRemoteRtpPort{0};
+    uint16_t m_configuredRemoteRtcpPort{0};
     uint32_t m_remoteSsrc{0};
     uint32_t m_localSsrc{0};
     bool m_sentStartupPli{false};
+    uint16_t m_probeSequence{0};
     std::chrono::steady_clock::time_point m_lastRtpTime{};
     std::chrono::steady_clock::time_point m_lastPliTime{};
     std::chrono::steady_clock::time_point m_lastReceiverReportTime{};

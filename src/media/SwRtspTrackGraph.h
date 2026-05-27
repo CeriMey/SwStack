@@ -466,6 +466,9 @@ private:
         }
         if (config.codec == SwVideoPacket::Codec::H264 ||
             config.codec == SwVideoPacket::Codec::H265) {
+            if (config.liveTrimEnabled) {
+                return lostPackets > 128;
+            }
             return lostPackets > 2;
         }
         return lostPackets > 4;
@@ -1237,7 +1240,7 @@ private:
         } else {
             m_h264Depacketizer.onSequenceGap(forceKeyFrameRecovery);
         }
-        if (forceKeyFrameRecovery) {
+        if (forceKeyFrameRecovery && !usesUnifiedLiveTrim_(config)) {
             emitRecovery_(SwMediaSource::RecoveryEvent::Kind::LiveCut,
                           "rtp loss");
         }

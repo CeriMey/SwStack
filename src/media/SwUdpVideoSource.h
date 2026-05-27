@@ -13,8 +13,10 @@
 #include "core/runtime/SwTimer.h"
 #include "SwDebug.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <vector>
 static constexpr const char* kSwLogCategory_SwUdpVideoSource = "sw.media.swudpvideosource";
 
@@ -44,11 +46,13 @@ public:
     }
 
     ~SwUdpVideoSource() override {
-        delete m_callbackContext;
-        m_callbackContext = nullptr;
         stop();
         delete m_monitorTimer;
+        m_monitorTimer = nullptr;
         delete m_socket;
+        m_socket = nullptr;
+        delete m_callbackContext;
+        m_callbackContext = nullptr;
     }
 
     SwString name() const override { return "SwUdpVideoSource"; }
@@ -100,6 +104,7 @@ public:
             m_socket->close();
         }
         m_tsDemux.reset();
+        m_detectedFormat = SwMediaOpenOptions::UdpPayloadFormat::Auto;
         emitStatus(StreamState::Stopped, "Stream stopped");
     }
 
@@ -116,6 +121,124 @@ private:
     static bool hasStartCodeHevcIdr_(const SwByteArray& payload) {
         std::vector<uint8_t> bytes(payload.begin(), payload.end());
         return SwTsProgramDemux::hasStartCodeHevcIdr(bytes);
+    }
+
+    static bool looksLikeMpegTs_(const SwByteArray& payload) {
+        const uint8_t* bytes = reinterpret_cast<const uint8_t*>(payload.constData());
+        const int size = static_cast<int>(payload.size());
+        if (!bytes || size < 188) {
+            return false;
+        }
+        if (bytes[0] != 0x47U) {
+            return false;
+        }
+        if (size >= 376) {
+            return bytes[188] == 0x47U;
+        }
+        return true;
+    }
+
+    static bool findStartCode_(const uint8_t* bytes,
+                               int size,
+                               int searchFrom,
+                               int& nalStart) {
+        if (!bytes || size < 4) {
+            return false;
+        }
+        for (int i = std::max(0, searchFrom); i + 3 < size; ++i) {
+            if (bytes[i] != 0x00U || bytes[i + 1] != 0x00U) {
+                continue;
+            }
+            if (bytes[i + 2] == 0x01U) {
+                nalStart = i + 3;
+                return nalStart < size;
+            }
+            if (i + 4 < size && bytes[i + 2] == 0x00U && bytes[i + 3] == 0x01U) {
+                nalStart = i + 4;
+                return nalStart < size;
+            }
+        }
+        return false;
+    }
+
+    static bool looksLikeAnnexBH265_(const SwByteArray& payload) {
+        const uint8_t* bytes = reinterpret_cast<const uint8_t*>(payload.constData());
+        const int size = static_cast<int>(payload.size());
+        int nalStart = 0;
+        int searchFrom = 0;
+        while (findStartCode_(bytes, size, searchFrom, nalStart)) {
+            if (nalStart + 1 >= size) {
+                break;
+            }
+            const uint8_t nalType = static_cast<uint8_t>((bytes[nalStart] >> 1) & 0x3FU);
+            if ((nalType >= 16U && nalType <= 21U) ||
+                nalType == 32U || nalType == 33U || nalType == 34U) {
+                return true;
+            }
+            searchFrom = nalStart + 1;
+        }
+        return false;
+    }
+
+    static bool looksLikeAnnexBH264_(const SwByteArray& payload) {
+        const uint8_t* bytes = reinterpret_cast<const uint8_t*>(payload.constData());
+        const int size = static_cast<int>(payload.size());
+        int nalStart = 0;
+        int searchFrom = 0;
+        while (findStartCode_(bytes, size, searchFrom, nalStart)) {
+            if (nalStart >= size) {
+                break;
+            }
+            const uint8_t nalType = static_cast<uint8_t>(bytes[nalStart] & 0x1FU);
+            if (nalType == 1U || nalType == 5U || nalType == 6U ||
+                nalType == 7U || nalType == 8U) {
+                return true;
+            }
+            searchFrom = nalStart + 1;
+        }
+        return false;
+    }
+
+    SwMediaOpenOptions::UdpPayloadFormat resolvePayloadFormat_(const SwByteArray& payload) {
+        if (m_options.udpFormat != SwMediaOpenOptions::UdpPayloadFormat::Auto) {
+            return m_options.udpFormat;
+        }
+        if (m_detectedFormat != SwMediaOpenOptions::UdpPayloadFormat::Auto) {
+            return m_detectedFormat;
+        }
+
+        SwMediaOpenOptions::UdpPayloadFormat detected =
+            SwMediaOpenOptions::UdpPayloadFormat::MpegTs;
+        if (looksLikeMpegTs_(payload)) {
+            detected = SwMediaOpenOptions::UdpPayloadFormat::MpegTs;
+        } else if (m_options.codec == SwVideoPacket::Codec::H265 ||
+                   looksLikeAnnexBH265_(payload)) {
+            detected = SwMediaOpenOptions::UdpPayloadFormat::AnnexBH265;
+        } else if (m_options.codec == SwVideoPacket::Codec::H264 ||
+                   looksLikeAnnexBH264_(payload)) {
+            detected = SwMediaOpenOptions::UdpPayloadFormat::AnnexBH264;
+        }
+        m_detectedFormat = detected;
+        swCWarning(kSwLogCategory_SwUdpVideoSource)
+            << "[SwUdpVideoSource] Auto-detected UDP payload format="
+            << udpPayloadFormatName_(detected);
+        return detected;
+    }
+
+    static const char* udpPayloadFormatName_(SwMediaOpenOptions::UdpPayloadFormat format) {
+        switch (format) {
+        case SwMediaOpenOptions::UdpPayloadFormat::Rtp:
+            return "rtp";
+        case SwMediaOpenOptions::UdpPayloadFormat::MpegTs:
+            return "mpegts";
+        case SwMediaOpenOptions::UdpPayloadFormat::AnnexBH264:
+            return "annexb-h264";
+        case SwMediaOpenOptions::UdpPayloadFormat::AnnexBH265:
+            return "annexb-h265";
+        case SwMediaOpenOptions::UdpPayloadFormat::Auto:
+        default:
+            return "auto";
+        }
     }
 
     static SwVideoPacket::Codec videoCodecFromName_(const SwString& codec) {
@@ -156,8 +279,10 @@ private:
                 continue;
             }
             m_lastPacketTime = std::chrono::steady_clock::now();
-            if (m_options.udpFormat == SwMediaOpenOptions::UdpPayloadFormat::MpegTs ||
-                m_options.udpFormat == SwMediaOpenOptions::UdpPayloadFormat::Auto) {
+            const SwMediaOpenOptions::UdpPayloadFormat payloadFormat =
+                resolvePayloadFormat_(datagram);
+            if (payloadFormat == SwMediaOpenOptions::UdpPayloadFormat::MpegTs ||
+                payloadFormat == SwMediaOpenOptions::UdpPayloadFormat::Auto) {
                 m_tsDemux.feed(reinterpret_cast<const uint8_t*>(datagram.constData()),
                               datagram.size(),
                               ++m_timestampCounter);
@@ -166,7 +291,7 @@ private:
 
             SwVideoPacket::Codec codec = m_options.codec;
             if (codec == SwVideoPacket::Codec::Unknown) {
-                codec = (m_options.udpFormat == SwMediaOpenOptions::UdpPayloadFormat::AnnexBH265)
+                codec = (payloadFormat == SwMediaOpenOptions::UdpPayloadFormat::AnnexBH265)
                             ? SwVideoPacket::Codec::H265
                             : SwVideoPacket::Codec::H264;
             }
@@ -201,6 +326,7 @@ private:
     SwUdpSocket* m_socket{nullptr};
     SwTimer* m_monitorTimer{nullptr};
     SwTsProgramDemux m_tsDemux{};
+    SwMediaOpenOptions::UdpPayloadFormat m_detectedFormat{SwMediaOpenOptions::UdpPayloadFormat::Auto};
     std::chrono::steady_clock::time_point m_lastPacketTime{};
     uint32_t m_timestampCounter{0};
 };
