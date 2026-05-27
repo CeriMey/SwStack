@@ -808,7 +808,7 @@ bool runSwVtpCodecCase(SwCoreApplication& app,
     HeadlessPlayerProbe player;
     if (!expect(player.start(SwString("swvtp://127.0.0.1:") +
                              SwString::number(serverPort) +
-                             "?announce=127.0.0.1&localport=" +
+                             "?localport=" +
                              SwString::number(clientPort)),
                 std::string("swvtp player start ") + codecText)) {
         server.stop();
@@ -953,7 +953,7 @@ bool runSwVtpNackRecoveryCase(SwCoreApplication& app) {
     HeadlessPlayerProbe player;
     if (!expect(player.start(SwString("swvtp://127.0.0.1:") +
                              SwString::number(serverPort) +
-                             "?announce=127.0.0.1&localport=" +
+                             "?localport=" +
                              SwString::number(clientPort)),
                 "swvtp nack player start")) {
         server.stop();

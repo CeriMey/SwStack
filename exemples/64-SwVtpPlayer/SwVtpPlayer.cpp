@@ -19,7 +19,7 @@
 namespace {
 
 struct AppOptions {
-    std::string url{"swvtp://127.0.0.1:55245?announce=127.0.0.1&localport=0"};
+    std::string url{"swvtp://127.0.0.1:55245?localport=0"};
     std::string decoderId{};
     uint64_t autoExitFrames{0};
     int timeoutMs{15000};
@@ -65,8 +65,9 @@ void printDecoders() {
 void printUsage() {
     std::cout
         << "Usage:\n"
-        << "  SwVtpPlayer [swvtp://host:port?announce=clientIp&localport=0] "
+        << "  SwVtpPlayer [swvtp://host:port?localport=0] "
            "[--decoder=id] [--auto-exit-frames=N] [--timeout-ms=N]\n"
+        << "  Add ?announce=clientIp only when the server must stream to a specific client IP.\n"
         << "  SwVtpPlayer --list-decoders\n";
 }
 

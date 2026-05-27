@@ -396,12 +396,18 @@ bool runDeliveryModeScenario() {
                     parsedClient.receivePort == 6000,
                 "client announcement keeps address and port") && ok;
 
-    SwVtpClientAnnouncement invalidClient = client;
-    invalidClient.clientIpv4 = kSwVtpIpv4Any;
-    ok = expect(!swVtpParseClientAnnouncementPayload(
-                    swVtpSerializeClientAnnouncement(invalidClient),
+    SwVtpClientAnnouncement autoAddressClient = client;
+    autoAddressClient.clientIpv4 = kSwVtpIpv4Any;
+    ok = expect(swVtpParseClientAnnouncementPayload(
+                    swVtpSerializeClientAnnouncement(autoAddressClient),
                     parsedClient),
-                "client announcement rejects 0.0.0.0 client address") && ok;
+                "client announcement allows auto client address") && ok;
+    ok = expect(parsedClient.clientIpv4 == kSwVtpIpv4Any &&
+                    !swVtpEndpointAcceptsClient(endpoint192, parsedClient),
+                "unresolved auto client address is not directly accepted") && ok;
+    parsedClient.clientIpv4 = client192168;
+    ok = expect(swVtpEndpointAcceptsClient(endpoint192, parsedClient),
+                "resolved auto client address is accepted") && ok;
 
     SwVtpUdpEndpoint broadcastEndpoint = swVtpMakeBroadcastEndpoint(5000);
     ok = expect(broadcastEndpoint.isValid(), "broadcast endpoint is valid") && ok;

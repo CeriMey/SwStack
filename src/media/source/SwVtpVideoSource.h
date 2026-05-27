@@ -148,35 +148,16 @@ public:
                                                  : 55245);
         m_bindAddress = m_options.bindAddress.isEmpty() ? SwString("0.0.0.0")
                                                         : m_options.bindAddress;
-        m_announceAddress = queryValue_("announce");
-        if (m_announceAddress.isEmpty()) {
-            m_announceAddress = queryValue_("client");
-        }
-        if (m_announceAddress.isEmpty()) {
-            m_announceAddress = queryValue_("client-ip");
-        }
-        if (m_announceAddress.isEmpty()) {
-            m_announceAddress = queryValue_("announce-ip");
-        }
-        if (m_announceAddress.isEmpty()) {
-            m_announceAddress = (m_serverHost == "127.0.0.1" || m_serverHost == "localhost")
-                                    ? SwString("127.0.0.1")
-                                    : m_bindAddress;
-        }
-
-        if (!swVtpParseIpv4Address(m_announceAddress.toStdString().c_str(),
-                                   m_announcement.clientIpv4) ||
-            !swVtpIsIpv4UnicastAddress(m_announcement.clientIpv4)) {
-            emitStatus(StreamState::Recovering, "Invalid SwVTP announce address");
-            return;
-        }
-
         if (!swVtpParseIpv4Address(m_serverHost.toStdString().c_str(), m_serverIpv4)) {
             emitStatus(StreamState::Recovering, "SwVTP server host must be an IPv4 address");
             return;
         }
         if (!swVtpParseIpv4Address(m_bindAddress.toStdString().c_str(), m_bindIpv4)) {
             emitStatus(StreamState::Recovering, "SwVTP bind address must be an IPv4 address");
+            return;
+        }
+        if (!resolveAnnounceAddress_()) {
+            emitStatus(StreamState::Recovering, "Invalid SwVTP announce address");
             return;
         }
 
@@ -248,6 +229,46 @@ private:
             return fallback;
         }
         return static_cast<int>(parsed);
+    }
+
+    SwString explicitAnnounceAddress_() const {
+        SwString value = queryValue_("announce");
+        if (value.isEmpty()) {
+            value = queryValue_("client");
+        }
+        if (value.isEmpty()) {
+            value = queryValue_("client-ip");
+        }
+        if (value.isEmpty()) {
+            value = queryValue_("announce-ip");
+        }
+        return value;
+    }
+
+    bool resolveAnnounceAddress_() {
+        m_announceAddress = explicitAnnounceAddress_();
+        if (!m_announceAddress.isEmpty()) {
+            return swVtpParseIpv4Address(m_announceAddress.toStdString().c_str(),
+                                         m_announcement.clientIpv4) &&
+                   swVtpIsIpv4UnicastAddress(m_announcement.clientIpv4);
+        }
+
+        if (m_serverHost == "127.0.0.1" || m_serverHost == "localhost") {
+            m_announceAddress = "127.0.0.1";
+            return swVtpParseIpv4Address("127.0.0.1", m_announcement.clientIpv4);
+        }
+
+        uint32_t bindIpv4 = 0;
+        if (swVtpParseIpv4Address(m_bindAddress.toStdString().c_str(), bindIpv4) &&
+            swVtpIsIpv4UnicastAddress(bindIpv4)) {
+            m_announceAddress = m_bindAddress;
+            m_announcement.clientIpv4 = bindIpv4;
+            return true;
+        }
+
+        m_announceAddress = "auto";
+        m_announcement.clientIpv4 = kSwVtpIpv4Any;
+        return true;
     }
 
     static uint16_t clampU16_(uint64_t value) {

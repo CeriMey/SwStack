@@ -675,6 +675,14 @@ inline bool SwVtpClientAnnouncement::isValid() const {
            swVtpIsIpv4UnicastAddress(clientIpv4);
 }
 
+inline bool swVtpClientAnnouncementPayloadIsWellFormed(
+    const SwVtpClientAnnouncement& client) {
+    return client.streamId != 0U &&
+           client.receivePort != 0U &&
+           (client.clientIpv4 == kSwVtpIpv4Any ||
+            swVtpIsIpv4UnicastAddress(client.clientIpv4));
+}
+
 inline bool swVtpEndpointAcceptsClient(const SwVtpUdpEndpoint& endpoint,
                                        const SwVtpClientAnnouncement& client) {
     return endpoint.deliveryMode == SwVtpDeliveryMode::Unicast &&
@@ -956,7 +964,7 @@ inline bool swVtpParseClientAnnouncementPayload(const SwByteArray& payload,
     client.streamId = swVtpReadU16(data, offset);
     client.receivePort = swVtpReadU16(data, offset);
     client.clientIpv4 = swVtpReadU32(data, offset);
-    if (!client.isValid()) {
+    if (!swVtpClientAnnouncementPayloadIsWellFormed(client)) {
         return false;
     }
     outClient = client;

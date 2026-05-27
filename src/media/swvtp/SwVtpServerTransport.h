@@ -331,8 +331,14 @@ private:
                       uint32_t senderIpv4,
                       uint16_t senderPort) {
         SwVtpClientAnnouncement announcement;
-        if (!swVtpParseClientAnnouncementPayload(payload, announcement) ||
-            !swVtpStreamConfigAcceptsClient(m_streamConfig, announcement)) {
+        if (!swVtpParseClientAnnouncementPayload(payload, announcement)) {
+            return;
+        }
+        if (announcement.clientIpv4 == kSwVtpIpv4Any) {
+            announcement.clientIpv4 = senderIpv4;
+            announcement.receivePort = senderPort;
+        }
+        if (!swVtpStreamConfigAcceptsClient(m_streamConfig, announcement)) {
             return;
         }
         Client client;
