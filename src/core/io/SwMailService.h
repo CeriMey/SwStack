@@ -233,6 +233,7 @@ private:
                             uint16_t relayPort,
                             bool implicitTls,
                             bool startTls,
+                            bool requireStartTls,
                             const SwString& relayUsername,
                             const SwString& relayPassword,
                             const SwString& trustedCaFile,
@@ -702,6 +703,41 @@ inline bool smtpEhlo_(BlockingSmtpSocket_& socket,
                       SwString& outError) {
     return socket.sendAll("EHLO " + heloHost + "\r\n", outError) &&
            smtpReadResponse_(socket, 10000, 2, response, nullptr, outError);
+}
+
+inline bool smtpResponseHasCapability_(const SwString& response, const SwString& capability) {
+    const SwString expected = capability.trimmed().toUpper();
+    if (expected.isEmpty()) {
+        return false;
+    }
+
+    const SwList<SwString> lines = response.split('\n');
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        const SwString line = lines[i].trimmed();
+        if (line.size() < 4 || line.left(3) != "250") {
+            continue;
+        }
+
+        SwString name = line.mid(4).trimmed();
+        const int space = name.indexOf(' ');
+        const int tab = name.indexOf('\t');
+        int cut = -1;
+        if (space >= 0 && tab >= 0) {
+            cut = space < tab ? space : tab;
+        } else if (space >= 0) {
+            cut = space;
+        } else if (tab >= 0) {
+            cut = tab;
+        }
+        if (cut >= 0) {
+            name = name.left(cut);
+        }
+
+        if (name.toUpper() == expected) {
+            return true;
+        }
+    }
+    return false;
 }
 
 inline bool smtpAuthenticatePlain_(BlockingSmtpSocket_& socket,
@@ -2597,6 +2633,7 @@ inline bool SwMailService::deliverQueueItem_(SwMailQueueItem item, SwString& out
                                   relayPort,
                                   m_config.outboundRelay.implicitTls,
                                   m_config.outboundRelay.startTls,
+                                  m_config.outboundRelay.startTls,
                                   m_config.outboundRelay.username,
                                   m_config.outboundRelay.password,
                                   m_config.outboundRelay.trustedCaFile,
@@ -2623,7 +2660,7 @@ inline bool SwMailService::deliverQueueItem_(SwMailQueueItem item, SwString& out
     for (std::size_t i = 0; i < targets.size(); ++i) {
         swCDebug(kSwLogCategory_SwMail) << "[SwMailService] trying MX target="
                                         << targets[i].toStdString();
-        if (deliverRemoteSmtp_(targets[i], 25, false, false, SwString(), SwString(), SwString(), item, outError)) {
+        if (deliverRemoteSmtp_(targets[i], 25, false, true, false, SwString(), SwString(), SwString(), item, outError)) {
             return true;
         }
     }
@@ -2634,6 +2671,7 @@ inline bool SwMailService::deliverRemoteSmtp_(const SwString& relayHost,
                                               uint16_t relayPort,
                                               bool implicitTls,
                                               bool startTls,
+                                              bool requireStartTls,
                                               const SwString& relayUsername,
                                               const SwString& relayPassword,
                                               const SwString& trustedCaFile,
@@ -2678,28 +2716,38 @@ inline bool SwMailService::deliverRemoteSmtp_(const SwString& relayHost,
     }
 
     if (!implicitTls && startTls) {
-        if (!socket.sendAll("STARTTLS\r\n", outError) ||
-            !swMailServiceDetail::smtpReadResponse_(socket, 10000, 2, response, &code, outError)) {
-            if (outError.isEmpty()) {
-                outError = "STARTTLS rejected";
+        if (!swMailServiceDetail::smtpResponseHasCapability_(response, "STARTTLS")) {
+            if (requireStartTls) {
+                outError = "STARTTLS not advertised";
+                swCWarning(kSwLogCategory_SwMail) << "[SwMailService] STARTTLS unavailable host="
+                                                  << relayHost.toStdString()
+                                                  << " error=" << outError.toStdString();
+                return false;
             }
-            swCWarning(kSwLogCategory_SwMail) << "[SwMailService] STARTTLS rejected host="
-                                              << relayHost.toStdString()
-                                              << " code=" << code
-                                              << " error=" << outError.toStdString();
-            return false;
-        }
-        if (!socket.startTls(relayHost, trustedCaFile, 10000, outError)) {
-            swCWarning(kSwLogCategory_SwMail) << "[SwMailService] STARTTLS handshake failed host="
-                                              << relayHost.toStdString()
-                                              << " error=" << outError.toStdString();
-            return false;
-        }
-        if (!swMailServiceDetail::smtpEhlo_(socket, m_config.mailHost, response, outError)) {
-            swCWarning(kSwLogCategory_SwMail) << "[SwMailService] post-STARTTLS EHLO failed host="
-                                              << relayHost.toStdString()
-                                              << " error=" << outError.toStdString();
-            return false;
+        } else {
+            if (!socket.sendAll("STARTTLS\r\n", outError) ||
+                !swMailServiceDetail::smtpReadResponse_(socket, 10000, 2, response, &code, outError)) {
+                if (outError.isEmpty()) {
+                    outError = "STARTTLS rejected";
+                }
+                swCWarning(kSwLogCategory_SwMail) << "[SwMailService] STARTTLS rejected host="
+                                                  << relayHost.toStdString()
+                                                  << " code=" << code
+                                                  << " error=" << outError.toStdString();
+                return false;
+            }
+            if (!socket.startTls(relayHost, trustedCaFile, 10000, outError)) {
+                swCWarning(kSwLogCategory_SwMail) << "[SwMailService] STARTTLS handshake failed host="
+                                                  << relayHost.toStdString()
+                                                  << " error=" << outError.toStdString();
+                return false;
+            }
+            if (!swMailServiceDetail::smtpEhlo_(socket, m_config.mailHost, response, outError)) {
+                swCWarning(kSwLogCategory_SwMail) << "[SwMailService] post-STARTTLS EHLO failed host="
+                                                  << relayHost.toStdString()
+                                                  << " error=" << outError.toStdString();
+                return false;
+            }
         }
     }
 

@@ -1272,6 +1272,73 @@ public:
                 ctx.json(SwJsonValue(object));
             });
 
+            auth.post("/email/change/request", [service, requireStarted, makeMessage, makeOk, resolveIdentity](SwHttpContext& ctx) {
+                if (!requireStarted(ctx)) {
+                    return;
+                }
+                SwHttpAuthIdentity currentIdentity;
+                SwString rawToken;
+                if (!resolveIdentity(ctx, currentIdentity, rawToken)) {
+                    return;
+                }
+                SwJsonDocument document;
+                SwString error;
+                if (!ctx.parseJsonBody(document, error) || !document.isObject()) {
+                    ctx.json(makeMessage("error", "Invalid JSON body"), 400);
+                    return;
+                }
+                const SwJsonObject object = document.object();
+                const SwDbStatus status =
+                    service->requestEmailChange(rawToken,
+                                                object.value("currentPassword").toString().c_str(),
+                                                object.value("newEmail").toString().c_str(),
+                                                &error);
+                if (!status.ok()) {
+                    const int httpStatus = status.code() == SwDbStatus::NotFound ? 401 : 400;
+                    ctx.json(makeMessage("error", error.isEmpty() ? status.message() : error), httpStatus);
+                    return;
+                }
+                ctx.json(makeOk());
+            });
+
+            auth.post("/email/change/confirm", [service, requireStarted, makeMessage, makeAuth, resolveIdentity](SwHttpContext& ctx) {
+                if (!requireStarted(ctx)) {
+                    return;
+                }
+                SwHttpAuthIdentity currentIdentity;
+                SwString rawToken;
+                if (!resolveIdentity(ctx, currentIdentity, rawToken)) {
+                    return;
+                }
+                SwJsonDocument document;
+                SwString error;
+                if (!ctx.parseJsonBody(document, error) || !document.isObject()) {
+                    ctx.json(makeMessage("error", "Invalid JSON body"), 400);
+                    return;
+                }
+                const SwJsonObject object = document.object();
+                SwHttpAuthIdentity updatedIdentity;
+                const SwDbStatus status =
+                    service->confirmEmailChange(rawToken,
+                                                object.value("code").toString().c_str(),
+                                                object.value("token").toString().c_str(),
+                                                &updatedIdentity,
+                                                &error);
+                if (!status.ok()) {
+                    const int httpStatus = status.code() == SwDbStatus::NotFound ? 404 : 400;
+                    ctx.json(makeMessage("error", error.isEmpty() ? status.message() : error), httpStatus);
+                    return;
+                }
+                service->applyIdentityToContext(ctx, updatedIdentity);
+                SwJsonObject response;
+                response["ok"] = true;
+                response["auth"] = makeAuth(updatedIdentity.account);
+                if (!updatedIdentity.subject.isNull()) {
+                    response["subject"] = updatedIdentity.subject;
+                }
+                ctx.json(SwJsonValue(response));
+            });
+
             auth.post("/password/forgot", [service, requireStarted, makeOk](SwHttpContext& ctx) {
                 if (!requireStarted(ctx)) {
                     return;
@@ -1307,6 +1374,33 @@ public:
                 object["ok"] = true;
                 object["purpose"] = "reset_password";
                 ctx.json(SwJsonValue(object));
+            });
+
+            auth.post("/password/change/request", [service, requireStarted, makeMessage, makeOk, resolveIdentity](SwHttpContext& ctx) {
+                if (!requireStarted(ctx)) {
+                    return;
+                }
+                SwHttpAuthIdentity currentIdentity;
+                SwString rawToken;
+                if (!resolveIdentity(ctx, currentIdentity, rawToken)) {
+                    return;
+                }
+                SwJsonDocument document;
+                SwString error;
+                if (!ctx.parseJsonBody(document, error) || !document.isObject()) {
+                    ctx.json(makeMessage("error", "Invalid JSON body"), 400);
+                    return;
+                }
+                const SwDbStatus status =
+                    service->requestPasswordChange(rawToken,
+                                                   document.object().value("currentPassword").toString().c_str(),
+                                                   &error);
+                if (!status.ok()) {
+                    const int httpStatus = status.code() == SwDbStatus::NotFound ? 401 : 400;
+                    ctx.json(makeMessage("error", error.isEmpty() ? status.message() : error), httpStatus);
+                    return;
+                }
+                ctx.json(makeOk());
             });
 
             auth.post("/password/reset", [service, requireStarted, makeMessage, makeOk, clearCookie](SwHttpContext& ctx) {

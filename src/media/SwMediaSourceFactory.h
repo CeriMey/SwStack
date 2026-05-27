@@ -14,6 +14,7 @@
 #include "media/SwRtpVideoSource.h"
 #include "media/SwRtspSource.h"
 #include "media/SwUdpVideoSource.h"
+#include "media/SwVtpVideoSource.h"
 #include "media/SwVideoSource.h"
 
 #include <algorithm>
@@ -48,6 +49,10 @@ public:
                 return std::make_shared<SwRtpVideoSource>(options);
             }
             return std::make_shared<SwUdpVideoSource>(options);
+        }
+
+        if (scheme == "swvtp") {
+            return std::make_shared<SwVtpVideoSource>(options);
         }
 
         if (scheme == "file" || scheme.isEmpty()) {

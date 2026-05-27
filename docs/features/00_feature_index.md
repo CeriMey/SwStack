@@ -25,5 +25,7 @@ Chaque fiche suit une structure fixe:
   GUI: SwGuiApplication, intégration Win32/X11, widgets/rendu/layout
 - `docs/features/80_media_video_pipeline.md`  
   Media: sources/décodeurs vidéo, RTSP/MJPEG, widget vidéo, ring buffer IPC vidéo
+- `docs/features/85_swvtp_av1_low_latency.md`
+  SwVTP/SwLive: transport binaire AV1 low-latency, deadlines, NACK court, metadata KLV
 - `docs/features/90_platform_filesystem_settings.md`  
   Accès OS: fichiers/dossiers, paths, settings, plateforme Win/POSIX

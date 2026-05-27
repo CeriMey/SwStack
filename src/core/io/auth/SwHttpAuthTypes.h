@@ -93,6 +93,7 @@ struct SwHttpAuthChallenge {
     SwString accountId;
     SwString code;
     SwString tokenHash;
+    SwJsonValue payload;
     long long expiresAtMs = 0;
     SwString consumedAt;
     SwString createdAt;
@@ -134,6 +135,7 @@ struct SwHttpAuthHooks {
     SwHttpAuthLoadSubjectHook loadSubject;
     SwHttpAuthDeliverMailHook deliverMail;
     SwHttpAuthLifecycleHook onEmailVerified;
+    SwHttpAuthLifecycleHook onEmailChanged;
     SwHttpAuthLifecycleHook onPasswordChanged;
 };
 

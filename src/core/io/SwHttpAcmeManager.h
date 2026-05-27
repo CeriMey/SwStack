@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <ctime>
 #include <functional>
+#include <memory>
 
 #if defined(_WIN32)
 #include "platform/win/SwWindows.h"
@@ -45,6 +46,7 @@ struct SwAcmeConfig {
     int retryDelayMs = 15 * 1000;
     int pollIntervalMs = 1000;
     int maxPollAttempts = 60;
+    int requestTimeoutMs = 30 * 1000;
 };
 
 inline SwList<SwString> swAcmeRequestedDomains(const SwAcmeConfig& config) {
@@ -578,7 +580,23 @@ inline void SwHttpAcmeManager::dispatchHttpRequest_(SwHttpClient::Method method,
         client->setTrustedCaFile(m_config.trustedCaFile);
     }
 
-    auto finish = [this, client, handler](bool transportOk, int transportError) {
+    SwTimer* timeoutTimer = nullptr;
+    if (m_config.requestTimeoutMs > 0) {
+        timeoutTimer = new SwTimer(client);
+        timeoutTimer->setSingleShot(true);
+    }
+
+    std::shared_ptr<bool> completed = std::make_shared<bool>(false);
+    auto finishWithTimeout = [client, timeoutTimer, handler, completed](bool transportOk, int transportError) {
+        if (*completed) {
+            return;
+        }
+        *completed = true;
+
+        if (timeoutTimer) {
+            timeoutTimer->stop();
+        }
+
         HttpResult result;
         result.transportOk = transportOk;
         result.transportError = transportError;
@@ -597,8 +615,12 @@ inline void SwHttpAcmeManager::dispatchHttpRequest_(SwHttpClient::Method method,
         }
     };
 
-    connect(client, &SwHttpClient::finished, [finish](const SwByteArray&) { finish(true, 0); });
-    connect(client, &SwHttpClient::errorOccurred, [finish](int err) { finish(false, err); });
+    connect(client, &SwHttpClient::finished, [finishWithTimeout](const SwByteArray&) { finishWithTimeout(true, 0); });
+    connect(client, &SwHttpClient::errorOccurred, [finishWithTimeout](int err) { finishWithTimeout(false, err); });
+    if (timeoutTimer) {
+        connect(timeoutTimer, &SwTimer::timeout, [finishWithTimeout]() { finishWithTimeout(false, -408); });
+        timeoutTimer->start(m_config.requestTimeoutMs);
+    }
     (void)client->request(method, url, body, contentType);
 }
 

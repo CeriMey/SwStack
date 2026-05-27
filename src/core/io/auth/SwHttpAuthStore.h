@@ -187,6 +187,40 @@ public:
         return writeAccountLocked_(account);
     }
 
+    SwDbStatus setAccountEmail(const SwString& accountId,
+                               const SwString& email,
+                               const SwString& verifiedAt) {
+        SwMutexLocker locker(&m_mutex);
+        SW_HTTP_AUTH_RETURN_IF_NOT_OPEN_();
+
+        const SwString normalizedAccountId = accountId.trimmed();
+        const SwString normalizedEmail = swHttpAuthDetail::normalizeEmail(email);
+        SwString localPart;
+        SwString domain;
+        if (!swHttpAuthDetail::splitEmail(normalizedEmail, localPart, domain)) {
+            return SwDbStatus(SwDbStatus::InvalidArgument, "Invalid email");
+        }
+
+        SwHttpAuthAccount existingByEmail;
+        const SwDbStatus existingStatus = loadAccountByEmailLocked_(normalizedEmail, existingByEmail);
+        if (existingStatus.ok() && existingByEmail.accountId != normalizedAccountId) {
+            return SwDbStatus(SwDbStatus::Busy, "Email already assigned");
+        }
+        if (!existingStatus.ok() && existingStatus.code() != SwDbStatus::NotFound) {
+            return existingStatus;
+        }
+
+        SwHttpAuthAccount account;
+        const SwDbStatus status = loadAccountByIdLocked_(normalizedAccountId, account);
+        if (!status.ok()) {
+            return status;
+        }
+        account.email = normalizedEmail;
+        account.emailVerifiedAt = verifiedAt.trimmed();
+        account.updatedAt = swHttpAuthDetail::currentIsoTimestamp();
+        return writeAccountLocked_(account);
+    }
+
     SwDbStatus setAccountPassword(const SwString& accountId, const SwString& password) {
         SwMutexLocker locker(&m_mutex);
         SW_HTTP_AUTH_RETURN_IF_NOT_OPEN_();
@@ -405,7 +439,8 @@ public:
                                const SwString& accountId,
                                unsigned long long ttlMs,
                                SwString* outRawToken,
-                               SwHttpAuthChallenge* outChallenge) {
+                               SwHttpAuthChallenge* outChallenge,
+                               const SwJsonValue& payload = SwJsonValue()) {
         SwMutexLocker locker(&m_mutex);
         SW_HTTP_AUTH_RETURN_IF_NOT_OPEN_();
 
@@ -439,6 +474,7 @@ public:
         challenge.accountId = account.accountId;
         challenge.code = code;
         challenge.tokenHash = swHttpAuthDetail::hashSha256(rawToken);
+        challenge.payload = payload;
         challenge.expiresAtMs = swHttpAuthDetail::currentEpochMs() + static_cast<long long>(ttlMs);
         challenge.consumedAt.clear();
         challenge.createdAt = swHttpAuthDetail::currentIsoTimestamp();
@@ -743,6 +779,9 @@ private:
         object["accountId"] = challenge.accountId.toStdString();
         object["code"] = challenge.code.toStdString();
         object["tokenHash"] = challenge.tokenHash.toStdString();
+        if (!challenge.payload.isNull()) {
+            object["payload"] = challenge.payload;
+        }
         object["expiresAtMs"] = challenge.expiresAtMs;
         object["consumedAt"] = challenge.consumedAt.toStdString();
         object["createdAt"] = challenge.createdAt.toStdString();
@@ -757,6 +796,9 @@ private:
         challenge.accountId = object.value("accountId").toString().c_str();
         challenge.code = object.value("code").toString().c_str();
         challenge.tokenHash = object.value("tokenHash").toString().c_str();
+        if (object.contains("payload")) {
+            challenge.payload = object.value("payload");
+        }
         challenge.expiresAtMs = static_cast<long long>(object.value("expiresAtMs").toInteger(0));
         challenge.consumedAt = object.value("consumedAt").toString().c_str();
         challenge.createdAt = object.value("createdAt").toString().c_str();

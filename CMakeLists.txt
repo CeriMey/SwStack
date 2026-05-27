@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.10)
 project(SwCore)
 
 include(CheckIPOSupported)
+enable_testing()
 
 # Utiliser le standard C++11
 set(CMAKE_CXX_STANDARD 11)
@@ -160,6 +161,9 @@ sw_add_example_subdirectory(exemples/58-WidgetPerfSelfTest OFF)
 sw_add_example_subdirectory(exemples/59-GridLayoutSelfTest OFF)
 sw_add_example_subdirectory(exemples/60-FuturePromiseSelfTest OFF)
 sw_add_example_subdirectory(exemples/61-PlatformVideoDecoderSelfTest ON)
+sw_add_example_subdirectory(exemples/62-SwVtpAv1SelfTest ON)
+sw_add_example_subdirectory(exemples/63-SwVtpUdpLoopback ON)
+sw_add_example_subdirectory(exemples/64-SwVtpPlayer ON)
 sw_add_example_subdirectory(sandbox/SwMainWindowApplication OFF)
 endif()
 

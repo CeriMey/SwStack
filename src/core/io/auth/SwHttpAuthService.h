@@ -67,6 +67,9 @@ public:
                            SwJsonValue* outSubject,
                            SwString* outError = nullptr);
     SwDbStatus requestPasswordReset(const SwString& email, SwString* outError = nullptr);
+    SwDbStatus requestPasswordChange(const SwString& rawToken,
+                                     const SwString& currentPassword,
+                                     SwString* outError = nullptr);
     SwDbStatus resetPassword(const SwString& code,
                              const SwString& token,
                              const SwString& newPassword,
@@ -76,6 +79,15 @@ public:
                               const SwString& newPassword,
                               SwHttpAuthIdentity* outIdentity = nullptr,
                               SwString* outError = nullptr);
+    SwDbStatus requestEmailChange(const SwString& rawToken,
+                                  const SwString& currentPassword,
+                                  const SwString& newEmail,
+                                  SwString* outError = nullptr);
+    SwDbStatus confirmEmailChange(const SwString& rawToken,
+                                  const SwString& code,
+                                  const SwString& token,
+                                  SwHttpAuthIdentity* outIdentity = nullptr,
+                                  SwString* outError = nullptr);
     bool loadSubjectView(const SwString& subjectId,
                          SwJsonValue* outSubject,
                          SwString* outError = nullptr) const;
@@ -664,6 +676,32 @@ inline SwDbStatus SwHttpAuthService::requestPasswordReset(const SwString& email,
     return sendChallengeForAccount_(account, "reset_password", true, outError);
 }
 
+inline SwDbStatus SwHttpAuthService::requestPasswordChange(const SwString& rawToken,
+                                                           const SwString& currentPassword,
+                                                           SwString* outError) {
+    if (outError) {
+        outError->clear();
+    }
+    if (!isStarted()) {
+        return SwDbStatus(SwDbStatus::NotOpen, "Auth service not started");
+    }
+
+    SwHttpAuthIdentity identity;
+    if (!resolveIdentityFromToken(rawToken, &identity, outError)) {
+        return SwDbStatus(SwDbStatus::NotFound, outError ? *outError : SwString("Invalid session"));
+    }
+    if (!m_store.verifyPassword(identity.account, currentPassword)) {
+        if (outError) {
+            *outError = "Invalid credentials";
+        }
+        return SwDbStatus(SwDbStatus::NotFound, "Invalid credentials");
+    }
+    if (!throttleAllows_("change_password:" + identity.account.accountId)) {
+        return SwDbStatus::success();
+    }
+    return sendChallengeForAccount_(identity.account, "reset_password", false, outError);
+}
+
 inline SwDbStatus SwHttpAuthService::resetPassword(const SwString& code,
                                                    const SwString& token,
                                                    const SwString& newPassword,
@@ -793,6 +831,230 @@ inline SwDbStatus SwHttpAuthService::changePassword(const SwString& rawToken,
     }
     if (m_hooks.onPasswordChanged) {
         m_hooks.onPasswordChanged(updatedAccount, refreshed.subject);
+    }
+    return SwDbStatus::success();
+}
+
+inline SwDbStatus SwHttpAuthService::requestEmailChange(const SwString& rawToken,
+                                                        const SwString& currentPassword,
+                                                        const SwString& newEmail,
+                                                        SwString* outError) {
+    if (outError) {
+        outError->clear();
+    }
+    if (!isStarted()) {
+        return SwDbStatus(SwDbStatus::NotOpen, "Auth service not started");
+    }
+
+    const SwString normalizedEmail = swHttpAuthDetail::normalizeEmail(newEmail);
+    SwString localPart;
+    SwString domain;
+    if (!swHttpAuthDetail::splitEmail(normalizedEmail, localPart, domain)) {
+        if (outError) {
+            *outError = "Invalid email";
+        }
+        return SwDbStatus(SwDbStatus::InvalidArgument, "Invalid email");
+    }
+
+    SwHttpAuthIdentity identity;
+    if (!resolveIdentityFromToken(rawToken, &identity, outError)) {
+        return SwDbStatus(SwDbStatus::NotFound, outError ? *outError : SwString("Invalid session"));
+    }
+    if (!m_store.verifyPassword(identity.account, currentPassword)) {
+        if (outError) {
+            *outError = "Invalid credentials";
+        }
+        return SwDbStatus(SwDbStatus::NotFound, "Invalid credentials");
+    }
+    if (normalizedEmail == identity.account.email) {
+        if (outError) {
+            *outError = "Email unchanged";
+        }
+        return SwDbStatus(SwDbStatus::InvalidArgument, "Email unchanged");
+    }
+
+    SwHttpAuthAccount existing;
+    const SwDbStatus existingStatus = m_store.getAccountByEmail(normalizedEmail, &existing);
+    if (existingStatus.ok()) {
+        if (outError) {
+            *outError = "Email already assigned";
+        }
+        return SwDbStatus(SwDbStatus::Busy, "Email already assigned");
+    }
+    if (existingStatus.code() != SwDbStatus::NotFound) {
+        if (outError) {
+            *outError = existingStatus.message();
+        }
+        return existingStatus;
+    }
+
+    if (!throttleAllows_("change_email:" + identity.account.accountId)) {
+        return SwDbStatus::success();
+    }
+
+    SwJsonObject payload;
+    payload["newEmail"] = normalizedEmail.toStdString();
+
+    SwString rawChallengeToken;
+    SwHttpAuthChallenge challenge;
+    SwDbStatus status = m_store.createChallenge("change_email",
+                                                identity.account.accountId,
+                                                m_config.verificationCodeTtlMs,
+                                                &rawChallengeToken,
+                                                &challenge,
+                                                SwJsonValue(payload));
+    if (!status.ok()) {
+        if (outError) {
+            *outError = status.message();
+        }
+        return status;
+    }
+
+    const SwString baseUrl = swHttpAuthDetail::normalizeBaseUrl(m_config.publicBaseUrl);
+    const SwString url = baseUrl.isEmpty()
+                             ? SwString()
+                             : (baseUrl + "/app/settings?emailChangeToken=" + rawChallengeToken);
+
+    SwHttpAuthMailTemplate mailTemplate;
+    mailTemplate.subject = "Validation de votre nouvelle adresse email VIGIL";
+    mailTemplate.textBody =
+        "Une demande de changement d adresse email a ete effectuee.\n\nCode: {{code}}\nLien direct: {{url}}\n";
+    mailTemplate.htmlBody =
+        "<p>Une demande de changement d adresse email a ete effectuee.</p>"
+        "<p><strong>Code:</strong> {{code}}</p>"
+        "<p><a href=\"{{url}}\">Valider cette adresse email</a></p>";
+    const SwHttpAuthRenderedTemplate rendered =
+        SwHttpAuthTemplateRenderer::render(mailTemplate, challenge.code, url);
+
+    SwHttpAuthOutgoingMail mail;
+    mail.purpose = "change_email";
+    mail.accountId = identity.account.accountId;
+    mail.email = normalizedEmail;
+    mail.fromAddress = m_config.mail.fromAddress.trimmed();
+    mail.to.append(normalizedEmail);
+    mail.subject = rendered.subject;
+    mail.textBody = rendered.textBody;
+    mail.htmlBody = rendered.htmlBody;
+    mail.code = challenge.code;
+    mail.url = url;
+
+    SwString mailError;
+    if (!sendMail_(mail, &mailError)) {
+        (void)m_store.removeChallenge(challenge.challengeId);
+        if (outError) {
+            *outError = mailError;
+        }
+        return SwDbStatus(SwDbStatus::IoError,
+                          mailError.isEmpty() ? SwString("Unable to deliver auth email") : mailError);
+    }
+    return SwDbStatus::success();
+}
+
+inline SwDbStatus SwHttpAuthService::confirmEmailChange(const SwString& rawToken,
+                                                        const SwString& code,
+                                                        const SwString& token,
+                                                        SwHttpAuthIdentity* outIdentity,
+                                                        SwString* outError) {
+    if (outError) {
+        outError->clear();
+    }
+    if (outIdentity) {
+        *outIdentity = SwHttpAuthIdentity();
+    }
+    if (!isStarted()) {
+        return SwDbStatus(SwDbStatus::NotOpen, "Auth service not started");
+    }
+
+    SwHttpAuthIdentity currentIdentity;
+    if (!resolveIdentityFromToken(rawToken, &currentIdentity, outError)) {
+        return SwDbStatus(SwDbStatus::NotFound, outError ? *outError : SwString("Invalid session"));
+    }
+
+    SwHttpAuthChallenge challenge;
+    SwDbStatus status = lookupChallenge_("change_email", code, token, &challenge);
+    if (!status.ok()) {
+        if (outError) {
+            *outError = status.message();
+        }
+        return status;
+    }
+    status = validateChallenge_(challenge);
+    if (!status.ok()) {
+        if (outError) {
+            *outError = status.message();
+        }
+        return status;
+    }
+    if (challenge.accountId != currentIdentity.account.accountId) {
+        if (outError) {
+            *outError = "Challenge not found";
+        }
+        return SwDbStatus(SwDbStatus::NotFound, "Challenge not found");
+    }
+    if (!challenge.payload.isObject()) {
+        if (outError) {
+            *outError = "Invalid email change challenge";
+        }
+        return SwDbStatus(SwDbStatus::InvalidArgument, "Invalid email change challenge");
+    }
+
+    const SwJsonObject payload = challenge.payload.toObject();
+    const SwString normalizedEmail =
+        swHttpAuthDetail::normalizeEmail(SwString(payload.value("newEmail").toString().c_str()));
+    SwString localPart;
+    SwString domain;
+    if (!swHttpAuthDetail::splitEmail(normalizedEmail, localPart, domain)) {
+        if (outError) {
+            *outError = "Invalid email change challenge";
+        }
+        return SwDbStatus(SwDbStatus::InvalidArgument, "Invalid email change challenge");
+    }
+
+    status = m_store.setAccountEmail(challenge.accountId,
+                                     normalizedEmail,
+                                     swHttpAuthDetail::currentIsoTimestamp());
+    if (!status.ok()) {
+        if (outError) {
+            *outError = status.message();
+        }
+        return status;
+    }
+
+    status = m_store.consumeChallenge(challenge.challengeId);
+    if (!status.ok()) {
+        if (outError) {
+            *outError = status.message();
+        }
+        return status;
+    }
+
+    SwHttpAuthAccount updatedAccount;
+    status = m_store.getAccountById(currentIdentity.account.accountId, &updatedAccount);
+    if (!status.ok()) {
+        if (outError) {
+            *outError = status.message();
+        }
+        return status;
+    }
+
+    if (m_hooks.onEmailChanged) {
+        SwJsonValue currentSubject;
+        SwString subjectError;
+        (void)loadSubjectView(updatedAccount.subjectId, &currentSubject, &subjectError);
+        m_hooks.onEmailChanged(updatedAccount, currentSubject);
+    }
+
+    SwHttpAuthIdentity refreshed;
+    refreshed.authenticated = true;
+    refreshed.emailVerified = !updatedAccount.emailVerifiedAt.trimmed().isEmpty();
+    refreshed.account = updatedAccount;
+    refreshed.session = currentIdentity.session;
+    if (!updatedAccount.subjectId.trimmed().isEmpty()) {
+        SwString subjectError;
+        (void)loadSubjectView(updatedAccount.subjectId, &refreshed.subject, &subjectError);
+    }
+    if (outIdentity) {
+        *outIdentity = refreshed;
     }
     return SwDbStatus::success();
 }
