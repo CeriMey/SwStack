@@ -30,6 +30,7 @@ enum class SwVtpMessageType : uint8_t {
     ReceiverStats = 32,
     Nack = 33,
     KeyFrameRequest = 34,
+    BitrateControl = 35,
     Ping = 48,
     Pong = 49,
     Close = 50
@@ -83,6 +84,7 @@ static constexpr uint32_t kSwVtpIpv4Broadcast = 0xFFFFFFFFU;
 static constexpr uint8_t kSwVtpUdpEndpointBytes = 12;
 static constexpr uint8_t kSwVtpStreamConfigBytes = 20;
 static constexpr uint8_t kSwVtpClientAnnouncementBytes = 8;
+static constexpr uint8_t kSwVtpBitrateControlBytes = 20;
 
 struct SwVtpUdpEndpoint {
     SwVtpDeliveryMode deliveryMode{SwVtpDeliveryMode::Invalid};
@@ -168,6 +170,21 @@ struct SwVtpReceiverStats {
     uint16_t captureLatencyMs{0};
     uint16_t clockUncertaintyMs{0};
     uint32_t droppedFrames{0};
+};
+
+struct SwVtpBitrateControl {
+    uint16_t streamId{0};
+    uint16_t trackId{0};
+    uint32_t targetBitrateKbps{0};
+    uint32_t encoderBitrateKbps{0};
+    uint32_t estimatedBandwidthKbps{0};
+    uint8_t reason{0};
+    uint8_t flags{0};
+    uint16_t reserved{0};
+
+    bool isValid() const {
+        return streamId != 0U && trackId != 0U && targetBitrateKbps != 0U;
+    }
 };
 
 struct SwVtpNackRequest {
@@ -991,6 +1008,43 @@ inline bool swVtpParseReceiverStatsPayload(const SwByteArray& payload,
     stats.clockUncertaintyMs = swVtpReadU16(data, offset);
     stats.droppedFrames = swVtpReadU32(data, offset);
     outStats = stats;
+    return true;
+}
+
+inline SwByteArray swVtpSerializeBitrateControl(const SwVtpBitrateControl& control) {
+    SwByteArray payload;
+    swVtpAppendU16(payload, control.streamId);
+    swVtpAppendU16(payload, control.trackId);
+    swVtpAppendU32(payload, control.targetBitrateKbps);
+    swVtpAppendU32(payload, control.encoderBitrateKbps);
+    swVtpAppendU32(payload, control.estimatedBandwidthKbps);
+    swVtpAppendU8(payload, control.reason);
+    swVtpAppendU8(payload, control.flags);
+    swVtpAppendU16(payload, control.reserved);
+    return payload;
+}
+
+inline bool swVtpParseBitrateControlPayload(const SwByteArray& payload,
+                                            SwVtpBitrateControl& outControl) {
+    if (payload.size() != kSwVtpBitrateControlBytes || !payload.constData()) {
+        return false;
+    }
+
+    const uint8_t* data = reinterpret_cast<const uint8_t*>(payload.constData());
+    size_t offset = 0;
+    SwVtpBitrateControl control;
+    control.streamId = swVtpReadU16(data, offset);
+    control.trackId = swVtpReadU16(data, offset);
+    control.targetBitrateKbps = swVtpReadU32(data, offset);
+    control.encoderBitrateKbps = swVtpReadU32(data, offset);
+    control.estimatedBandwidthKbps = swVtpReadU32(data, offset);
+    control.reason = swVtpReadU8(data, offset);
+    control.flags = swVtpReadU8(data, offset);
+    control.reserved = swVtpReadU16(data, offset);
+    if (control.reserved != 0U || !control.isValid()) {
+        return false;
+    }
+    outControl = control;
     return true;
 }
 

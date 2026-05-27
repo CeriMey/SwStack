@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if(NOT WIN32)
-    message(WARNING "SwVtpPlayer GUI example is Windows-only for the current platform video widget build. Skipping.")
+    message(WARNING "SwVtpPlayer GUI example is Windows-only for the current platform video widget build. Use SwVtpUdpLoopback for WSL/Linux headless validation. Skipping.")
     return()
 endif()
 

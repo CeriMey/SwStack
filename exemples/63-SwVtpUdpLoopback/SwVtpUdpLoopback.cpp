@@ -1,4 +1,10 @@
 #include "media/swvtp/SwVtpAv1.h"
+#include "media/SwMediaPacket.h"
+#include "media/SwMediaTrack.h"
+#include "media/server/SwMediaServer.h"
+#include "media/swvtp/SwVtpKlv.h"
+#include "media/swvtp/SwVtpServerTransport.h"
+#include "media/swvtp/SwVtpUdpTransport.h"
 
 #include <algorithm>
 #include <chrono>
@@ -8,54 +14,16 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
 
-#if defined(_WIN32)
-#include <winsock2.h>
-#include <ws2tcpip.h>
-typedef SOCKET SwVtpSocketHandle;
-static const SwVtpSocketHandle kInvalidSocketHandle = INVALID_SOCKET;
-#else
-#include <arpa/inet.h>
-#include <errno.h>
-#include <netinet/in.h>
-#include <sys/select.h>
-#include <sys/socket.h>
-#include <unistd.h>
-typedef int SwVtpSocketHandle;
-static const SwVtpSocketHandle kInvalidSocketHandle = -1;
-#endif
-
 namespace {
-
-struct SocketRuntime {
-    SocketRuntime() {
-#if defined(_WIN32)
-        WSADATA data;
-        ok = (::WSAStartup(MAKEWORD(2, 2), &data) == 0);
-#endif
-    }
-    ~SocketRuntime() {
-#if defined(_WIN32)
-        if (ok) {
-            ::WSACleanup();
-        }
-#endif
-    }
-    bool ok{true};
-};
 
 struct IvfFrame {
     uint64_t timestamp{0};
     SwByteArray payload{};
-};
-
-struct UdpPacket {
-    SwByteArray bytes{};
-    uint32_t senderIpv4{0};
-    uint16_t senderPort{0};
 };
 
 struct UsStats {
@@ -107,6 +75,12 @@ uint64_t readLe64(const uint8_t* data) {
         value = (value << 8U) | static_cast<uint64_t>(data[i]);
     }
     return value;
+}
+
+void appendBe64(SwByteArray& out, uint64_t value) {
+    for (int shift = 56; shift >= 0; shift -= 8) {
+        out.append(static_cast<char>((value >> static_cast<unsigned int>(shift)) & 0xFFU));
+    }
 }
 
 std::string ipv4ToString(uint32_t ipv4) {
@@ -216,140 +190,6 @@ bool loadIvfAv1Frames(const char* path, std::vector<IvfFrame>& frames, std::stri
     return true;
 }
 
-void closeSocket(SwVtpSocketHandle socketHandle) {
-    if (socketHandle == kInvalidSocketHandle) {
-        return;
-    }
-#if defined(_WIN32)
-    ::closesocket(socketHandle);
-#else
-    ::close(socketHandle);
-#endif
-}
-
-sockaddr_in makeSockaddr(uint32_t ipv4, uint16_t port) {
-    sockaddr_in addr;
-    std::memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    addr.sin_addr.s_addr = htonl(ipv4);
-    return addr;
-}
-
-uint32_t sockaddrIpv4(const sockaddr_in& addr) {
-    return ntohl(addr.sin_addr.s_addr);
-}
-
-uint16_t sockaddrPort(const sockaddr_in& addr) {
-    return ntohs(addr.sin_port);
-}
-
-SwVtpSocketHandle createUdpSocket() {
-    return ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-}
-
-bool bindUdpSocket(SwVtpSocketHandle socketHandle, uint32_t ipv4, uint16_t port) {
-    const int yes = 1;
-    ::setsockopt(socketHandle, SOL_SOCKET, SO_REUSEADDR,
-                 reinterpret_cast<const char*>(&yes), sizeof(yes));
-    sockaddr_in addr = makeSockaddr(ipv4, port);
-    return ::bind(socketHandle,
-                  reinterpret_cast<const sockaddr*>(&addr),
-                  sizeof(addr)) == 0;
-}
-
-bool localPort(SwVtpSocketHandle socketHandle, uint16_t& outPort) {
-    sockaddr_in addr;
-    std::memset(&addr, 0, sizeof(addr));
-#if defined(_WIN32)
-    int len = sizeof(addr);
-#else
-    socklen_t len = sizeof(addr);
-#endif
-    if (::getsockname(socketHandle, reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
-        return false;
-    }
-    outPort = sockaddrPort(addr);
-    return true;
-}
-
-bool waitReadable(SwVtpSocketHandle socketHandle, int timeoutMs) {
-    fd_set readSet;
-    FD_ZERO(&readSet);
-    FD_SET(socketHandle, &readSet);
-    timeval timeout;
-    timeout.tv_sec = timeoutMs / 1000;
-    timeout.tv_usec = (timeoutMs % 1000) * 1000;
-    const int result = ::select(static_cast<int>(socketHandle + 1),
-                                &readSet,
-                                nullptr,
-                                nullptr,
-                                &timeout);
-    return result > 0 && FD_ISSET(socketHandle, &readSet);
-}
-
-bool recvUdp(SwVtpSocketHandle socketHandle, int timeoutMs, UdpPacket& outPacket) {
-    if (!waitReadable(socketHandle, timeoutMs)) {
-        return false;
-    }
-    std::vector<char> buffer(65536);
-    sockaddr_in sender;
-    std::memset(&sender, 0, sizeof(sender));
-#if defined(_WIN32)
-    int senderLen = sizeof(sender);
-    const int received = ::recvfrom(socketHandle,
-                                    buffer.data(),
-                                    static_cast<int>(buffer.size()),
-                                    0,
-                                    reinterpret_cast<sockaddr*>(&sender),
-                                    &senderLen);
-#else
-    socklen_t senderLen = sizeof(sender);
-    const ssize_t received = ::recvfrom(socketHandle,
-                                        buffer.data(),
-                                        buffer.size(),
-                                        0,
-                                        reinterpret_cast<sockaddr*>(&sender),
-                                        &senderLen);
-#endif
-    if (received <= 0) {
-        return false;
-    }
-    outPacket.bytes = SwByteArray();
-    outPacket.bytes.append(buffer.data(), static_cast<std::size_t>(received));
-    outPacket.senderIpv4 = sockaddrIpv4(sender);
-    outPacket.senderPort = sockaddrPort(sender);
-    return true;
-}
-
-bool sendUdp(SwVtpSocketHandle socketHandle,
-             const SwByteArray& bytes,
-             uint32_t ipv4,
-             uint16_t port) {
-    sockaddr_in dest = makeSockaddr(ipv4, port);
-    const char* data = bytes.constData();
-    if (!data || bytes.isEmpty()) {
-        return false;
-    }
-#if defined(_WIN32)
-    const int sent = ::sendto(socketHandle,
-                              data,
-                              static_cast<int>(bytes.size()),
-                              0,
-                              reinterpret_cast<const sockaddr*>(&dest),
-                              sizeof(dest));
-    return sent == static_cast<int>(bytes.size());
-#else
-    const ssize_t sent = ::sendto(socketHandle,
-                                  data,
-                                  bytes.size(),
-                                  0,
-                                  reinterpret_cast<const sockaddr*>(&dest),
-                                  sizeof(dest));
-    return sent == static_cast<ssize_t>(bytes.size());
-#endif
-}
-
 SwByteArray makeControlDatagram(SwVtpMessageType type, const SwByteArray& payload) {
     SwVtpDatagram datagram;
     datagram.header.version = kSwVtpVersion1;
@@ -359,6 +199,40 @@ SwByteArray makeControlDatagram(SwVtpMessageType type, const SwByteArray& payloa
     datagram.header.sendTimeUs = nowUs();
     datagram.payload = payload;
     return swVtpSerializeDatagram(datagram);
+}
+
+SwMediaTrack makeKlvTrack() {
+    SwMediaTrack track;
+    track.id = "klv";
+    track.type = SwMediaTrack::Type::Metadata;
+    track.codec = "klv";
+    track.clockRate = 90000;
+    track.selected = true;
+    track.availability = SwMediaTrack::Availability::Available;
+    return track;
+}
+
+SwMediaPacket makeKlvPacket(uint64_t frameIndex, uint64_t captureUs) {
+    static const unsigned char key[16] = {
+        0x06, 0x0E, 0x2B, 0x34, 0x02, 0x0B, 0x01, 0x01,
+        0x0E, 0x01, 0x03, 0x01, 0x01, 0x00, 0x00, 0x00
+    };
+
+    SwByteArray payload;
+    payload.append(reinterpret_cast<const char*>(key), sizeof(key));
+    payload.append(static_cast<char>(16));
+    appendBe64(payload, frameIndex);
+    appendBe64(payload, captureUs);
+
+    SwMediaPacket packet;
+    packet.setType(SwMediaPacket::Type::Metadata);
+    packet.setTrackId("klv");
+    packet.setCodec("klv");
+    packet.setClockRate(90000);
+    packet.setPayload(payload);
+    packet.setPts(static_cast<std::int64_t>(captureUs));
+    packet.setDts(static_cast<std::int64_t>(captureUs));
+    return packet;
 }
 
 void printUsage() {
@@ -405,23 +279,37 @@ int runServer(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
-    SwVtpStreamConfig config;
-    config.streamId = 1;
-    config.trackId = 1;
-    config.trackType = SwVtpTrackType::Video;
-    config.codec = SwVtpCodec::AV1;
-    config.endpoint = swVtpMakeUnicastEndpoint(unicastMask, bindPort);
-    if (!config.isValid()) {
-        std::cerr << "[SwVTP server] invalid stream config\n";
-        return EXIT_FAILURE;
-    }
+    SwMediaServerConfig serverConfig;
+    serverConfig.endpoint.protocol = SwMediaTransportProtocol::SwVtp;
+    serverConfig.endpoint.deliveryMode = SwMediaTransportDeliveryMode::Unicast;
+    serverConfig.endpoint.bindAddress = ipv4ToString(bindIp).c_str();
+    serverConfig.endpoint.host = ipv4ToString(unicastMask).c_str();
+    serverConfig.endpoint.port = bindPort;
+    serverConfig.mtuBytes = static_cast<uint16_t>(std::min<std::size_t>(mtu, 65535U));
+    serverConfig.defaultLatencyBudgetMs = 90;
+    serverConfig.maxClients = 1;
 
-    SwVtpSocketHandle socketHandle = createUdpSocket();
-    if (socketHandle == kInvalidSocketHandle ||
-        !bindUdpSocket(socketHandle, bindIp, bindPort)) {
-        std::cerr << "[SwVTP server] failed to bind "
+    SwVideoPublishStream stream;
+    stream.id = "main";
+    stream.trackId = "video";
+    stream.codec = SwVideoPacket::Codec::AV1;
+    stream.width = 1920;
+    stream.height = 1080;
+    stream.fpsNumerator = 30;
+    stream.fpsDenominator = 1;
+    stream.startBitrateKbps = 4000;
+    stream.minBitrateKbps = 800;
+    stream.maxBitrateKbps = 12000;
+    stream.latencyBudgetMs = 90;
+
+    auto transport = std::make_shared<SwVtpServerTransport>();
+    SwMediaServer server(serverConfig);
+    server.setTransport(transport);
+    if (!server.addVideoStream(stream) ||
+        !server.addMetadataTrack(makeKlvTrack()) ||
+        !server.start()) {
+        std::cerr << "[SwVTP server] failed to start SwMediaServer on "
                   << ipv4ToString(bindIp) << ":" << bindPort << "\n";
-        closeSocket(socketHandle);
         return EXIT_FAILURE;
     }
 
@@ -429,117 +317,67 @@ int runServer(int argc, char** argv) {
               << " mode=unicast mask=" << ipv4ToString(unicastMask)
               << " frames=" << frameLimit << " mtu=" << mtu << "\n";
 
-    SwVtpClientAnnouncement acceptedClient;
-    uint32_t clientIp = 0;
-    uint16_t clientPort = 0;
     const uint64_t waitStart = nowUs();
-    while (nowUs() - waitStart < 10000000ULL) {
-        UdpPacket packet;
-        if (!recvUdp(socketHandle, 500, packet)) {
-            continue;
-        }
-
-        SwVtpDatagram datagram;
-        if (!swVtpParseDatagram(packet.bytes, datagram)) {
-            continue;
-        }
-
-        if (datagram.header.messageType == SwVtpMessageType::Ping) {
-            SwVtpClockSyncPing ping;
-            if (swVtpParseClockSyncPing(datagram.payload, ping)) {
-                SwVtpClockSyncPong pong;
-                pong.syncId = ping.syncId;
-                pong.clientSendTimeUs = ping.clientSendTimeUs;
-                pong.serverReceiveTimeUs = nowUs();
-                pong.serverSendTimeUs = nowUs();
-                sendUdp(socketHandle,
-                        makeControlDatagram(SwVtpMessageType::Pong,
-                                            swVtpSerializeClockSyncPong(pong)),
-                        packet.senderIpv4,
-                        packet.senderPort);
-            }
-        } else if (datagram.header.messageType == SwVtpMessageType::Hello) {
-            SwVtpClientAnnouncement client;
-            if (swVtpParseClientAnnouncementPayload(datagram.payload, client) &&
-                swVtpStreamConfigAcceptsClient(config, client)) {
-                acceptedClient = client;
-                clientIp = client.clientIpv4;
-                clientPort = client.receivePort;
-                sendUdp(socketHandle,
-                        makeControlDatagram(SwVtpMessageType::Accept,
-                                            swVtpSerializeStreamConfig(config)),
-                        packet.senderIpv4,
-                        packet.senderPort);
-                break;
-            }
-        }
+    while (transport->activeClientCount() == 0U && nowUs() - waitStart < 10000000ULL) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    if (!acceptedClient.isValid()) {
+    if (transport->activeClientCount() == 0U) {
         std::cerr << "[SwVTP server] no valid client announcement received\n";
-        closeSocket(socketHandle);
+        server.stop();
         return EXIT_FAILURE;
     }
 
-    std::cout << "[SwVTP server] acceptedClient=" << ipv4ToString(clientIp)
-              << ":" << clientPort << "\n";
+    std::cout << "[SwVTP server] acceptedClients=" << transport->activeClientCount() << "\n";
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    uint64_t datagramsSent = 0;
-    uint64_t bytesSent = 0;
     uint64_t videoBytes = 0;
+    uint64_t klvPackets = 0;
+    uint64_t klvBytes = 0;
     const uint64_t sendStart = nowUs();
     for (std::size_t i = 0; i < frameLimit; ++i) {
         const IvfFrame& frame = frames[i % frames.size()];
+        const uint64_t captureUs = nowUs() - 4000ULL;
         SwVideoPacket packet(SwVideoPacket::Codec::AV1,
                              frame.payload,
-                             static_cast<std::int64_t>(i * 33333ULL),
-                             static_cast<std::int64_t>(i * 33333ULL),
+                             static_cast<std::int64_t>(captureUs),
+                             static_cast<std::int64_t>(captureUs),
                              i == 0U);
 
-        SwVtpAv1PacketizerOptions options;
-        options.streamId = config.streamId;
-        options.trackId = config.trackId;
-        options.frameId = static_cast<uint32_t>(i + 1U);
-        options.nowUs = nowUs();
-        options.captureTimeUs = options.nowUs - 4000ULL;
-        options.latencyBudgetUs = 90000;
-        options.maxDatagramBytes = mtu;
-
-        const SwVtpAv1PacketizerResult packetized =
-            SwVtpAv1Packetizer::packetize(packet, options);
-        if (!packetized.ok) {
-            std::cerr << "[SwVTP server] packetizer failed at frame " << i << "\n";
-            closeSocket(socketHandle);
+        if (!server.publishVideoPacket("main", packet)) {
+            std::cerr << "[SwVTP server] publish failed at frame " << i << "\n";
+            server.stop();
             return EXIT_FAILURE;
         }
-
-        for (std::size_t n = 0; n < packetized.serializedDatagrams.size(); ++n) {
-            if (!sendUdp(socketHandle, packetized.serializedDatagrams[n], clientIp, clientPort)) {
-                std::cerr << "[SwVTP server] send failed at frame " << i << "\n";
-                closeSocket(socketHandle);
-                return EXIT_FAILURE;
-            }
-            ++datagramsSent;
-            bytesSent += packetized.serializedDatagrams[n].size();
-        }
         videoBytes += frame.payload.size();
+
+        const SwMediaPacket klv = makeKlvPacket(static_cast<uint64_t>(i), captureUs);
+        if (server.publishMediaPacket("klv", klv)) {
+            ++klvPackets;
+            klvBytes += klv.payload().size();
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(33));
     }
     const uint64_t sendElapsedUs = std::max<uint64_t>(1U, nowUs() - sendStart);
-    const double networkKbps =
-        static_cast<double>(bytesSent * 8ULL) / static_cast<double>(sendElapsedUs) * 1000.0;
     const double videoKbps =
         static_cast<double>(videoBytes * 8ULL) / static_cast<double>(sendElapsedUs) * 1000.0;
+    const SwVideoServerMetrics metrics = server.metrics();
 
-    std::cout << "[SwVTP server metrics] framesSent=" << frameLimit
-              << " datagramsSent=" << datagramsSent
+    std::cout << "[SwVTP server metrics] framesSent=" << metrics.framesSent
+              << " datagramsSent=" << metrics.transport.datagramsSent
               << " videoBytes=" << videoBytes
-              << " udpPayloadBytes=" << bytesSent
+              << " klvPackets=" << klvPackets
+              << " klvBytes=" << klvBytes
+              << " udpPayloadBytes=" << metrics.transport.bytesSent
               << " elapsedMs=" << (sendElapsedUs / 1000.0)
               << " videoKbps=" << videoKbps
-              << " udpPayloadKbps=" << networkKbps << "\n";
+              << " udpPayloadKbps="
+              << (static_cast<double>(metrics.transport.bytesSent * 8ULL) /
+                  static_cast<double>(sendElapsedUs) * 1000.0)
+              << " targetKbps=" << metrics.targetBitrateKbps
+              << " encoderKbps=" << metrics.encoderBitrateKbps << "\n";
 
-    closeSocket(socketHandle);
+    server.stop();
     return EXIT_SUCCESS;
 }
 
@@ -572,37 +410,34 @@ int runClient(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
-    SwVtpSocketHandle socketHandle = createUdpSocket();
-    if (socketHandle == kInvalidSocketHandle ||
-        !bindUdpSocket(socketHandle, kSwVtpIpv4Any, clientPort)) {
+    SwVtpUdpTransport udp;
+    if (!udp.open(kSwVtpIpv4Any, clientPort)) {
         std::cerr << "[SwVTP client] failed to bind receive socket\n";
-        closeSocket(socketHandle);
         return EXIT_FAILURE;
     }
-    if (!localPort(socketHandle, clientPort)) {
-        std::cerr << "[SwVTP client] failed to read bound port\n";
-        closeSocket(socketHandle);
-        return EXIT_FAILURE;
-    }
+    clientPort = udp.localPort();
 
     SwVtpClockEstimate clockEstimate;
     SwVtpClockSyncPing ping;
     ping.syncId = 1;
-    ping.clientSendTimeUs = nowUs();
-    if (!sendUdp(socketHandle,
-                 makeControlDatagram(SwVtpMessageType::Ping,
-                                     swVtpSerializeClockSyncPing(ping)),
-                 serverIp,
-                 serverPort)) {
-        std::cerr << "[SwVTP client] failed to send clock ping\n";
-        closeSocket(socketHandle);
-        return EXIT_FAILURE;
-    }
-
+    uint64_t lastPingUs = 0;
     const uint64_t clockWaitStart = nowUs();
     while (nowUs() - clockWaitStart < 2000000ULL) {
-        UdpPacket packet;
-        if (!recvUdp(socketHandle, 200, packet)) {
+        const uint64_t currentUs = nowUs();
+        if (lastPingUs == 0U || currentUs - lastPingUs >= 200000ULL) {
+            ping.clientSendTimeUs = currentUs;
+            if (!udp.send(makeControlDatagram(SwVtpMessageType::Ping,
+                                              swVtpSerializeClockSyncPing(ping)),
+                          serverIp,
+                          serverPort)) {
+                std::cerr << "[SwVTP client] failed to send clock ping\n";
+                return EXIT_FAILURE;
+            }
+            lastPingUs = currentUs;
+        }
+
+        SwVtpUdpPacket packet;
+        if (!udp.receive(50, packet)) {
             continue;
         }
         SwVtpDatagram datagram;
@@ -623,7 +458,6 @@ int runClient(int argc, char** argv) {
 
     if (!clockEstimate.valid) {
         std::cerr << "[SwVTP client] failed to estimate clock\n";
-        closeSocket(socketHandle);
         return EXIT_FAILURE;
     }
 
@@ -631,21 +465,25 @@ int runClient(int argc, char** argv) {
     client.streamId = 1;
     client.receivePort = clientPort;
     client.clientIpv4 = clientIp;
-    if (!sendUdp(socketHandle,
-                 makeControlDatagram(SwVtpMessageType::Hello,
-                                     swVtpSerializeClientAnnouncement(client)),
-                 serverIp,
-                 serverPort)) {
-        std::cerr << "[SwVTP client] failed to send announcement\n";
-        closeSocket(socketHandle);
-        return EXIT_FAILURE;
-    }
 
     SwVtpStreamConfig config;
+    uint64_t lastHelloUs = 0;
     const uint64_t acceptWaitStart = nowUs();
     while (nowUs() - acceptWaitStart < 2000000ULL) {
-        UdpPacket packet;
-        if (!recvUdp(socketHandle, 200, packet)) {
+        const uint64_t currentUs = nowUs();
+        if (lastHelloUs == 0U || currentUs - lastHelloUs >= 200000ULL) {
+            if (!udp.send(makeControlDatagram(SwVtpMessageType::Hello,
+                                              swVtpSerializeClientAnnouncement(client)),
+                          serverIp,
+                          serverPort)) {
+                std::cerr << "[SwVTP client] failed to send announcement\n";
+                return EXIT_FAILURE;
+            }
+            lastHelloUs = currentUs;
+        }
+
+        SwVtpUdpPacket packet;
+        if (!udp.receive(50, packet)) {
             continue;
         }
         SwVtpDatagram datagram;
@@ -658,7 +496,6 @@ int runClient(int argc, char** argv) {
 
     if (!config.isValid()) {
         std::cerr << "[SwVTP client] server did not accept stream\n";
-        closeSocket(socketHandle);
         return EXIT_FAILURE;
     }
 
@@ -670,30 +507,50 @@ int runClient(int argc, char** argv) {
               << "\n";
 
     SwVtpAv1Reassembler reassembler;
+    SwVtpKlvReassembler klvReassembler;
+    klvReassembler.setTrackId("klv");
     UsStats transferLatency;
     UsStats captureLatency;
     uint64_t datagramsReceived = 0;
+    uint64_t klvDatagramsReceived = 0;
     uint64_t bytesReceived = 0;
     uint64_t videoBytes = 0;
+    uint64_t klvBytes = 0;
+    uint64_t klvPackets = 0;
     std::size_t framesCompleted = 0;
     const uint64_t receiveStart = nowUs();
     uint64_t lastPacketUs = receiveStart;
 
-    while (framesCompleted < expectedFrames && nowUs() - lastPacketUs < 3000000ULL) {
-        UdpPacket packet;
-        if (!recvUdp(socketHandle, 500, packet)) {
+    while ((framesCompleted < expectedFrames || klvPackets < expectedFrames) &&
+           nowUs() - lastPacketUs < 3000000ULL) {
+        SwVtpUdpPacket packet;
+        if (!udp.receive(500, packet)) {
             continue;
         }
         lastPacketUs = nowUs();
 
         SwVtpDatagram datagram;
-        if (!swVtpParseDatagram(packet.bytes, datagram) ||
-            datagram.header.messageType != SwVtpMessageType::FrameFragment) {
+        if (!swVtpParseDatagram(packet.bytes, datagram)) {
+            continue;
+        }
+        bytesReceived += packet.bytes.size();
+
+        if (datagram.header.messageType == SwVtpMessageType::KlvFragment) {
+            ++klvDatagramsReceived;
+            SwVtpKlvReassembler::PushResult push =
+                klvReassembler.pushDatagram(datagram, lastPacketUs);
+            if (push.completed()) {
+                ++klvPackets;
+                klvBytes += push.packet.payload().size();
+            }
+            continue;
+        }
+
+        if (datagram.header.messageType != SwVtpMessageType::FrameFragment) {
             continue;
         }
 
         ++datagramsReceived;
-        bytesReceived += packet.bytes.size();
 
         const SwVtpFrameLatencySample latency =
             swVtpMeasureFrameLatency(datagram.header, clockEstimate, lastPacketUs);
@@ -714,6 +571,7 @@ int runClient(int argc, char** argv) {
 
     const uint64_t receiveElapsedUs = std::max<uint64_t>(1U, nowUs() - receiveStart);
     const SwVtpAv1Reassembler::Snapshot snapshot = reassembler.snapshot();
+    const SwVtpKlvReassembler::Snapshot klvSnapshot = klvReassembler.snapshot();
     const double videoKbps =
         static_cast<double>(videoBytes * 8ULL) / static_cast<double>(receiveElapsedUs) * 1000.0;
     const double udpPayloadKbps =
@@ -721,9 +579,12 @@ int runClient(int argc, char** argv) {
 
     std::cout << "[SwVTP client metrics] framesCompleted=" << framesCompleted
               << " expectedFrames=" << expectedFrames
-              << " datagramsReceived=" << datagramsReceived
+              << " videoDatagrams=" << datagramsReceived
+              << " klvDatagrams=" << klvDatagramsReceived
               << " udpPayloadBytes=" << bytesReceived
               << " videoBytes=" << videoBytes
+              << " klvPackets=" << klvPackets
+              << " klvBytes=" << klvBytes
               << " elapsedMs=" << (receiveElapsedUs / 1000.0)
               << " videoKbps=" << videoKbps
               << " udpPayloadKbps=" << udpPayloadKbps
@@ -735,20 +596,19 @@ int runClient(int argc, char** argv) {
               << captureLatency.maxMs()
               << " duplicates=" << snapshot.duplicateFragments
               << " stale=" << snapshot.staleFragments
-              << " dropped=" << snapshot.droppedFrames << "\n";
+              << " dropped=" << snapshot.droppedFrames
+              << " klvDuplicates=" << klvSnapshot.duplicateFragments
+              << " klvStale=" << klvSnapshot.staleFragments
+              << " klvDropped=" << klvSnapshot.droppedSamples << "\n";
 
-    closeSocket(socketHandle);
-    return framesCompleted == expectedFrames ? EXIT_SUCCESS : EXIT_FAILURE;
+    return framesCompleted == expectedFrames && klvPackets >= expectedFrames
+               ? EXIT_SUCCESS
+               : EXIT_FAILURE;
 }
 
 } // namespace
 
 int main(int argc, char** argv) {
-    SocketRuntime runtime;
-    if (!runtime.ok) {
-        std::cerr << "[SwVTP UDP] socket runtime init failed\n";
-        return EXIT_FAILURE;
-    }
     if (argc < 2) {
         printUsage();
         return EXIT_FAILURE;

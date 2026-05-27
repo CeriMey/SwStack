@@ -7,7 +7,7 @@
 
 #include "media/SwMediaPlayer.h"
 #include "media/SwMediaSourceFactory.h"
-#include "media/SwVtpVideoSource.h"
+#include "media/source/SwVtpVideoSource.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -111,6 +111,8 @@ SwString formatMetrics(const SwVtpVideoSourceMetrics& metrics,
                   sizeof(buffer),
                   "rx frames=%llu presented=%llu fps=%.1f datagrams=%llu "
                   "bitrate video=%.0fkbps udp=%.0fkbps "
+                  "target=%ukbps encoder=%ukbps estBw=%ukbps "
+                  "klv=%llu/%lluB "
                   "videoBytes=%llu udpBytes=%llu clock=%s rtt=%.3fms uncertainty=%.3fms "
                   "transfer avg/min/max=%.3f/%.3f/%.3fms capture avg/min/max=%.3f/%.3f/%.3fms "
                   "dup=%llu stale=%llu drop=%llu",
@@ -120,6 +122,11 @@ SwString formatMetrics(const SwVtpVideoSourceMetrics& metrics,
                   static_cast<unsigned long long>(metrics.datagramsReceived),
                   metrics.liveVideoKbps,
                   metrics.liveUdpKbps,
+                  metrics.negotiatedTargetBitrateKbps,
+                  metrics.negotiatedEncoderBitrateKbps,
+                  metrics.estimatedBandwidthKbps,
+                  static_cast<unsigned long long>(metrics.klvPacketsCompleted),
+                  static_cast<unsigned long long>(metrics.klvBytesCompleted),
                   static_cast<unsigned long long>(metrics.videoBytesCompleted),
                   static_cast<unsigned long long>(metrics.datagramBytesReceived),
                   metrics.clockSynced ? "ok" : "wait",
@@ -146,6 +153,11 @@ void printFinalMetrics(const SwVtpVideoSourceMetrics& metrics,
               << " datagramsReceived=" << metrics.datagramsReceived
               << " liveVideoKbps=" << metrics.liveVideoKbps
               << " liveUdpKbps=" << metrics.liveUdpKbps
+              << " negotiatedTargetKbps=" << metrics.negotiatedTargetBitrateKbps
+              << " negotiatedEncoderKbps=" << metrics.negotiatedEncoderBitrateKbps
+              << " estimatedBandwidthKbps=" << metrics.estimatedBandwidthKbps
+              << " klvPackets=" << metrics.klvPacketsCompleted
+              << " klvBytes=" << metrics.klvBytesCompleted
               << " videoBytes=" << metrics.videoBytesCompleted
               << " udpBytes=" << metrics.datagramBytesReceived
               << " clockRttUs=" << metrics.clockRttUs
@@ -209,7 +221,7 @@ int main(int argc, char** argv) {
     auto player = std::make_shared<SwMediaPlayer>();
     player->setSource(source);
     player->setAudioEnabled(false);
-    player->setMetadataEnabled(false);
+    player->setMetadataEnabled(true);
     player->videoSink()->setDedicatedDecodeThreadEnabled(true);
     player->videoSink()->setDecodeQueueLimits(4, 1024 * 1024);
     player->videoSink()->setDecoderStallRecoveryEnabled(true);

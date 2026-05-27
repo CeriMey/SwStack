@@ -813,6 +813,42 @@ bool runReceiverStatsPayloadRoundTrip() {
     return ok;
 }
 
+bool runBitrateControlPayloadRoundTrip() {
+    SwVtpBitrateControl control;
+    control.streamId = 2;
+    control.trackId = 1;
+    control.targetBitrateKbps = 4200;
+    control.encoderBitrateKbps = 4000;
+    control.estimatedBandwidthKbps = 6200;
+    control.reason = static_cast<uint8_t>(SwVtpAdaptiveBitrateDecision::Reason::NetworkPressure);
+    control.flags = 1;
+
+    SwVtpBitrateControl parsed;
+    bool ok = expect(swVtpParseBitrateControlPayload(swVtpSerializeBitrateControl(control),
+                                                     parsed),
+                     "parse bitrate control payload");
+    ok = expect(parsed.streamId == control.streamId, "bitrate control stream id") && ok;
+    ok = expect(parsed.trackId == control.trackId, "bitrate control track id") && ok;
+    ok = expect(parsed.targetBitrateKbps == control.targetBitrateKbps,
+                "bitrate control target") && ok;
+    ok = expect(parsed.encoderBitrateKbps == control.encoderBitrateKbps,
+                "bitrate control encoder bitrate") && ok;
+    ok = expect(parsed.estimatedBandwidthKbps == control.estimatedBandwidthKbps,
+                "bitrate control bandwidth") && ok;
+    ok = expect(parsed.reason == control.reason, "bitrate control reason") && ok;
+    ok = expect(parsed.flags == control.flags, "bitrate control flags") && ok;
+
+    SwByteArray invalid = swVtpSerializeBitrateControl(control);
+    invalid[19] = 1;
+    ok = expect(!swVtpParseBitrateControlPayload(invalid, parsed),
+                "bitrate control rejects reserved bits") && ok;
+
+    if (ok) {
+        std::cout << "[SwVTP bitrate control payload] PASS\n";
+    }
+    return ok;
+}
+
 bool runLatencyValidationScenario() {
     SwVtpClockSyncSample invalidSync;
     invalidSync.syncId = 0;
@@ -1296,6 +1332,7 @@ int main(int argc, char** argv) {
     ok = runControlPayloadValidationScenario() && ok;
     ok = runNackPayloadRoundTrip() && ok;
     ok = runReceiverStatsPayloadRoundTrip() && ok;
+    ok = runBitrateControlPayloadRoundTrip() && ok;
     ok = runLatencyValidationScenario() && ok;
     ok = runClockSyncPayloadRoundTrip() && ok;
     ok = runLatencySymmetricClockScenario() && ok;

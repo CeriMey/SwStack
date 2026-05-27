@@ -607,6 +607,17 @@ public:
         m_maxReadBatchDatagrams = maxPackets;
     }
 
+    void setBroadcastEnabled(bool enabled) {
+        m_broadcastEnabled = enabled;
+        applyBroadcastMode();
+    }
+
+    bool pollPendingDatagrams(int timeoutMs = 0) {
+        const uint64_t receivedBefore = totalReceivedDatagrams();
+        pollSocket_(timeoutMs);
+        return hasPendingDatagrams() || totalReceivedDatagrams() != receivedBefore;
+    }
+
     /**
      * @brief Closes the underlying resource and stops active work.
      *
@@ -756,6 +767,7 @@ private:
             m_dualStackEnabled = (rc == 0 && dualStack);
         }
         applyReceiveBufferSize();
+        applyBroadcastMode();
         m_totalReceivedDatagrams.store(0);
         m_totalQueueDrops.store(0);
         m_queueHighWatermark.store(0);
@@ -1345,6 +1357,22 @@ private:
 #endif
     }
 
+    void applyBroadcastMode() {
+        if (!isSocketValid()) {
+            return;
+        }
+        const int enabled = m_broadcastEnabled ? 1 : 0;
+#if defined(_WIN32)
+        setsockopt(m_socket,
+                   SOL_SOCKET,
+                   SO_BROADCAST,
+                   reinterpret_cast<const char*>(&enabled),
+                   sizeof(enabled));
+#else
+        setsockopt(m_socket, SOL_SOCKET, SO_BROADCAST, &enabled, sizeof(enabled));
+#endif
+    }
+
 #if defined(_WIN32)
     SOCKET m_socket;
     WSADATA m_wsaData{};
@@ -1384,6 +1412,7 @@ private:
     size_t m_maxDatagramSize{2048};
     size_t m_maxPendingDatagrams{512};
     size_t m_maxReadBatchDatagrams{128};
+    bool m_broadcastEnabled{false};
     SwByteArray m_readBuffer;
     SwSocketTrafficStateHandle socketTrafficState_;
     SwString m_publishedBoundAddress;

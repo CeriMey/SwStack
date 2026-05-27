@@ -1,13 +1,18 @@
 #pragma once
 
 /**
- * @file src/media/SwVtpVideoSource.h
+ * @file src/media/source/SwVtpVideoSource.h
  * @brief Low-latency SwVTP video source for SwMediaPlayer and SwVideoWidget.
  */
 
 #include "media/SwMediaOpenOptions.h"
 #include "media/SwVideoSource.h"
 #include "media/swvtp/SwVtpAv1.h"
+#include "media/swvtp/SwVtpFrameReassembler.h"
+#include "media/swvtp/SwVtpKlv.h"
+#include "media/swvtp/SwVtpUdpTransport.h"
+#include "core/object/SwObject.h"
+#include "core/types/Sw.h"
 
 #include <algorithm>
 #include <atomic>
@@ -18,22 +23,6 @@
 #include <functional>
 #include <mutex>
 #include <thread>
-#include <vector>
-
-#if defined(_WIN32)
-#include <winsock2.h>
-#include <ws2tcpip.h>
-typedef SOCKET SwVtpVideoSourceSocketHandle;
-static const SwVtpVideoSourceSocketHandle kSwVtpVideoSourceInvalidSocket = INVALID_SOCKET;
-#else
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/select.h>
-#include <sys/socket.h>
-#include <unistd.h>
-typedef int SwVtpVideoSourceSocketHandle;
-static const SwVtpVideoSourceSocketHandle kSwVtpVideoSourceInvalidSocket = -1;
-#endif
 
 static constexpr const char* kSwLogCategory_SwVtpVideoSource = "sw.media.swvtpvideosource";
 
@@ -42,10 +31,18 @@ struct SwVtpVideoSourceMetrics {
     uint64_t datagramBytesReceived{0};
     uint64_t framesCompleted{0};
     uint64_t videoBytesCompleted{0};
+    uint64_t klvPacketsCompleted{0};
+    uint64_t klvBytesCompleted{0};
+    uint64_t klvAcceptedFragments{0};
+    uint64_t klvDuplicateFragments{0};
+    uint64_t klvStaleFragments{0};
+    uint64_t klvDroppedPackets{0};
     uint64_t duplicateFragments{0};
     uint64_t staleFragments{0};
     uint64_t droppedFrames{0};
     uint64_t acceptedFragments{0};
+    uint64_t nackRequestsSent{0};
+    uint64_t nackFragmentsRequested{0};
     uint64_t transferLatencySamples{0};
     uint64_t transferLatencyTotalUs{0};
     uint64_t transferLatencyMinUs{0};
@@ -58,6 +55,11 @@ struct SwVtpVideoSourceMetrics {
     uint64_t clockUncertaintyUs{0};
     double liveVideoKbps{0.0};
     double liveUdpKbps{0.0};
+    uint32_t negotiatedTargetBitrateKbps{0};
+    uint32_t negotiatedEncoderBitrateKbps{0};
+    uint32_t estimatedBandwidthKbps{0};
+    uint8_t bitrateReason{0};
+    uint8_t bitrateFlags{0};
     uint8_t clockConfidencePercent{0};
     uint16_t localPort{0};
     SwString serverAddress{};
@@ -113,7 +115,7 @@ public:
         SwMediaTrack video;
         video.id = "video";
         video.type = SwMediaTrack::Type::Video;
-        video.codec = "av1";
+        video.codec = "unknown";
         video.selected = true;
         video.availability = SwMediaTrack::Availability::Available;
         tracks.append(video);
@@ -182,9 +184,15 @@ public:
         m_clockEstimate = SwVtpClockEstimate();
         m_streamConfig = SwVtpStreamConfig();
         m_reassembler.reset();
+        m_klvReassembler.reset();
+        m_klvTrackId = 0;
         m_lastPacketTime = {};
         m_lastHelloUs = 0;
         m_lastPingUs = 0;
+        m_lastStatsUs = 0;
+        m_lastNackUs = 0;
+        m_lastNackFrameId = 0;
+        m_lastFrameId = 0;
         m_nextSyncId = 1;
         m_rateWindowStartUs = nowUs_();
         m_rateWindowDatagramBytes = 0;
@@ -213,6 +221,7 @@ public:
             m_worker.join();
         }
         m_reassembler.reset();
+        m_klvReassembler.reset();
         emitStatus(StreamState::Stopped, "SwVTP stopped");
     }
 
@@ -241,6 +250,20 @@ private:
         return static_cast<int>(parsed);
     }
 
+    static uint16_t clampU16_(uint64_t value) {
+        return value > 65535ULL ? 65535U : static_cast<uint16_t>(value);
+    }
+
+    static uint32_t clampKbps_(double value) {
+        if (value <= 0.0) {
+            return 0;
+        }
+        if (value >= 4294967295.0) {
+            return 0xFFFFFFFFU;
+        }
+        return static_cast<uint32_t>(value);
+    }
+
     SwByteArray makeControlDatagram_(SwVtpMessageType type,
                                      const SwByteArray& payload) const {
         SwVtpDatagram datagram;
@@ -248,129 +271,121 @@ private:
         datagram.header.messageType = type;
         datagram.header.trackType = SwVtpTrackType::Control;
         datagram.header.codec = SwVtpCodec::Unknown;
+        if (m_streamConfig.isValid()) {
+            datagram.header.streamId = m_streamConfig.streamId;
+            datagram.header.trackId = m_streamConfig.trackId;
+        } else {
+            datagram.header.streamId = m_announcement.streamId;
+        }
         datagram.header.sendTimeUs = nowUs_();
         datagram.payload = payload;
         return swVtpSerializeDatagram(datagram);
     }
 
-    static void closeNativeSocket_(SwVtpVideoSourceSocketHandle socketHandle) {
-        if (socketHandle == kSwVtpVideoSourceInvalidSocket) {
-            return;
-        }
-#if defined(_WIN32)
-        ::closesocket(socketHandle);
-#else
-        ::close(socketHandle);
-#endif
-    }
-
-    static sockaddr_in makeSockaddr_(uint32_t ipv4, uint16_t port) {
-        sockaddr_in addr;
-        std::memset(&addr, 0, sizeof(addr));
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(port);
-        addr.sin_addr.s_addr = htonl(ipv4);
-        return addr;
-    }
-
-    static uint16_t sockaddrPort_(const sockaddr_in& addr) {
-        return ntohs(addr.sin_port);
-    }
-
-    static bool bindNativeSocket_(SwVtpVideoSourceSocketHandle socketHandle,
-                                  uint32_t ipv4,
-                                  uint16_t port) {
-        const int yes = 1;
-        ::setsockopt(socketHandle,
-                     SOL_SOCKET,
-                     SO_REUSEADDR,
-                     reinterpret_cast<const char*>(&yes),
-                     sizeof(yes));
-        sockaddr_in addr = makeSockaddr_(ipv4, port);
-        return ::bind(socketHandle,
-                      reinterpret_cast<const sockaddr*>(&addr),
-                      sizeof(addr)) == 0;
-    }
-
-    static bool localNativePort_(SwVtpVideoSourceSocketHandle socketHandle,
-                                 uint16_t& outPort) {
-        sockaddr_in addr;
-        std::memset(&addr, 0, sizeof(addr));
-#if defined(_WIN32)
-        int length = sizeof(addr);
-#else
-        socklen_t length = sizeof(addr);
-#endif
-        if (::getsockname(socketHandle, reinterpret_cast<sockaddr*>(&addr), &length) != 0) {
-            return false;
-        }
-        outPort = sockaddrPort_(addr);
-        return true;
-    }
-
-    bool sendNative_(SwVtpVideoSourceSocketHandle socketHandle,
-                     const SwByteArray& bytes,
-                     uint32_t ipv4,
-                     uint16_t port) {
-        if (bytes.isEmpty() || !bytes.constData()) {
-            return false;
-        }
-        sockaddr_in dest = makeSockaddr_(ipv4, port);
-#if defined(_WIN32)
-        const int sent = ::sendto(socketHandle,
-                                  bytes.constData(),
-                                  static_cast<int>(bytes.size()),
-                                  0,
-                                  reinterpret_cast<const sockaddr*>(&dest),
-                                  sizeof(dest));
-        return sent == static_cast<int>(bytes.size());
-#else
-        const ssize_t sent = ::sendto(socketHandle,
-                                      bytes.constData(),
-                                      bytes.size(),
-                                      0,
-                                      reinterpret_cast<const sockaddr*>(&dest),
-                                      sizeof(dest));
-        return sent == static_cast<ssize_t>(bytes.size());
-#endif
-    }
-
-    bool sendControl_(SwVtpVideoSourceSocketHandle socketHandle,
+    bool sendControl_(SwVtpUdpTransport& transport,
                       SwVtpMessageType type,
                       const SwByteArray& payload) {
         const SwByteArray bytes = makeControlDatagram_(type, payload);
-        return sendNative_(socketHandle, bytes, m_serverIpv4, m_serverPort);
+        return transport.send(bytes, m_serverIpv4, m_serverPort);
     }
 
-    void sendClockPing_(SwVtpVideoSourceSocketHandle socketHandle) {
+    void sendClockPing_(SwVtpUdpTransport& transport) {
         SwVtpClockSyncPing ping;
         ping.syncId = m_nextSyncId++;
         ping.clientSendTimeUs = nowUs_();
         m_lastPingUs = ping.clientSendTimeUs;
-        sendControl_(socketHandle, SwVtpMessageType::Ping, swVtpSerializeClockSyncPing(ping));
+        sendControl_(transport, SwVtpMessageType::Ping, swVtpSerializeClockSyncPing(ping));
     }
 
-    void sendAnnouncement_(SwVtpVideoSourceSocketHandle socketHandle) {
+    void sendAnnouncement_(SwVtpUdpTransport& transport) {
         if (m_announcement.receivePort == 0U) {
-            localNativePort_(socketHandle, m_announcement.receivePort);
+            m_announcement.receivePort = transport.localPort();
         }
         m_lastHelloUs = nowUs_();
-        sendControl_(socketHandle,
+        sendControl_(transport,
                      SwVtpMessageType::Hello,
                      swVtpSerializeClientAnnouncement(m_announcement));
     }
 
-    void maintainSession_(SwVtpVideoSourceSocketHandle socketHandle) {
+    void sendReceiverStats_(SwVtpUdpTransport& transport, uint64_t now) {
+        if (!m_streamConfig.isValid()) {
+            return;
+        }
+
+        SwVtpReceiverStats stats;
+        stats.streamId = m_streamConfig.streamId;
+        stats.trackId = m_streamConfig.trackId;
+        stats.lastFrameId = m_lastFrameId;
+
+        SwVtpVideoSourceMetrics metrics;
+        {
+            std::lock_guard<std::mutex> lock(m_metricsMutex);
+            metrics = m_metrics;
+        }
+        const ConsumerPressure pressure = consumerPressure();
+        const uint64_t frameTotal = metrics.framesCompleted + metrics.droppedFrames;
+
+        stats.estimatedBandwidthKbps = clampKbps_(metrics.liveUdpKbps);
+        if (stats.estimatedBandwidthKbps == 0U) {
+            stats.estimatedBandwidthKbps = metrics.negotiatedTargetBitrateKbps;
+        }
+        stats.rttMs = clampU16_(metrics.clockRttUs / 1000ULL);
+        stats.clockUncertaintyMs = clampU16_(metrics.clockUncertaintyUs / 1000ULL);
+        stats.lossPermille = frameTotal == 0U
+                                 ? 0U
+                                 : clampU16_((metrics.droppedFrames * 1000ULL) / frameTotal);
+        {
+            const uint64_t fragmentTotal =
+                metrics.acceptedFragments + metrics.nackFragmentsRequested;
+            stats.nackPermille =
+                fragmentTotal == 0U
+                    ? 0U
+                    : clampU16_((metrics.nackFragmentsRequested * 1000ULL) /
+                                fragmentTotal);
+        }
+        stats.receiveQueueMs = clampU16_(static_cast<uint64_t>(pressure.queuedPackets) * 2ULL);
+        if (pressure.softPressure) {
+            stats.receiveQueueMs = std::max<uint16_t>(stats.receiveQueueMs, 25U);
+        }
+        if (pressure.hardPressure) {
+            stats.receiveQueueMs = std::max<uint16_t>(stats.receiveQueueMs, 80U);
+        }
+        stats.decodeQueueMs = pressure.decoderStalled
+                                  ? clampU16_(static_cast<uint64_t>(
+                                        std::max<std::int64_t>(0, pressure.stalledForMs)))
+                                  : 0U;
+        stats.transferLatencyMs = clampU16_(
+            static_cast<uint64_t>(metrics.averageTransferLatencyMs() + 0.5));
+        stats.captureLatencyMs = clampU16_(
+            static_cast<uint64_t>(metrics.averageCaptureLatencyMs() + 0.5));
+        stats.droppedFrames = metrics.droppedFrames > 0xFFFFFFFFULL
+                                  ? 0xFFFFFFFFU
+                                  : static_cast<uint32_t>(metrics.droppedFrames);
+
+        if (sendControl_(transport,
+                         SwVtpMessageType::ReceiverStats,
+                         swVtpSerializeReceiverStats(stats))) {
+            m_lastStatsUs = now;
+            std::lock_guard<std::mutex> lock(m_metricsMutex);
+            m_metrics.estimatedBandwidthKbps = stats.estimatedBandwidthKbps;
+        }
+    }
+
+    void maintainSession_(SwVtpUdpTransport& transport) {
         if (!isRunning()) {
             return;
         }
         const uint64_t now = nowUs_();
         if (!m_clockEstimate.valid && (m_lastPingUs == 0U || now - m_lastPingUs > 500000ULL)) {
-            sendClockPing_(socketHandle);
+            sendClockPing_(transport);
         }
         if (!m_streamConfig.isValid() &&
             (m_lastHelloUs == 0U || now - m_lastHelloUs > 500000ULL)) {
-            sendAnnouncement_(socketHandle);
+            sendAnnouncement_(transport);
+        }
+        if (m_streamConfig.isValid() &&
+            (m_lastStatsUs == 0U || now - m_lastStatsUs > 250000ULL)) {
+            sendReceiverStats_(transport, now);
         }
         if (m_lastPacketTime.time_since_epoch().count() != 0) {
             const auto elapsed =
@@ -385,80 +400,32 @@ private:
     }
 
     void workerMain_() {
-#if defined(_WIN32)
-        WSADATA wsaData;
-        const bool wsaOk = (::WSAStartup(MAKEWORD(2, 2), &wsaData) == 0);
-        if (!wsaOk) {
-            emitStatus(StreamState::Recovering, "WSAStartup failed");
+        SwVtpUdpTransport transport;
+        if (!transport.open(m_bindIpv4, m_listenPort)) {
+            emitStatus(StreamState::Recovering, "Failed to bind SwVTP UDP socket");
             return;
         }
-#endif
-        SwVtpVideoSourceSocketHandle socketHandle = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        if (socketHandle == kSwVtpVideoSourceInvalidSocket ||
-            !bindNativeSocket_(socketHandle, m_bindIpv4, m_listenPort)) {
-            emitStatus(StreamState::Recovering, "Failed to bind native SwVTP UDP socket");
-            closeNativeSocket_(socketHandle);
-#if defined(_WIN32)
-            ::WSACleanup();
-#endif
-            return;
-        }
-        localNativePort_(socketHandle, m_announcement.receivePort);
+        m_announcement.receivePort = transport.localPort();
         {
             std::lock_guard<std::mutex> lock(m_metricsMutex);
             m_metrics.localPort = m_announcement.receivePort;
         }
         publishMetrics_();
 
-        sendClockPing_(socketHandle);
-        sendAnnouncement_(socketHandle);
+        sendClockPing_(transport);
+        sendAnnouncement_(transport);
 
         while (!m_stopRequested.load()) {
-            maintainSession_(socketHandle);
-            fd_set readSet;
-            FD_ZERO(&readSet);
-            FD_SET(socketHandle, &readSet);
-            timeval timeout;
-            timeout.tv_sec = 0;
-            timeout.tv_usec = 50000;
-            const int ready = ::select(static_cast<int>(socketHandle + 1),
-                                       &readSet,
-                                       nullptr,
-                                       nullptr,
-                                       &timeout);
-            if (ready <= 0 || !FD_ISSET(socketHandle, &readSet)) {
+            maintainSession_(transport);
+            SwVtpUdpPacket packet;
+            if (!transport.receive(50, packet)) {
                 continue;
             }
 
-            std::vector<char> buffer(65536);
-            sockaddr_in sender;
-            std::memset(&sender, 0, sizeof(sender));
-#if defined(_WIN32)
-            int senderLength = sizeof(sender);
-            const int received = ::recvfrom(socketHandle,
-                                            buffer.data(),
-                                            static_cast<int>(buffer.size()),
-                                            0,
-                                            reinterpret_cast<sockaddr*>(&sender),
-                                            &senderLength);
-#else
-            socklen_t senderLength = sizeof(sender);
-            const ssize_t received = ::recvfrom(socketHandle,
-                                                buffer.data(),
-                                                buffer.size(),
-                                                0,
-                                                reinterpret_cast<sockaddr*>(&sender),
-                                                &senderLength);
-#endif
-            if (received <= 0) {
-                continue;
-            }
-            SwByteArray bytes;
-            bytes.append(buffer.data(), static_cast<std::size_t>(received));
             m_lastPacketTime = std::chrono::steady_clock::now();
 
             SwVtpDatagram datagram;
-            if (!swVtpParseDatagram(bytes, datagram)) {
+            if (!swVtpParseDatagram(packet.bytes, datagram)) {
                 continue;
             }
             if (datagram.header.messageType == SwVtpMessageType::Pong) {
@@ -469,15 +436,24 @@ private:
                 handleAccept_(datagram.payload);
                 continue;
             }
+            if (datagram.header.messageType == SwVtpMessageType::StreamConfig) {
+                handleStreamConfig_(datagram.payload);
+                continue;
+            }
+            if (datagram.header.messageType == SwVtpMessageType::BitrateControl) {
+                handleBitrateControl_(datagram.payload);
+                continue;
+            }
             if (datagram.header.messageType == SwVtpMessageType::FrameFragment) {
-                handleFrameFragment_(datagram, bytes.size());
+                handleFrameFragment_(transport, datagram, packet.bytes.size());
+                continue;
+            }
+            if (datagram.header.messageType == SwVtpMessageType::KlvFragment) {
+                handleKlvFragment_(datagram, packet.bytes.size());
                 continue;
             }
         }
-        closeNativeSocket_(socketHandle);
-#if defined(_WIN32)
-        ::WSACleanup();
-#endif
+        transport.close();
     }
 
     void handlePong_(const SwByteArray& payload) {
@@ -512,7 +488,121 @@ private:
             std::lock_guard<std::mutex> lock(m_metricsMutex);
             m_metrics.accepted = true;
         }
+        updateVideoTrack_(config.codec);
         emitStatus(StreamState::Streaming, "SwVTP accepted");
+        publishMetrics_();
+    }
+
+    void handleStreamConfig_(const SwByteArray& payload) {
+        SwVtpStreamConfig config;
+        if (!swVtpParseStreamConfigPayload(payload, config)) {
+            return;
+        }
+        if (config.trackType == SwVtpTrackType::MetadataKlv &&
+            config.codec == SwVtpCodec::Klv) {
+            m_klvTrackId = config.trackId;
+            m_klvReassembler.setTrackId("klv");
+            addKlvTrack_();
+        }
+    }
+
+    void addKlvTrack_() {
+        SwList<SwMediaTrack> currentTracks = tracks();
+        for (auto it = currentTracks.begin(); it != currentTracks.end(); ++it) {
+            if (it->id == "klv") {
+                return;
+            }
+        }
+        SwMediaTrack klv;
+        klv.id = "klv";
+        klv.type = SwMediaTrack::Type::Metadata;
+        klv.codec = "klv";
+        klv.clockRate = 90000;
+        klv.selected = true;
+        klv.availability = SwMediaTrack::Availability::Available;
+        currentTracks.append(klv);
+        setTracks(currentTracks);
+    }
+
+    void updateVideoTrack_(SwVtpCodec codec) {
+        const SwString codecName = swVtpVideoCodecName(codec);
+        if (codecName == "unknown") {
+            return;
+        }
+        SwList<SwMediaTrack> currentTracks = tracks();
+        bool updated = false;
+        for (auto it = currentTracks.begin(); it != currentTracks.end(); ++it) {
+            if (it->type == SwMediaTrack::Type::Video || it->id == "video") {
+                it->id = "video";
+                it->type = SwMediaTrack::Type::Video;
+                it->codec = codecName;
+                it->selected = true;
+                it->availability = SwMediaTrack::Availability::Available;
+                updated = true;
+                break;
+            }
+        }
+        if (!updated) {
+            SwMediaTrack video;
+            video.id = "video";
+            video.type = SwMediaTrack::Type::Video;
+            video.codec = codecName;
+            video.selected = true;
+            video.availability = SwMediaTrack::Availability::Available;
+            currentTracks.append(video);
+        }
+        setTracks(currentTracks);
+    }
+
+    void handleBitrateControl_(const SwByteArray& payload) {
+        SwVtpBitrateControl control;
+        if (!swVtpParseBitrateControlPayload(payload, control) || !control.isValid()) {
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(m_metricsMutex);
+            m_metrics.negotiatedTargetBitrateKbps = control.targetBitrateKbps;
+            m_metrics.negotiatedEncoderBitrateKbps = control.encoderBitrateKbps;
+            m_metrics.estimatedBandwidthKbps = control.estimatedBandwidthKbps;
+            m_metrics.bitrateReason = control.reason;
+            m_metrics.bitrateFlags = control.flags;
+        }
+        publishMetrics_();
+    }
+
+    void handleKlvFragment_(const SwVtpDatagram& datagram, std::size_t datagramBytes) {
+        const uint64_t receiveUs = nowUs_();
+        {
+            std::lock_guard<std::mutex> lock(m_metricsMutex);
+            ++m_metrics.datagramsReceived;
+            m_metrics.datagramBytesReceived += datagramBytes;
+            m_rateWindowDatagramBytes += datagramBytes;
+        }
+
+        if (m_klvTrackId == 0U) {
+            m_klvTrackId = datagram.header.trackId;
+            m_klvReassembler.setTrackId("klv");
+            addKlvTrack_();
+        }
+
+        SwVtpKlvReassembler::PushResult push =
+            m_klvReassembler.pushDatagram(datagram, receiveUs);
+        const SwVtpKlvReassembler::Snapshot snapshot = m_klvReassembler.snapshot();
+        if (push.completed()) {
+            {
+                std::lock_guard<std::mutex> lock(m_metricsMutex);
+                ++m_metrics.klvPacketsCompleted;
+                m_metrics.klvBytesCompleted += push.packet.payload().size();
+            }
+            emitMediaPacket(push.packet);
+        }
+        {
+            std::lock_guard<std::mutex> lock(m_metricsMutex);
+            m_metrics.klvAcceptedFragments = snapshot.acceptedFragments;
+            m_metrics.klvDuplicateFragments = snapshot.duplicateFragments;
+            m_metrics.klvStaleFragments = snapshot.staleFragments;
+            m_metrics.klvDroppedPackets = snapshot.droppedSamples;
+        }
         publishMetrics_();
     }
 
@@ -541,8 +631,67 @@ private:
         }
     }
 
-    void handleFrameFragment_(const SwVtpDatagram& datagram, std::size_t datagramBytes) {
+    void maybeSendNack_(SwVtpUdpTransport& transport,
+                        uint16_t streamId,
+                        uint16_t trackId,
+                        uint32_t frameId,
+                        uint16_t observedFragmentIndex,
+                        bool requestAllMissing,
+                        uint64_t nowUs) {
+        if (!m_streamConfig.isValid() || frameId == 0U) {
+            return;
+        }
+        if (m_lastNackFrameId == frameId &&
+            nowUs > m_lastNackUs &&
+            nowUs - m_lastNackUs < kMinNackIntervalUs) {
+            return;
+        }
+
+        SwVtpNackRequest request;
+        if (!m_reassembler.makeNackRequest(streamId,
+                                           trackId,
+                                           frameId,
+                                           nowUs,
+                                           kNackRetransmitBudgetUs,
+                                           request)) {
+            return;
+        }
+        if (!requestAllMissing) {
+            SwVtpNackRequest limited;
+            limited.streamId = request.streamId;
+            limited.trackId = request.trackId;
+            limited.frameId = request.frameId;
+            for (auto it = request.missingFragments.begin();
+                 it != request.missingFragments.end();
+                 ++it) {
+                if (*it <= observedFragmentIndex) {
+                    limited.missingFragments.append(*it);
+                }
+            }
+            request = limited;
+        }
+        if (!request.isValid()) {
+            return;
+        }
+
+        if (sendControl_(transport, SwVtpMessageType::Nack, swVtpSerializeNack(request))) {
+            m_lastNackUs = nowUs;
+            m_lastNackFrameId = frameId;
+            std::lock_guard<std::mutex> lock(m_metricsMutex);
+            ++m_metrics.nackRequestsSent;
+            m_metrics.nackFragmentsRequested +=
+                static_cast<uint64_t>(request.missingFragments.size());
+        }
+    }
+
+    void handleFrameFragment_(SwVtpUdpTransport& transport,
+                              const SwVtpDatagram& datagram,
+                              std::size_t datagramBytes) {
         const uint64_t receiveUs = nowUs_();
+        const uint32_t previousFrameId = m_lastFrameId;
+        const bool movedToNewerFrame =
+            previousFrameId != 0U && datagram.header.frameId > previousFrameId;
+        m_lastFrameId = datagram.header.frameId;
         {
             std::lock_guard<std::mutex> lock(m_metricsMutex);
             ++m_metrics.datagramsReceived;
@@ -556,9 +705,10 @@ private:
                                                        receiveUs));
         }
 
-        SwVtpAv1Reassembler::PushResult push =
+        updateVideoTrack_(datagram.header.codec);
+        SwVtpFrameReassembler::PushResult push =
             m_reassembler.pushDatagram(datagram, receiveUs);
-        const SwVtpAv1Reassembler::Snapshot snapshot = m_reassembler.snapshot();
+        const SwVtpFrameReassembler::Snapshot snapshot = m_reassembler.snapshot();
         bool completed = false;
         std::size_t completedBytes = 0;
         if (push.completed()) {
@@ -566,6 +716,23 @@ private:
             completedBytes = push.packet.payload().size();
             emitStatus(StreamState::Streaming, "SwVTP streaming");
             emitPacket(push.packet);
+        } else if (datagram.header.fragmentCount > 1U) {
+            maybeSendNack_(transport,
+                           datagram.header.streamId,
+                           datagram.header.trackId,
+                           datagram.header.frameId,
+                           datagram.header.fragmentIndex,
+                           false,
+                           receiveUs);
+        }
+        if (movedToNewerFrame) {
+            maybeSendNack_(transport,
+                           datagram.header.streamId,
+                           datagram.header.trackId,
+                           previousFrameId,
+                           0xFFFFU,
+                           true,
+                           receiveUs);
         }
         {
             std::lock_guard<std::mutex> lock(m_metricsMutex);
@@ -619,7 +786,8 @@ private:
     }
 
     SwMediaOpenOptions m_options{};
-    SwVtpAv1Reassembler m_reassembler{};
+    SwVtpFrameReassembler m_reassembler{};
+    SwVtpKlvReassembler m_klvReassembler{};
     SwVtpClockEstimate m_clockEstimate{};
     SwVtpStreamConfig m_streamConfig{};
     SwVtpClientAnnouncement m_announcement{};
@@ -630,9 +798,14 @@ private:
     uint32_t m_bindIpv4{0};
     uint16_t m_listenPort{0};
     SwString m_announceAddress{};
+    uint16_t m_klvTrackId{0};
     uint32_t m_nextSyncId{1};
     uint64_t m_lastPingUs{0};
     uint64_t m_lastHelloUs{0};
+    uint64_t m_lastStatsUs{0};
+    uint64_t m_lastNackUs{0};
+    uint32_t m_lastFrameId{0};
+    uint32_t m_lastNackFrameId{0};
     uint64_t m_rateWindowStartUs{0};
     uint64_t m_rateWindowDatagramBytes{0};
     uint64_t m_rateWindowVideoBytes{0};
@@ -642,4 +815,6 @@ private:
     MetricsCallback m_metricsCallback{};
     std::thread m_worker{};
     std::atomic<bool> m_stopRequested{false};
+    static constexpr uint64_t kMinNackIntervalUs = 2000ULL;
+    static constexpr uint64_t kNackRetransmitBudgetUs = 15000ULL;
 };

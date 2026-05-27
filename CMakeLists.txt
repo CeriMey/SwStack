@@ -164,6 +164,8 @@ sw_add_example_subdirectory(exemples/61-PlatformVideoDecoderSelfTest ON)
 sw_add_example_subdirectory(exemples/62-SwVtpAv1SelfTest ON)
 sw_add_example_subdirectory(exemples/63-SwVtpUdpLoopback ON)
 sw_add_example_subdirectory(exemples/64-SwVtpPlayer ON)
+sw_add_example_subdirectory(exemples/65-MediaServerArchitectureSelfTest ON)
+sw_add_example_subdirectory(exemples/66-MediaTransportEndToEndSelfTest ON)
 sw_add_example_subdirectory(sandbox/SwMainWindowApplication OFF)
 endif()
 

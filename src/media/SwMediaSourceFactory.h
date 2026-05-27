@@ -6,16 +6,16 @@
  * @brief Declares the scheme-based media source factory used by generic player examples.
  */
 
-#include "media/SwFileVideoSource.h"
-#include "media/SwHttpMjpegSource.h"
 #include "media/SwMediaOpenOptions.h"
-#include "media/SwMediaSource.h"
 #include "media/SwPlatformMovieSource.h"
-#include "media/SwRtpVideoSource.h"
-#include "media/SwRtspSource.h"
-#include "media/SwUdpVideoSource.h"
-#include "media/SwVtpVideoSource.h"
-#include "media/SwVideoSource.h"
+#include "media/source/SwFileVideoSource.h"
+#include "media/source/SwHttpMjpegSource.h"
+#include "media/source/SwMediaSource.h"
+#include "media/source/SwRtpVideoSource.h"
+#include "media/source/SwRtspSource.h"
+#include "media/source/SwUdpVideoSource.h"
+#include "media/source/SwVideoSource.h"
+#include "media/source/SwVtpVideoSource.h"
 
 #include <algorithm>
 #include <array>

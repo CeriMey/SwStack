@@ -732,11 +732,19 @@ public:
         if (!initializeVaapiProbe_()) {
             return false;
         }
+#if SW_MEDIA_LINUX_HAS_VAAPI_HEADERS
         if (m_emitNativeVaapiFrames && !m_vaExportSurfaceHandleFn) {
             logUnavailableOnce_("vaExportSurfaceHandle unavailable for native VA-API export");
             shutdown();
             return false;
         }
+#else
+        if (m_emitNativeVaapiFrames) {
+            logUnavailableOnce_("VA-API headers unavailable for native frame export");
+            shutdown();
+            return false;
+        }
+#endif
         m_opened = true;
         if (expectedFormat.width > 0 && expectedFormat.height > 0) {
             m_inputWidth = expectedFormat.width;
