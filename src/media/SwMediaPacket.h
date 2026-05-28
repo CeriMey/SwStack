@@ -71,6 +71,7 @@ public:
         mediaPacket.setPayload(packet.payload());
         mediaPacket.setPts(packet.pts());
         mediaPacket.setDts(packet.dts());
+        mediaPacket.setClockRate(packet.clockRate());
         mediaPacket.setKeyFrame(packet.isKeyFrame());
         mediaPacket.setDiscontinuity(packet.isDiscontinuity());
         return mediaPacket;

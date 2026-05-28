@@ -1,9 +1,13 @@
+#include "SwCoreApplication.h"
+#include "core/io/SwTcpSocket.h"
 #include "media/SwMediaPacket.h"
 #include "media/SwMediaTrack.h"
 #include "media/encoder/SwAv1LiveEncoder.h"
 #include "media/encoder/SwVideoEncoder.h"
+#include "media/rtp/SwRtpPacketizer.h"
 #include "media/server/SwMediaServer.h"
 #include "media/server/SwMediaServerFactory.h"
+#include "media/rtsp/SwRtspServerTransport.h"
 #include "media/swvtp/SwVtpFeedbackController.h"
 #include "media/swvtp/SwVtpKlv.h"
 #include "media/swvtp/SwVtpProtocol.h"
@@ -11,6 +15,7 @@
 #include "media/swvtp/SwVtpUdpTransport.h"
 
 #include <chrono>
+#include <cctype>
 #include <cstring>
 #include <cstdlib>
 #include <iostream>
@@ -89,6 +94,46 @@ SwVideoPacket makeSecondAv1Packet() {
     return SwVideoPacket(SwVideoPacket::Codec::AV1, payload, 34000, 34000, false);
 }
 
+SwVideoPacket makeH264NalPacket(uint8_t salt, int64_t pts = 1000) {
+    SwByteArray payload;
+    payload.append(static_cast<char>(0x65));
+    for (int i = 0; i < 12; ++i) {
+        payload.append(static_cast<char>((salt + i * 13) & 0xFF));
+    }
+    return SwVideoPacket(SwVideoPacket::Codec::H264, payload, pts, pts, true);
+}
+
+SwVideoPacket makeH264AnnexBLargePacket() {
+    SwByteArray payload;
+    const char startCode[] = {0x00, 0x00, 0x00, 0x01};
+    payload.append(startCode, sizeof(startCode));
+    payload.append(static_cast<char>(0x65));
+    for (int i = 0; i < 220; ++i) {
+        payload.append(static_cast<char>((i * 7 + 5) & 0xFF));
+    }
+    return SwVideoPacket(SwVideoPacket::Codec::H264, payload, 1000, 1000, true);
+}
+
+SwVideoPacket makeH265AnnexBLargePacket() {
+    SwByteArray payload;
+    const char startCode[] = {0x00, 0x00, 0x00, 0x01};
+    payload.append(startCode, sizeof(startCode));
+    payload.append(static_cast<char>(19 << 1));
+    payload.append(static_cast<char>(0x01));
+    for (int i = 0; i < 220; ++i) {
+        payload.append(static_cast<char>((i * 11 + 9) & 0xFF));
+    }
+    return SwVideoPacket(SwVideoPacket::Codec::H265, payload, 1000, 1000, true);
+}
+
+SwVideoPacket makeAv1LargePacket() {
+    SwByteArray payload;
+    for (int i = 0; i < 220; ++i) {
+        payload.append(static_cast<char>((i * 17 + 1) & 0xFF));
+    }
+    return SwVideoPacket(SwVideoPacket::Codec::AV1, payload, 1000, 1000, true);
+}
+
 SwMediaTrack makeKlvTrack() {
     SwMediaTrack track;
     track.id = "klv";
@@ -141,11 +186,66 @@ uint32_t readBe32(const unsigned char* data) {
            static_cast<uint32_t>(data[3]);
 }
 
-SwVideoPublishStream makeStream() {
+std::string lowerCopy(std::string value) {
+    for (size_t i = 0; i < value.size(); ++i) {
+        value[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(value[i])));
+    }
+    return value;
+}
+
+size_t rtspContentLength(const std::string& responseHeader) {
+    const std::string lower = lowerCopy(responseHeader);
+    const std::string key = "content-length:";
+    const size_t pos = lower.find(key);
+    if (pos == std::string::npos) {
+        return 0U;
+    }
+    return static_cast<size_t>(std::atoi(lower.c_str() + pos + key.size()));
+}
+
+bool readRtspResponse(SwCoreApplication& app,
+                      SwTcpSocket& socket,
+                      std::string& response,
+                      int timeoutMs) {
+    std::string buffer;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(timeoutMs);
+    while (std::chrono::steady_clock::now() < deadline) {
+        (void)app.processEvent(false);
+        const SwString chunk = socket.read();
+        if (!chunk.isEmpty()) {
+            buffer += chunk.toStdString();
+        }
+        const size_t headerEnd = buffer.find("\r\n\r\n");
+        if (headerEnd != std::string::npos) {
+            const size_t bodyBytes = rtspContentLength(buffer.substr(0, headerEnd + 4U));
+            if (buffer.size() >= headerEnd + 4U + bodyBytes) {
+                response = buffer;
+                return true;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    response = buffer;
+    return false;
+}
+
+bool sendRtspRequest(SwCoreApplication& app,
+                     SwTcpSocket& socket,
+                     const std::string& request,
+                     std::string& response) {
+    if (!socket.write(SwString(request))) {
+        return false;
+    }
+    (void)socket.waitForBytesWritten(500);
+    return readRtspResponse(app, socket, response, 1000);
+}
+
+SwVideoPublishStream makeStream(SwVideoPacket::Codec codec = SwVideoPacket::Codec::AV1) {
     SwVideoPublishStream stream;
     stream.id = "main";
     stream.trackId = "video";
-    stream.codec = SwVideoPacket::Codec::AV1;
+    stream.codec = codec;
     stream.width = 1920;
     stream.height = 1080;
     stream.startBitrateKbps = 4000;
@@ -159,6 +259,17 @@ uint64_t nowUs() {
         std::chrono::steady_clock::now().time_since_epoch();
     return static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count());
+}
+
+template <typename Predicate>
+bool pumpUntil(SwCoreApplication& app, Predicate predicate, int timeoutMs) {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(timeoutMs);
+    while (!predicate() && std::chrono::steady_clock::now() < deadline) {
+        (void)app.processEvent(false);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return predicate();
 }
 
 SwByteArray makeControlDatagram(SwVtpMessageType type, const SwByteArray& payload) {
@@ -226,12 +337,12 @@ bool runServerPublishCheck() {
     SwVtpClientAnnouncement announcement;
     announcement.streamId = 1;
     swVtpParseIpv4Address("127.0.0.1", announcement.clientIpv4);
-    announcement.receivePort = client.localPort();
+    announcement.receivePort = 0;
     ok = expect(client.send(makeControlDatagram(SwVtpMessageType::Hello,
                                                 swVtpSerializeClientAnnouncement(announcement)),
                             0x7F000001U,
                             config.endpoint.port),
-                "client hello send") && ok;
+                "client hello send with auto receive port") && ok;
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (swvtpTransport && swvtpTransport->activeClientCount() == 0U &&
@@ -367,10 +478,13 @@ bool runDatagramTransportCheck(SwMediaTransportProtocol protocol,
         SwMediaServerFactory::createTransport(config);
     SwMediaServer server(config);
     server.setTransport(transport);
-    ok = expect(server.addVideoStream(makeStream()), label) && ok;
+    const SwVideoPacket::Codec codec =
+        expectRtpHeader ? SwVideoPacket::Codec::H264 : SwVideoPacket::Codec::AV1;
+    ok = expect(server.addVideoStream(makeStream(codec)), label) && ok;
     ok = expect(server.start(), label) && ok;
-    const SwVideoPacket sent = makeAv1Packet();
-    const SwVideoPacket second = makeSecondAv1Packet();
+    const SwVideoPacket sent = expectRtpHeader ? makeH264NalPacket(1, 1000) : makeAv1Packet();
+    const SwVideoPacket second = expectRtpHeader ? makeH264NalPacket(2, 34000)
+                                                 : makeSecondAv1Packet();
     ok = expect(server.publishVideoPacket("main", sent), label) && ok;
     ok = expect(server.publishVideoPacket("main", second), label) && ok;
 
@@ -396,8 +510,8 @@ bool runDatagramTransportCheck(SwMediaTransportProtocol protocol,
                     label) && ok;
         ok = expect((firstData[0] & 0x0FU) == 0U, label) && ok;
         ok = expect((firstData[1] & 0x80U) != 0U, label) && ok;
-        ok = expect((firstData[1] & 0x7FU) == 97U, label) && ok;
-        ok = expect((secondData[1] & 0x7FU) == 97U, label) && ok;
+        ok = expect((firstData[1] & 0x7FU) == 96U, label) && ok;
+        ok = expect((secondData[1] & 0x7FU) == 96U, label) && ok;
         ok = expect(readBe16(firstData + 2) == 1U, label) && ok;
         ok = expect(readBe16(secondData + 2) == 2U, label) && ok;
         ok = expect(readBe32(firstData + 4) == 90U, label) && ok;
@@ -427,9 +541,158 @@ bool runDatagramTransportCheck(SwMediaTransportProtocol protocol,
     return ok;
 }
 
+bool runRtpPacketizerChecks() {
+    bool ok = true;
+    SwRtpPacketizer packetizer;
+    SwVideoPublishStream h264Stream = makeStream(SwVideoPacket::Codec::H264);
+    std::vector<SwByteArray> h264 =
+        packetizer.packetize(h264Stream, makeH264AnnexBLargePacket(), 80);
+    ok = expect(h264.size() > 1U, "H264 RTP FU-A fragmentation") && ok;
+    if (!h264.empty()) {
+        const unsigned char* first = reinterpret_cast<const unsigned char*>(h264.front().constData());
+        const unsigned char* last = reinterpret_cast<const unsigned char*>(h264.back().constData());
+        ok = expect(h264.front().size() <= 80U, "H264 RTP packet respects MTU") && ok;
+        ok = expect(first && ((first[12] & 0x1FU) == 28U), "H264 RTP FU-A indicator") && ok;
+        ok = expect(first && ((first[13] & 0x80U) != 0U), "H264 RTP FU-A start") && ok;
+        ok = expect(last && ((last[1] & 0x80U) != 0U), "H264 RTP marker on last FU-A") && ok;
+        ok = expect(last && ((last[13] & 0x40U) != 0U), "H264 RTP FU-A end") && ok;
+    }
+
+    SwVideoPublishStream h265Stream = makeStream(SwVideoPacket::Codec::H265);
+    std::vector<SwByteArray> h265 =
+        packetizer.packetize(h265Stream, makeH265AnnexBLargePacket(), 84);
+    ok = expect(h265.size() > 1U, "H265 RTP FU fragmentation") && ok;
+    if (!h265.empty()) {
+        const unsigned char* first = reinterpret_cast<const unsigned char*>(h265.front().constData());
+        const unsigned char* last = reinterpret_cast<const unsigned char*>(h265.back().constData());
+        ok = expect(h265.front().size() <= 84U, "H265 RTP packet respects MTU") && ok;
+        ok = expect(first && (((first[12] >> 1U) & 0x3FU) == 49U),
+                    "H265 RTP FU indicator") && ok;
+        ok = expect(first && ((first[14] & 0x80U) != 0U), "H265 RTP FU start") && ok;
+        ok = expect(last && ((last[1] & 0x80U) != 0U), "H265 RTP marker on last FU") && ok;
+        ok = expect(last && ((last[14] & 0x40U) != 0U), "H265 RTP FU end") && ok;
+    }
+
+    SwVideoPublishStream av1Stream = makeStream(SwVideoPacket::Codec::AV1);
+    std::vector<SwByteArray> av1 =
+        packetizer.packetize(av1Stream, makeAv1LargePacket(), 80);
+    ok = expect(av1.size() > 1U, "AV1 RTP fragmentation") && ok;
+    if (!av1.empty()) {
+        const unsigned char* first = reinterpret_cast<const unsigned char*>(av1.front().constData());
+        const unsigned char* last = reinterpret_cast<const unsigned char*>(av1.back().constData());
+        ok = expect(av1.front().size() <= 80U, "AV1 RTP packet respects MTU") && ok;
+        ok = expect(first && ((first[12] & 0x40U) != 0U), "AV1 RTP Y bit on non-final") && ok;
+        ok = expect(first && ((first[12] & 0x08U) != 0U), "AV1 RTP N bit on keyframe") && ok;
+        ok = expect(last && ((last[12] & 0x80U) != 0U), "AV1 RTP Z bit on continuation") && ok;
+        ok = expect(last && ((last[12] & 0x40U) == 0U), "AV1 RTP final clears Y bit") && ok;
+        ok = expect(last && ((last[1] & 0x80U) != 0U), "AV1 RTP marker on final") && ok;
+    }
+    return ok;
+}
+
+bool runRtspControlServerCheck(SwCoreApplication& app) {
+    bool ok = true;
+    const uint16_t rtspPort = 56520;
+    SwMediaServerConfig config;
+    config.endpoint.protocol = SwMediaTransportProtocol::Rtsp;
+    config.endpoint.host = "127.0.0.1";
+    config.endpoint.bindAddress = "127.0.0.1";
+    config.endpoint.port = rtspPort;
+    config.mtuBytes = 80;
+
+    std::shared_ptr<SwVideoTransportServer> transport =
+        SwMediaServerFactory::createTransport(config);
+    std::shared_ptr<SwRtspServerTransport> rtspTransport =
+        std::dynamic_pointer_cast<SwRtspServerTransport>(transport);
+    SwMediaServer server(config);
+    server.setTransport(transport);
+    ok = expect(static_cast<bool>(rtspTransport), "RTSP transport concrete type") && ok;
+    ok = expect(server.addVideoStream(makeStream(SwVideoPacket::Codec::H264)),
+                "RTSP server add H264 stream") && ok;
+    ok = expect(server.start(), "RTSP control server start") && ok;
+
+    SwVtpUdpTransport receiver;
+    ok = expect(receiver.open(SwString("127.0.0.1"), 0), "RTSP RTP receiver bind") && ok;
+
+    SwTcpSocket client;
+    ok = expect(client.connectToHost("127.0.0.1", rtspPort), "RTSP TCP connect start") && ok;
+    ok = expect(pumpUntil(app,
+                          [&client]() {
+                              return client.state() == SwAbstractSocket::ConnectedState;
+                          },
+                          1000),
+                "RTSP TCP connected") && ok;
+
+    const std::string url = "rtsp://127.0.0.1:" + std::to_string(rtspPort) + "/stream";
+    std::string response;
+    ok = expect(sendRtspRequest(app,
+                                client,
+                                "OPTIONS " + url + " RTSP/1.0\r\nCSeq: 1\r\n\r\n",
+                                response),
+                "RTSP OPTIONS response") && ok;
+    ok = expect(response.find("Public:") != std::string::npos, "RTSP OPTIONS public header") && ok;
+
+    ok = expect(sendRtspRequest(app,
+                                client,
+                                "DESCRIBE " + url +
+                                    " RTSP/1.0\r\nCSeq: 2\r\nAccept: application/sdp\r\n\r\n",
+                                response),
+                "RTSP DESCRIBE response") && ok;
+    ok = expect(response.find("application/sdp") != std::string::npos,
+                "RTSP DESCRIBE SDP content type") && ok;
+    ok = expect(response.find("a=rtpmap:96 H264/90000") != std::string::npos,
+                "RTSP DESCRIBE H264 RTP map") && ok;
+
+    std::ostringstream setup;
+    setup << "SETUP " << url << "/trackID=0 RTSP/1.0\r\n"
+          << "CSeq: 3\r\n"
+          << "Transport: RTP/AVP;unicast;client_port="
+          << receiver.localPort() << "-" << static_cast<uint16_t>(receiver.localPort() + 1)
+          << "\r\n\r\n";
+    ok = expect(sendRtspRequest(app, client, setup.str(), response),
+                "RTSP SETUP response") && ok;
+    ok = expect(response.find("server_port=") != std::string::npos,
+                "RTSP SETUP server_port") && ok;
+    ok = expect(response.find("Session:") != std::string::npos,
+                "RTSP SETUP session") && ok;
+
+    ok = expect(sendRtspRequest(app,
+                                client,
+                                "PLAY " + url + " RTSP/1.0\r\nCSeq: 4\r\nSession: swrtsp\r\n\r\n",
+                                response),
+                "RTSP PLAY response") && ok;
+    ok = expect(response.find("RTP-Info:") != std::string::npos,
+                "RTSP PLAY RTP-Info") && ok;
+
+    const SwVideoPacket packet = makeH264AnnexBLargePacket();
+    ok = expect(server.publishVideoPacket("main", packet), "RTSP publish H264 RTP frame") && ok;
+
+    SwVtpUdpPacket firstPacket;
+    SwVtpUdpPacket secondPacket;
+    ok = expect(receiver.receive(500, firstPacket), "RTSP client received first RTP") && ok;
+    ok = expect(receiver.receive(500, secondPacket), "RTSP client received second RTP") && ok;
+    if (!firstPacket.bytes.isEmpty()) {
+        const unsigned char* data =
+            reinterpret_cast<const unsigned char*>(firstPacket.bytes.constData());
+        ok = expect(firstPacket.bytes.size() <= config.mtuBytes, "RTSP RTP respects MTU") && ok;
+        ok = expect(data && ((data[0] >> 6U) == 2U), "RTSP RTP version") && ok;
+        ok = expect(data && ((data[1] & 0x7FU) == 96U), "RTSP RTP H264 payload type") && ok;
+        ok = expect(data && ((data[12] & 0x1FU) == 28U), "RTSP RTP H264 FU-A") && ok;
+    }
+
+    const SwVideoServerMetrics metrics = server.metrics();
+    ok = expect(metrics.transport.datagramsSent >= 2U, "RTSP server sent RTP datagrams") && ok;
+    client.close();
+    receiver.close();
+    server.stop();
+    return ok;
+}
+
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    SwCoreApplication app(argc, argv);
+
     bool ok = true;
     ok = runTransportFactoryChecks() && ok;
     ok = runServerPublishCheck() && ok;
@@ -441,9 +704,8 @@ int main() {
     ok = runDatagramTransportCheck(SwMediaTransportProtocol::Rtp,
                                    "RTP server emits RTP datagram",
                                    true) && ok;
-    ok = runDatagramTransportCheck(SwMediaTransportProtocol::Rtsp,
-                                   "RTSP server emits RTP media datagram",
-                                   true) && ok;
+    ok = runRtpPacketizerChecks() && ok;
+    ok = runRtspControlServerCheck(app) && ok;
     if (!ok) {
         return EXIT_FAILURE;
     }

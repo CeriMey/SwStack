@@ -1190,7 +1190,10 @@ private:
         if (frameTimestamp >= 0 &&
             lastPresentedTimestamp >= 0 &&
             frameTimestamp <= lastPresentedTimestamp) {
-            return;
+            if (!isTimestampReset_(frameTimestamp, lastPresentedTimestamp)) {
+                return;
+            }
+            m_lastPresentedFrameTimestamp.store(-1);
         }
         bool shouldPost = false;
         const auto now = std::chrono::steady_clock::now();
@@ -1791,6 +1794,15 @@ private:
             std::max(8, std::min(30, (kPresentationMaxBufferMs_ + intervalMs - 1) / intervalMs)));
     }
 
+    static bool isTimestampReset_(std::int64_t timestamp, std::int64_t previousTimestamp) {
+        static constexpr std::int64_t kBackwardResetThreshold100ns_ =
+            2LL * 1000LL * 1000LL * 10LL;
+        return timestamp >= 0 &&
+               previousTimestamp >= 0 &&
+               timestamp < previousTimestamp &&
+               previousTimestamp - timestamp > kBackwardResetThreshold100ns_;
+    }
+
     void updateEstimatedPresentationIntervalLocked_(
         const SwVideoFrame& frame,
         std::chrono::steady_clock::time_point now) {
@@ -1873,7 +1885,13 @@ private:
         if (frameTimestamp >= 0 &&
             lastPresentedTimestamp >= 0 &&
             frameTimestamp <= lastPresentedTimestamp) {
-            return;
+            if (!isTimestampReset_(frameTimestamp, lastPresentedTimestamp)) {
+                return;
+            }
+            swCWarning(kSwLogCategory_SwVideoWidget)
+                << "[SwVideoWidget] Accepting live timestamp reset"
+                << " previousTs=" << lastPresentedTimestamp
+                << " nextTs=" << frameTimestamp;
         }
         if (frameTimestamp >= 0) {
             m_lastPresentedFrameTimestamp.store(frameTimestamp);
@@ -1900,7 +1918,10 @@ private:
         if (m_frameArrived) {
             m_frameArrived(frame);
         }
-        if (!m_repaintPending.exchange(true)) {
+        if (m_realtimePresentationActive.load()) {
+            m_repaintPending.store(true);
+            update();
+        } else if (!m_repaintPending.exchange(true)) {
             update();
         }
     }

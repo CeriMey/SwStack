@@ -143,6 +143,7 @@ private:
                                   packet.pts(),
                                   packet.dts(),
                                   packet.isKeyFrame());
+        videoPacket.setClockRate(packet.clockRate() > 0 ? packet.clockRate() : 90000);
         videoPacket.setDiscontinuity(packet.isDiscontinuity());
         emitPacket(videoPacket);
     }

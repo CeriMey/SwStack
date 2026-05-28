@@ -27,7 +27,7 @@ void appendLeb128(SwByteArray& payload, uint64_t value) {
     } while (value != 0U);
 }
 
-SwByteArray makeObu(SwVtpAv1ObuType type,
+SwByteArray makeObu(SwAv1ObuType type,
                     const SwByteArray& body,
                     bool withExtension = false,
                     uint8_t temporalLayer = 0) {
@@ -57,9 +57,9 @@ SwByteArray makeBody(std::size_t bytes, uint8_t seed) {
 
 SwByteArray makeAv1AccessUnit() {
     SwByteArray payload;
-    payload.append(makeObu(SwVtpAv1ObuType::TemporalDelimiter, makeBody(1, 0x01U)));
-    payload.append(makeObu(SwVtpAv1ObuType::SequenceHeader, makeBody(12, 0x10U)));
-    payload.append(makeObu(SwVtpAv1ObuType::Frame, makeBody(2600, 0x40U), true, 1));
+    payload.append(makeObu(SwAv1ObuType::TemporalDelimiter, makeBody(1, 0x01U)));
+    payload.append(makeObu(SwAv1ObuType::SequenceHeader, makeBody(12, 0x10U)));
+    payload.append(makeObu(SwAv1ObuType::Frame, makeBody(2600, 0x40U), true, 1));
     return payload;
 }
 
@@ -409,6 +409,19 @@ bool runDeliveryModeScenario() {
     ok = expect(swVtpEndpointAcceptsClient(endpoint192, parsedClient),
                 "resolved auto client address is accepted") && ok;
 
+    SwVtpClientAnnouncement autoPortClient = client;
+    autoPortClient.receivePort = 0;
+    ok = expect(swVtpParseClientAnnouncementPayload(
+                    swVtpSerializeClientAnnouncement(autoPortClient),
+                    parsedClient),
+                "client announcement allows auto receive port") && ok;
+    ok = expect(parsedClient.receivePort == 0 &&
+                    !swVtpEndpointAcceptsClient(endpoint192, parsedClient),
+                "unresolved auto receive port is not directly accepted") && ok;
+    parsedClient.receivePort = client.receivePort;
+    ok = expect(swVtpEndpointAcceptsClient(endpoint192, parsedClient),
+                "resolved auto receive port is accepted") && ok;
+
     SwVtpUdpEndpoint broadcastEndpoint = swVtpMakeBroadcastEndpoint(5000);
     ok = expect(broadcastEndpoint.isValid(), "broadcast endpoint is valid") && ok;
     broadcastEndpoint.ipv4 = client10;
@@ -525,6 +538,12 @@ bool runPacketizerValidationScenario() {
     ok = expect(fallback.datagrams[0].header.deadlineUs ==
                     options.nowUs + options.latencyBudgetUs,
                 "packetizer computes deadline from latency budget") && ok;
+    ok = expect(fallback.containsSequenceHeader, "packetizer reports codec config") && ok;
+    ok = expect(!fallback.keyFrame, "sequence header alone is not a keyframe") && ok;
+    ok = expect(!fallback.datagrams[0].header.hasFlag(SwVtpFlag_KeyFrame),
+                "codec config does not set keyframe flag") && ok;
+    ok = expect(fallback.datagrams[0].header.hasFlag(SwVtpFlag_CodecConfig),
+                "codec config flag remains set") && ok;
 
     if (ok) {
         std::cout << "[SwVTP AV1 packetizer validation] PASS\n";
@@ -554,6 +573,8 @@ bool runReassemblerScenario() {
     ok = expect(completedPacket.payload() == makeAv1AccessUnit(), "completed payload") && ok;
     ok = expect(completedPacket.isKeyFrame(), "completed keyframe") && ok;
     ok = expect(completedPacket.isDiscontinuity(), "completed discontinuity") && ok;
+    ok = expect(completedPacket.clockRate() == 1000000,
+                "completed SwVTP packet clock rate is microseconds") && ok;
 
     SwVtpAv1Reassembler::PushResult duplicate =
         reassembler.pushSerializedDatagram(result.serializedDatagrams[0], 3000);
@@ -1106,6 +1127,7 @@ bool runAdaptiveBandwidthEstimateScenario() {
     SwVtpAdaptiveBitrateController controller(policy);
     SwVtpReceiverStats bandwidthDrop;
     bandwidthDrop.estimatedBandwidthKbps = 4000;
+    bandwidthDrop.lossPermille = 30;
 
     SwVtpAdaptiveBitrateDecision down = controller.update(bandwidthDrop, 0);
     bool ok = expect(down.reason == SwVtpAdaptiveBitrateDecision::Reason::NetworkPressure,
@@ -1150,17 +1172,17 @@ bool runAdaptiveBandwidthHeadroomScenario() {
     limitedHeadroom.estimatedBandwidthKbps = 9000;
 
     SwVtpAdaptiveBitrateDecision hold = controller.update(limitedHeadroom, 5000);
-    bool ok = expect(hold.reason == SwVtpAdaptiveBitrateDecision::Reason::Stable,
-                     "ABR does not upshift without bandwidth headroom");
-    ok = expect(hold.targetBitrateKbps == 8000,
-                "ABR keeps target when below ceiling but headroom is insufficient") && ok;
+    bool ok = expect(hold.reason == SwVtpAdaptiveBitrateDecision::Reason::UpshiftProbe,
+                     "ABR probes up when measured send rate is not congested");
+    ok = expect(hold.targetBitrateKbps == 8800,
+                "ABR ignores sender-limited bandwidth estimate without congestion") && ok;
 
     SwVtpReceiverStats wideHeadroom;
     wideHeadroom.estimatedBandwidthKbps = 11000;
     SwVtpAdaptiveBitrateDecision up = controller.update(wideHeadroom, 9000);
     ok = expect(up.reason == SwVtpAdaptiveBitrateDecision::Reason::UpshiftProbe,
                 "ABR upshifts with enough bandwidth headroom") && ok;
-    ok = expect(up.targetBitrateKbps == 8800,
+    ok = expect(up.targetBitrateKbps == 9680,
                 "ABR uses configured upshift percent") && ok;
 
     if (ok) {
@@ -1192,6 +1214,20 @@ bool runAdaptiveQueueAndDecoderPressureScenario() {
                 "ABR render queue pressure does not force keyframe") && ok;
     ok = expect(queueDown.preferBaseTemporalLayer,
                 "ABR render queue prefers base temporal layer") && ok;
+
+    SwVtpAdaptiveBitrateController receiveQueueController(policy);
+    SwVtpReceiverStats receiveBacklog;
+    receiveBacklog.estimatedBandwidthKbps = 20000;
+    receiveBacklog.receiveQueueMs = 100;
+    SwVtpAdaptiveBitrateDecision receiveQueueDown =
+        receiveQueueController.update(receiveBacklog, 1000);
+    ok = expect(receiveQueueDown.reason ==
+                    SwVtpAdaptiveBitrateDecision::Reason::ClientQueuePressure,
+                "ABR receive queue pressure reason") && ok;
+    ok = expect(receiveQueueDown.targetBitrateKbps == 3900,
+                "ABR receive queue fast downshift") && ok;
+    ok = expect(receiveQueueDown.requestKeyFrame,
+                "ABR receive queue pressure requests keyframe") && ok;
 
     SwVtpAdaptiveBitrateController decoderController(policy);
     SwVtpReceiverStats decoderBacklog;
@@ -1226,11 +1262,21 @@ bool runAdaptiveMinMaxClampScenario() {
 
     SwVtpReceiverStats lowBandwidth;
     lowBandwidth.estimatedBandwidthKbps = 500;
+    lowBandwidth.lossPermille = 30;
     SwVtpAdaptiveBitrateDecision minClamp = controller.update(lowBandwidth, 1000);
     ok = expect(minClamp.reason == SwVtpAdaptiveBitrateDecision::Reason::NetworkPressure,
                 "ABR low bandwidth reason") && ok;
-    ok = expect(minClamp.targetBitrateKbps == 1200,
-                "ABR low bandwidth clamped to min") && ok;
+    ok = expect(minClamp.targetBitrateKbps == 450,
+                "ABR congestion can go below configured min") && ok;
+
+    SwVtpReceiverStats recovered;
+    recovered.estimatedBandwidthKbps = 450;
+    SwVtpAdaptiveBitrateDecision recovery =
+        controller.update(recovered, policy.upshiftCooldownMs + 1000ULL);
+    ok = expect(recovery.reason == SwVtpAdaptiveBitrateDecision::Reason::UpshiftProbe,
+                "ABR recovers from sender-limited congestion floor") && ok;
+    ok = expect(recovery.targetBitrateKbps == 1200,
+                "ABR recovery returns to configured minimum") && ok;
 
     if (ok) {
         std::cout << "[SwVTP adaptive min/max clamp] PASS\n";
@@ -1255,7 +1301,7 @@ bool runIvfAv1StreamValidation(const char* path) {
 
     for (std::size_t frameIndex = 0; frameIndex < frames.size(); ++frameIndex) {
         const IvfFrame& frame = frames[frameIndex];
-        const SwList<SwVtpAv1Obu> obus = SwVtpAv1Parser::parseObus(frame.payload);
+        const SwList<SwAv1ObuInfo> obus = SwAv1Bitstream::parseObus(frame.payload);
         if (!obus.isEmpty()) {
             ++framesWithParsedObus;
         }
@@ -1305,6 +1351,8 @@ bool runIvfAv1StreamValidation(const char* path) {
                     "real AV1 payload survives SwVTP bit-exact") && ok;
         ok = expect(completedPacket.pts() == static_cast<std::int64_t>(frame.timestamp),
                     "real AV1 timestamp survives SwVTP") && ok;
+        ok = expect(completedPacket.clockRate() == 1000000,
+                    "real AV1 SwVTP packet clock rate is microseconds") && ok;
 
         totalBytes += frame.payload.size();
         totalDatagrams += packetized.serializedDatagrams.size();

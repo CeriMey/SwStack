@@ -169,6 +169,10 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     std::int64_t dts() const { return m_dts; }
+
+    int clockRate() const { return m_clockRate; }
+
+    void setClockRate(int clockRate) { m_clockRate = clockRate; }
     /**
      * @brief Sets the pts.
      * @param pts Value passed to the method.
@@ -228,6 +232,7 @@ private:
     SwByteArray m_payload;
     std::int64_t m_pts{-1};
     std::int64_t m_dts{-1};
+    int m_clockRate{0};
     bool m_isKeyFrame{false};
     bool m_isDiscontinuity{false};
     SwVideoFormatInfo m_rawFormat{};

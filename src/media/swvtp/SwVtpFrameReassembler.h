@@ -276,7 +276,8 @@ private:
                              payload,
                              static_cast<std::int64_t>(state.firstHeader.ptsUs),
                              static_cast<std::int64_t>(state.firstHeader.ptsUs),
-                             state.keyFrame || state.codecConfig);
+                             state.keyFrame);
+        packet.setClockRate(1000000);
         packet.setDiscontinuity(state.discontinuity);
         return packet;
     }

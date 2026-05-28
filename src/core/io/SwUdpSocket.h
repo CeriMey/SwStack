@@ -284,6 +284,118 @@ public:
         return updateMulticastMembership_(groupAddress, localInterface, false);
     }
 
+    bool setMulticastTimeToLive(uint8_t ttl) {
+        if (!isSocketValid()) {
+            return false;
+        }
+        if (m_socketFamily == AF_INET) {
+#if defined(_WIN32)
+            DWORD value = ttl;
+            return ::setsockopt(m_socket,
+                                IPPROTO_IP,
+                                IP_MULTICAST_TTL,
+                                reinterpret_cast<const char*>(&value),
+                                sizeof(value)) == 0;
+#else
+            unsigned char value = ttl;
+            return ::setsockopt(m_socket, IPPROTO_IP, IP_MULTICAST_TTL, &value, sizeof(value)) == 0;
+#endif
+        }
+        if (m_socketFamily == AF_INET6) {
+            int value = static_cast<int>(ttl);
+#if defined(_WIN32)
+            return ::setsockopt(m_socket,
+                                IPPROTO_IPV6,
+                                IPV6_MULTICAST_HOPS,
+                                reinterpret_cast<const char*>(&value),
+                                sizeof(value)) == 0;
+#else
+            return ::setsockopt(m_socket, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &value, sizeof(value)) == 0;
+#endif
+        }
+        return false;
+    }
+
+    bool setMulticastLoopbackEnabled(bool enabled) {
+        if (!isSocketValid()) {
+            return false;
+        }
+        if (m_socketFamily == AF_INET) {
+#if defined(_WIN32)
+            DWORD value = enabled ? 1U : 0U;
+            return ::setsockopt(m_socket,
+                                IPPROTO_IP,
+                                IP_MULTICAST_LOOP,
+                                reinterpret_cast<const char*>(&value),
+                                sizeof(value)) == 0;
+#else
+            unsigned char value = enabled ? 1U : 0U;
+            return ::setsockopt(m_socket, IPPROTO_IP, IP_MULTICAST_LOOP, &value, sizeof(value)) == 0;
+#endif
+        }
+        if (m_socketFamily == AF_INET6) {
+            int value = enabled ? 1 : 0;
+#if defined(_WIN32)
+            return ::setsockopt(m_socket,
+                                IPPROTO_IPV6,
+                                IPV6_MULTICAST_LOOP,
+                                reinterpret_cast<const char*>(&value),
+                                sizeof(value)) == 0;
+#else
+            return ::setsockopt(m_socket, IPPROTO_IPV6, IPV6_MULTICAST_LOOP, &value, sizeof(value)) == 0;
+#endif
+        }
+        return false;
+    }
+
+    bool setMulticastInterface(const SwString& localInterface) {
+        if (!isSocketValid()) {
+            return false;
+        }
+        if (m_socketFamily == AF_INET) {
+#if !defined(_WIN32)
+            const std::string ifName = localInterface.trimmed().toStdString();
+            if (!ifName.empty()) {
+                const unsigned int index = ::if_nametoindex(ifName.c_str());
+                if (index != 0U) {
+                    ip_mreqn request{};
+                    request.imr_ifindex = static_cast<int>(index);
+                    return ::setsockopt(m_socket, IPPROTO_IP, IP_MULTICAST_IF, &request, sizeof(request)) == 0;
+                }
+            }
+#endif
+            in_addr address{};
+            if (!resolveIpv4Interface_(localInterface, address)) {
+                return false;
+            }
+#if defined(_WIN32)
+            return ::setsockopt(m_socket,
+                                IPPROTO_IP,
+                                IP_MULTICAST_IF,
+                                reinterpret_cast<const char*>(&address),
+                                sizeof(address)) == 0;
+#else
+            return ::setsockopt(m_socket, IPPROTO_IP, IP_MULTICAST_IF, &address, sizeof(address)) == 0;
+#endif
+        }
+        if (m_socketFamily == AF_INET6) {
+            const unsigned int index = resolveIpv6InterfaceIndex_(localInterface);
+            if (!localInterface.isEmpty() && index == 0U) {
+                return false;
+            }
+#if defined(_WIN32)
+            return ::setsockopt(m_socket,
+                                IPPROTO_IPV6,
+                                IPV6_MULTICAST_IF,
+                                reinterpret_cast<const char*>(&index),
+                                sizeof(index)) == 0;
+#else
+            return ::setsockopt(m_socket, IPPROTO_IPV6, IPV6_MULTICAST_IF, &index, sizeof(index)) == 0;
+#endif
+        }
+        return false;
+    }
+
     /**
      * @brief Performs the `abort` operation.
      */
@@ -315,6 +427,22 @@ public:
             return -1;
         }
         return sendDatagram(data, static_cast<size_t>(size), target);
+    }
+
+    int64_t writeDatagram(const char* data, int64_t size, const ResolvedAddress& target) {
+        if (!data || size <= 0 || target.length == 0 || target.family == AF_UNSPEC) {
+            return -1;
+        }
+        ResolvedAddress resolved = target;
+        if (!ensureSocketForAddress_(resolved)) {
+            setSocketError(SocketError::SocketAccessError, SwString("Socket creation failed"));
+            return -1;
+        }
+        if (!coerceAddressForSocket_(resolved)) {
+            setSocketError(SocketError::OperationError, SwString("Address family mismatch"));
+            return -1;
+        }
+        return sendDatagram(data, static_cast<size_t>(size), resolved);
     }
 
     /**
@@ -880,7 +1008,10 @@ private:
             return -1;
         }
         if (sent > 0) {
-            const bool localEndpointChanged = refreshLocalEndpoint_();
+            const bool shouldRefreshLocalEndpoint =
+                m_boundAddress.isEmpty() || m_boundPort == 0U;
+            const bool localEndpointChanged =
+                shouldRefreshLocalEndpoint ? refreshLocalEndpoint_() : false;
             m_totalSentBytes.fetch_add(static_cast<uint64_t>(sent), std::memory_order_relaxed);
             m_totalSentDatagrams.fetch_add(1, std::memory_order_relaxed);
             swSocketTrafficAddSentBytes(socketTrafficState_, static_cast<unsigned long long>(sent));

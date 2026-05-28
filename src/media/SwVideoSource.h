@@ -258,6 +258,7 @@ public:
         m_loggedWaitingForDecoderSync.store(false);
         m_loggedFirstPacketToDecoder.store(false);
         m_packetsSinceLastDecodedFrame.store(0);
+        m_firstDecoderInputTickMs.store(0);
         m_lastDecodedFrameTickMs.store(0);
         if (m_decoder && m_frameCallback) {
             m_decoder->setFrameCallback(makeDecoderFrameCallbackLocked_());
@@ -285,6 +286,7 @@ public:
         m_loggedWaitingForDecoderSync.store(false);
         m_loggedFirstPacketToDecoder.store(false);
         m_packetsSinceLastDecodedFrame.store(0);
+        m_firstDecoderInputTickMs.store(0);
         m_lastDecodedFrameTickMs.store(0);
         if (m_decoder && m_frameCallback) {
             m_decoder->setFrameCallback(makeDecoderFrameCallbackLocked_());
@@ -321,6 +323,7 @@ public:
             m_loggedFirstPacketToDecoder.store(false);
             m_waitingForDecoderSync.store(true);
             m_loggedWaitingForDecoderSync.store(false);
+            m_firstDecoderInputTickMs.store(0);
         }
         if (decoderToFlush) {
             decoderToFlush->flush();
@@ -348,6 +351,7 @@ public:
                 m_loggedFirstPacketToDecoder.store(false);
                 m_waitingForDecoderSync.store(true);
                 m_loggedWaitingForDecoderSync.store(false);
+                m_firstDecoderInputTickMs.store(0);
             }
         }
         if (decoderToFlush) {
@@ -449,6 +453,7 @@ public:
         m_loggedWaitingForDecoderSync.store(false);
         m_loggedFirstPacketToDecoder.store(false);
         m_packetsSinceLastDecodedFrame.store(0);
+        m_firstDecoderInputTickMs.store(0);
         m_lastDecodedFrameTickMs.store(0);
         publishConsumerPressure_();
     }
@@ -498,6 +503,7 @@ public:
             m_loggedFirstPacketToDecoder.store(false);
             m_packetsSinceLastDecodedFrame.store(0);
             m_lastPacketTickMs.store(0);
+            m_firstDecoderInputTickMs.store(0);
             m_lastDecodedFrameTickMs.store(0);
         }
         {
@@ -671,6 +677,7 @@ private:
         m_waitingForDecoderSync.store(true);
         m_loggedWaitingForDecoderSync.store(false);
         m_packetsSinceLastDecodedFrame.store(0);
+        m_firstDecoderInputTickMs.store(0);
         m_lastDecodedFrameTickMs.store(0);
     }
 
@@ -902,9 +909,64 @@ private:
                 << "[SwVideoPipeline] Rejecting packet enqueue at hard queue limit"
                 << " codec=" << static_cast<int>(packet.codec())
                 << " bytes=" << packet.payload().size();
+            if (!packet.carriesRawFrame()) {
+                recoverDecodeQueueOverflow_(packet, recoveryEpoch);
+            }
             return;
         }
         m_queueCv.notify_one();
+    }
+
+    void recoverDecodeQueueOverflow_(const SwVideoPacket& packet, uint64_t recoveryEpoch) {
+        if (recoveryEpoch != m_recoveryEpoch.load()) {
+            return;
+        }
+
+        {
+            std::lock_guard<std::mutex> queueLock(m_queueMutex);
+            if (!m_workerRunning || recoveryEpoch != m_recoveryEpoch.load()) {
+                return;
+            }
+            m_packetQueue.clear();
+            m_queuedBytes = 0;
+            updateQueuePressureLocked_();
+        }
+
+        std::shared_ptr<SwVideoDecoder> decoderToFlush;
+        uint64_t nextEpoch = recoveryEpoch;
+        bool staleRecovery = false;
+        {
+            SwMutexLocker lock(m_mutex);
+            if (recoveryEpoch != m_recoveryEpoch.load()) {
+                staleRecovery = true;
+            } else {
+                nextEpoch = m_recoveryEpoch.fetch_add(1) + 1;
+                m_decoderFrameEpoch.store(nextEpoch);
+                decoderToFlush = m_decoder;
+                requestDecoderRecoveryLocked_("decode-queue-overflow");
+                m_waitingForDecoderSync.store(true);
+                m_loggedWaitingForDecoderSync.store(false);
+                m_loggedFirstPacketToDecoder.store(false);
+                m_packetsSinceLastDecodedFrame.store(0);
+                m_firstDecoderInputTickMs.store(0);
+                m_lastDecodedFrameTickMs.store(0);
+            }
+        }
+        if (staleRecovery) {
+            publishConsumerPressure_();
+            return;
+        }
+
+        if (decoderToFlush) {
+            decoderToFlush->flush();
+        }
+        swCWarning(kSwLogCategory_SwVideoPipeline)
+            << "[SwVideoPipeline] Decode queue overflow, forcing decoder resync"
+            << " epoch=" << nextEpoch
+            << " codec=" << static_cast<int>(packet.codec())
+            << " bytes=" << packet.payload().size();
+        publishConsumerPressure_();
+        m_queueCv.notify_all();
     }
 
     static std::size_t pressureHighWatermark_(std::size_t limit) {
@@ -971,14 +1033,18 @@ private:
         }
 
         const int64_t lastDecodedTickMs = m_lastDecodedFrameTickMs.load();
+        const int64_t firstDecoderInputTickMs = m_firstDecoderInputTickMs.load();
         const int64_t nowTickMs = monotonicMs_();
         pressure.packetsWithoutFrame = m_packetsSinceLastDecodedFrame.load();
-        pressure.stalledForMs =
-            (lastDecodedTickMs > 0) ? std::max<int64_t>(0, nowTickMs - lastDecodedTickMs) : 0;
+        pressure.stalledForMs = (lastDecodedTickMs > 0)
+                                    ? std::max<int64_t>(0, nowTickMs - lastDecodedTickMs)
+                                    : ((firstDecoderInputTickMs > 0)
+                                           ? std::max<int64_t>(0, nowTickMs - firstDecoderInputTickMs)
+                                           : 0);
         pressure.decoderStalled =
             m_decoderRecoveryRequested.load() ||
             (!m_waitingForDecoderSync.load() &&
-             (lastDecodedTickMs > 0) &&
+             ((lastDecodedTickMs > 0) || (firstDecoderInputTickMs > 0)) &&
              (pressure.stalledForMs >= m_decoderStallThresholdMs) &&
              (pressure.packetsWithoutFrame >= std::max<uint64_t>(1U, m_decoderStallPacketThreshold)));
 
@@ -1047,13 +1113,16 @@ private:
             if (decoder && !m_waitingForDecoderSync.load()) {
                 const uint64_t packetsWithoutFrame = m_packetsSinceLastDecodedFrame.fetch_add(1) + 1;
                 const int64_t lastDecodedTickMs = m_lastDecodedFrameTickMs.load();
+                const int64_t firstDecoderInputTickMs = m_firstDecoderInputTickMs.load();
                 const int64_t stalledForMs =
-                    (lastDecodedTickMs > 0) ? (nowTickMs - lastDecodedTickMs) : 0;
+                    (lastDecodedTickMs > 0)
+                        ? (nowTickMs - lastDecodedTickMs)
+                        : ((firstDecoderInputTickMs > 0) ? (nowTickMs - firstDecoderInputTickMs) : 0);
                 const uint64_t packetThreshold =
                     packet.isDiscontinuity() ? (m_decoderStallPacketThreshold / 2)
                                              : m_decoderStallPacketThreshold;
                 if (m_decoderStallRecoveryEnabled.load() &&
-                    lastDecodedTickMs > 0 &&
+                    ((lastDecodedTickMs > 0) || (firstDecoderInputTickMs > 0)) &&
                     stalledForMs >= m_decoderStallThresholdMs &&
                     packetsWithoutFrame >= std::max<uint64_t>(1, packetThreshold)) {
                     const bool canBridgeToSoftware =
@@ -1111,6 +1180,7 @@ private:
                     m_loggedWaitingForDecoderSync.store(false);
                     m_loggedFirstPacketToDecoder.store(false);
                     m_packetsSinceLastDecodedFrame.store(0);
+                    m_firstDecoderInputTickMs.store(0);
                     m_lastDecodedFrameTickMs.store(0);
                     swCWarning(kSwLogCategory_SwVideoPipeline) << "[SwVideoPipeline] Decoder selected codec="
                                 << static_cast<int>(packet.codec())
@@ -1143,6 +1213,8 @@ private:
                 packetToFeed.setDiscontinuity(true);
                 m_loggedWaitingForDecoderSync.store(false);
             }
+            int64_t firstInputExpected = 0;
+            m_firstDecoderInputTickMs.compare_exchange_strong(firstInputExpected, nowTickMs);
             if (!m_loggedFirstPacketToDecoder.exchange(true)) {
                 swCWarning(kSwLogCategory_SwVideoPipeline) << "[SwVideoPipeline] First packet to decoder "
                             << " codec=" << static_cast<int>(packet.codec())
@@ -1218,6 +1290,7 @@ private:
             }
             m_lastDecodedFrameTickMs.store(monotonicMs_());
             m_packetsSinceLastDecodedFrame.store(0);
+            m_firstDecoderInputTickMs.store(0);
             publishConsumerPressure_();
             if (downstream) {
                 downstream(frame);
@@ -1255,6 +1328,7 @@ private:
     std::atomic<bool> m_waitingForDecoderSync{false};
     std::atomic<bool> m_loggedWaitingForDecoderSync{false};
     std::atomic<int64_t> m_lastPacketTickMs{0};
+    std::atomic<int64_t> m_firstDecoderInputTickMs{0};
     std::atomic<int64_t> m_lastDecodedFrameTickMs{0};
     std::atomic<uint64_t> m_packetsSinceLastDecodedFrame{0};
     std::atomic<uint64_t> m_recoveryEpoch{1};

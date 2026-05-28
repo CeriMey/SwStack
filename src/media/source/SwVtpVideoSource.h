@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <thread>
 
@@ -172,8 +173,17 @@ public:
         m_lastPingUs = 0;
         m_lastStatsUs = 0;
         m_lastNackUs = 0;
+        m_lastKeyFrameRequestUs = 0;
+        m_lastRecoveryEmitUs = 0;
+        m_lastReconnectProbeUs = 0;
+        m_lastAcceptUs = 0;
+        m_lastVideoReceiveUs = 0;
+        m_noVideoRecoveryActive = false;
         m_lastNackFrameId = 0;
         m_lastFrameId = 0;
+        m_lastVideoPtsUs = -1;
+        m_videoFrameIntervalUs = kDefaultVideoFrameIntervalUs;
+        m_lastTimestampNormalizeLogUs = 0;
         m_nextSyncId = 1;
         m_rateWindowStartUs = nowUs_();
         m_rateWindowDatagramBytes = 0;
@@ -285,6 +295,12 @@ private:
         return static_cast<uint32_t>(value);
     }
 
+    static uint64_t saturatedAddUs_(uint64_t lhs, uint64_t rhs) {
+        return lhs > std::numeric_limits<uint64_t>::max() - rhs
+                   ? std::numeric_limits<uint64_t>::max()
+                   : lhs + rhs;
+    }
+
     SwByteArray makeControlDatagram_(SwVtpMessageType type,
                                      const SwByteArray& payload) const {
         SwVtpDatagram datagram;
@@ -316,6 +332,72 @@ private:
         ping.clientSendTimeUs = nowUs_();
         m_lastPingUs = ping.clientSendTimeUs;
         sendControl_(transport, SwVtpMessageType::Ping, swVtpSerializeClockSyncPing(ping));
+    }
+
+    bool sendKeyFrameRequest_(SwVtpUdpTransport& transport, uint64_t now) {
+        static constexpr uint64_t kKeyFrameRequestCooldownUs = 500000ULL;
+        if (!m_streamConfig.isValid()) {
+            return false;
+        }
+        if (m_lastKeyFrameRequestUs != 0U &&
+            now < m_lastKeyFrameRequestUs + kKeyFrameRequestCooldownUs) {
+            return false;
+        }
+        if (!sendControl_(transport, SwVtpMessageType::KeyFrameRequest, SwByteArray())) {
+            return false;
+        }
+        m_lastKeyFrameRequestUs = now;
+        return true;
+    }
+
+    void triggerVideoResync_(SwVtpUdpTransport& transport,
+                             uint64_t now,
+                             const SwString& reason) {
+        sendKeyFrameRequest_(transport, now);
+        if (m_lastRecoveryEmitUs != 0U &&
+            now >= m_lastRecoveryEmitUs &&
+            now - m_lastRecoveryEmitUs < kRecoveryEmitCooldownUs) {
+            return;
+        }
+        m_lastRecoveryEmitUs = now;
+        swCWarning(kSwLogCategory_SwVtpVideoSource)
+            << "[SwVtpVideoSource] Video reference lost, requesting decoder resync"
+            << " reason=" << reason;
+        emitRecovery(SwMediaSource::RecoveryEvent::Kind::LiveCut, reason);
+    }
+
+    void sendReconnectProbe_(SwVtpUdpTransport& transport,
+                             uint64_t now,
+                             uint64_t silentForUs) {
+        if (m_lastReconnectProbeUs != 0U &&
+            now >= m_lastReconnectProbeUs &&
+            now - m_lastReconnectProbeUs < kReconnectProbeIntervalUs) {
+            return;
+        }
+        m_lastReconnectProbeUs = now;
+
+        if (!m_noVideoRecoveryActive) {
+            m_noVideoRecoveryActive = true;
+            m_reassembler.reset();
+            m_klvReassembler.reset();
+            m_lastFrameId = 0;
+            m_lastNackFrameId = 0;
+            m_lastNackUs = 0;
+            m_lastKeyFrameRequestUs = 0;
+            m_lastVideoPtsUs = -1;
+            m_videoFrameIntervalUs = kDefaultVideoFrameIntervalUs;
+            emitRecovery(SwMediaSource::RecoveryEvent::Kind::Reconnect,
+                         "No SwVTP video received; reconnect probe");
+        }
+
+        swCWarning(kSwLogCategory_SwVtpVideoSource)
+            << "[SwVtpVideoSource] No video received, probing reconnect"
+            << " silentForMs=" << (silentForUs / 1000ULL)
+            << " accepted=" << (m_streamConfig.isValid() ? 1 : 0);
+
+        sendClockPing_(transport);
+        sendAnnouncement_(transport);
+        sendKeyFrameRequest_(transport, now);
     }
 
     void sendAnnouncement_(SwVtpUdpTransport& transport) {
@@ -371,10 +453,13 @@ private:
         if (pressure.hardPressure) {
             stats.receiveQueueMs = std::max<uint16_t>(stats.receiveQueueMs, 80U);
         }
-        stats.decodeQueueMs = pressure.decoderStalled
-                                  ? clampU16_(static_cast<uint64_t>(
-                                        std::max<std::int64_t>(0, pressure.stalledForMs)))
-                                  : 0U;
+        stats.decodeQueueMs =
+            pressure.decoderStalled
+                ? clampU16_(std::max<uint64_t>(
+                      80ULL,
+                      static_cast<uint64_t>(
+                          std::max<std::int64_t>(0, pressure.stalledForMs))))
+                : 0U;
         stats.transferLatencyMs = clampU16_(
             static_cast<uint64_t>(metrics.averageTransferLatencyMs() + 0.5));
         stats.captureLatencyMs = clampU16_(
@@ -389,6 +474,9 @@ private:
             m_lastStatsUs = now;
             std::lock_guard<std::mutex> lock(m_metricsMutex);
             m_metrics.estimatedBandwidthKbps = stats.estimatedBandwidthKbps;
+        }
+        if (pressure.hardPressure || pressure.decoderStalled) {
+            sendKeyFrameRequest_(transport, now);
         }
     }
 
@@ -408,14 +496,19 @@ private:
             (m_lastStatsUs == 0U || now - m_lastStatsUs > 250000ULL)) {
             sendReceiverStats_(transport, now);
         }
-        if (m_lastPacketTime.time_since_epoch().count() != 0) {
-            const auto elapsed =
-                std::chrono::duration_cast<std::chrono::seconds>(
-                    std::chrono::steady_clock::now() - m_lastPacketTime).count();
-            if (elapsed > 3) {
-                emitStatus(StreamState::Recovering,
-                           SwString("No SwVTP data received for ") +
-                               SwString::number(static_cast<int>(elapsed)) + SwString(" s"));
+        if (m_streamConfig.isValid()) {
+            const uint64_t lastVideoUs = m_lastVideoReceiveUs != 0U
+                                             ? m_lastVideoReceiveUs
+                                             : m_lastAcceptUs;
+            if (lastVideoUs != 0U && now > lastVideoUs) {
+                const uint64_t silentForUs = now - lastVideoUs;
+                if (silentForUs > kNoVideoReconnectTimeoutUs) {
+                    emitStatus(StreamState::Recovering,
+                               SwString("No SwVTP video received for ") +
+                                   SwString::number(static_cast<int>(silentForUs / 1000000ULL)) +
+                                   SwString(" s"));
+                    sendReconnectProbe_(transport, now, silentForUs);
+                }
             }
         }
     }
@@ -454,7 +547,7 @@ private:
                 continue;
             }
             if (datagram.header.messageType == SwVtpMessageType::Accept) {
-                handleAccept_(datagram.payload);
+                handleAccept_(transport, datagram.payload);
                 continue;
             }
             if (datagram.header.messageType == SwVtpMessageType::StreamConfig) {
@@ -499,18 +592,23 @@ private:
         publishMetrics_();
     }
 
-    void handleAccept_(const SwByteArray& payload) {
+    void handleAccept_(SwVtpUdpTransport& transport, const SwByteArray& payload) {
         SwVtpStreamConfig config;
         if (!swVtpParseStreamConfigPayload(payload, config)) {
             return;
         }
+        const uint64_t now = nowUs_();
         m_streamConfig = config;
+        m_lastAcceptUs = now;
+        m_lastReconnectProbeUs = 0;
+        m_noVideoRecoveryActive = false;
         {
             std::lock_guard<std::mutex> lock(m_metricsMutex);
             m_metrics.accepted = true;
         }
         updateVideoTrack_(config.codec);
         emitStatus(StreamState::Streaming, "SwVTP accepted");
+        sendKeyFrameRequest_(transport, now);
         publishMetrics_();
     }
 
@@ -606,8 +704,9 @@ private:
             addKlvTrack_();
         }
 
+        const SwVtpDatagram reassemblyDatagram = datagramWithClientDeadline_(datagram);
         SwVtpKlvReassembler::PushResult push =
-            m_klvReassembler.pushDatagram(datagram, receiveUs);
+            m_klvReassembler.pushDatagram(reassemblyDatagram, receiveUs);
         const SwVtpKlvReassembler::Snapshot snapshot = m_klvReassembler.snapshot();
         if (push.completed()) {
             {
@@ -625,6 +724,100 @@ private:
             m_metrics.klvDroppedPackets = snapshot.droppedSamples;
         }
         publishMetrics_();
+    }
+
+    SwVtpDatagram datagramWithClientDeadline_(const SwVtpDatagram& datagram) const {
+        if (datagram.header.deadlineUs == 0U) {
+            return datagram;
+        }
+
+        SwVtpDatagram normalized = datagram;
+        const bool videoFragment = datagram.header.trackType == SwVtpTrackType::Video;
+        const bool videoSyncFragment =
+            videoFragment &&
+            (datagram.header.hasFlag(SwVtpFlag_KeyFrame) ||
+             datagram.header.hasFlag(SwVtpFlag_CodecConfig));
+        if (videoSyncFragment) {
+            normalized.header.deadlineUs = 0;
+            return normalized;
+        }
+
+        uint64_t clientDeadlineUs = 0;
+        if (swVtpServerTimeToClientTime(datagram.header.deadlineUs,
+                                        m_clockEstimate,
+                                        clientDeadlineUs)) {
+            const uint64_t latencyBudgetUs =
+                datagram.header.sendTimeUs == 0U
+                    ? 0U
+                    : swVtpPositiveDelta(datagram.header.deadlineUs,
+                                         datagram.header.sendTimeUs);
+            if (latencyBudgetUs != 0U &&
+                m_clockEstimate.oneWayUncertaintyUs >= latencyBudgetUs) {
+                normalized.header.deadlineUs = 0;
+                return normalized;
+            }
+            if (videoFragment) {
+                uint32_t targetKbps = 0;
+                uint64_t averageTransferUs = 0;
+                uint64_t maxTransferUs = 0;
+                {
+                    std::lock_guard<std::mutex> lock(m_metricsMutex);
+                    targetKbps = m_metrics.negotiatedTargetBitrateKbps;
+                    if (m_metrics.transferLatencySamples != 0U) {
+                        averageTransferUs =
+                            m_metrics.transferLatencyTotalUs /
+                            m_metrics.transferLatencySamples;
+                        maxTransferUs = m_metrics.transferLatencyMaxUs;
+                    }
+                }
+                const uint64_t observedTransferUs =
+                    std::max(averageTransferUs, maxTransferUs);
+                if ((targetKbps != 0U && targetKbps <= kDeadlineBypassLowBitrateKbps) ||
+                    (latencyBudgetUs != 0U &&
+                     observedTransferUs >= latencyBudgetUs * kDeadlineBypassLatencyFactor)) {
+                    normalized.header.deadlineUs = 0;
+                    return normalized;
+                }
+            }
+            uint64_t deadlineSlackUs = m_clockEstimate.oneWayUncertaintyUs;
+            if (videoFragment) {
+                static constexpr uint64_t kFragmentDeadlineSlackPerFragmentUs = 2000ULL;
+                static constexpr uint64_t kMaxFragmentDeadlineSlackUs = 500000ULL;
+                static constexpr uint64_t kMaxObservedDeadlineSlackUs = 2000000ULL;
+                const uint64_t fragmentSlackUs = std::min<uint64_t>(
+                    kMaxFragmentDeadlineSlackUs,
+                    static_cast<uint64_t>(datagram.header.fragmentCount) *
+                        kFragmentDeadlineSlackPerFragmentUs);
+                deadlineSlackUs = saturatedAddUs_(deadlineSlackUs, fragmentSlackUs);
+
+                uint64_t averageTransferUs = 0;
+                uint64_t maxTransferUs = 0;
+                {
+                    std::lock_guard<std::mutex> lock(m_metricsMutex);
+                    if (m_metrics.transferLatencySamples != 0U) {
+                        averageTransferUs =
+                            m_metrics.transferLatencyTotalUs /
+                            m_metrics.transferLatencySamples;
+                        maxTransferUs = m_metrics.transferLatencyMaxUs;
+                    }
+                }
+                const uint64_t observedTransferUs =
+                    std::max(averageTransferUs, maxTransferUs);
+                if (latencyBudgetUs != 0U && observedTransferUs > latencyBudgetUs) {
+                    deadlineSlackUs = saturatedAddUs_(
+                        deadlineSlackUs,
+                        std::min<uint64_t>(kMaxObservedDeadlineSlackUs,
+                                           observedTransferUs - latencyBudgetUs));
+                }
+            }
+            normalized.header.deadlineUs =
+                clientDeadlineUs > std::numeric_limits<uint64_t>::max() - deadlineSlackUs
+                    ? 0U
+                    : clientDeadlineUs + deadlineSlackUs;
+        } else {
+            normalized.header.deadlineUs = 0;
+        }
+        return normalized;
     }
 
     void addLatencySample_(const SwVtpFrameLatencySample& latency) {
@@ -650,6 +843,50 @@ private:
             m_metrics.captureLatencyMaxUs =
                 std::max(m_metrics.captureLatencyMaxUs, latency.captureToReceiveUs);
         }
+    }
+
+    SwVideoPacket normalizeCompletedVideoPacket_(const SwVideoPacket& packet,
+                                                 uint64_t receiveUs) {
+        SwVideoPacket normalized = packet;
+        normalized.setClockRate(packet.clockRate() > 0 ? packet.clockRate() : 1000000);
+
+        std::int64_t ptsUs = normalized.pts();
+        if (ptsUs < 0 && normalized.dts() >= 0) {
+            ptsUs = normalized.dts();
+        }
+        if (ptsUs < 0) {
+            ptsUs = m_lastVideoPtsUs >= 0
+                        ? m_lastVideoPtsUs + m_videoFrameIntervalUs
+                        : 0;
+        }
+
+        if (m_lastVideoPtsUs >= 0) {
+            const std::int64_t deltaUs = ptsUs - m_lastVideoPtsUs;
+            if (deltaUs > 0) {
+                if (deltaUs >= kMinTrackedFrameIntervalUs &&
+                    deltaUs <= kMaxTrackedFrameIntervalUs) {
+                    m_videoFrameIntervalUs = deltaUs;
+                }
+            } else {
+                const std::int64_t inputPtsUs = ptsUs;
+                ptsUs = m_lastVideoPtsUs + m_videoFrameIntervalUs;
+                if (m_lastTimestampNormalizeLogUs == 0U ||
+                    receiveUs < m_lastTimestampNormalizeLogUs ||
+                    receiveUs - m_lastTimestampNormalizeLogUs >= kTimestampNormalizeLogCooldownUs) {
+                    m_lastTimestampNormalizeLogUs = receiveUs;
+                    swCWarning(kSwLogCategory_SwVtpVideoSource)
+                        << "[SwVtpVideoSource] Normalizing backward video timestamp"
+                        << " previousPtsUs=" << m_lastVideoPtsUs
+                        << " packetPtsUs=" << inputPtsUs
+                        << " syntheticPtsUs=" << ptsUs;
+                }
+            }
+        }
+
+        normalized.setPts(ptsUs);
+        normalized.setDts(ptsUs);
+        m_lastVideoPtsUs = ptsUs;
+        return normalized;
     }
 
     void maybeSendNack_(SwVtpUdpTransport& transport,
@@ -706,9 +943,12 @@ private:
     }
 
     void handleFrameFragment_(SwVtpUdpTransport& transport,
-                              const SwVtpDatagram& datagram,
-                              std::size_t datagramBytes) {
+                               const SwVtpDatagram& datagram,
+                               std::size_t datagramBytes) {
         const uint64_t receiveUs = nowUs_();
+        m_lastVideoReceiveUs = receiveUs;
+        m_lastReconnectProbeUs = 0;
+        m_noVideoRecoveryActive = false;
         const uint32_t previousFrameId = m_lastFrameId;
         const bool movedToNewerFrame =
             previousFrameId != 0U && datagram.header.frameId > previousFrameId;
@@ -727,16 +967,32 @@ private:
         }
 
         updateVideoTrack_(datagram.header.codec);
+        const SwVtpDatagram reassemblyDatagram = datagramWithClientDeadline_(datagram);
+        const SwVtpFrameReassembler::Snapshot previousSnapshot = m_reassembler.snapshot();
         SwVtpFrameReassembler::PushResult push =
-            m_reassembler.pushDatagram(datagram, receiveUs);
+            m_reassembler.pushDatagram(reassemblyDatagram, receiveUs);
         const SwVtpFrameReassembler::Snapshot snapshot = m_reassembler.snapshot();
+        const bool droppedVideoReference =
+            snapshot.droppedFrames > previousSnapshot.droppedFrames;
+        const bool staleVideoFragment =
+            snapshot.staleFragments > previousSnapshot.staleFragments;
+        if (droppedVideoReference || staleVideoFragment) {
+            triggerVideoResync_(
+                transport,
+                receiveUs,
+                droppedVideoReference
+                    ? SwString("SwVTP video frame dropped; waiting for keyframe")
+                    : SwString("SwVTP video fragment stale; waiting for keyframe"));
+        }
+
         bool completed = false;
         std::size_t completedBytes = 0;
         if (push.completed()) {
             completed = true;
             completedBytes = push.packet.payload().size();
+            SwVideoPacket outputPacket = normalizeCompletedVideoPacket_(push.packet, receiveUs);
             emitStatus(StreamState::Streaming, "SwVTP streaming");
-            emitPacket(push.packet);
+            emitPacket(outputPacket);
         } else if (datagram.header.fragmentCount > 1U) {
             maybeSendNack_(transport,
                            datagram.header.streamId,
@@ -825,8 +1081,16 @@ private:
     uint64_t m_lastHelloUs{0};
     uint64_t m_lastStatsUs{0};
     uint64_t m_lastNackUs{0};
+    uint64_t m_lastKeyFrameRequestUs{0};
+    uint64_t m_lastRecoveryEmitUs{0};
+    uint64_t m_lastTimestampNormalizeLogUs{0};
+    uint64_t m_lastReconnectProbeUs{0};
+    uint64_t m_lastAcceptUs{0};
+    uint64_t m_lastVideoReceiveUs{0};
     uint32_t m_lastFrameId{0};
     uint32_t m_lastNackFrameId{0};
+    std::int64_t m_lastVideoPtsUs{-1};
+    std::int64_t m_videoFrameIntervalUs{33333};
     uint64_t m_rateWindowStartUs{0};
     uint64_t m_rateWindowDatagramBytes{0};
     uint64_t m_rateWindowVideoBytes{0};
@@ -836,6 +1100,16 @@ private:
     MetricsCallback m_metricsCallback{};
     std::thread m_worker{};
     std::atomic<bool> m_stopRequested{false};
+    bool m_noVideoRecoveryActive{false};
     static constexpr uint64_t kMinNackIntervalUs = 2000ULL;
     static constexpr uint64_t kNackRetransmitBudgetUs = 15000ULL;
+    static constexpr uint32_t kDeadlineBypassLowBitrateKbps = 500U;
+    static constexpr uint64_t kDeadlineBypassLatencyFactor = 4ULL;
+    static constexpr uint64_t kRecoveryEmitCooldownUs = 500000ULL;
+    static constexpr uint64_t kTimestampNormalizeLogCooldownUs = 1000000ULL;
+    static constexpr uint64_t kNoVideoReconnectTimeoutUs = 3000000ULL;
+    static constexpr uint64_t kReconnectProbeIntervalUs = 1000000ULL;
+    static constexpr std::int64_t kDefaultVideoFrameIntervalUs = 33333;
+    static constexpr std::int64_t kMinTrackedFrameIntervalUs = 1000;
+    static constexpr std::int64_t kMaxTrackedFrameIntervalUs = 250000;
 };

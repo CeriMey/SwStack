@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
+#include <mutex>
 #include <utility>
 
 #include <QByteArray>
@@ -28,6 +29,7 @@
 #include "SwWidgetPlatformAdapter.h"
 #include "gui/qtbinding/SwQtBindingEventPump.h"
 #include "gui/qtbinding/SwQtBindingWin32WidgetHost.h"
+#include "source/SwVtpVideoSource.h"
 
 #if defined(_WIN32)
 #include "platform/win/SwWindows.h"
@@ -91,6 +93,9 @@ public:
         video_->setScalingMode(SwVideoWidget::ScalingMode::Fit);
         video_->setBackgroundColor({8, 8, 8});
         video_->setVideoSink(videoSink_);
+        videoSink_->setDedicatedDecodeThreadEnabled(true);
+        videoSink_->setDecodeQueueLimits(6, 2 * 1024 * 1024);
+        videoSink_->setDecoderStallRecoveryEnabled(true);
 
         SwVerticalLayout* layout = new SwVerticalLayout(this);
         layout->setMargin(0);
@@ -219,6 +224,7 @@ private:
             videoSink_->setPreferredVideoDecoder(SwVideoPacket::Codec::AV1, openOptions.decoderId);
         }
         videoSink_->setVideoSource(videoSource);
+        bindSwVtpMetrics_(source_);
         if (startAfterOpen) {
             startCurrentSource_();
         }
@@ -260,7 +266,99 @@ private:
         }
         source_->setMediaPacketCallback(SwMediaSource::MediaPacketCallback());
         source_->setRecoveryCallback(SwMediaSource::RecoveryCallback());
+        if (auto swvtpSource = std::dynamic_pointer_cast<SwVtpVideoSource>(source_)) {
+            swvtpSource->setMetricsCallback(SwVtpVideoSource::MetricsCallback());
+        }
         callbacksBound_ = false;
+    }
+
+    void bindSwVtpMetrics_(const std::shared_ptr<SwMediaSource>& source) {
+        auto swvtpSource = std::dynamic_pointer_cast<SwVtpVideoSource>(source);
+        if (!swvtpSource) {
+            return;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(swVtpMetricsLogMutex_);
+            lastSwVtpMetricsLogTime_ = std::chrono::steady_clock::time_point{};
+            lastSwVtpDatagrams_ = 0;
+            lastSwVtpFramesCompleted_ = 0;
+            lastSwVtpKlvPacketsCompleted_ = 0;
+            lastSwVtpAccepted_ = false;
+            loggedSwVtpMetrics_ = false;
+        }
+
+        std::weak_ptr<int> weakGuard = callbackGuard_;
+        swvtpSource->setMetricsCallback(
+            [this, weakGuard](const SwVtpVideoSourceMetrics& metrics) {
+                if (weakGuard.expired()) {
+                    return;
+                }
+                logSwVtpMetrics_(metrics);
+            });
+
+        swCWarning("sw.exemples.qtstaticvideo")
+            << "[SwQtVideoPlayerWidget] SwVTP metrics callback bound";
+    }
+
+    void logSwVtpMetrics_(const SwVtpVideoSourceMetrics& metrics) {
+        const auto now = std::chrono::steady_clock::now();
+        uint64_t presentedFrames = 0;
+        SwVideoSource::StreamStatus status;
+        if (videoSink_) {
+            presentedFrames = videoSink_->presentedFrameCount();
+            status = videoSink_->streamStatus();
+        }
+
+        bool shouldLog = false;
+        {
+            std::lock_guard<std::mutex> lock(swVtpMetricsLogMutex_);
+            const bool acceptedChanged = metrics.accepted != lastSwVtpAccepted_;
+            const bool datagramsChanged = metrics.datagramsReceived != lastSwVtpDatagrams_;
+            const bool framesChanged = metrics.framesCompleted != lastSwVtpFramesCompleted_;
+            const bool klvChanged = metrics.klvPacketsCompleted != lastSwVtpKlvPacketsCompleted_;
+            const auto elapsedMs =
+                lastSwVtpMetricsLogTime_.time_since_epoch().count() == 0
+                    ? 0
+                    : std::chrono::duration_cast<std::chrono::milliseconds>(
+                          now - lastSwVtpMetricsLogTime_).count();
+
+            shouldLog =
+                !loggedSwVtpMetrics_ ||
+                acceptedChanged ||
+                (framesChanged && elapsedMs >= 500) ||
+                (klvChanged && elapsedMs >= 1000) ||
+                (datagramsChanged && metrics.framesCompleted == 0 && elapsedMs >= 1000);
+
+            if (!shouldLog) {
+                return;
+            }
+
+            loggedSwVtpMetrics_ = true;
+            lastSwVtpMetricsLogTime_ = now;
+            lastSwVtpDatagrams_ = metrics.datagramsReceived;
+            lastSwVtpFramesCompleted_ = metrics.framesCompleted;
+            lastSwVtpKlvPacketsCompleted_ = metrics.klvPacketsCompleted;
+            lastSwVtpAccepted_ = metrics.accepted;
+        }
+
+        swCWarning("sw.exemples.qtstaticvideo")
+            << "[SwQtVideoPlayerWidget] SwVTP metrics"
+            << " accepted=" << (metrics.accepted ? 1 : 0)
+            << " clockSynced=" << (metrics.clockSynced ? 1 : 0)
+            << " localPort=" << metrics.localPort
+            << " announced=" << metrics.announcedAddress
+            << " datagrams=" << metrics.datagramsReceived
+            << " udpBytes=" << metrics.datagramBytesReceived
+            << " framesCompleted=" << metrics.framesCompleted
+            << " videoBytes=" << metrics.videoBytesCompleted
+            << " klvPackets=" << metrics.klvPacketsCompleted
+            << " droppedFrames=" << metrics.droppedFrames
+            << " duplicateFragments=" << metrics.duplicateFragments
+            << " staleFragments=" << metrics.staleFragments
+            << " liveVideoKbps=" << metrics.liveVideoKbps
+            << " presentedFrames=" << presentedFrames
+            << " sinkState=" << static_cast<int>(status.state);
     }
 
     SwVideoWidget* video_{nullptr};
@@ -273,6 +371,13 @@ private:
     bool playing_{false};
     std::chrono::steady_clock::time_point lastStartTime_{};
     std::chrono::steady_clock::time_point lastRestartTime_{};
+    std::mutex swVtpMetricsLogMutex_{};
+    std::chrono::steady_clock::time_point lastSwVtpMetricsLogTime_{};
+    uint64_t lastSwVtpDatagrams_{0};
+    uint64_t lastSwVtpFramesCompleted_{0};
+    uint64_t lastSwVtpKlvPacketsCompleted_{0};
+    bool lastSwVtpAccepted_{false};
+    bool loggedSwVtpMetrics_{false};
 };
 
 } // namespace

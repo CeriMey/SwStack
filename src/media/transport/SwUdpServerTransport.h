@@ -10,6 +10,8 @@
 #include "media/server/SwVideoTransportServer.h"
 
 #include <mutex>
+#include <utility>
+#include <vector>
 
 class SwUdpServerTransport : public SwVideoTransportServer {
 public:
@@ -51,15 +53,17 @@ public:
             return false;
         }
 
-        const SwString bindAddress = config().endpoint.bindAddress.isEmpty()
-                                         ? SwString("0.0.0.0")
-                                         : config().endpoint.bindAddress;
+        const SwString bindAddress = bindAddressFromConfig_();
         m_socket.close();
         m_socket.setBroadcastEnabled(config().endpoint.deliveryMode ==
                                      SwMediaTransportDeliveryMode::Broadcast);
         if (!m_socket.bind(bindAddress,
                            0,
                            SwUdpSocket::ShareAddress | SwUdpSocket::ReuseAddressHint)) {
+            return false;
+        }
+        if (!configureSocketOptionsLocked_()) {
+            m_socket.close();
             return false;
         }
         m_running = true;
@@ -89,8 +93,27 @@ public:
         ++m_metrics.framesAccepted;
         m_metrics.videoBytesAccepted += packet.payload().size();
 
-        const SwByteArray datagram = makeDatagramLocked_(*stream, packet);
-        if (datagram.isEmpty() || !sendDatagramLocked_(datagram)) {
+        const std::vector<SwByteArray> datagrams = makeDatagramsLocked_(*stream, packet);
+        if (datagrams.empty()) {
+            ++m_metrics.framesDropped;
+            ++m_metrics.transport.sendFailures;
+            return false;
+        }
+
+        bool sentAll = true;
+        size_t bytesSent = 0U;
+        size_t datagramsSent = 0U;
+        for (size_t i = 0; i < datagrams.size(); ++i) {
+            const SwByteArray& datagram = datagrams[i];
+            if (datagram.isEmpty() || !sendDatagramLocked_(datagram)) {
+                sentAll = false;
+                break;
+            }
+            bytesSent += datagram.size();
+            ++datagramsSent;
+        }
+
+        if (!sentAll) {
             ++m_metrics.framesDropped;
             ++m_metrics.transport.sendFailures;
             return false;
@@ -98,8 +121,8 @@ public:
 
         ++m_metrics.framesSent;
         m_metrics.videoBytesSent += packet.payload().size();
-        ++m_metrics.transport.datagramsSent;
-        m_metrics.transport.bytesSent += datagram.size();
+        m_metrics.transport.datagramsSent += datagramsSent;
+        m_metrics.transport.bytesSent += bytesSent;
         return true;
     }
 
@@ -113,6 +136,16 @@ protected:
                                             const SwVideoPacket& packet) {
         (void)stream;
         return packet.payload();
+    }
+
+    virtual std::vector<SwByteArray> makeDatagramsLocked_(const SwVideoPublishStream& stream,
+                                                          const SwVideoPacket& packet) {
+        std::vector<SwByteArray> datagrams;
+        SwByteArray datagram = makeDatagramLocked_(stream, packet);
+        if (!datagram.isEmpty()) {
+            datagrams.push_back(std::move(datagram));
+        }
+        return datagrams;
     }
 
     bool sendDatagramLocked_(const SwByteArray& datagram) {
@@ -151,6 +184,32 @@ private:
         return endpoint.host.isEmpty() || endpoint.host == "0.0.0.0"
                    ? SwString()
                    : endpoint.host;
+    }
+
+    SwString bindAddressFromConfig_() const {
+        if (!config().endpoint.bindAddress.isEmpty() &&
+            config().endpoint.bindAddress != "0.0.0.0") {
+            return config().endpoint.bindAddress;
+        }
+        return destinationHostFromConfig_().contains(":") ? SwString("::") : SwString("0.0.0.0");
+    }
+
+    bool configureSocketOptionsLocked_() {
+        const SwTransportEndpoint& endpoint = config().endpoint;
+        if (endpoint.deliveryMode != SwMediaTransportDeliveryMode::Multicast) {
+            return true;
+        }
+        if (!m_socket.setMulticastTimeToLive(endpoint.ttl)) {
+            return false;
+        }
+        if (!m_socket.setMulticastLoopbackEnabled(endpoint.multicastLoopback)) {
+            return false;
+        }
+        if (!endpoint.interfaceAddress.isEmpty() &&
+            !m_socket.setMulticastInterface(endpoint.interfaceAddress)) {
+            return false;
+        }
+        return true;
     }
 
     SwString m_protocolName{};

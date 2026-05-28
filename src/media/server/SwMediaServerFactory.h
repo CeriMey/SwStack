@@ -14,7 +14,9 @@
 #include "media/transport/SwUdpServerTransport.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <memory>
+#include <string>
 
 class SwMediaServerFactory {
 public:
@@ -74,7 +76,7 @@ private:
         const SwString mode = url.queryValue("mode").toLower();
         if (mode == "broadcast" || endpoint.host == "255.255.255.255") {
             endpoint.deliveryMode = SwMediaTransportDeliveryMode::Broadcast;
-        } else if (mode == "multicast" || endpoint.host.startsWith("239.")) {
+        } else if (mode == "multicast" || isMulticastHost_(endpoint.host)) {
             endpoint.deliveryMode = SwMediaTransportDeliveryMode::Multicast;
         } else {
             endpoint.deliveryMode = SwMediaTransportDeliveryMode::Unicast;
@@ -97,5 +99,27 @@ private:
             break;
         }
         return 0;
+    }
+
+    static bool isIpv4MulticastHost_(const SwString& host) {
+        const std::string text = host.trimmed().toStdString();
+        if (text.empty() || text.find(':') != std::string::npos) {
+            return false;
+        }
+        const std::size_t dot = text.find('.');
+        if (dot == std::string::npos) {
+            return false;
+        }
+        const int firstOctet = std::atoi(text.substr(0, dot).c_str());
+        return firstOctet >= 224 && firstOctet <= 239;
+    }
+
+    static bool isIpv6MulticastHost_(const SwString& host) {
+        const SwString normalized = host.trimmed().toLower();
+        return normalized.startsWith("ff");
+    }
+
+    static bool isMulticastHost_(const SwString& host) {
+        return isIpv4MulticastHost_(host) || isIpv6MulticastHost_(host);
     }
 };

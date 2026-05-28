@@ -6,6 +6,7 @@
  */
 
 #include "media/server/SwVideoTransportServer.h"
+#include "media/SwAv1Bitstream.h"
 #include "media/swvtp/SwVtpAv1.h"
 #include "media/swvtp/SwVtpFeedbackController.h"
 #include "media/swvtp/SwVtpKlv.h"
@@ -15,6 +16,7 @@
 #include <atomic>
 #include <chrono>
 #include <deque>
+#include <limits>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -49,6 +51,7 @@ public:
         m_streamConfig.trackType = SwVtpTrackType::Video;
         m_streamConfig.codec = swVtpCodecFromVideoCodec_(stream.codec);
         m_streamConfig.endpoint = endpointFromConfig_();
+        m_av1SequenceHeader = SwByteArray();
         refreshKlvConfigLocked_();
         return m_streamConfig.isValid();
     }
@@ -96,7 +99,6 @@ public:
         m_recentFragments.clear();
         m_metrics.transport.activeClients = 0;
         m_running = false;
-        m_lastDatagramSendUs = 0;
     }
 
     bool isRunning() const override {
@@ -161,13 +163,35 @@ public:
 
 protected:
     virtual bool writeDatagram_(const SwByteArray& datagram) {
-        std::vector<Client> clients;
+        struct ClientEndpoint {
+            uint32_t ipv4{0};
+            uint16_t port{0};
+        };
+
+        ClientEndpoint singleClient;
+        bool hasSingleClient = false;
+        std::vector<ClientEndpoint> clients;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
-            clients = m_clients;
+            if (m_clients.empty()) {
+                return false;
+            }
+            if (m_clients.size() == 1U) {
+                singleClient.ipv4 = m_clients.front().ipv4;
+                singleClient.port = m_clients.front().port;
+                hasSingleClient = true;
+            } else {
+                clients.reserve(m_clients.size());
+                for (std::size_t i = 0; i < m_clients.size(); ++i) {
+                    ClientEndpoint endpoint;
+                    endpoint.ipv4 = m_clients[i].ipv4;
+                    endpoint.port = m_clients[i].port;
+                    clients.push_back(endpoint);
+                }
+            }
         }
-        if (clients.empty()) {
-            return false;
+        if (hasSingleClient) {
+            return sendDatagramToClient_(datagram, singleClient.ipv4, singleClient.port);
         }
         bool allSent = true;
         for (std::size_t i = 0; i < clients.size(); ++i) {
@@ -305,6 +329,8 @@ private:
                 handleReceiverStats_(datagram.payload, packet.senderIpv4, packet.senderPort);
             } else if (datagram.header.messageType == SwVtpMessageType::Nack) {
                 handleNack_(datagram, packet.senderIpv4, packet.senderPort);
+            } else if (datagram.header.messageType == SwVtpMessageType::KeyFrameRequest) {
+                handleKeyFrameRequest_(datagram, packet.senderIpv4, packet.senderPort);
             }
         }
     }
@@ -336,6 +362,8 @@ private:
         }
         if (announcement.clientIpv4 == kSwVtpIpv4Any) {
             announcement.clientIpv4 = senderIpv4;
+        }
+        if (announcement.receivePort == 0U) {
             announcement.receivePort = senderPort;
         }
         if (!swVtpStreamConfigAcceptsClient(m_streamConfig, announcement)) {
@@ -399,6 +427,25 @@ private:
                               senderPort);
     }
 
+    void handleKeyFrameRequest_(const SwVtpDatagram& datagram,
+                                uint32_t senderIpv4,
+                                uint16_t senderPort) {
+        const SwString clientId = ipv4ToString_(senderIpv4) + ":" + SwString::number(senderPort);
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            markClientSeenLocked_(senderIpv4, senderPort);
+        }
+
+        SwVideoServerClientFeedback feedback;
+        feedback.clientId = clientId;
+        feedback.streamId = SwString::number(static_cast<int>(
+            datagram.header.streamId != 0U ? datagram.header.streamId : m_streamConfig.streamId));
+        feedback.targetBitrateKbps = m_feedbackController.targetBitrateKbps();
+        feedback.encoderBitrateKbps = feedback.targetBitrateKbps;
+        feedback.requestKeyFrame = true;
+        emitClientFeedback(feedback);
+    }
+
     void handleNack_(const SwVtpDatagram& datagram,
                      uint32_t senderIpv4,
                      uint16_t senderPort) {
@@ -432,16 +479,18 @@ private:
             }
         }
 
+        uint64_t retransmitDatagrams = 0;
+        uint64_t retransmitBytes = 0;
         for (std::size_t i = 0; i < retransmit.size(); ++i) {
             if (sendDatagramToClient_(retransmit[i], senderIpv4, senderPort)) {
-                std::lock_guard<std::mutex> lock(m_mutex);
-                ++m_metrics.transport.datagramsSent;
-                m_metrics.transport.bytesSent += retransmit[i].size();
+                ++retransmitDatagrams;
+                retransmitBytes += static_cast<uint64_t>(retransmit[i].size());
             } else {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 ++m_metrics.transport.sendFailures;
             }
         }
+        addSentDatagramMetrics_(retransmitDatagrams, retransmitBytes);
     }
 
     void sendBitrateControl_(const Client& client) {
@@ -476,6 +525,17 @@ private:
         }
         if (m_clients.size() < config().maxClients || config().maxClients == 0U) {
             m_clients.push_back(client);
+            return;
+        }
+
+        auto oldest = std::min_element(
+            m_clients.begin(),
+            m_clients.end(),
+            [](const Client& lhs, const Client& rhs) {
+                return lhs.lastSeenUs < rhs.lastSeenUs;
+            });
+        if (oldest != m_clients.end()) {
+            *oldest = client;
         }
     }
 
@@ -506,12 +566,25 @@ private:
     void cacheFrameFragment_(const SwVtpDatagram& datagram,
                              const SwByteArray& bytes,
                              uint64_t nowUs) {
+        CachedFragment fragment;
+        if (!makeCachedFrameFragment_(datagram, bytes, nowUs, fragment)) {
+            return;
+        }
+        std::vector<CachedFragment> fragments;
+        fragments.push_back(fragment);
+        cacheFrameFragments_(fragments, nowUs);
+    }
+
+    bool makeCachedFrameFragment_(const SwVtpDatagram& datagram,
+                                  const SwByteArray& bytes,
+                                  uint64_t nowUs,
+                                  CachedFragment& fragment) const {
         if (datagram.header.messageType != SwVtpMessageType::FrameFragment ||
             datagram.header.trackType != SwVtpTrackType::Video ||
             datagram.header.fragmentCount == 0U) {
-            return;
+            return false;
         }
-        CachedFragment fragment;
+        fragment = CachedFragment();
         fragment.streamId = datagram.header.streamId;
         fragment.trackId = datagram.header.trackId;
         fragment.frameId = datagram.header.frameId;
@@ -519,62 +592,65 @@ private:
         fragment.fragmentCount = datagram.header.fragmentCount;
         fragment.storedAtUs = nowUs;
         fragment.bytes = bytes;
+        return true;
+    }
 
+    void cacheFrameFragments_(const std::vector<CachedFragment>& fragments,
+                              uint64_t nowUs) {
+        if (fragments.empty()) {
+            return;
+        }
         std::lock_guard<std::mutex> lock(m_mutex);
         trimFragmentCacheLocked_(nowUs);
-        for (auto it = m_recentFragments.begin(); it != m_recentFragments.end(); ++it) {
-            if (it->streamId == fragment.streamId &&
-                it->trackId == fragment.trackId &&
-                it->frameId == fragment.frameId &&
-                it->fragmentIndex == fragment.fragmentIndex) {
-                *it = fragment;
-                return;
-            }
+        for (std::size_t i = 0; i < fragments.size(); ++i) {
+            m_recentFragments.push_back(fragments[i]);
         }
-        m_recentFragments.push_back(fragment);
         trimFragmentCacheLocked_(nowUs);
     }
 
-    void cacheSerializedFrameFragment_(const SwByteArray& bytes, uint64_t nowUs) {
-        SwVtpDatagram datagram;
-        if (swVtpParseDatagram(bytes, datagram)) {
-            cacheFrameFragment_(datagram, bytes, nowUs);
+    void addSentDatagramMetrics_(uint64_t datagrams, uint64_t bytes) {
+        if (datagrams == 0U && bytes == 0U) {
+            return;
         }
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_metrics.transport.datagramsSent += datagrams;
+        m_metrics.transport.bytesSent += bytes;
     }
 
-    uint64_t pacingIntervalUs_(std::size_t bytes) const {
-        uint32_t targetKbps = 0;
-        {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            targetKbps = m_metrics.targetBitrateKbps;
-        }
-        if (targetKbps == 0U || bytes == 0U) {
-            return 0U;
-        }
-        const uint64_t intervalUs =
-            (static_cast<uint64_t>(bytes) * 8ULL * 1000ULL) /
-            static_cast<uint64_t>(targetKbps);
-        if (intervalUs < kMinSleepPacingIntervalUs) {
-            return 0U;
-        }
-        return std::min<uint64_t>(intervalUs, kMaxPacingIntervalUs);
+    void addPublishedFrameMetrics_(uint64_t datagrams,
+                                   uint64_t transportBytes,
+                                   uint64_t videoBytes) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_metrics.transport.datagramsSent += datagrams;
+        m_metrics.transport.bytesSent += transportBytes;
+        ++m_metrics.framesSent;
+        m_metrics.videoBytesSent += videoBytes;
+    }
+
+    void addSendFailureDroppedFrame_() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        ++m_metrics.transport.sendFailures;
+        ++m_metrics.framesDropped;
+    }
+
+    static uint64_t saturatedAddUs_(uint64_t lhs, uint64_t rhs) {
+        return lhs > std::numeric_limits<uint64_t>::max() - rhs
+                   ? std::numeric_limits<uint64_t>::max()
+                   : lhs + rhs;
+    }
+
+    uint64_t estimatedFrameDeadlineSlackUs_(std::size_t payloadBytes,
+                                             std::size_t maxPayloadBytes) const {
+        (void)payloadBytes;
+        (void)maxPayloadBytes;
+        return 0U;
     }
 
     bool sendDatagramToClient_(const SwByteArray& datagram,
                                uint32_t ipv4,
                                uint16_t port) {
         std::lock_guard<std::mutex> sendLock(m_sendMutex);
-        const uint64_t intervalUs = pacingIntervalUs_(static_cast<std::size_t>(datagram.size()));
-        if (intervalUs > 0U && m_lastDatagramSendUs != 0U) {
-            const uint64_t now = nowUs_();
-            const uint64_t dueUs = m_lastDatagramSendUs + intervalUs;
-            if (dueUs > now) {
-                std::this_thread::sleep_for(std::chrono::microseconds(dueUs - now));
-            }
-        }
-        const bool ok = m_udp.send(datagram, ipv4, port);
-        m_lastDatagramSendUs = nowUs_();
-        return ok;
+        return m_udp.send(datagram, ipv4, port);
     }
 
     SwVtpUdpEndpoint endpointFromConfig_() const {
@@ -615,8 +691,18 @@ private:
         const uint64_t nowUs = nowUs_();
         const uint64_t ptsUs = packetPtsUs_(packet, nowUs);
         const uint64_t captureTimeUs = packetCaptureTimeUs_(packet, nowUs);
+        const uint64_t deadlineSlackUs =
+            estimatedFrameDeadlineSlackUs_(payloadBytes, maxPayloadBytes);
         const uint64_t deadlineUs =
-            nowUs + static_cast<uint64_t>(m_stream.latencyBudgetMs) * 1000ULL;
+            saturatedAddUs_(saturatedAddUs_(nowUs,
+                                            static_cast<uint64_t>(m_stream.latencyBudgetMs) *
+                                                1000ULL),
+                            deadlineSlackUs);
+
+        std::vector<CachedFragment> cachedFragments;
+        cachedFragments.reserve(fragmentCount);
+        uint64_t sentDatagrams = 0;
+        uint64_t sentBytes = 0;
 
         for (uint16_t fragmentIndex = 0; fragmentIndex < fragmentCount; ++fragmentIndex) {
             const std::size_t begin = static_cast<std::size_t>(fragmentIndex) * maxPayloadBytes;
@@ -653,20 +739,22 @@ private:
             datagram.payload = payload.mid(static_cast<int>(begin), static_cast<int>(count));
 
             const SwByteArray bytes = swVtpSerializeDatagram(datagram);
-            cacheFrameFragment_(datagram, bytes, datagram.header.sendTimeUs);
+            CachedFragment cachedFragment;
+            if (makeCachedFrameFragment_(datagram, bytes, datagram.header.sendTimeUs, cachedFragment)) {
+                cachedFragments.push_back(cachedFragment);
+            }
             if (!writeDatagram_(bytes)) {
-                std::lock_guard<std::mutex> lock(m_mutex);
-                ++m_metrics.framesDropped;
-                ++m_metrics.transport.sendFailures;
+                cacheFrameFragments_(cachedFragments, nowUs);
+                addSendFailureDroppedFrame_();
                 return false;
             }
-            std::lock_guard<std::mutex> lock(m_mutex);
-            ++m_metrics.transport.datagramsSent;
-            m_metrics.transport.bytesSent += bytes.size();
+            ++sentDatagrams;
+            sentBytes += static_cast<uint64_t>(bytes.size());
         }
-        std::lock_guard<std::mutex> lock(m_mutex);
-        ++m_metrics.framesSent;
-        m_metrics.videoBytesSent += payload.size();
+        cacheFrameFragments_(cachedFragments, nowUs);
+        addPublishedFrameMetrics_(sentDatagrams,
+                                  sentBytes,
+                                  static_cast<uint64_t>(payload.size()));
         return true;
     }
 
@@ -680,32 +768,75 @@ private:
         options.latencyBudgetUs = static_cast<uint64_t>(m_stream.latencyBudgetMs) * 1000ULL;
         options.maxDatagramBytes = std::max<std::size_t>(config().mtuBytes,
                                                          kSwVtpHeaderBytes + 1U);
+        options.deadlineSlackUs = estimatedFrameDeadlineSlackUs_(
+            static_cast<std::size_t>(packet.payload().size()),
+            options.maxDatagramBytes - kSwVtpHeaderBytes);
 
-        const SwVtpAv1PacketizerResult packetized =
-            SwVtpAv1Packetizer::packetize(packet, options);
+        SwVideoPacket packetWithCachedConfig;
+        const SwVideoPacket* packetToPublish = &packet;
+        SwVtpAv1PacketizerResult packetized =
+            SwVtpAv1Packetizer::packetize(*packetToPublish, options);
         if (!packetized.ok) {
             std::lock_guard<std::mutex> lock(m_mutex);
             ++m_metrics.framesDropped;
             return false;
         }
 
+        if (!packetized.sequenceHeader.isEmpty()) {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_av1SequenceHeader = packetized.sequenceHeader;
+        } else if (packet.isKeyFrame()) {
+            SwByteArray cachedSequenceHeader;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                cachedSequenceHeader = m_av1SequenceHeader;
+            }
+            if (!cachedSequenceHeader.isEmpty()) {
+                packetWithCachedConfig = packet;
+                packetWithCachedConfig.setPayload(
+                    SwAv1Bitstream::insertSequenceHeader(packet.payload(),
+                                                         cachedSequenceHeader));
+                packetToPublish = &packetWithCachedConfig;
+                options.deadlineSlackUs = estimatedFrameDeadlineSlackUs_(
+                    static_cast<std::size_t>(packetToPublish->payload().size()),
+                    options.maxDatagramBytes - kSwVtpHeaderBytes);
+                packetized = SwVtpAv1Packetizer::packetize(*packetToPublish, options);
+                if (!packetized.ok) {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    ++m_metrics.framesDropped;
+                    return false;
+                }
+            }
+        }
+
+        std::vector<CachedFragment> cachedFragments;
+        cachedFragments.reserve(packetized.serializedDatagrams.size());
+        for (std::size_t i = 0; i < packetized.serializedDatagrams.size(); ++i) {
+            CachedFragment cachedFragment;
+            if (makeCachedFrameFragment_(packetized.datagrams[i],
+                                         packetized.serializedDatagrams[i],
+                                         options.nowUs,
+                                         cachedFragment)) {
+                cachedFragments.push_back(cachedFragment);
+            }
+        }
+        cacheFrameFragments_(cachedFragments, options.nowUs);
+
+        uint64_t sentDatagrams = 0;
+        uint64_t sentBytes = 0;
         for (auto it = packetized.serializedDatagrams.begin();
              it != packetized.serializedDatagrams.end();
              ++it) {
-            cacheSerializedFrameFragment_(*it, options.nowUs);
             if (!writeDatagram_(*it)) {
-                std::lock_guard<std::mutex> lock(m_mutex);
-                ++m_metrics.transport.sendFailures;
-                ++m_metrics.framesDropped;
+                addSendFailureDroppedFrame_();
                 return false;
             }
-            std::lock_guard<std::mutex> lock(m_mutex);
-            ++m_metrics.transport.datagramsSent;
-            m_metrics.transport.bytesSent += it->size();
+            ++sentDatagrams;
+            sentBytes += static_cast<uint64_t>(it->size());
         }
-        std::lock_guard<std::mutex> lock(m_mutex);
-        ++m_metrics.framesSent;
-        m_metrics.videoBytesSent += packet.payload().size();
+        addPublishedFrameMetrics_(sentDatagrams,
+                                  sentBytes,
+                                  static_cast<uint64_t>(packetToPublish->payload().size()));
         return true;
     }
 
@@ -733,6 +864,8 @@ private:
             return false;
         }
 
+        uint64_t sentDatagrams = 0;
+        uint64_t sentBytes = 0;
         for (auto it = packetized.serializedDatagrams.begin();
              it != packetized.serializedDatagrams.end();
              ++it) {
@@ -741,10 +874,10 @@ private:
                 ++m_metrics.transport.sendFailures;
                 return false;
             }
-            std::lock_guard<std::mutex> lock(m_mutex);
-            ++m_metrics.transport.datagramsSent;
-            m_metrics.transport.bytesSent += it->size();
+            ++sentDatagrams;
+            sentBytes += static_cast<uint64_t>(it->size());
         }
+        addSentDatagramMetrics_(sentDatagrams, sentBytes);
         return true;
     }
 
@@ -752,6 +885,7 @@ private:
     SwVtpStreamConfig m_streamConfig{};
     SwMediaTrack m_klvTrack{};
     SwVtpStreamConfig m_klvConfig{};
+    SwByteArray m_av1SequenceHeader{};
     SwVideoServerMetrics m_metrics{};
     SwVtpFeedbackController m_feedbackController{};
     SwVtpUdpTransport m_udp{};
@@ -761,12 +895,9 @@ private:
     std::atomic<bool> m_stopRequested{false};
     mutable std::mutex m_mutex;
     mutable std::mutex m_sendMutex;
-    uint64_t m_lastDatagramSendUs{0};
     uint32_t m_nextFrameId{1};
     uint32_t m_nextKlvId{1};
     bool m_running{false};
-    static constexpr std::size_t kFragmentCacheMaxDatagrams = 2048U;
-    static constexpr uint64_t kFragmentCacheMaxAgeUs = 500000ULL;
-    static constexpr uint64_t kMinSleepPacingIntervalUs = 1000ULL;
-    static constexpr uint64_t kMaxPacingIntervalUs = 2000ULL;
+    static constexpr std::size_t kFragmentCacheMaxDatagrams = 16384U;
+    static constexpr uint64_t kFragmentCacheMaxAgeUs = 3000000ULL;
 };

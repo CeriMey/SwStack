@@ -224,7 +224,7 @@ int main(int argc, char** argv) {
     player->setAudioEnabled(false);
     player->setMetadataEnabled(true);
     player->videoSink()->setDedicatedDecodeThreadEnabled(true);
-    player->videoSink()->setDecodeQueueLimits(4, 1024 * 1024);
+    player->videoSink()->setDecodeQueueLimits(6, 2 * 1024 * 1024);
     player->videoSink()->setDecoderStallRecoveryEnabled(true);
     video->setVideoSink(player->videoSink());
 

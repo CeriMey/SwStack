@@ -655,6 +655,7 @@ inline void swWidgetScheduleDamageWake_(long long delayUs) {
     timerId = app->addTimer([]() {
         swWidgetDamageWakeTimerId_() = 0;
         swWidgetDamageWakeDeadlineNs_() = 0;
+        SwWidgetPlatformAdapter::flushDamage();
     }, static_cast<int>(requestedDelayUs), true, SwFiberLane::Control);
 }
 

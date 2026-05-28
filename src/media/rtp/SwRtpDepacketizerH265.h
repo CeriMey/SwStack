@@ -314,6 +314,7 @@ private:
                                  static_cast<std::int64_t>(timestamp),
                                  static_cast<std::int64_t>(timestamp),
                                   m_currentKeyFrame);
+            packet.setClockRate(90000);
             if (recoveryAccepted || m_emitDiscontinuityOnNextFrame) {
                 packet.setDiscontinuity(true);
                 m_emitDiscontinuityOnNextFrame = false;

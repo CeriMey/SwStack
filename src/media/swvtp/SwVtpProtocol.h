@@ -243,6 +243,7 @@ struct SwVtpAdaptiveBitratePolicy {
     uint32_t minBitrateKbps{500};
     uint32_t maxBitrateKbps{20000};
     uint32_t startBitrateKbps{4000};
+    uint32_t congestionFloorKbps{150};
     uint16_t targetQueueMs{30};
     uint16_t hardQueueMs{80};
     uint16_t highLossPermille{20};
@@ -307,9 +308,9 @@ public:
             decision.reason = SwVtpAdaptiveBitrateDecision::Reason::Startup;
         }
 
-        const bool clientQueueHard =
-            stats.receiveQueueMs >= m_policy.hardQueueMs ||
-            stats.renderQueueMs >= m_policy.hardQueueMs;
+        const bool receiveQueueHard = stats.receiveQueueMs >= m_policy.hardQueueMs;
+        const bool renderQueueHard = stats.renderQueueMs >= m_policy.hardQueueMs;
+        const bool clientQueueHard = receiveQueueHard || renderQueueHard;
         const bool decoderHard = stats.decodeQueueMs >= m_policy.hardQueueMs;
         const bool networkHard =
             stats.lossPermille >= m_policy.criticalLossPermille ||
@@ -322,17 +323,24 @@ public:
             stats.receiveQueueMs >= m_policy.targetQueueMs ||
             stats.renderQueueMs >= m_policy.targetQueueMs ||
             stats.decodeQueueMs >= m_policy.targetQueueMs;
+        const bool measuredCongestion =
+            networkHard || networkSoft || clientQueueHard || decoderHard || queueSoft;
         const uint32_t bandwidthCeilingKbps = bandwidthCeiling_(stats);
         const bool bandwidthPressure =
-            bandwidthCeilingKbps > 0U && m_targetBitrateKbps > bandwidthCeilingKbps;
+            measuredCongestion &&
+            bandwidthCeilingKbps > 0U &&
+            m_targetBitrateKbps > bandwidthCeilingKbps;
+        bool congestionLimited = false;
 
         if (networkHard || clientQueueHard || decoderHard) {
             m_targetBitrateKbps = scaledBitrate_(m_targetBitrateKbps,
                                                  m_policy.fastDownshiftPercent);
             applyBandwidthCeiling_(bandwidthCeilingKbps);
+            congestionLimited = bandwidthCeilingKbps > 0U &&
+                                m_targetBitrateKbps <= bandwidthCeilingKbps;
             m_lastPressureMs = nowMs;
             m_haveLastPressure = true;
-            decision.requestKeyFrame = networkHard || decoderHard;
+            decision.requestKeyFrame = networkHard || decoderHard || receiveQueueHard;
             decision.preferBaseTemporalLayer = true;
             decision.reason = decoderHard
                                   ? SwVtpAdaptiveBitrateDecision::Reason::DecoderPressure
@@ -343,6 +351,8 @@ public:
             m_targetBitrateKbps = scaledBitrate_(m_targetBitrateKbps,
                                                  m_policy.softDownshiftPercent);
             applyBandwidthCeiling_(bandwidthCeilingKbps);
+            congestionLimited = bandwidthCeilingKbps > 0U &&
+                                m_targetBitrateKbps <= bandwidthCeilingKbps;
             m_lastPressureMs = nowMs;
             m_haveLastPressure = true;
             decision.preferBaseTemporalLayer = true;
@@ -351,6 +361,7 @@ public:
                                   : SwVtpAdaptiveBitrateDecision::Reason::NetworkPressure;
         } else if (bandwidthPressure) {
             m_targetBitrateKbps = bandwidthCeilingKbps;
+            congestionLimited = true;
             m_lastPressureMs = nowMs;
             m_haveLastPressure = true;
             decision.preferBaseTemporalLayer = true;
@@ -365,7 +376,9 @@ public:
             decision.reason = SwVtpAdaptiveBitrateDecision::Reason::Stable;
         }
 
-        m_targetBitrateKbps = clampBitrate_(m_targetBitrateKbps);
+        m_targetBitrateKbps = congestionLimited
+                                  ? clampCongestionBitrate_(m_targetBitrateKbps)
+                                  : clampBitrate_(m_targetBitrateKbps);
         decision.targetBitrateKbps = m_targetBitrateKbps;
         return decision;
     }
@@ -375,6 +388,14 @@ private:
         const uint32_t minBitrate = m_policy.minBitrateKbps == 0U ? 1U : m_policy.minBitrateKbps;
         const uint32_t maxBitrate = std::max(minBitrate, m_policy.maxBitrateKbps);
         return std::min(maxBitrate, std::max(minBitrate, bitrateKbps));
+    }
+
+    uint32_t clampCongestionBitrate_(uint32_t bitrateKbps) const {
+        const uint32_t floorBitrate = m_policy.congestionFloorKbps == 0U
+                                          ? 1U
+                                          : m_policy.congestionFloorKbps;
+        const uint32_t maxBitrate = std::max(floorBitrate, m_policy.maxBitrateKbps);
+        return std::min(maxBitrate, std::max(floorBitrate, bitrateKbps));
     }
 
     uint32_t scaledBitrate_(uint32_t bitrateKbps, uint16_t percent) const {
@@ -393,8 +414,8 @@ private:
         if (stats.estimatedBandwidthKbps == 0U) {
             return 0U;
         }
-        return clampBitrate_(scaleRaw_(stats.estimatedBandwidthKbps,
-                                       m_policy.bandwidthSafetyPercent));
+        return clampCongestionBitrate_(scaleRaw_(stats.estimatedBandwidthKbps,
+                                                 m_policy.bandwidthSafetyPercent));
     }
 
     void applyBandwidthCeiling_(uint32_t bandwidthCeilingKbps) {
@@ -412,7 +433,9 @@ private:
             nowMs < m_lastPressureMs + m_policy.upshiftCooldownMs) {
             return false;
         }
-        if (stats.lossPermille != 0U || stats.nackPermille != 0U) {
+        if (stats.lossPermille != 0U ||
+            stats.nackPermille != 0U ||
+            stats.jitterMs >= m_policy.highJitterMs) {
             return false;
         }
         if (stats.receiveQueueMs != 0U && stats.receiveQueueMs >= m_policy.targetQueueMs / 2U) {
@@ -424,12 +447,7 @@ private:
         if (stats.renderQueueMs != 0U && stats.renderQueueMs >= m_policy.targetQueueMs / 2U) {
             return false;
         }
-        if (stats.estimatedBandwidthKbps == 0U) {
-            return m_targetBitrateKbps < m_policy.maxBitrateKbps;
-        }
-        return scaledBitrate_(m_targetBitrateKbps, m_policy.upshiftPercent) <=
-               clampBitrate_(scaleRaw_(stats.estimatedBandwidthKbps,
-                                       m_policy.upshiftBandwidthHeadroomPercent));
+        return m_targetBitrateKbps < m_policy.maxBitrateKbps;
     }
 
     SwVtpAdaptiveBitratePolicy m_policy{};
@@ -678,7 +696,6 @@ inline bool SwVtpClientAnnouncement::isValid() const {
 inline bool swVtpClientAnnouncementPayloadIsWellFormed(
     const SwVtpClientAnnouncement& client) {
     return client.streamId != 0U &&
-           client.receivePort != 0U &&
            (client.clientIpv4 == kSwVtpIpv4Any ||
             swVtpIsIpv4UnicastAddress(client.clientIpv4));
 }

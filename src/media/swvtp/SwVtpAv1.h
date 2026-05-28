@@ -5,45 +5,16 @@
  * @brief AV1-aware SwVTP packetization and deadline-based reassembly.
  */
 
+#include "media/SwAv1Bitstream.h"
 #include "media/SwVideoPacket.h"
 #include "media/swvtp/SwVtpProtocol.h"
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <vector>
-
-enum class SwVtpAv1ObuType : uint8_t {
-    Reserved0 = 0,
-    SequenceHeader = 1,
-    TemporalDelimiter = 2,
-    FrameHeader = 3,
-    TileGroup = 4,
-    Metadata = 5,
-    Frame = 6,
-    RedundantFrameHeader = 7,
-    TileList = 8,
-    Padding = 15
-};
-
-struct SwVtpAv1Obu {
-    std::size_t offset{0};
-    std::size_t headerBytes{0};
-    std::size_t payloadOffset{0};
-    std::size_t payloadBytes{0};
-    std::size_t totalBytes{0};
-    SwVtpAv1ObuType type{SwVtpAv1ObuType::Reserved0};
-    bool hasExtension{false};
-    bool hasSizeField{false};
-    uint8_t temporalLayer{0};
-    uint8_t spatialLayer{0};
-
-    bool overlaps(std::size_t begin, std::size_t end) const {
-        const std::size_t obuEnd = offset + totalBytes;
-        return begin < obuEnd && end > offset;
-    }
-};
 
 struct SwVtpAv1PacketizerOptions {
     uint16_t streamId{1};
@@ -52,6 +23,7 @@ struct SwVtpAv1PacketizerOptions {
     uint64_t nowUs{0};
     uint64_t captureTimeUs{0};
     uint64_t latencyBudgetUs{70000};
+    uint64_t deadlineSlackUs{0};
     std::size_t maxDatagramBytes{1200};
     uint8_t temporalLayer{0};
     uint8_t spatialLayer{0};
@@ -61,120 +33,9 @@ struct SwVtpAv1PacketizerResult {
     bool ok{false};
     bool keyFrame{false};
     bool containsSequenceHeader{false};
+    SwByteArray sequenceHeader{};
     SwList<SwVtpDatagram> datagrams{};
     SwList<SwByteArray> serializedDatagrams{};
-};
-
-class SwVtpAv1Parser {
-public:
-    static bool readLeb128(const uint8_t* data,
-                           std::size_t size,
-                           std::size_t& offset,
-                           uint64_t& value,
-                           std::size_t& bytesRead) {
-        value = 0;
-        bytesRead = 0;
-        uint32_t shift = 0;
-        while (bytesRead < 8U) {
-            if (!data || offset >= size) {
-                return false;
-            }
-            const uint8_t byte = data[offset++];
-            ++bytesRead;
-            value |= static_cast<uint64_t>(byte & 0x7FU) << shift;
-            if ((byte & 0x80U) == 0U) {
-                return true;
-            }
-            shift += 7U;
-        }
-        return false;
-    }
-
-    static SwList<SwVtpAv1Obu> parseObus(const SwByteArray& payload) {
-        SwList<SwVtpAv1Obu> out;
-        const uint8_t* data = reinterpret_cast<const uint8_t*>(payload.constData());
-        const std::size_t size = static_cast<std::size_t>(payload.size());
-        if (!data || size == 0U) {
-            return out;
-        }
-
-        std::size_t offset = 0;
-        while (offset < size) {
-            const std::size_t obuOffset = offset;
-            const uint8_t header = data[offset++];
-            if ((header & 0x80U) != 0U) {
-                break;
-            }
-
-            SwVtpAv1Obu obu;
-            obu.offset = obuOffset;
-            obu.type = static_cast<SwVtpAv1ObuType>((header >> 3U) & 0x0FU);
-            obu.hasExtension = (header & 0x04U) != 0U;
-            obu.hasSizeField = (header & 0x02U) != 0U;
-
-            if (obu.hasExtension) {
-                if (offset >= size) {
-                    break;
-                }
-                const uint8_t extension = data[offset++];
-                obu.temporalLayer = static_cast<uint8_t>((extension >> 5U) & 0x07U);
-                obu.spatialLayer = static_cast<uint8_t>((extension >> 3U) & 0x03U);
-            }
-
-            uint64_t obuPayloadBytes = 0;
-            std::size_t sizeFieldBytes = 0;
-            if (obu.hasSizeField) {
-                if (!readLeb128(data, size, offset, obuPayloadBytes, sizeFieldBytes)) {
-                    break;
-                }
-            } else {
-                obuPayloadBytes = static_cast<uint64_t>(size - offset);
-            }
-
-            if (obuPayloadBytes > static_cast<uint64_t>(size - offset)) {
-                break;
-            }
-
-            obu.headerBytes = offset - obuOffset;
-            obu.payloadOffset = offset;
-            obu.payloadBytes = static_cast<std::size_t>(obuPayloadBytes);
-            obu.totalBytes = obu.headerBytes + obu.payloadBytes;
-            out.append(obu);
-            offset += obu.payloadBytes;
-        }
-        return out;
-    }
-
-    static bool containsObuType(const SwList<SwVtpAv1Obu>& obus, SwVtpAv1ObuType type) {
-        for (SwList<SwVtpAv1Obu>::const_iterator it = obus.begin(); it != obus.end(); ++it) {
-            if (it->type == type) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    static bool fragmentOverlapsObuType(const SwList<SwVtpAv1Obu>& obus,
-                                        std::size_t begin,
-                                        std::size_t end,
-                                        SwVtpAv1ObuType type) {
-        for (SwList<SwVtpAv1Obu>::const_iterator it = obus.begin(); it != obus.end(); ++it) {
-            if (it->type == type && it->overlaps(begin, end)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    static uint8_t highestTemporalLayer(const SwList<SwVtpAv1Obu>& obus) {
-        uint8_t layer = 0;
-        for (SwList<SwVtpAv1Obu>::const_iterator it = obus.begin(); it != obus.end(); ++it) {
-            if (it->temporalLayer > layer) {
-                layer = it->temporalLayer;
-            }
-        }
-        return layer;
-    }
 };
 
 class SwVtpAv1Packetizer {
@@ -199,17 +60,25 @@ public:
         }
 
         const uint16_t fragmentCount = static_cast<uint16_t>(fragmentCountSize);
-        const SwList<SwVtpAv1Obu> obus = SwVtpAv1Parser::parseObus(payload);
-        const bool containsSequenceHeader =
-            SwVtpAv1Parser::containsObuType(obus, SwVtpAv1ObuType::SequenceHeader);
-        const bool keyFrame = packet.isKeyFrame() || containsSequenceHeader;
+        const SwList<SwAv1ObuInfo> obus = SwAv1Bitstream::parseObus(payload);
+        const SwByteArray sequenceHeader =
+            SwAv1Bitstream::collectSequenceHeader(payload, obus);
+        const bool containsSequenceHeader = !sequenceHeader.isEmpty();
+        const bool keyFrame = packet.isKeyFrame();
         const uint64_t ptsUs = packet.pts() >= 0
                                    ? static_cast<uint64_t>(packet.pts())
                                    : options.nowUs;
-        const uint64_t deadlineUs = options.nowUs + options.latencyBudgetUs;
+        uint64_t deadlineUs = options.nowUs + options.latencyBudgetUs;
+        if (deadlineUs < options.nowUs ||
+            deadlineUs > std::numeric_limits<uint64_t>::max() - options.deadlineSlackUs) {
+            deadlineUs = std::numeric_limits<uint64_t>::max();
+        } else {
+            deadlineUs += options.deadlineSlackUs;
+        }
 
         result.keyFrame = keyFrame;
         result.containsSequenceHeader = containsSequenceHeader;
+        result.sequenceHeader = sequenceHeader;
         result.datagrams.reserve(fragmentCount);
         result.serializedDatagrams.reserve(fragmentCount);
 
@@ -219,10 +88,10 @@ public:
             const std::size_t count = std::min(maxPayloadBytes, remaining);
             const std::size_t end = begin + count;
             const bool sequenceFragment =
-                SwVtpAv1Parser::fragmentOverlapsObuType(obus,
-                                                         begin,
-                                                         end,
-                                                         SwVtpAv1ObuType::SequenceHeader);
+                SwAv1Bitstream::fragmentOverlapsObuType(obus,
+                                                        begin,
+                                                        end,
+                                                        SwAv1ObuType::SequenceHeader);
 
             SwVtpDatagram datagram;
             datagram.payload = payload.mid(static_cast<int>(begin), static_cast<int>(count));
@@ -234,7 +103,7 @@ public:
             datagram.header.codec = SwVtpCodec::AV1;
             datagram.header.temporalLayer =
                 options.temporalLayer != 0U ? options.temporalLayer
-                                            : SwVtpAv1Parser::highestTemporalLayer(obus);
+                                            : SwAv1Bitstream::highestTemporalLayer(obus);
             datagram.header.spatialLayer = options.spatialLayer;
             datagram.header.frameId = options.frameId;
             datagram.header.fragmentIndex = fragmentIndex;
@@ -510,7 +379,8 @@ private:
                              payload,
                              static_cast<std::int64_t>(state.firstHeader.ptsUs),
                              static_cast<std::int64_t>(state.firstHeader.ptsUs),
-                             state.keyFrame || state.codecConfig);
+                             state.keyFrame);
+        packet.setClockRate(1000000);
         packet.setDiscontinuity(state.discontinuity);
         return packet;
     }

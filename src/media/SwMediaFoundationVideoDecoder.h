@@ -64,6 +64,7 @@
  */
 
 #include "media/SwPlatformVideoDecoderIds.h"
+#include "media/SwAv1Bitstream.h"
 #include "media/SwVideoDecoder.h"
 #include "media/SwVideoPacket.h"
 #include "SwDebug.h"
@@ -564,6 +565,15 @@ private:
 
     void cacheSequenceHeader(const SwVideoPacket& packet) {
         if (!m_sequenceHeader.isEmpty() || packet.payload().isEmpty()) {
+            return;
+        }
+        if (packet.codec() == SwVideoPacket::Codec::AV1) {
+            m_sequenceHeader = SwAv1Bitstream::collectSequenceHeader(packet.payload());
+            if (!m_sequenceHeader.isEmpty() && !m_loggedSequenceHeader.exchange(true)) {
+                swCWarning(kSwLogCategory_SwMediaFoundationH264Decoder)
+                    << "[" << m_name << "] Cached AV1 sequence header bytes="
+                    << m_sequenceHeader.size();
+            }
             return;
         }
         if (packet.codec() != SwVideoPacket::Codec::H264 &&
@@ -1083,7 +1093,7 @@ private:
         sample->AddBuffer(buffer.Get());
 
         if (packet.pts() >= 0) {
-            const LONGLONG hns = static_cast<LONGLONG>((packet.pts() * 10000000LL) / 90000LL);
+            const LONGLONG hns = packetPtsToHns_(packet);
             sample->SetSampleTime(hns);
             sample->SetSampleDuration(0);
         }
@@ -1380,6 +1390,20 @@ private:
             return SwVideoPixelFormat::BGRA32;
         }
         return SwVideoPixelFormat::Unknown;
+    }
+
+    static LONGLONG packetPtsToHns_(const SwVideoPacket& packet) {
+        const std::int64_t pts = packet.pts();
+        const int clockRate = packet.clockRate() > 0 ? packet.clockRate() : 90000;
+        if (clockRate == 1000000) {
+            return static_cast<LONGLONG>(pts * 10LL);
+        }
+        if (clockRate == 10000000) {
+            return static_cast<LONGLONG>(pts);
+        }
+        return static_cast<LONGLONG>(
+            (static_cast<long double>(pts) * 10000000.0L) /
+            static_cast<long double>(clockRate));
     }
 
     SwVideoFrame wrapNativeFrame(IMFSample* sample, SwString& failureReason) {
