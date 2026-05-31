@@ -982,7 +982,13 @@ inline void SwX11PlatformIntegration::handleClientMessage(const XClientMessageEv
     }
 
     auto* window = findWindow(event.window);
-    if (!window || !window->callbacks().deleteHandler) {
+    if (!window) {
+        return;
+    }
+    if (window->callbacks().closeHandler && !window->callbacks().closeHandler()) {
+        return;
+    }
+    if (!window->callbacks().deleteHandler) {
         return;
     }
     if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
@@ -1251,8 +1257,23 @@ inline SwKeyEvent SwX11PlatformIntegration::toKeyEvent(const XKeyEvent& event) {
     keyEvent.alt = (event.state & Mod1Mask) != 0;
     keyEvent.system = false;
 
-    KeySym sym = XLookupKeysym(const_cast<XKeyEvent*>(&event), 0);
+    char textBuffer[32] = {};
+    KeySym sym = NoSymbol;
+    const int textLength = XLookupString(const_cast<XKeyEvent*>(&event),
+                                         textBuffer,
+                                         static_cast<int>(sizeof(textBuffer) - 1),
+                                         &sym,
+                                         nullptr);
     keyEvent.keyCode = static_cast<int>(sym);
+    if (textLength > 0 && !keyEvent.ctrl && !keyEvent.alt) {
+        textBuffer[std::min(textLength, static_cast<int>(sizeof(textBuffer) - 1))] = '\0';
+        const SwString text = SwString::fromUtf8(textBuffer, static_cast<size_t>(textLength));
+        const std::wstring wide = text.toStdWString();
+        if (!wide.empty()) {
+            keyEvent.text = wide[0];
+            keyEvent.textProvided = true;
+        }
+    }
     return keyEvent;
 }
 

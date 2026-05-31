@@ -49,6 +49,8 @@
 #include "SwDebug.h"
 
 #include <atomic>
+#include <cctype>
+#include <cstdio>
 #include <cstring>
 #include <cstdint>
 #include <string>
@@ -165,7 +167,7 @@ public:
             return false;
         }
 
-        // Validate adapter name (alphanumeric, dash, underscore, space only — prevents command injection)
+        // Validate adapter name (alphanumeric, dash, underscore, space only; prevents command injection)
         {
             std::string n = name.toStdString();
             if (n.empty() || n.size() > 64) {
@@ -206,6 +208,76 @@ public:
         m_open.store(true);
         registerDispatcher_();
         return true;
+    }
+
+    /**
+     * @brief Attach an already-created TUN file descriptor.
+     *
+     * Android creates VPN/TUN interfaces through android.net.VpnService and
+     * hands native code a file descriptor. This entry point lets the portable
+     * SwTun read/write path reuse that descriptor without trying to create or
+     * configure /dev/net/tun itself.
+     */
+    bool openFromFileDescriptor(int fd,
+                                const SwString& name,
+                                const SwString& address,
+                                int prefix,
+                                bool ownsFd = true) {
+#if defined(_WIN32)
+        SW_UNUSED(fd);
+        SW_UNUSED(name);
+        SW_UNUSED(address);
+        SW_UNUSED(prefix);
+        SW_UNUSED(ownsFd);
+        swCError(kSwLogCategory_SwTun)
+            << "[SwTun] openFromFileDescriptor is not supported on Windows";
+        return false;
+#else
+        if (m_open.load()) {
+            swCWarning(kSwLogCategory_SwTun) << "[SwTun] Already open";
+            return false;
+        }
+        if (fd < 0) {
+            swCError(kSwLogCategory_SwTun) << "[SwTun] Invalid TUN file descriptor";
+            return false;
+        }
+        if (prefix < 1 || prefix > 32) {
+            swCError(kSwLogCategory_SwTun) << "[SwTun] Invalid prefix: " << prefix;
+            return false;
+        }
+
+        std::string a = address.toStdString();
+        int octets[4] = {-1, -1, -1, -1};
+        int n = sscanf(a.c_str(), "%d.%d.%d.%d",
+                       &octets[0], &octets[1], &octets[2], &octets[3]);
+        if (n != 4 || octets[0] < 0 || octets[0] > 255 ||
+            octets[1] < 0 || octets[1] > 255 ||
+            octets[2] < 0 || octets[2] > 255 ||
+            octets[3] < 0 || octets[3] > 255) {
+            swCError(kSwLogCategory_SwTun) << "[SwTun] Invalid IPv4 address: " << a;
+            return false;
+        }
+
+        if (m_tunFd >= 0) {
+            closeLinux_();
+        }
+
+        m_tunFd = fd;
+        m_ownsTunFd = ownsFd;
+        m_linuxIfName = name.isEmpty() ? SwString("tun-fd") : name;
+
+        int flags = fcntl(m_tunFd, F_GETFL, 0);
+        if (flags >= 0) {
+            fcntl(m_tunFd, F_SETFL, flags | O_NONBLOCK);
+        }
+
+        m_name = m_linuxIfName;
+        m_address = address;
+        m_prefix = prefix;
+        m_open.store(true);
+        registerDispatcher_();
+        return true;
+#endif
     }
 
     /**
@@ -745,6 +817,7 @@ private:
         }
 
         m_tunFd = fd;
+        m_ownsTunFd = true;
         m_linuxIfName = SwString(ifr.ifr_name);
 
         // Configure IP (inputs already validated in open())
@@ -779,9 +852,12 @@ private:
 
     void closeLinux_() {
         if (m_tunFd >= 0) {
-            ::close(m_tunFd);
+            if (m_ownsTunFd) {
+                ::close(m_tunFd);
+            }
             m_tunFd = -1;
         }
+        m_ownsTunFd = true;
     }
 
     bool writeLinux_(const SwByteArray& packet) {
@@ -822,6 +898,7 @@ private:
     }
 
     int m_tunFd = -1;
+    bool m_ownsTunFd = true;
     SwString m_linuxIfName;
 
 #endif // _WIN32

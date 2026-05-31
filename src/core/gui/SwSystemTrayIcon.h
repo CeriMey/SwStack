@@ -32,12 +32,31 @@
 #ifndef NIN_KEYSELECT
 #define NIN_KEYSELECT (WM_USER + 1)
 #endif
+#ifndef NIIF_NONE
+#define NIIF_NONE 0x00000000
+#endif
+#ifndef NIIF_INFO
+#define NIIF_INFO 0x00000001
+#endif
+#ifndef NIIF_WARNING
+#define NIIF_WARNING 0x00000002
+#endif
+#ifndef NIIF_ERROR
+#define NIIF_ERROR 0x00000003
+#endif
 #endif
 
 class SwSystemTrayIcon : public SwObject {
     SW_OBJECT(SwSystemTrayIcon, SwObject)
 
 public:
+    enum class MessageIcon {
+        NoIcon,
+        Information,
+        Warning,
+        Critical
+    };
+
     explicit SwSystemTrayIcon(SwObject* parent = nullptr)
         : SwObject(parent) {}
 
@@ -94,7 +113,7 @@ public:
         nid.uCallbackMessage = SW_TRAY_MSG;
         nid.hIcon = loadIcon_();
         if (!m_tooltip.isEmpty()) {
-            std::wstring tip(m_tooltip.toStdString().begin(), m_tooltip.toStdString().end());
+            const std::wstring tip = toWide_(m_tooltip);
             wcsncpy_s(nid.szTip, tip.c_str(), 127);
         }
         Shell_NotifyIconW(NIM_ADD, &nid);
@@ -119,19 +138,15 @@ public:
 
     bool isVisible() const { return m_visible; }
 
-    enum class MessageIcon {
-        NoIcon,
-        Information,
-        Warning,
-        Critical
-    };
-
     void showMessage(const SwString& title,
                      const SwString& message,
                      MessageIcon icon = MessageIcon::Information,
                      int timeoutMs = 10000) {
 #ifdef _WIN32
-        if (!m_visible || !m_hwnd) {
+        if (!m_visible) {
+            show();
+        }
+        if (!m_visible || !m_hwnd || message.isEmpty()) {
             return;
         }
 
@@ -140,20 +155,21 @@ public:
         nid.hWnd = m_hwnd;
         nid.uID = 1;
         nid.uFlags = NIF_INFO;
-        const std::string titleText = title.toStdString();
-        const std::string messageText = message.toStdString();
-        const std::wstring wideTitle(titleText.begin(), titleText.end());
-        const std::wstring wideMessage(messageText.begin(), messageText.end());
-        wcsncpy_s(nid.szInfoTitle, wideTitle.c_str(), 63);
-        wcsncpy_s(nid.szInfo, wideMessage.c_str(), 255);
-        nid.uTimeout = timeoutMs > 0 ? static_cast<UINT>(timeoutMs) : 10000U;
-        nid.dwInfoFlags = messageIconFlag_(icon);
+        nid.dwInfoFlags = messageIconFlags_(icon);
+        if (timeoutMs > 0) {
+            nid.uTimeout = static_cast<UINT>(timeoutMs);
+        }
+
+        const std::wstring titleText = toWide_(title.isEmpty() ? m_tooltip : title);
+        const std::wstring messageText = toWide_(message);
+        wcsncpy_s(nid.szInfoTitle, titleText.empty() ? L"" : titleText.c_str(), static_cast<size_t>(-1));
+        wcsncpy_s(nid.szInfo, messageText.c_str(), static_cast<size_t>(-1));
         Shell_NotifyIconW(NIM_MODIFY, &nid);
 #else
-        SW_UNUSED(title);
-        SW_UNUSED(message);
-        SW_UNUSED(icon);
-        SW_UNUSED(timeoutMs);
+        (void)title;
+        (void)message;
+        (void)icon;
+        (void)timeoutMs;
 #endif
     }
 
@@ -184,16 +200,6 @@ private:
         return LoadIconW(nullptr, MAKEINTRESOURCEW(32512));
     }
 
-    static DWORD messageIconFlag_(MessageIcon icon) {
-        switch (icon) {
-        case MessageIcon::Information: return NIIF_INFO;
-        case MessageIcon::Warning: return NIIF_WARNING;
-        case MessageIcon::Critical: return NIIF_ERROR;
-        case MessageIcon::NoIcon:
-        default: return NIIF_NONE;
-        }
-    }
-
     void updateIcon_() {
         if (!m_visible || !m_hwnd) return;
         NOTIFYICONDATAW nid = {};
@@ -212,9 +218,54 @@ private:
         nid.hWnd = m_hwnd;
         nid.uID = 1;
         nid.uFlags = NIF_TIP;
-        std::wstring tip(m_tooltip.toStdString().begin(), m_tooltip.toStdString().end());
+        const std::wstring tip = toWide_(m_tooltip);
         wcsncpy_s(nid.szTip, tip.c_str(), 127);
         Shell_NotifyIconW(NIM_MODIFY, &nid);
+    }
+
+    static DWORD messageIconFlags_(MessageIcon icon) {
+        switch (icon) {
+        case MessageIcon::NoIcon:
+            return NIIF_NONE;
+        case MessageIcon::Warning:
+            return NIIF_WARNING;
+        case MessageIcon::Critical:
+            return NIIF_ERROR;
+        case MessageIcon::Information:
+        default:
+            return NIIF_INFO;
+        }
+    }
+
+    static std::wstring toWide_(const SwString& value) {
+        const std::string utf8 = value.toStdString();
+        if (utf8.empty()) {
+            return std::wstring();
+        }
+        const int required = MultiByteToWideChar(CP_UTF8,
+                                                 0,
+                                                 utf8.c_str(),
+                                                 -1,
+                                                 nullptr,
+                                                 0);
+        if (required <= 0) {
+            return std::wstring(utf8.begin(), utf8.end());
+        }
+
+        std::wstring wide(static_cast<size_t>(required), L'\0');
+        const int written = MultiByteToWideChar(CP_UTF8,
+                                                0,
+                                                utf8.c_str(),
+                                                -1,
+                                                &wide[0],
+                                                required);
+        if (written <= 0) {
+            return std::wstring(utf8.begin(), utf8.end());
+        }
+        if (!wide.empty() && wide.back() == L'\0') {
+            wide.pop_back();
+        }
+        return wide;
     }
 
     void showContextMenu_() {

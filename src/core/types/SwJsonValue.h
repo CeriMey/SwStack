@@ -496,6 +496,7 @@ public:
         case Type::Integer:
         case Type::Double:
         case Type::String:
+        case Type::Null:
             return true;
         }
         return false;

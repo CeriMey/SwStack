@@ -87,6 +87,7 @@
 #  include <errno.h>
 #  include <fcntl.h>
 #  include <sys/socket.h>
+#  include <sys/types.h>
 #  include <sys/un.h>
 #  include <pthread.h>
 #  include <signal.h>
@@ -94,6 +95,22 @@
 #  include <sys/mman.h>
 #  include <sys/stat.h>
 #  include <unistd.h>
+#endif
+
+#if defined(__ANDROID__)
+inline int swAndroidShmOpenUnavailable_(const char*, int, mode_t) {
+    errno = ENOSYS;
+    return -1;
+}
+
+inline int swAndroidShmUnlinkUnavailable_(const char*) {
+    errno = ENOSYS;
+    return -1;
+}
+
+#  define shm_open swAndroidShmOpenUnavailable_
+#  define shm_unlink swAndroidShmUnlinkUnavailable_
+#  define SW_SHARED_MEMORY_SIGNAL_ANDROID_SHM_STUBS
 #endif
 
 namespace sw {
@@ -5342,3 +5359,9 @@ inline void notifyRegistryChangedBestEffort_(const SwString& domain) {
 
 } // namespace ipc
 } // namespace sw
+
+#ifdef SW_SHARED_MEMORY_SIGNAL_ANDROID_SHM_STUBS
+#  undef shm_open
+#  undef shm_unlink
+#  undef SW_SHARED_MEMORY_SIGNAL_ANDROID_SHM_STUBS
+#endif

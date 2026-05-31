@@ -124,7 +124,9 @@ class SwRemoteObject : public SwObject {
         publisherId_ = makePublisherId_(this);
 	        ensureConfigDirectories();
  	        loadConfig();
+#ifndef __ANDROID__
  	        enableSharedMemoryConfig(true);
+#endif
             (void)ipcExposeRpcT(SwString("system/saveAsFactory"), this, &SwRemoteObject::saveAsFactory);
             (void)ipcExposeRpcT(SwString("system/resetFactory"), this, &SwRemoteObject::resetFactory);
  	        // Publish an initial snapshot so external tools (ex: SwBridge) can read it via IPC.

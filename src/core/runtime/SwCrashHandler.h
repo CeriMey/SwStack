@@ -55,8 +55,11 @@
 #pragma comment(lib, "Dbghelp.lib")
 #endif
 
-#if defined(__linux__)
+#if defined(__linux__) && !defined(__ANDROID__)
 #include <execinfo.h>
+#endif
+
+#if defined(__linux__)
 #include <fcntl.h>
 #include <signal.h>
 #include <unistd.h>
@@ -688,9 +691,14 @@ private:
             const std::string header = appNameStorage_().toStdString() + " crash (signal " + std::to_string(sig) + ")\n";
             writeBestEffort_(fd, header.c_str(), header.size());
 
+#if defined(__ANDROID__)
+            const char* unavailable = "Backtrace unavailable on Android\n";
+            writeBestEffort_(fd, unavailable, std::strlen(unavailable));
+#else
             void* frames[64];
             int n = ::backtrace(frames, 64);
             ::backtrace_symbols_fd(frames, n, fd);
+#endif
             ::close(fd);
         }
 

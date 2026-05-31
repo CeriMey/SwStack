@@ -10,6 +10,10 @@
 
 #include <algorithm>
 
+#ifdef Success
+#undef Success
+#endif
+
 class SwStatusLight : public SwWidget {
     SW_OBJECT(SwStatusLight, SwWidget)
 

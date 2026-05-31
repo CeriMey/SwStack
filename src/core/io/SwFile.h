@@ -227,7 +227,7 @@ public:
      * @param data Value passed to the method.
      * @return `true` on success; otherwise `false`.
      */
-    bool write(const SwString& data) {
+    bool write(const SwString& data) override {
         if (currentMode_ != Write && currentMode_ != Append) {
             swCError(kSwLogCategory_SwFile) << "Fichier non ouvert en mode écriture.";
         }
