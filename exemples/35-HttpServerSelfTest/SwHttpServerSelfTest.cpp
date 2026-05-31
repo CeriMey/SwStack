@@ -10,6 +10,7 @@
 #include "SwDir.h"
 #include "SwFile.h"
 #include "SwDebug.h"
+#include "SwHttpParserLimitSelfTest.h"
 
 #if defined(__has_include)
 #if __has_include("SwHttpServerSelfTestConfig.h")
@@ -594,6 +595,10 @@ private:
 };
 
 int main(int argc, char* argv[]) {
+    if (!runSwHttpParserLimitSelfTest()) {
+        return 1;
+    }
+
     SwCoreApplication app(argc, argv);
 
     SwHttpServer server(nullptr);

@@ -20,6 +20,7 @@
 #include "SwList.h"
 #include "SwIcon.h"
 #include <functional>
+#include <string>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -118,6 +119,44 @@ public:
 
     bool isVisible() const { return m_visible; }
 
+    enum class MessageIcon {
+        NoIcon,
+        Information,
+        Warning,
+        Critical
+    };
+
+    void showMessage(const SwString& title,
+                     const SwString& message,
+                     MessageIcon icon = MessageIcon::Information,
+                     int timeoutMs = 10000) {
+#ifdef _WIN32
+        if (!m_visible || !m_hwnd) {
+            return;
+        }
+
+        NOTIFYICONDATAW nid = {};
+        nid.cbSize = sizeof(nid);
+        nid.hWnd = m_hwnd;
+        nid.uID = 1;
+        nid.uFlags = NIF_INFO;
+        const std::string titleText = title.toStdString();
+        const std::string messageText = message.toStdString();
+        const std::wstring wideTitle(titleText.begin(), titleText.end());
+        const std::wstring wideMessage(messageText.begin(), messageText.end());
+        wcsncpy_s(nid.szInfoTitle, wideTitle.c_str(), 63);
+        wcsncpy_s(nid.szInfo, wideMessage.c_str(), 255);
+        nid.uTimeout = timeoutMs > 0 ? static_cast<UINT>(timeoutMs) : 10000U;
+        nid.dwInfoFlags = messageIconFlag_(icon);
+        Shell_NotifyIconW(NIM_MODIFY, &nid);
+#else
+        SW_UNUSED(title);
+        SW_UNUSED(message);
+        SW_UNUSED(icon);
+        SW_UNUSED(timeoutMs);
+#endif
+    }
+
 signals:
     DECLARE_SIGNAL_VOID(activated)
     DECLARE_SIGNAL_VOID(doubleClicked)
@@ -143,6 +182,16 @@ private:
             if (h) return h;
         }
         return LoadIconW(nullptr, MAKEINTRESOURCEW(32512));
+    }
+
+    static DWORD messageIconFlag_(MessageIcon icon) {
+        switch (icon) {
+        case MessageIcon::Information: return NIIF_INFO;
+        case MessageIcon::Warning: return NIIF_WARNING;
+        case MessageIcon::Critical: return NIIF_ERROR;
+        case MessageIcon::NoIcon:
+        default: return NIIF_NONE;
+        }
     }
 
     void updateIcon_() {

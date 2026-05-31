@@ -74,6 +74,11 @@ protected:
 
 private:
     struct ColorSpec_ {
+        ColorSpec_() = default;
+        ColorSpec_(const SwColor& colorValue, float alphaValue)
+            : color(colorValue), alpha(alphaValue) {
+        }
+
         SwColor color{0, 0, 0};
         float alpha{1.0f};
     };

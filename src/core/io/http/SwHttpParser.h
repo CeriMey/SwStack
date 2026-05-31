@@ -99,51 +99,25 @@ public:
      * @return The requested feed.
      */
     FeedStatus feed(const SwByteArray& data, SwList<SwHttpRequest>& outRequests) {
-        if (!data.isEmpty()) {
-            m_buffer.append(data);
+        bool progressed = false;
+        if (data.isEmpty()) {
+            return drainAvailable_(outRequests, progressed);
         }
 
-        bool progressed = false;
-        while (true) {
-            if (m_state == State::Error) {
-                return FeedStatus::Error;
+        std::size_t offset = 0;
+        while (offset < data.size()) {
+            std::size_t take = data.size() - offset;
+            const std::size_t maxAppend = maxFeedAppendBytes_();
+            if (take > maxAppend) {
+                take = maxAppend;
             }
+            m_buffer.append(data.constData() + offset, take);
+            offset += take;
 
-            bool loopProgress = false;
-            switch (m_state) {
-            case State::RequestLine:
-                loopProgress = parseRequestLine_();
-                break;
-            case State::Headers:
-                loopProgress = parseHeaders_();
-                break;
-            case State::BodyFixed:
-                loopProgress = parseFixedBody_();
-                break;
-            case State::ChunkSize:
-                loopProgress = parseChunkSize_();
-                break;
-            case State::ChunkData:
-                loopProgress = parseChunkData_();
-                break;
-            case State::ChunkDataCRLF:
-                loopProgress = parseChunkDataCrlf_();
-                break;
-            case State::ChunkTrailers:
-                loopProgress = parseChunkTrailers_();
-                break;
-            case State::Complete:
-                finalizeRequest_(outRequests);
-                loopProgress = true;
-                break;
-            case State::Error:
-                return FeedStatus::Error;
+            const FeedStatus status = drainAvailable_(outRequests, progressed);
+            if (status == FeedStatus::Error) {
+                return status;
             }
-
-            if (!loopProgress) {
-                break;
-            }
-            progressed = true;
         }
 
         if (m_state == State::Error) {
@@ -247,6 +221,62 @@ private:
     int m_errorStatus = 0;
     SwString m_errorMessage;
 
+    static std::size_t maxFeedAppendBytes_() {
+        return 1024;
+    }
+
+    FeedStatus drainAvailable_(SwList<SwHttpRequest>& outRequests, bool& progressed) {
+        while (true) {
+            if (m_state == State::Error) {
+                return FeedStatus::Error;
+            }
+
+            bool loopProgress = false;
+            switch (m_state) {
+            case State::RequestLine:
+                loopProgress = parseRequestLine_();
+                break;
+            case State::Headers:
+                loopProgress = parseHeaders_();
+                break;
+            case State::BodyFixed:
+                loopProgress = parseFixedBody_();
+                break;
+            case State::ChunkSize:
+                loopProgress = parseChunkSize_();
+                break;
+            case State::ChunkData:
+                loopProgress = parseChunkData_();
+                break;
+            case State::ChunkDataCRLF:
+                loopProgress = parseChunkDataCrlf_();
+                break;
+            case State::ChunkTrailers:
+                loopProgress = parseChunkTrailers_();
+                break;
+            case State::Complete:
+                finalizeRequest_(outRequests);
+                loopProgress = true;
+                break;
+            case State::Error:
+                return FeedStatus::Error;
+            }
+
+            if (!loopProgress) {
+                break;
+            }
+            progressed = true;
+        }
+
+        if (m_state == State::Error) {
+            return FeedStatus::Error;
+        }
+        if (progressed) {
+            return FeedStatus::Ok;
+        }
+        return FeedStatus::NeedMoreData;
+    }
+
     void setError_(int status, const SwString& message) {
         if (m_multipartStreamingActive) {
             m_multipartStreamParser.cleanupTemporaryFiles();
@@ -280,10 +310,17 @@ private:
         return true;
     }
 
+    bool pendingBufferExceedsLimit_(std::size_t usedBytes, std::size_t maxBytes) const {
+        if (usedBytes > maxBytes) {
+            return true;
+        }
+        return m_buffer.size() > maxBytes - usedBytes;
+    }
+
     bool parseRequestLine_() {
         SwString line;
         if (!popLine_(line)) {
-            if (m_buffer.size() > m_limits.maxRequestLineBytes) {
+            if (pendingBufferExceedsLimit_(0, m_limits.maxRequestLineBytes)) {
                 setError_(414, "Request line too long");
             }
             return false;
@@ -354,6 +391,9 @@ private:
         while (true) {
             SwString line;
             if (!popLine_(line)) {
+                if (pendingBufferExceedsLimit_(m_headerBytes, m_limits.maxHeaderBytes)) {
+                    setError_(431, "Headers too large");
+                }
                 return false;
             }
 
@@ -490,6 +530,13 @@ private:
     bool parseChunkSize_() {
         SwString line;
         if (!popLine_(line)) {
+            if (pendingBufferExceedsLimit_(0, m_limits.maxRequestLineBytes)) {
+                setError_(400, "Chunk size line too long");
+            }
+            return false;
+        }
+        if (line.size() > m_limits.maxRequestLineBytes) {
+            setError_(400, "Chunk size line too long");
             return false;
         }
         std::size_t chunkSize = 0;
@@ -569,6 +616,9 @@ private:
         while (true) {
             SwString line;
             if (!popLine_(line)) {
+                if (pendingBufferExceedsLimit_(m_headerBytes, m_limits.maxHeaderBytes)) {
+                    setError_(431, "Trailers too large");
+                }
                 return false;
             }
             // Trailers ignored for now, but bounded by global header size policy.

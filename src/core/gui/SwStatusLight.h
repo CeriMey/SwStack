@@ -16,7 +16,7 @@ class SwStatusLight : public SwWidget {
 public:
     enum class Tone {
         Neutral,
-        Success,
+        Good,
         Warning,
         Danger
     };
@@ -92,7 +92,7 @@ protected:
 private:
     static SwColor coreColor_(Tone tone) {
         switch (tone) {
-        case Tone::Success: return SwColor{74, 165, 132};
+        case Tone::Good: return SwColor{74, 165, 132};
         case Tone::Warning: return SwColor{214, 154, 88};
         case Tone::Danger: return SwColor{196, 93, 93};
         case Tone::Neutral:
@@ -102,7 +102,7 @@ private:
 
     static SwColor glowColor_(Tone tone) {
         switch (tone) {
-        case Tone::Success: return SwColor{45, 95, 78};
+        case Tone::Good: return SwColor{45, 95, 78};
         case Tone::Warning: return SwColor{104, 77, 43};
         case Tone::Danger: return SwColor{101, 52, 52};
         case Tone::Neutral:
@@ -112,7 +112,7 @@ private:
 
     static SwColor highlightColor_(Tone tone) {
         switch (tone) {
-        case Tone::Success: return SwColor{149, 214, 191};
+        case Tone::Good: return SwColor{149, 214, 191};
         case Tone::Warning: return SwColor{242, 203, 146};
         case Tone::Danger: return SwColor{233, 167, 167};
         case Tone::Neutral:
