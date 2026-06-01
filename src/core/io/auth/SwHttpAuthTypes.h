@@ -23,6 +23,7 @@
 #include <vector>
 
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <openssl/rand.h>
 
 static constexpr const char* kSwLogCategory_SwHttpAuth = "sw.core.io.swhttpauth";
@@ -56,6 +57,8 @@ struct SwHttpAuthConfig {
     bool verificationRequired = true;
     unsigned long long verificationCodeTtlMs = 15ull * 60ull * 1000ull;
     unsigned long long resetCodeTtlMs = 15ull * 60ull * 1000ull;
+    unsigned long long mfaChallengeTtlMs = 5ull * 60ull * 1000ull;
+    SwString mfaIssuer = "SwStack";
     SwString publicBaseUrl;
     SwHttpAuthMailConfig mail;
 };
@@ -72,6 +75,9 @@ struct SwHttpAuthAccount {
     SwString emailVerifiedAt;
     bool passwordResetRequired = false;
     bool suspended = false;
+    bool mfaTotpEnabled = false;
+    SwString mfaTotpSecret;
+    SwString mfaTotpEnabledAt;
     SwString createdAt;
     SwString updatedAt;
 };
@@ -119,6 +125,23 @@ struct SwHttpAuthIdentity {
     SwHttpAuthAccount account;
     SwHttpAuthSession session;
     SwJsonValue subject;
+};
+
+struct SwHttpAuthMfaLoginChallenge {
+    SwString challengeToken;
+    SwString email;
+    long long expiresAtMs = 0;
+};
+
+struct SwHttpAuthMfaTotpSetup {
+    SwString setupToken;
+    SwString secret;
+    SwString otpauthUri;
+    SwString issuer;
+    SwString label;
+    int digits = 6;
+    int periodSeconds = 30;
+    long long expiresAtMs = 0;
 };
 
 using SwHttpAuthRegisterSubjectHook =
@@ -351,6 +374,197 @@ inline bool verifyPasswordHash(const SwString& storedHash, const SwString& passw
     }
 
     return constantTimeEquals(expected, derived);
+}
+
+inline SwString base32EncodeBytes(const std::vector<unsigned char>& bytes) {
+    static const char* kAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    SwString encoded;
+    int buffer = 0;
+    int bitsLeft = 0;
+    for (std::size_t i = 0; i < bytes.size(); ++i) {
+        buffer = (buffer << 8) | static_cast<int>(bytes[i]);
+        bitsLeft += 8;
+        while (bitsLeft >= 5) {
+            encoded.append(kAlphabet[(buffer >> (bitsLeft - 5)) & 0x1f]);
+            bitsLeft -= 5;
+        }
+    }
+    if (bitsLeft > 0) {
+        encoded.append(kAlphabet[(buffer << (5 - bitsLeft)) & 0x1f]);
+    }
+    return encoded;
+}
+
+inline bool base32DecodeBytes(const SwString& encoded, std::vector<unsigned char>& outBytes) {
+    outBytes.clear();
+    int buffer = 0;
+    int bitsLeft = 0;
+    const std::string text = encoded.toStdString();
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const unsigned char raw = static_cast<unsigned char>(text[i]);
+        if (raw == '=' || raw == ' ' || raw == '-' || raw == '\t' || raw == '\r' || raw == '\n') {
+            continue;
+        }
+
+        int value = -1;
+        const unsigned char c = static_cast<unsigned char>(std::toupper(raw));
+        if (c >= 'A' && c <= 'Z') {
+            value = c - 'A';
+        } else if (c >= '2' && c <= '7') {
+            value = 26 + (c - '2');
+        }
+        if (value < 0) {
+            outBytes.clear();
+            return false;
+        }
+
+        buffer = (buffer << 5) | value;
+        bitsLeft += 5;
+        if (bitsLeft >= 8) {
+            outBytes.push_back(static_cast<unsigned char>((buffer >> (bitsLeft - 8)) & 0xff));
+            bitsLeft -= 8;
+        }
+    }
+    return !outBytes.empty();
+}
+
+inline SwString generateTotpSecret(std::size_t byteCount = 20) {
+    std::vector<unsigned char> bytes;
+    if (!fillRandomBytes(bytes, byteCount)) {
+        return SwString();
+    }
+    return base32EncodeBytes(bytes);
+}
+
+inline SwString normalizeTotpCode(const SwString& code) {
+    SwString normalized;
+    const std::string text = code.toStdString();
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(text[i]);
+        if (std::isdigit(c)) {
+            normalized.append(static_cast<char>(c));
+            continue;
+        }
+        if (c == ' ' || c == '-') {
+            continue;
+        }
+        return SwString();
+    }
+    return normalized;
+}
+
+inline SwString totpCodeForCounter(const std::vector<unsigned char>& secretBytes,
+                                   unsigned long long counter,
+                                   int digits = 6) {
+    if (secretBytes.empty() || digits < 6 || digits > 8) {
+        return SwString();
+    }
+
+    unsigned char counterBytes[8] = {0};
+    for (int i = 7; i >= 0; --i) {
+        counterBytes[i] = static_cast<unsigned char>(counter & 0xff);
+        counter >>= 8;
+    }
+
+    unsigned char digest[EVP_MAX_MD_SIZE] = {0};
+    unsigned int digestLen = 0;
+    unsigned char* hmac = HMAC(EVP_sha1(),
+                               secretBytes.data(),
+                               static_cast<int>(secretBytes.size()),
+                               counterBytes,
+                               sizeof(counterBytes),
+                               digest,
+                               &digestLen);
+    if (!hmac || digestLen < 20) {
+        return SwString();
+    }
+
+    const int offset = digest[digestLen - 1] & 0x0f;
+    if (offset + 3 >= static_cast<int>(digestLen)) {
+        return SwString();
+    }
+
+    const unsigned int binary =
+        ((static_cast<unsigned int>(digest[offset]) & 0x7f) << 24) |
+        ((static_cast<unsigned int>(digest[offset + 1]) & 0xff) << 16) |
+        ((static_cast<unsigned int>(digest[offset + 2]) & 0xff) << 8) |
+        (static_cast<unsigned int>(digest[offset + 3]) & 0xff);
+
+    unsigned int modulo = 1;
+    for (int i = 0; i < digits; ++i) {
+        modulo *= 10;
+    }
+    const unsigned int code = binary % modulo;
+    std::ostringstream stream;
+    stream << std::setfill('0') << std::setw(digits) << code;
+    return SwString(stream.str());
+}
+
+inline bool verifyTotpCode(const SwString& secret,
+                           const SwString& code,
+                           long long nowMs = currentEpochMs(),
+                           int allowedWindow = 1,
+                           int periodSeconds = 30,
+                           int digits = 6) {
+    const SwString normalizedCode = normalizeTotpCode(code);
+    if (normalizedCode.size() != static_cast<std::size_t>(digits) || periodSeconds <= 0 || allowedWindow < 0) {
+        return false;
+    }
+
+    std::vector<unsigned char> secretBytes;
+    if (!base32DecodeBytes(secret.trimmed(), secretBytes)) {
+        return false;
+    }
+
+    const long long currentCounter = (nowMs / 1000ll) / static_cast<long long>(periodSeconds);
+    for (int drift = -allowedWindow; drift <= allowedWindow; ++drift) {
+        const long long candidateCounter = currentCounter + static_cast<long long>(drift);
+        if (candidateCounter < 0) {
+            continue;
+        }
+        const SwString expected = totpCodeForCounter(secretBytes,
+                                                     static_cast<unsigned long long>(candidateCounter),
+                                                     digits);
+        if (!expected.isEmpty() &&
+            constantTimeEquals(SwByteArray(normalizedCode.toUtf8()), SwByteArray(expected.toUtf8()))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+inline SwString urlEncodeComponent(const SwString& value) {
+    std::ostringstream stream;
+    const std::string text = value.toStdString();
+    stream << std::uppercase << std::hex;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(text[i]);
+        if ((c >= 'A' && c <= 'Z') ||
+            (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') ||
+            c == '-' || c == '_' || c == '.' || c == '~') {
+            stream << static_cast<char>(c);
+        } else {
+            stream << '%' << std::setw(2) << std::setfill('0') << static_cast<int>(c);
+        }
+    }
+    return SwString(stream.str());
+}
+
+inline SwString buildTotpOtpAuthUri(const SwString& issuer,
+                                    const SwString& label,
+                                    const SwString& secret,
+                                    int digits = 6,
+                                    int periodSeconds = 30) {
+    const SwString normalizedIssuer = issuer.trimmed().isEmpty() ? SwString("SwStack") : issuer.trimmed();
+    const SwString normalizedLabel = label.trimmed().isEmpty() ? SwString("account") : label.trimmed();
+    const SwString accountLabel = normalizedIssuer + ":" + normalizedLabel;
+    return "otpauth://totp/" +
+           urlEncodeComponent(accountLabel) +
+           "?secret=" + urlEncodeComponent(secret.trimmed()) +
+           "&issuer=" + urlEncodeComponent(normalizedIssuer) +
+           "&algorithm=SHA1&digits=" + SwString::number(digits) +
+           "&period=" + SwString::number(periodSeconds);
 }
 
 inline SwString generateChallengeCode(std::size_t length = 8) {

@@ -284,6 +284,30 @@ public:
         return writeAccountLocked_(account);
     }
 
+    SwDbStatus setAccountTotp(const SwString& accountId,
+                              const SwString& secret,
+                              const SwString& enabledAt) {
+        SwMutexLocker locker(&m_mutex);
+        SW_HTTP_AUTH_RETURN_IF_NOT_OPEN_();
+
+        SwHttpAuthAccount account;
+        const SwDbStatus status = loadAccountByIdLocked_(accountId.trimmed(), account);
+        if (!status.ok()) {
+            return status;
+        }
+
+        const SwString normalizedSecret = secret.trimmed().toUpper();
+        account.mfaTotpEnabled = !normalizedSecret.isEmpty();
+        account.mfaTotpSecret = normalizedSecret;
+        account.mfaTotpEnabledAt = account.mfaTotpEnabled
+                                       ? (enabledAt.trimmed().isEmpty()
+                                              ? swHttpAuthDetail::currentIsoTimestamp()
+                                              : enabledAt.trimmed())
+                                       : SwString();
+        account.updatedAt = swHttpAuthDetail::currentIsoTimestamp();
+        return writeAccountLocked_(account);
+    }
+
     SwList<SwHttpAuthAccount> listAccounts() {
         SwMutexLocker locker(&m_mutex);
         SwList<SwHttpAuthAccount> accounts;
@@ -727,6 +751,9 @@ private:
         object["emailVerifiedAt"] = account.emailVerifiedAt.toStdString();
         object["passwordResetRequired"] = account.passwordResetRequired;
         object["suspended"] = account.suspended;
+        object["mfaTotpEnabled"] = account.mfaTotpEnabled;
+        object["mfaTotpSecret"] = account.mfaTotpSecret.toStdString();
+        object["mfaTotpEnabledAt"] = account.mfaTotpEnabledAt.toStdString();
         object["createdAt"] = account.createdAt.toStdString();
         object["updatedAt"] = account.updatedAt.toStdString();
         return object;
@@ -741,6 +768,13 @@ private:
         account.emailVerifiedAt = object.value("emailVerifiedAt").toString().c_str();
         account.passwordResetRequired = object.value("passwordResetRequired").toBool(false);
         account.suspended = object.value("suspended").toBool(false);
+        account.mfaTotpEnabled = object.value("mfaTotpEnabled").toBool(false);
+        account.mfaTotpSecret = object.value("mfaTotpSecret").toString().c_str();
+        account.mfaTotpEnabledAt = object.value("mfaTotpEnabledAt").toString().c_str();
+        if (account.mfaTotpSecret.trimmed().isEmpty()) {
+            account.mfaTotpEnabled = false;
+            account.mfaTotpEnabledAt.clear();
+        }
         account.createdAt = object.value("createdAt").toString().c_str();
         account.updatedAt = object.value("updatedAt").toString().c_str();
         return account;

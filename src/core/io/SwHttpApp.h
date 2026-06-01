@@ -1091,6 +1091,26 @@ public:
             service->applyIdentityToContext(ctx, outIdentity);
             return true;
         };
+        auto respondSession = [service, makeAuth, secureCookie](SwHttpContext& ctx,
+                                                                const SwString& rawToken,
+                                                                const SwHttpAuthIdentity& identity) {
+            ctx.setHeader("set-cookie",
+                          swHttpAuthDetail::buildSessionCookie(service->config().sessionCookieName,
+                                                               rawToken,
+                                                               static_cast<long long>(service->config().sessionTtlMs / 1000ull),
+                                                               secureCookie(ctx)));
+            service->applyIdentityToContext(ctx, identity);
+
+            SwJsonObject object;
+            object["token"] = rawToken.toStdString();
+            object["tokenType"] = "Bearer";
+            object["expiresAtMs"] = static_cast<long long>(identity.session.expiresAtMs);
+            object["auth"] = makeAuth(identity.account);
+            if (!identity.subject.isNull()) {
+                object["subject"] = identity.subject;
+            }
+            ctx.json(SwJsonValue(object));
+        };
 
         group(basePrefix, [&](SwHttpApp& auth) {
             auth.post("/register", [service, requireStarted, makeMessage, makeAuth](SwHttpContext& ctx) {
@@ -1127,7 +1147,7 @@ public:
                 ctx.json(SwJsonValue(object), 201);
             });
 
-            auth.post("/login", [service, requireStarted, makeMessage, makeAuth, secureCookie](SwHttpContext& ctx) {
+            auth.post("/login", [service, requireStarted, makeMessage, respondSession](SwHttpContext& ctx) {
                 if (!requireStarted(ctx)) {
                     return;
                 }
@@ -1140,6 +1160,7 @@ public:
                 SwString rawToken;
                 SwString resetToken;
                 SwHttpAuthIdentity identity;
+                SwHttpAuthMfaLoginChallenge mfaChallenge;
                 const SwDbStatus status = service->login(document.object().value("email").toString().c_str(),
                                                          document.object().value("password").toString().c_str(),
                                                          ctx.headerValue("user-agent"),
@@ -1147,8 +1168,18 @@ public:
                                                          &rawToken,
                                                          &identity,
                                                          &resetToken,
-                                                         &error);
+                                                         &error,
+                                                         &mfaChallenge);
                 if (!status.ok()) {
+                    if (!mfaChallenge.challengeToken.isEmpty()) {
+                        SwJsonObject object;
+                        object["mfaRequired"] = true;
+                        object["mfaToken"] = mfaChallenge.challengeToken.toStdString();
+                        object["email"] = mfaChallenge.email.toStdString();
+                        object["expiresAtMs"] = static_cast<long long>(mfaChallenge.expiresAtMs);
+                        ctx.json(SwJsonValue(object));
+                        return;
+                    }
                     if (!resetToken.isEmpty()) {
                         SwJsonObject object;
                         object["error"] =
@@ -1163,21 +1194,147 @@ public:
                     ctx.json(makeMessage("error", error.isEmpty() ? status.message() : error), httpStatus);
                     return;
                 }
-                ctx.setHeader("set-cookie",
-                              swHttpAuthDetail::buildSessionCookie(service->config().sessionCookieName,
-                                                                   rawToken,
-                                                                   static_cast<long long>(service->config().sessionTtlMs / 1000ull),
-                                                                   secureCookie(ctx)));
-                service->applyIdentityToContext(ctx, identity);
+                respondSession(ctx, rawToken, identity);
+            });
+
+            auth.post("/mfa/totp/login", [service, requireStarted, makeMessage, respondSession](SwHttpContext& ctx) {
+                if (!requireStarted(ctx)) {
+                    return;
+                }
+                SwJsonDocument document;
+                SwString error;
+                if (!ctx.parseJsonBody(document, error) || !document.isObject()) {
+                    ctx.json(makeMessage("error", "Invalid JSON body"), 400);
+                    return;
+                }
+
+                SwString rawToken;
+                SwHttpAuthIdentity identity;
+                const SwDbStatus status = service->verifyTotpLogin(document.object().value("mfaToken").toString().c_str(),
+                                                                   document.object().value("code").toString().c_str(),
+                                                                   ctx.headerValue("user-agent"),
+                                                                   ctx.isTls(),
+                                                                   &rawToken,
+                                                                   &identity,
+                                                                   &error);
+                if (!status.ok()) {
+                    const int httpStatus = status.code() == SwDbStatus::Busy ? 403 : 401;
+                    ctx.json(makeMessage("error", error.isEmpty() ? status.message() : error), httpStatus);
+                    return;
+                }
+                respondSession(ctx, rawToken, identity);
+            });
+
+            auth.get("/mfa/totp", [service, requireStarted, makeMessage, makeAuth, resolveIdentity](SwHttpContext& ctx) {
+                if (!requireStarted(ctx)) {
+                    return;
+                }
+                SwHttpAuthIdentity identity;
+                SwString rawToken;
+                if (!resolveIdentity(ctx, identity, rawToken)) {
+                    return;
+                }
+                SwJsonObject object;
+                object["enabled"] = identity.account.mfaTotpEnabled;
+                object["enabledAt"] = identity.account.mfaTotpEnabledAt.toStdString();
+                object["auth"] = makeAuth(identity.account);
+                ctx.json(SwJsonValue(object));
+            });
+
+            auth.post("/mfa/totp/setup", [service, requireStarted, makeMessage, requestToken](SwHttpContext& ctx) {
+                if (!requireStarted(ctx)) {
+                    return;
+                }
+                SwJsonDocument document;
+                SwString error;
+                if (!ctx.parseJsonBody(document, error) || !document.isObject()) {
+                    ctx.json(makeMessage("error", "Invalid JSON body"), 400);
+                    return;
+                }
+
+                SwHttpAuthMfaTotpSetup setup;
+                const SwDbStatus status =
+                    service->beginTotpSetup(requestToken(ctx),
+                                            document.object().value("currentPassword").toString().c_str(),
+                                            &setup,
+                                            &error);
+                if (!status.ok()) {
+                    const int httpStatus = status.code() == SwDbStatus::NotFound ? 401 :
+                                           (status.code() == SwDbStatus::Busy ? 409 : 400);
+                    ctx.json(makeMessage("error", error.isEmpty() ? status.message() : error), httpStatus);
+                    return;
+                }
 
                 SwJsonObject object;
-                object["token"] = rawToken.toStdString();
-                object["tokenType"] = "Bearer";
-                object["expiresAtMs"] = static_cast<long long>(identity.session.expiresAtMs);
-                object["auth"] = makeAuth(identity.account);
-                if (!identity.subject.isNull()) {
-                    object["subject"] = identity.subject;
+                object["setupToken"] = setup.setupToken.toStdString();
+                object["secret"] = setup.secret.toStdString();
+                object["otpauthUri"] = setup.otpauthUri.toStdString();
+                object["issuer"] = setup.issuer.toStdString();
+                object["label"] = setup.label.toStdString();
+                object["digits"] = setup.digits;
+                object["periodSeconds"] = setup.periodSeconds;
+                object["expiresAtMs"] = static_cast<long long>(setup.expiresAtMs);
+                ctx.json(SwJsonValue(object));
+            });
+
+            auth.post("/mfa/totp/confirm", [service, requireStarted, makeMessage, makeAuth, requestToken](SwHttpContext& ctx) {
+                if (!requireStarted(ctx)) {
+                    return;
                 }
+                SwJsonDocument document;
+                SwString error;
+                if (!ctx.parseJsonBody(document, error) || !document.isObject()) {
+                    ctx.json(makeMessage("error", "Invalid JSON body"), 400);
+                    return;
+                }
+
+                SwHttpAuthIdentity identity;
+                const SwDbStatus status =
+                    service->confirmTotpSetup(requestToken(ctx),
+                                              document.object().value("setupToken").toString().c_str(),
+                                              document.object().value("code").toString().c_str(),
+                                              &identity,
+                                              &error);
+                if (!status.ok()) {
+                    const int httpStatus = status.code() == SwDbStatus::Busy ? 403 : 400;
+                    ctx.json(makeMessage("error", error.isEmpty() ? status.message() : error), httpStatus);
+                    return;
+                }
+
+                SwJsonObject object;
+                object["enabled"] = true;
+                object["enabledAt"] = identity.account.mfaTotpEnabledAt.toStdString();
+                object["auth"] = makeAuth(identity.account);
+                ctx.json(SwJsonValue(object));
+            });
+
+            auth.post("/mfa/totp/disable", [service, requireStarted, makeMessage, makeAuth, requestToken](SwHttpContext& ctx) {
+                if (!requireStarted(ctx)) {
+                    return;
+                }
+                SwJsonDocument document;
+                SwString error;
+                if (!ctx.parseJsonBody(document, error) || !document.isObject()) {
+                    ctx.json(makeMessage("error", "Invalid JSON body"), 400);
+                    return;
+                }
+
+                SwHttpAuthIdentity identity;
+                const SwDbStatus status =
+                    service->disableTotp(requestToken(ctx),
+                                         document.object().value("currentPassword").toString().c_str(),
+                                         &identity,
+                                         &error);
+                if (!status.ok()) {
+                    const int httpStatus = status.code() == SwDbStatus::NotFound ? 401 : 400;
+                    ctx.json(makeMessage("error", error.isEmpty() ? status.message() : error), httpStatus);
+                    return;
+                }
+
+                SwJsonObject object;
+                object["enabled"] = false;
+                object["enabledAt"] = "";
+                object["auth"] = makeAuth(identity.account);
                 ctx.json(SwJsonValue(object));
             });
 

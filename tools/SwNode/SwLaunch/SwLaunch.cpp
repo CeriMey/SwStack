@@ -1194,7 +1194,11 @@ class LaunchContainerProcess : public SwObject {
         if (!reloadOnDisconnect_) return;
         if (onlineTimer_) onlineTimer_->stop();
 
-        process_->terminate();
+        // The registry heartbeat path runs on SwLaunch's event loop. If the
+        // child is already wedged, a graceful terminate can block this loop and
+        // make the control API unreachable. A heartbeat restart is recovery
+        // logic, so prefer a bounded hard kill before starting a fresh child.
+        process_->kill();
 
         const int delay = (restartDelayMs_ > 0) ? restartDelayMs_ : 1000;
         SwTimer::singleShot(delay, [this]() {
@@ -1527,7 +1531,11 @@ class LaunchNodeProcess : public SwObject {
         if (!reloadOnDisconnect_) return;
         if (onlineTimer_) onlineTimer_->stop();
 
-        process_->terminate();
+        // The registry heartbeat path runs on SwLaunch's event loop. If the
+        // child is already wedged, a graceful terminate can block this loop and
+        // make the control API unreachable. A heartbeat restart is recovery
+        // logic, so prefer a bounded hard kill before starting a fresh child.
+        process_->kill();
 
         const int delay = (restartDelayMs_ > 0) ? restartDelayMs_ : 1000;
         SwTimer::singleShot(delay, [this]() {

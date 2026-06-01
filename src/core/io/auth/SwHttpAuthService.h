@@ -58,7 +58,28 @@ public:
                      SwString* outRawToken,
                      SwHttpAuthIdentity* outIdentity,
                      SwString* outPasswordResetToken = nullptr,
-                     SwString* outError = nullptr);
+                     SwString* outError = nullptr,
+                     SwHttpAuthMfaLoginChallenge* outMfaChallenge = nullptr);
+    SwDbStatus verifyTotpLogin(const SwString& challengeToken,
+                               const SwString& code,
+                               const SwString& userAgent,
+                               bool viaTls,
+                               SwString* outRawToken,
+                               SwHttpAuthIdentity* outIdentity,
+                               SwString* outError = nullptr);
+    SwDbStatus beginTotpSetup(const SwString& rawToken,
+                              const SwString& currentPassword,
+                              SwHttpAuthMfaTotpSetup* outSetup,
+                              SwString* outError = nullptr);
+    SwDbStatus confirmTotpSetup(const SwString& rawToken,
+                                const SwString& setupToken,
+                                const SwString& code,
+                                SwHttpAuthIdentity* outIdentity = nullptr,
+                                SwString* outError = nullptr);
+    SwDbStatus disableTotp(const SwString& rawToken,
+                           const SwString& currentPassword,
+                           SwHttpAuthIdentity* outIdentity = nullptr,
+                           SwString* outError = nullptr);
     SwDbStatus logout(const SwString& rawToken);
     SwDbStatus requestEmailVerification(const SwString& email, SwString* outError = nullptr);
     SwDbStatus verifyEmail(const SwString& code,
@@ -149,6 +170,8 @@ inline SwJsonObject accountToJson_(const SwHttpAuthAccount& account) {
     object["emailVerifiedAt"] = account.emailVerifiedAt.toStdString();
     object["passwordResetRequired"] = account.passwordResetRequired;
     object["suspended"] = account.suspended;
+    object["mfaTotpEnabled"] = account.mfaTotpEnabled;
+    object["mfaTotpEnabledAt"] = account.mfaTotpEnabledAt.toStdString();
     object["createdAt"] = account.createdAt.toStdString();
     object["updatedAt"] = account.updatedAt.toStdString();
     return object;
@@ -165,6 +188,9 @@ inline void SwHttpAuthService::setConfig(const SwHttpAuthConfig& config) {
     }
     if (normalized.passwordMinLength < 1) {
         normalized.passwordMinLength = 1;
+    }
+    if (normalized.mfaIssuer.trimmed().isEmpty()) {
+        normalized.mfaIssuer = "SwStack";
     }
     m_config = normalized;
     m_store.setConfig(m_config);
@@ -428,7 +454,8 @@ inline SwDbStatus SwHttpAuthService::login(const SwString& email,
                                            SwString* outRawToken,
                                            SwHttpAuthIdentity* outIdentity,
                                            SwString* outPasswordResetToken,
-                                           SwString* outError) {
+                                           SwString* outError,
+                                           SwHttpAuthMfaLoginChallenge* outMfaChallenge) {
     if (outError) {
         outError->clear();
     }
@@ -440,6 +467,9 @@ inline SwDbStatus SwHttpAuthService::login(const SwString& email,
     }
     if (outPasswordResetToken) {
         outPasswordResetToken->clear();
+    }
+    if (outMfaChallenge) {
+        *outMfaChallenge = SwHttpAuthMfaLoginChallenge();
     }
     if (!isStarted()) {
         return SwDbStatus(SwDbStatus::NotOpen, "Auth service not started");
@@ -509,6 +539,30 @@ inline SwDbStatus SwHttpAuthService::login(const SwString& email,
         }
         return SwDbStatus(SwDbStatus::Busy, "Email not verified");
     }
+    if (account.mfaTotpEnabled && !account.mfaTotpSecret.trimmed().isEmpty()) {
+        SwString mfaToken;
+        SwHttpAuthChallenge challenge;
+        status = m_store.createChallenge("login_mfa",
+                                         account.accountId,
+                                         m_config.mfaChallengeTtlMs,
+                                         &mfaToken,
+                                         &challenge);
+        if (!status.ok()) {
+            if (outError) {
+                *outError = status.message();
+            }
+            return status;
+        }
+        if (outMfaChallenge) {
+            outMfaChallenge->challengeToken = mfaToken;
+            outMfaChallenge->email = account.email;
+            outMfaChallenge->expiresAtMs = challenge.expiresAtMs;
+        }
+        if (outError) {
+            *outError = "MFA required";
+        }
+        return SwDbStatus(SwDbStatus::Busy, "MFA required");
+    }
 
     SwHttpAuthSession session;
     status = m_store.createSession(account.accountId,
@@ -532,6 +586,345 @@ inline SwDbStatus SwHttpAuthService::login(const SwString& email,
     if (!account.subjectId.trimmed().isEmpty()) {
         SwString subjectError;
         (void)loadSubjectView(account.subjectId, &identity.subject, &subjectError);
+    }
+    if (outIdentity) {
+        *outIdentity = identity;
+    }
+    return SwDbStatus::success();
+}
+
+inline SwDbStatus SwHttpAuthService::verifyTotpLogin(const SwString& challengeToken,
+                                                     const SwString& code,
+                                                     const SwString& userAgent,
+                                                     bool viaTls,
+                                                     SwString* outRawToken,
+                                                     SwHttpAuthIdentity* outIdentity,
+                                                     SwString* outError) {
+    if (outError) {
+        outError->clear();
+    }
+    if (outRawToken) {
+        outRawToken->clear();
+    }
+    if (outIdentity) {
+        *outIdentity = SwHttpAuthIdentity();
+    }
+    if (!isStarted()) {
+        return SwDbStatus(SwDbStatus::NotOpen, "Auth service not started");
+    }
+
+    SwHttpAuthChallenge challenge;
+    SwDbStatus status = lookupChallenge_("login_mfa", SwString(), challengeToken, &challenge);
+    if (!status.ok()) {
+        if (outError) {
+            *outError = status.message();
+        }
+        return status;
+    }
+    status = validateChallenge_(challenge);
+    if (!status.ok()) {
+        if (outError) {
+            *outError = status.message();
+        }
+        return status;
+    }
+
+    SwHttpAuthAccount account;
+    status = m_store.getAccountById(challenge.accountId, &account);
+    if (!status.ok()) {
+        if (outError) {
+            *outError = status.message();
+        }
+        return status;
+    }
+    if (account.suspended) {
+        if (outError) {
+            *outError = "Account suspended";
+        }
+        return SwDbStatus(SwDbStatus::Busy, "Account suspended");
+    }
+    if (!account.mfaTotpEnabled || account.mfaTotpSecret.trimmed().isEmpty()) {
+        if (outError) {
+            *outError = "MFA not enabled";
+        }
+        return SwDbStatus(SwDbStatus::InvalidArgument, "MFA not enabled");
+    }
+    if (!throttleAllows_("login_mfa:" + account.accountId)) {
+        if (outError) {
+            *outError = "Too many MFA attempts";
+        }
+        return SwDbStatus(SwDbStatus::Busy, "Too many MFA attempts");
+    }
+    if (!swHttpAuthDetail::verifyTotpCode(account.mfaTotpSecret, code)) {
+        if (outError) {
+            *outError = "Invalid MFA code";
+        }
+        return SwDbStatus(SwDbStatus::NotFound, "Invalid MFA code");
+    }
+
+    SwHttpAuthSession session;
+    status = m_store.createSession(account.accountId,
+                                   userAgent,
+                                   viaTls,
+                                   m_config.sessionTtlMs,
+                                   outRawToken,
+                                   &session);
+    if (!status.ok()) {
+        if (outError) {
+            *outError = status.message();
+        }
+        return status;
+    }
+    (void)m_store.consumeChallenge(challenge.challengeId);
+
+    SwHttpAuthIdentity identity;
+    identity.authenticated = true;
+    identity.emailVerified = !account.emailVerifiedAt.trimmed().isEmpty();
+    identity.account = account;
+    identity.session = session;
+    if (!account.subjectId.trimmed().isEmpty()) {
+        SwString subjectError;
+        (void)loadSubjectView(account.subjectId, &identity.subject, &subjectError);
+    }
+    if (outIdentity) {
+        *outIdentity = identity;
+    }
+    return SwDbStatus::success();
+}
+
+inline SwDbStatus SwHttpAuthService::beginTotpSetup(const SwString& rawToken,
+                                                    const SwString& currentPassword,
+                                                    SwHttpAuthMfaTotpSetup* outSetup,
+                                                    SwString* outError) {
+    if (outError) {
+        outError->clear();
+    }
+    if (outSetup) {
+        *outSetup = SwHttpAuthMfaTotpSetup();
+    }
+    if (!isStarted()) {
+        return SwDbStatus(SwDbStatus::NotOpen, "Auth service not started");
+    }
+    if (!outSetup) {
+        return SwDbStatus(SwDbStatus::InvalidArgument, "Missing MFA setup output");
+    }
+
+    SwHttpAuthIdentity identity;
+    SwString resolveError;
+    if (!resolveIdentityFromToken(rawToken, &identity, &resolveError)) {
+        if (outError) {
+            *outError = resolveError.isEmpty() ? SwString("Authentication required") : resolveError;
+        }
+        return SwDbStatus(SwDbStatus::NotFound, "Authentication required");
+    }
+    if (identity.account.mfaTotpEnabled && !identity.account.mfaTotpSecret.trimmed().isEmpty()) {
+        if (outError) {
+            *outError = "MFA already enabled";
+        }
+        return SwDbStatus(SwDbStatus::Busy, "MFA already enabled");
+    }
+    if (!m_store.verifyPassword(identity.account, currentPassword)) {
+        if (outError) {
+            *outError = "Invalid credentials";
+        }
+        return SwDbStatus(SwDbStatus::NotFound, "Invalid credentials");
+    }
+
+    const SwString secret = swHttpAuthDetail::generateTotpSecret(20);
+    if (secret.isEmpty()) {
+        if (outError) {
+            *outError = "Unable to generate MFA secret";
+        }
+        return SwDbStatus(SwDbStatus::IoError, "Unable to generate MFA secret");
+    }
+
+    const SwString issuer = m_config.mfaIssuer.trimmed().isEmpty() ? SwString("SwStack") : m_config.mfaIssuer.trimmed();
+    const SwString label = identity.account.email.trimmed().isEmpty()
+                               ? identity.account.accountId
+                               : identity.account.email.trimmed();
+    SwJsonObject payload;
+    payload["secret"] = secret.toStdString();
+    payload["issuer"] = issuer.toStdString();
+    payload["label"] = label.toStdString();
+
+    SwString setupToken;
+    SwHttpAuthChallenge challenge;
+    const SwDbStatus status = m_store.createChallenge("setup_mfa",
+                                                      identity.account.accountId,
+                                                      m_config.mfaChallengeTtlMs,
+                                                      &setupToken,
+                                                      &challenge,
+                                                      SwJsonValue(payload));
+    if (!status.ok()) {
+        if (outError) {
+            *outError = status.message();
+        }
+        return status;
+    }
+
+    outSetup->setupToken = setupToken;
+    outSetup->secret = secret;
+    outSetup->issuer = issuer;
+    outSetup->label = label;
+    outSetup->digits = 6;
+    outSetup->periodSeconds = 30;
+    outSetup->expiresAtMs = challenge.expiresAtMs;
+    outSetup->otpauthUri = swHttpAuthDetail::buildTotpOtpAuthUri(issuer, label, secret, 6, 30);
+    return SwDbStatus::success();
+}
+
+inline SwDbStatus SwHttpAuthService::confirmTotpSetup(const SwString& rawToken,
+                                                      const SwString& setupToken,
+                                                      const SwString& code,
+                                                      SwHttpAuthIdentity* outIdentity,
+                                                      SwString* outError) {
+    if (outError) {
+        outError->clear();
+    }
+    if (outIdentity) {
+        *outIdentity = SwHttpAuthIdentity();
+    }
+    if (!isStarted()) {
+        return SwDbStatus(SwDbStatus::NotOpen, "Auth service not started");
+    }
+
+    SwHttpAuthIdentity identity;
+    SwString resolveError;
+    if (!resolveIdentityFromToken(rawToken, &identity, &resolveError)) {
+        if (outError) {
+            *outError = resolveError.isEmpty() ? SwString("Authentication required") : resolveError;
+        }
+        return SwDbStatus(SwDbStatus::NotFound, "Authentication required");
+    }
+
+    SwHttpAuthChallenge challenge;
+    SwDbStatus status = lookupChallenge_("setup_mfa", SwString(), setupToken, &challenge);
+    if (!status.ok()) {
+        if (outError) {
+            *outError = status.message();
+        }
+        return status;
+    }
+    status = validateChallenge_(challenge);
+    if (!status.ok()) {
+        if (outError) {
+            *outError = status.message();
+        }
+        return status;
+    }
+    if (challenge.accountId != identity.account.accountId) {
+        if (outError) {
+            *outError = "Challenge not found";
+        }
+        return SwDbStatus(SwDbStatus::NotFound, "Challenge not found");
+    }
+    if (!challenge.payload.isObject()) {
+        if (outError) {
+            *outError = "Invalid MFA setup challenge";
+        }
+        return SwDbStatus(SwDbStatus::Corruption, "Invalid MFA setup challenge");
+    }
+
+    const SwJsonObject payload = challenge.payload.toObject();
+    const SwString secret = payload.value("secret").toString().c_str();
+    if (secret.trimmed().isEmpty()) {
+        if (outError) {
+            *outError = "Invalid MFA setup challenge";
+        }
+        return SwDbStatus(SwDbStatus::Corruption, "Invalid MFA setup challenge");
+    }
+    if (!throttleAllows_("setup_mfa:" + identity.account.accountId)) {
+        if (outError) {
+            *outError = "Too many MFA attempts";
+        }
+        return SwDbStatus(SwDbStatus::Busy, "Too many MFA attempts");
+    }
+    if (!swHttpAuthDetail::verifyTotpCode(secret, code)) {
+        if (outError) {
+            *outError = "Invalid MFA code";
+        }
+        return SwDbStatus(SwDbStatus::NotFound, "Invalid MFA code");
+    }
+
+    status = m_store.setAccountTotp(identity.account.accountId, secret, swHttpAuthDetail::currentIsoTimestamp());
+    if (!status.ok()) {
+        if (outError) {
+            *outError = status.message();
+        }
+        return status;
+    }
+    (void)m_store.consumeChallenge(challenge.challengeId);
+
+    SwHttpAuthAccount refreshedAccount;
+    status = m_store.getAccountById(identity.account.accountId, &refreshedAccount);
+    if (!status.ok()) {
+        if (outError) {
+            *outError = status.message();
+        }
+        return status;
+    }
+    identity.account = refreshedAccount;
+    identity.emailVerified = !refreshedAccount.emailVerifiedAt.trimmed().isEmpty();
+    if (!refreshedAccount.subjectId.trimmed().isEmpty()) {
+        SwString subjectError;
+        (void)loadSubjectView(refreshedAccount.subjectId, &identity.subject, &subjectError);
+    }
+    if (outIdentity) {
+        *outIdentity = identity;
+    }
+    return SwDbStatus::success();
+}
+
+inline SwDbStatus SwHttpAuthService::disableTotp(const SwString& rawToken,
+                                                 const SwString& currentPassword,
+                                                 SwHttpAuthIdentity* outIdentity,
+                                                 SwString* outError) {
+    if (outError) {
+        outError->clear();
+    }
+    if (outIdentity) {
+        *outIdentity = SwHttpAuthIdentity();
+    }
+    if (!isStarted()) {
+        return SwDbStatus(SwDbStatus::NotOpen, "Auth service not started");
+    }
+
+    SwHttpAuthIdentity identity;
+    SwString resolveError;
+    if (!resolveIdentityFromToken(rawToken, &identity, &resolveError)) {
+        if (outError) {
+            *outError = resolveError.isEmpty() ? SwString("Authentication required") : resolveError;
+        }
+        return SwDbStatus(SwDbStatus::NotFound, "Authentication required");
+    }
+    if (!m_store.verifyPassword(identity.account, currentPassword)) {
+        if (outError) {
+            *outError = "Invalid credentials";
+        }
+        return SwDbStatus(SwDbStatus::NotFound, "Invalid credentials");
+    }
+
+    SwDbStatus status = m_store.setAccountTotp(identity.account.accountId, SwString(), SwString());
+    if (!status.ok()) {
+        if (outError) {
+            *outError = status.message();
+        }
+        return status;
+    }
+
+    SwHttpAuthAccount refreshedAccount;
+    status = m_store.getAccountById(identity.account.accountId, &refreshedAccount);
+    if (!status.ok()) {
+        if (outError) {
+            *outError = status.message();
+        }
+        return status;
+    }
+    identity.account = refreshedAccount;
+    identity.emailVerified = !refreshedAccount.emailVerifiedAt.trimmed().isEmpty();
+    if (!refreshedAccount.subjectId.trimmed().isEmpty()) {
+        SwString subjectError;
+        (void)loadSubjectView(refreshedAccount.subjectId, &identity.subject, &subjectError);
     }
     if (outIdentity) {
         *outIdentity = identity;
