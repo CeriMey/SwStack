@@ -50,7 +50,6 @@
 
 #include <atomic>
 #include <cctype>
-#include <cstdio>
 #include <cstring>
 #include <cstdint>
 #include <string>
@@ -65,7 +64,9 @@
 #  include <unistd.h>
 #  include <sys/ioctl.h>
 #  include <sys/select.h>
+#  include <sys/socket.h>
 #  include <net/if.h>
+#  include <netinet/in.h>
 #  include <linux/if_tun.h>
 #  include <arpa/inet.h>
 #endif
@@ -92,6 +93,7 @@ typedef void    (WINAPI *WintunReleaseReceivePacket_t)(WINTUN_SESSION_HANDLE, co
 typedef BYTE*   (WINAPI *WintunAllocateSendPacket_t)(WINTUN_SESSION_HANDLE, DWORD);
 typedef void    (WINAPI *WintunSendPacket_t)(WINTUN_SESSION_HANDLE, const BYTE*);
 typedef HANDLE  (WINAPI *WintunGetReadWaitEvent_t)(WINTUN_SESSION_HANDLE);
+typedef void    (WINAPI *WintunGetAdapterLUID_t)(WINTUN_ADAPTER_HANDLE, NET_LUID*);
 
 #endif // _WIN32
 
@@ -182,16 +184,9 @@ public:
             }
         }
 
-        // Validate IPv4 address format (d.d.d.d)
-        {
-            std::string a = address.toStdString();
-            int octets[4] = {-1,-1,-1,-1};
-            int n = sscanf(a.c_str(), "%d.%d.%d.%d", &octets[0], &octets[1], &octets[2], &octets[3]);
-            if (n != 4 || octets[0] < 0 || octets[0] > 255 || octets[1] < 0 || octets[1] > 255 ||
-                octets[2] < 0 || octets[2] > 255 || octets[3] < 0 || octets[3] > 255) {
-                swCError(kSwLogCategory_SwTun) << "[SwTun] Invalid IPv4 address: " << a;
-                return false;
-            }
+        if (!parseIpv4Address_(address)) {
+            swCError(kSwLogCategory_SwTun) << "[SwTun] Invalid IPv4 address: " << address;
+            return false;
         }
 
 #if defined(_WIN32)
@@ -246,15 +241,8 @@ public:
             return false;
         }
 
-        std::string a = address.toStdString();
-        int octets[4] = {-1, -1, -1, -1};
-        int n = sscanf(a.c_str(), "%d.%d.%d.%d",
-                       &octets[0], &octets[1], &octets[2], &octets[3]);
-        if (n != 4 || octets[0] < 0 || octets[0] > 255 ||
-            octets[1] < 0 || octets[1] > 255 ||
-            octets[2] < 0 || octets[2] > 255 ||
-            octets[3] < 0 || octets[3] > 255) {
-            swCError(kSwLogCategory_SwTun) << "[SwTun] Invalid IPv4 address: " << a;
+        if (!parseIpv4Address_(address)) {
+            swCError(kSwLogCategory_SwTun) << "[SwTun] Invalid IPv4 address: " << address;
             return false;
         }
 
@@ -369,6 +357,48 @@ signals:
     // Private implementation
     // =======================================================================
 private:
+
+    static bool parseIpv4Address_(const SwString& address, uint32_t* hostOrderOut = nullptr) {
+        const std::string text = address.toStdString();
+        uint32_t octets[4] = {0, 0, 0, 0};
+        size_t pos = 0;
+
+        for (int i = 0; i < 4; ++i) {
+            if (pos >= text.size() || !std::isdigit(static_cast<unsigned char>(text[pos]))) {
+                return false;
+            }
+
+            uint32_t value = 0;
+            int digits = 0;
+            while (pos < text.size() && std::isdigit(static_cast<unsigned char>(text[pos]))) {
+                value = value * 10u + static_cast<uint32_t>(text[pos] - '0');
+                if (value > 255u || ++digits > 3) {
+                    return false;
+                }
+                ++pos;
+            }
+
+            octets[i] = value;
+            if (i < 3) {
+                if (pos >= text.size() || text[pos] != '.') {
+                    return false;
+                }
+                ++pos;
+            }
+        }
+
+        if (pos != text.size()) {
+            return false;
+        }
+
+        if (hostOrderOut) {
+            *hostOrderOut = (octets[0] << 24) |
+                            (octets[1] << 16) |
+                            (octets[2] << 8) |
+                            octets[3];
+        }
+        return true;
+    }
 
     void registerDispatcher_() {
         unregisterDispatcher_();
@@ -514,50 +544,94 @@ private:
         return LoadLibraryW(path.c_str());
     }
 
-    static bool runNetshCommand_(const std::wstring& arguments,
-                                 DWORD timeoutMs,
-                                 DWORD* exitCodeOut = nullptr) {
-        wchar_t systemDir[MAX_PATH] = {0};
-        const UINT systemDirLen = GetSystemDirectoryW(systemDir, MAX_PATH);
-        if (systemDirLen == 0 || systemDirLen >= MAX_PATH) {
+    static void removeWindowsIpv4Addresses_(const NET_LUID& adapterLuid) {
+        PMIB_UNICASTIPADDRESS_TABLE addressTable = nullptr;
+        const DWORD tableStatus = GetUnicastIpAddressTable(AF_INET, &addressTable);
+        if (tableStatus != NO_ERROR || !addressTable) {
+            return;
+        }
+
+        for (ULONG i = 0; i < addressTable->NumEntries; ++i) {
+            MIB_UNICASTIPADDRESS_ROW row = addressTable->Table[i];
+            if (row.InterfaceLuid.Value != adapterLuid.Value) {
+                continue;
+            }
+            const DWORD deleteStatus = DeleteUnicastIpAddressEntry(&row);
+            if (deleteStatus != NO_ERROR && deleteStatus != ERROR_NOT_FOUND) {
+                swCWarning(kSwLogCategory_SwTun)
+                    << "[SwTun] DeleteUnicastIpAddressEntry failed (err="
+                    << static_cast<unsigned long>(deleteStatus)
+                    << ")";
+            }
+        }
+
+        FreeMibTable(addressTable);
+    }
+
+    static bool setWindowsIpv4Address_(const NET_LUID& adapterLuid,
+                                       const SwString& address,
+                                       int prefix) {
+        uint32_t addressHostOrder = 0;
+        if (!parseIpv4Address_(address, &addressHostOrder)) {
+            SetLastError(ERROR_INVALID_PARAMETER);
             return false;
         }
 
-        const std::wstring netshPath = std::wstring(systemDir) + L"\\netsh.exe";
-        std::wstring commandLine = L"\"" + netshPath + L"\" " + arguments;
+        removeWindowsIpv4Addresses_(adapterLuid);
 
-        STARTUPINFOW startupInfo {};
-        startupInfo.cb = sizeof(startupInfo);
-        PROCESS_INFORMATION processInfo {};
-        if (!CreateProcessW(netshPath.c_str(),
-                            commandLine.empty() ? nullptr : &commandLine[0],
-                            nullptr,
-                            nullptr,
-                            FALSE,
-                            CREATE_NO_WINDOW,
-                            nullptr,
-                            nullptr,
-                            &startupInfo,
-                            &processInfo)) {
+        MIB_UNICASTIPADDRESS_ROW addressRow;
+        InitializeUnicastIpAddressEntry(&addressRow);
+        addressRow.InterfaceLuid = adapterLuid;
+        addressRow.Address.si_family = AF_INET;
+        addressRow.Address.Ipv4.sin_family = AF_INET;
+        addressRow.Address.Ipv4.sin_addr.S_un.S_addr = htonl(addressHostOrder);
+        addressRow.OnLinkPrefixLength = static_cast<UINT8>(prefix);
+        addressRow.PrefixOrigin = IpPrefixOriginManual;
+        addressRow.SuffixOrigin = IpSuffixOriginManual;
+        addressRow.ValidLifetime = 0xFFFFFFFFu;
+        addressRow.PreferredLifetime = 0xFFFFFFFFu;
+        addressRow.SkipAsSource = FALSE;
+
+        DWORD status = CreateUnicastIpAddressEntry(&addressRow);
+        if (status == ERROR_OBJECT_ALREADY_EXISTS) {
+            status = SetUnicastIpAddressEntry(&addressRow);
+        }
+        if (status != NO_ERROR) {
+            SetLastError(status);
+            return false;
+        }
+        return true;
+    }
+
+    static bool setWindowsMtu_(const NET_LUID& adapterLuid, int mtu) {
+        MIB_IPINTERFACE_ROW interfaceRow;
+        InitializeIpInterfaceEntry(&interfaceRow);
+        interfaceRow.Family = AF_INET;
+        interfaceRow.InterfaceLuid = adapterLuid;
+
+        DWORD status = GetIpInterfaceEntry(&interfaceRow);
+        if (status != NO_ERROR) {
+            SetLastError(status);
             return false;
         }
 
-        const DWORD waitResult = WaitForSingleObject(processInfo.hProcess, timeoutMs);
-        if (waitResult == WAIT_TIMEOUT) {
-            (void)TerminateProcess(processInfo.hProcess, 1);
-            (void)WaitForSingleObject(processInfo.hProcess, 1000);
+        interfaceRow.NlMtu = static_cast<ULONG>(mtu);
+        status = SetIpInterfaceEntry(&interfaceRow);
+        if (status != NO_ERROR) {
+            SetLastError(status);
+            return false;
         }
+        return true;
+    }
 
-        DWORD exitCode = STILL_ACTIVE;
-        (void)GetExitCodeProcess(processInfo.hProcess, &exitCode);
-        CloseHandle(processInfo.hThread);
-        CloseHandle(processInfo.hProcess);
-
-        if (exitCodeOut) {
-            *exitCodeOut = exitCode;
+    static bool configureWindowsInterface_(const NET_LUID& adapterLuid,
+                                           const SwString& address,
+                                           int prefix,
+                                           int mtu) {
+        if (!setWindowsIpv4Address_(adapterLuid, address, prefix)) {
+            return false;
         }
-        if (waitResult != WAIT_OBJECT_0 || exitCode != 0) {
-            SetLastError(waitResult == WAIT_TIMEOUT ? WAIT_TIMEOUT : exitCode);
+        if (!setWindowsMtu_(adapterLuid, mtu)) {
             return false;
         }
         return true;
@@ -582,9 +656,11 @@ private:
         m_fnAlloc    = (WintunAllocateSendPacket_t)   GetProcAddress(m_wintunDll, "WintunAllocateSendPacket");
         m_fnSend     = (WintunSendPacket_t)      GetProcAddress(m_wintunDll, "WintunSendPacket");
         m_fnWait     = (WintunGetReadWaitEvent_t) GetProcAddress(m_wintunDll, "WintunGetReadWaitEvent");
+        m_fnGetLuid  = (WintunGetAdapterLUID_t)   GetProcAddress(m_wintunDll, "WintunGetAdapterLUID");
 
         if (!m_fnCreate || !m_fnClose || !m_fnStart || !m_fnEnd ||
-            !m_fnRecv || !m_fnRelease || !m_fnAlloc || !m_fnSend || !m_fnWait) {
+            !m_fnRecv || !m_fnRelease || !m_fnAlloc || !m_fnSend ||
+            !m_fnWait || !m_fnGetLuid) {
             swCError(kSwLogCategory_SwTun) << "[SwTun] Failed to resolve wintun.dll exports";
             FreeLibrary(m_wintunDll);
             m_wintunDll = nullptr;
@@ -616,86 +692,19 @@ private:
             return false;
         }
 
-        // Configure IP via netsh (inputs already validated above)
-        {
-            uint32_t mask = ~0u << (32 - prefix);
-            const SwString maskString = SwString::number((mask >> 24) & 0xFF) + "." +
-                                        SwString::number((mask >> 16) & 0xFF) + "." +
-                                        SwString::number((mask >> 8) & 0xFF) + "." +
-                                        SwString::number(mask & 0xFF);
-            std::string addressUtf8 = address.toStdString();
-            std::string maskUtf8 = maskString.toStdString();
-            const int addressWideLen = MultiByteToWideChar(CP_UTF8, 0, addressUtf8.c_str(), -1, nullptr, 0);
-            const int maskWideLen = MultiByteToWideChar(CP_UTF8, 0, maskUtf8.c_str(), -1, nullptr, 0);
-            if (addressWideLen <= 0 || maskWideLen <= 0) {
-                swCError(kSwLogCategory_SwTun) << "[SwTun] Failed to convert netsh arguments to UTF-16";
-                m_fnClose(m_adapter);
-                m_adapter = nullptr;
-                FreeLibrary(m_wintunDll);
-                m_wintunDll = nullptr;
-                return false;
-            }
-
-            std::wstring wAddress(static_cast<size_t>(addressWideLen), L'\0');
-            std::wstring wMask(static_cast<size_t>(maskWideLen), L'\0');
-            MultiByteToWideChar(CP_UTF8, 0, addressUtf8.c_str(), -1, &wAddress[0], addressWideLen);
-            MultiByteToWideChar(CP_UTF8, 0, maskUtf8.c_str(), -1, &wMask[0], maskWideLen);
-
-            const std::wstring arguments = std::wstring(L"interface ip set address name=\"") +
-                                           std::wstring(wName.c_str()) +
-                                           L"\" static " +
-                                           std::wstring(wAddress.c_str()) +
-                                           L" " +
-                                           std::wstring(wMask.c_str());
-            DWORD netshExitCode = 0;
-            if (!runNetshCommand_(arguments, 5000, &netshExitCode)) {
-                swCWarning(kSwLogCategory_SwTun)
-                    << "[SwTun] netsh interface setup failed or timed out (code="
-                    << static_cast<long long>(netshExitCode)
-                    << ", err=" << static_cast<long long>(GetLastError())
-                    << ")";
-                m_fnClose(m_adapter);
-                m_adapter = nullptr;
-                FreeLibrary(m_wintunDll);
-                m_wintunDll = nullptr;
-                return false;
-            }
-
-            const std::wstring mtuArguments =
-                std::wstring(L"interface ipv4 set subinterface \"") +
-                std::wstring(wName.c_str()) +
-                L"\" mtu=" +
-                std::to_wstring(m_mtu) +
-                L" store=active";
-            netshExitCode = 0;
-            if (!runNetshCommand_(mtuArguments, 5000, &netshExitCode)) {
-                swCWarning(kSwLogCategory_SwTun)
-                    << "[SwTun] netsh interface MTU setup failed or timed out (code="
-                    << static_cast<long long>(netshExitCode)
-                    << ", err=" << static_cast<long long>(GetLastError())
-                    << ")";
-                m_fnClose(m_adapter);
-                m_adapter = nullptr;
-                FreeLibrary(m_wintunDll);
-                m_wintunDll = nullptr;
-                return false;
-            }
-            if (false) {
-            char cmd[512];
-            snprintf(cmd, sizeof(cmd),
-                     "netsh interface ip set address name=\"%s\" static %s %u.%u.%u.%u",
-                     name.toStdString().c_str(),
-                     address.toStdString().c_str(),
-                     (mask >> 24) & 0xFF, (mask >> 16) & 0xFF,
-                     (mask >> 8) & 0xFF, mask & 0xFF);
-            swCDebug(kSwLogCategory_SwTun) << "[SwTun] " << cmd;
-            int ret = system(cmd);
-            if (ret != 0) {
-                swCWarning(kSwLogCategory_SwTun) << "[SwTun] netsh returned " << ret
-                    << " — IP configuration may have failed";
-            }
-        }
-
+        NET_LUID adapterLuid;
+        std::memset(&adapterLuid, 0, sizeof(adapterLuid));
+        m_fnGetLuid(m_adapter, &adapterLuid);
+        if (!configureWindowsInterface_(adapterLuid, address, prefix, m_mtu)) {
+            swCWarning(kSwLogCategory_SwTun)
+                << "[SwTun] Native Windows interface setup failed (err="
+                << static_cast<unsigned long>(GetLastError())
+                << ")";
+            m_fnClose(m_adapter);
+            m_adapter = nullptr;
+            FreeLibrary(m_wintunDll);
+            m_wintunDll = nullptr;
+            return false;
         }
 
         // Start session (4 MB ring)
@@ -784,11 +793,118 @@ private:
     WintunAllocateSendPacket_t     m_fnAlloc   = nullptr;
     WintunSendPacket_t             m_fnSend    = nullptr;
     WintunGetReadWaitEvent_t       m_fnWait    = nullptr;
+    WintunGetAdapterLUID_t         m_fnGetLuid = nullptr;
 
 #else
     // -----------------------------------------------------------------------
     //  Linux back-end (/dev/net/tun)
     // -----------------------------------------------------------------------
+
+    static bool fillLinuxIfreqName_(struct ifreq& ifr, const SwString& ifName) {
+        const std::string name = ifName.toStdString();
+        if (name.empty() || name.size() >= IFNAMSIZ) {
+            errno = EINVAL;
+            swCError(kSwLogCategory_SwTun) << "[SwTun] Invalid Linux interface name: " << ifName;
+            return false;
+        }
+
+        std::memset(&ifr, 0, sizeof(ifr));
+        std::strncpy(ifr.ifr_name, name.c_str(), IFNAMSIZ - 1);
+        return true;
+    }
+
+    static bool setLinuxIpv4Field_(int controlFd,
+                                   const SwString& ifName,
+                                   unsigned long request,
+                                   uint32_t ipv4HostOrder,
+                                   const char* label) {
+        struct ifreq ifr;
+        if (!fillLinuxIfreqName_(ifr, ifName)) {
+            return false;
+        }
+
+        struct sockaddr_in* socketAddress = reinterpret_cast<struct sockaddr_in*>(&ifr.ifr_addr);
+        socketAddress->sin_family = AF_INET;
+        socketAddress->sin_addr.s_addr = htonl(ipv4HostOrder);
+
+        if (ioctl(controlFd, request, &ifr) < 0) {
+            swCError(kSwLogCategory_SwTun)
+                << "[SwTun] " << label << " failed on " << ifName << ": " << strerror(errno);
+            return false;
+        }
+        return true;
+    }
+
+    static bool setLinuxMtu_(int controlFd, const SwString& ifName, int mtu) {
+        struct ifreq ifr;
+        if (!fillLinuxIfreqName_(ifr, ifName)) {
+            return false;
+        }
+
+        ifr.ifr_mtu = mtu;
+        if (ioctl(controlFd, SIOCSIFMTU, &ifr) < 0) {
+            swCError(kSwLogCategory_SwTun)
+                << "[SwTun] SIOCSIFMTU failed on " << ifName << ": " << strerror(errno);
+            return false;
+        }
+        return true;
+    }
+
+    static bool setLinuxInterfaceUp_(int controlFd, const SwString& ifName) {
+        struct ifreq ifr;
+        if (!fillLinuxIfreqName_(ifr, ifName)) {
+            return false;
+        }
+
+        if (ioctl(controlFd, SIOCGIFFLAGS, &ifr) < 0) {
+            swCError(kSwLogCategory_SwTun)
+                << "[SwTun] SIOCGIFFLAGS failed on " << ifName << ": " << strerror(errno);
+            return false;
+        }
+
+        ifr.ifr_flags = static_cast<short>(ifr.ifr_flags | IFF_UP);
+        if (ioctl(controlFd, SIOCSIFFLAGS, &ifr) < 0) {
+            swCError(kSwLogCategory_SwTun)
+                << "[SwTun] SIOCSIFFLAGS failed on " << ifName << ": " << strerror(errno);
+            return false;
+        }
+        return true;
+    }
+
+    static bool configureLinuxInterface_(const SwString& ifName,
+                                         const SwString& address,
+                                         int prefix,
+                                         int mtu) {
+        uint32_t addressHostOrder = 0;
+        if (!parseIpv4Address_(address, &addressHostOrder)) {
+            swCError(kSwLogCategory_SwTun) << "[SwTun] Invalid IPv4 address: " << address;
+            return false;
+        }
+
+        const uint32_t maskHostOrder = (prefix == 32) ? 0xFFFFFFFFu : (0xFFFFFFFFu << (32 - prefix));
+        const int controlFd = ::socket(AF_INET, SOCK_DGRAM, 0);
+        if (controlFd < 0) {
+            swCError(kSwLogCategory_SwTun)
+                << "[SwTun] Failed to open interface control socket: " << strerror(errno);
+            return false;
+        }
+
+        const bool ok =
+            setLinuxIpv4Field_(controlFd, ifName, SIOCSIFADDR, addressHostOrder, "SIOCSIFADDR") &&
+            setLinuxIpv4Field_(controlFd, ifName, SIOCSIFNETMASK, maskHostOrder, "SIOCSIFNETMASK") &&
+            setLinuxMtu_(controlFd, ifName, mtu) &&
+            setLinuxInterfaceUp_(controlFd, ifName);
+
+        if (!ok) {
+            const int savedErrno = errno;
+            ::close(controlFd);
+            errno = savedErrno;
+            return false;
+        }
+
+        ::close(controlFd);
+        return true;
+    }
 
     bool openLinux_(const SwString& name, const SwString& address, int prefix) {
         if (m_tunFd >= 0) {
@@ -805,9 +921,12 @@ private:
         }
 
         struct ifreq ifr;
-        std::memset(&ifr, 0, sizeof(ifr));
+        if (!fillLinuxIfreqName_(ifr, name)) {
+            emit errorOccurred(errno);
+            ::close(fd);
+            return false;
+        }
         ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
-        std::strncpy(ifr.ifr_name, name.toStdString().c_str(), IFNAMSIZ - 1);
 
         if (ioctl(fd, TUNSETIFF, &ifr) < 0) {
             swCError(kSwLogCategory_SwTun) << "[SwTun] TUNSETIFF failed: " << strerror(errno);
@@ -820,27 +939,10 @@ private:
         m_ownsTunFd = true;
         m_linuxIfName = SwString(ifr.ifr_name);
 
-        // Configure IP (inputs already validated in open())
-        {
-            char cmd[256];
-            snprintf(cmd, sizeof(cmd), "ip addr add %s/%d dev %s",
-                     address.toStdString().c_str(), prefix,
-                     m_linuxIfName.toStdString().c_str());
-            swCDebug(kSwLogCategory_SwTun) << "[SwTun] " << cmd;
-            int ret = system(cmd);
-            if (ret != 0) {
-                swCWarning(kSwLogCategory_SwTun) << "[SwTun] ip addr add returned " << ret;
-            }
-        }
-        {
-            char cmd[128];
-            snprintf(cmd, sizeof(cmd), "ip link set dev %s up mtu %d",
-                     m_linuxIfName.toStdString().c_str(), m_mtu);
-            swCDebug(kSwLogCategory_SwTun) << "[SwTun] " << cmd;
-            int ret = system(cmd);
-            if (ret != 0) {
-                swCWarning(kSwLogCategory_SwTun) << "[SwTun] ip link set returned " << ret;
-            }
+        if (!configureLinuxInterface_(m_linuxIfName, address, prefix, m_mtu)) {
+            emit errorOccurred(errno);
+            closeLinux_();
+            return false;
         }
 
         int flags = fcntl(m_tunFd, F_GETFL, 0);
