@@ -86,6 +86,62 @@ static bool findSignalInRegistryForTarget(const SwString& domain,
     return false;
 }
 
+static bool methodMatchesQueueMethod(const SwString& requestedMethod,
+                                     const SwString& queueMethod) {
+    if (requestedMethod == queueMethod) {
+        return true;
+    }
+
+    const int sep = queueMethod.indexOf("|");
+    if (sep <= 0) {
+        return false;
+    }
+
+    const SwString tag = queueMethod.left(sep);
+    for (char c : tag.toStdString()) {
+        if (c < '0' || c > '9') {
+            return false;
+        }
+    }
+    return requestedMethod == queueMethod.mid(sep + 1);
+}
+
+static bool findRpcRequestQueueForMethod(const SwString& domain,
+                                         const SwString& object,
+                                         const SwString& requestedMethod,
+                                         RpcQueueInfo& out,
+                                         SwString& queueMethodOut) {
+    const SwString exactSignal = SwString("__rpc__|") + requestedMethod;
+    if (findSignalInRegistryForTarget(domain, object, exactSignal, out)) {
+        queueMethodOut = requestedMethod;
+        return true;
+    }
+
+    const SwString prefix("__rpc__|");
+    SwJsonArray all = sw::ipc::shmRegistrySnapshot(domain);
+    for (size_t i = 0; i < all.size(); ++i) {
+        const SwJsonValue v = all[i];
+        if (!v.isObject()) continue;
+        const SwJsonObject o(v.toObject());
+        if (SwString(o["object"].toString()) != object) continue;
+
+        const SwString signal = SwString(o["signal"].toString());
+        if (!signal.startsWith(prefix)) continue;
+
+        const SwString queueMethod = signal.mid(static_cast<int>(prefix.size()));
+        if (!methodMatchesQueueMethod(requestedMethod, queueMethod)) continue;
+
+        out.signal = signal;
+        out.shmName = SwString(o["shmName"].toString());
+        out.typeName = SwString(o["typeName"].toString());
+        out.typeId = parseHexU64(SwString(o["typeId"].toString()).toStdString());
+        queueMethodOut = queueMethod;
+        return true;
+    }
+
+    return false;
+}
+
 #if defined(_WIN32)
 struct WinHandle {
     HANDLE h{NULL};
@@ -512,8 +568,8 @@ int SwApiRpcsCommand::cmdCall_() {
         return 2;
     }
 
-    const SwString method = args()[2];
-    if (method.isEmpty()) {
+    const SwString requestedMethod = args()[2];
+    if (requestedMethod.isEmpty()) {
         std::cerr << "swapi rpc call: empty <method>\n";
         return 2;
     }
@@ -523,9 +579,9 @@ int SwApiRpcsCommand::cmdCall_() {
 
     const SwString clientInfo = cli().value("clientInfo", SwString("swapi"));
 
-    const SwString reqSignal = SwString("__rpc__|") + method;
     RpcQueueInfo reqInfo;
-    if (!findSignalInRegistryForTarget(target.domain, target.object, reqSignal, reqInfo)) {
+    SwString method;
+    if (!findRpcRequestQueueForMethod(target.domain, target.object, requestedMethod, reqInfo, method)) {
         std::cerr << "swapi rpc call: rpc request queue not found in registry (__rpc__|method)\n";
         return 3;
     }

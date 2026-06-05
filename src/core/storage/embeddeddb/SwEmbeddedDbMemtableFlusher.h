@@ -142,7 +142,7 @@ inline SwDbStatus SwEmbeddedDb::flushMemTable_(const swEmbeddedDbDetail::MemTabl
         openedHandles[newTables[i].fileName] = handle;
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    SwEmbeddedDbLock_ lock(mutex_);
     swEmbeddedDbDetail::Manifest_ backupManifest = manifest_;
     SwHash<SwString, std::shared_ptr<swEmbeddedDbDetail::TableHandle_>> backupHandles = tableHandles_;
 

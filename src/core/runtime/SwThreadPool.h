@@ -60,6 +60,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <thread>
 
 #if defined(_WIN32)
 #include "platform/win/SwWindows.h"
@@ -206,6 +207,124 @@ public:
 private:
     bool m_forever;
     long long m_deadlineMs;
+};
+
+struct SwThreadPoolWaitMutex_ {
+#if defined(_WIN32)
+    SwThreadPoolWaitMutex_() {
+        InitializeCriticalSection(&section);
+    }
+
+    ~SwThreadPoolWaitMutex_() {
+        DeleteCriticalSection(&section);
+    }
+
+    SwThreadPoolWaitMutex_(const SwThreadPoolWaitMutex_&) = delete;
+    SwThreadPoolWaitMutex_& operator=(const SwThreadPoolWaitMutex_&) = delete;
+
+    CRITICAL_SECTION section;
+#else
+    std::mutex mutex;
+#endif
+};
+
+class SwThreadPoolWaitLock_ {
+public:
+    explicit SwThreadPoolWaitLock_(SwThreadPoolWaitMutex_& mutex)
+        : mutex_(mutex) {
+        lock();
+    }
+
+    ~SwThreadPoolWaitLock_() {
+        if (locked_) {
+            unlock();
+        }
+    }
+
+    void lock() {
+        if (locked_) {
+            return;
+        }
+#if defined(_WIN32)
+        EnterCriticalSection(&mutex_.section);
+#else
+        mutex_.mutex.lock();
+#endif
+        locked_ = true;
+    }
+
+    void unlock() {
+        if (!locked_) {
+            return;
+        }
+        locked_ = false;
+#if defined(_WIN32)
+        LeaveCriticalSection(&mutex_.section);
+#else
+        mutex_.mutex.unlock();
+#endif
+    }
+
+    SwThreadPoolWaitLock_(const SwThreadPoolWaitLock_&) = delete;
+    SwThreadPoolWaitLock_& operator=(const SwThreadPoolWaitLock_&) = delete;
+
+#if defined(_WIN32)
+    CRITICAL_SECTION* nativeHandle_() {
+        return &mutex_.section;
+    }
+#endif
+
+private:
+    SwThreadPoolWaitMutex_& mutex_;
+    bool locked_ = false;
+};
+
+class SwThreadPoolWaitCondition_ {
+public:
+#if defined(_WIN32)
+    SwThreadPoolWaitCondition_() {
+        InitializeConditionVariable(&condition_);
+    }
+
+    void notify_all() {
+        WakeAllConditionVariable(&condition_);
+    }
+
+    void wait(SwThreadPoolWaitLock_& lock) {
+        SleepConditionVariableCS(&condition_, lock.nativeHandle_(), INFINITE);
+    }
+
+    template<typename Rep, typename Period>
+    void wait_for(SwThreadPoolWaitLock_& lock,
+                  const std::chrono::duration<Rep, Period>& duration) {
+        const long long requestedMs =
+            std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+        const DWORD timeoutMs = requestedMs <= 0
+            ? 0
+            : static_cast<DWORD>((std::min)(requestedMs, static_cast<long long>(INFINITE - 1)));
+        SleepConditionVariableCS(&condition_, lock.nativeHandle_(), timeoutMs);
+    }
+
+private:
+    CONDITION_VARIABLE condition_;
+#else
+    void notify_all() {
+        condition_.notify_all();
+    }
+
+    void wait(SwThreadPoolWaitLock_& lock) {
+        condition_.wait(lock);
+    }
+
+    template<typename Rep, typename Period>
+    void wait_for(SwThreadPoolWaitLock_& lock,
+                  const std::chrono::duration<Rep, Period>& duration) {
+        condition_.wait_for(lock, duration);
+    }
+
+private:
+    std::condition_variable_any condition_;
+#endif
 };
 
 /**
@@ -856,6 +975,81 @@ public:
     }
 
     /**
+     * @brief Stops all workers once the pool has no running or queued work.
+     *
+     * @details This is intended for owners that already prevent new submissions
+     * before teardown and want to reclaim idle worker threads while keeping the
+     * pool object reusable for a later open/start cycle.
+     */
+    bool stopIdleWorkers(int msecs) {
+        return stopIdleWorkers(SwDeadlineTimer(msecs));
+    }
+
+    bool stopIdleWorkers(const SwDeadlineTimer& deadline = SwDeadlineTimer(SwDeadlineTimer::Forever)) {
+        for (;;) {
+            SwVector<WorkerEntry*> workersToStop;
+            bool canStop = false;
+
+            {
+                SwMutexLocker locker(&m_mutex);
+                if (isCurrentThreadWorkerLocked_()) {
+                    swCWarning(kSwLogCategory_SwThreadPool)
+                        << "stopIdleWorkers() called from a SwThreadPool worker; refusing to self-block";
+                    return false;
+                }
+
+                canStop = (m_runningTasks == 0);
+                if (canStop) {
+                    const int workerCount = m_workers.size();
+                    for (int i = 0; i < workerCount; ++i) {
+                        WorkerEntry* worker = m_workers[static_cast<size_t>(i)];
+                        if (worker && (worker->running || worker->dispatchPosted || !worker->queuedTasks.isEmpty())) {
+                            canStop = false;
+                            break;
+                        }
+                    }
+                }
+
+                if (canStop) {
+                    workersToStop = m_workers;
+                    const int retiredCount = static_cast<int>(m_retiredWorkers.size());
+                    for (int i = 0; i < retiredCount; ++i) {
+                        workersToStop.push_back(m_retiredWorkers[static_cast<size_t>(i)]);
+                    }
+                    m_workers.clear();
+                    m_retiredWorkers.clear();
+                }
+            }
+
+            if (canStop) {
+                const int count = workersToStop.size();
+                for (int i = 0; i < count; ++i) {
+                    WorkerEntry* worker = workersToStop[static_cast<size_t>(i)];
+                    if (worker && worker->thread) {
+                        worker->thread->quit();
+                    }
+                }
+                for (int i = 0; i < count; ++i) {
+                    stopSingleWorker_(workersToStop[static_cast<size_t>(i)]);
+                }
+                notifyStateChanged_();
+                return true;
+            }
+
+            if (deadline.hasExpired()) {
+                return false;
+            }
+
+            const int remaining = deadline.remainingTime();
+            if (remaining == 0) {
+                return false;
+            }
+            const int sleepMs = (remaining < 0 || remaining > 10) ? 10 : remaining;
+            std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
+        }
+    }
+
+    /**
      * @brief Returns the current expiry Timeout.
      * @return The current expiry Timeout.
      *
@@ -1295,7 +1489,7 @@ private:
 
     void notifyStateChanged_() {
         {
-            std::lock_guard<std::mutex> lock(m_waitMutex);
+            SwThreadPoolWaitLock_ lock(m_waitMutex);
         }
         m_waitCondition.notify_all();
     }
@@ -1748,7 +1942,7 @@ private:
     }
 
     bool awaitQuiescent_(const SwDeadlineTimer& deadline) {
-        std::unique_lock<std::mutex> waitLocker(m_waitMutex);
+        SwThreadPoolWaitLock_ waitLocker(m_waitMutex);
         for (;;) {
             {
                 SwMutexLocker locker(&m_mutex);
@@ -1806,8 +2000,8 @@ private:
     mutable SwMutex m_mutex;
     SwVector<WorkerEntry*> m_workers;
     SwList<WorkerEntry*> m_retiredWorkers;
-    std::mutex m_waitMutex;
-    std::condition_variable m_waitCondition;
+    SwThreadPoolWaitMutex_ m_waitMutex;
+    SwThreadPoolWaitCondition_ m_waitCondition;
 
     int m_maxThreadCount;
     int m_maxQueuedTaskCount;

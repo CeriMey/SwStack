@@ -75,6 +75,114 @@ namespace atomic {
  * migrate objects and execute their queued events in the appropriate context.
  */
 class Thread {
+private:
+    struct RegistryMutex_ {
+#if defined(_WIN32)
+        RegistryMutex_() {
+            InitializeCriticalSection(&section);
+        }
+
+        ~RegistryMutex_() {
+            DeleteCriticalSection(&section);
+        }
+
+        RegistryMutex_(const RegistryMutex_&) = delete;
+        RegistryMutex_& operator=(const RegistryMutex_&) = delete;
+
+        CRITICAL_SECTION section;
+#else
+        std::mutex mutex;
+#endif
+    };
+
+    class RegistryLock_ {
+    public:
+        friend class ThreadCondition_;
+
+        explicit RegistryLock_(RegistryMutex_& mutex)
+            : mutex_(mutex) {
+            lock();
+        }
+
+        ~RegistryLock_() {
+            if (locked_) {
+                unlock();
+            }
+        }
+
+        void lock() {
+            if (locked_) {
+                return;
+            }
+#if defined(_WIN32)
+            EnterCriticalSection(&mutex_.section);
+#else
+            mutex_.mutex.lock();
+#endif
+            locked_ = true;
+        }
+
+        void unlock() {
+            if (!locked_) {
+                return;
+            }
+            locked_ = false;
+#if defined(_WIN32)
+            LeaveCriticalSection(&mutex_.section);
+#else
+            mutex_.mutex.unlock();
+#endif
+        }
+
+        RegistryLock_(const RegistryLock_&) = delete;
+        RegistryLock_& operator=(const RegistryLock_&) = delete;
+
+#if defined(_WIN32)
+        CRITICAL_SECTION* nativeHandle_() {
+            return &mutex_.section;
+        }
+#endif
+
+    private:
+        RegistryMutex_& mutex_;
+        bool locked_ = false;
+    };
+
+    class ThreadCondition_ {
+    public:
+#if defined(_WIN32)
+        ThreadCondition_() {
+            InitializeConditionVariable(&condition_);
+        }
+
+        void notify_all() {
+            WakeAllConditionVariable(&condition_);
+        }
+
+        template<typename Predicate>
+        void wait(RegistryLock_& lock, Predicate predicate) {
+            while (!predicate()) {
+                SleepConditionVariableCS(&condition_, lock.nativeHandle_(), INFINITE);
+            }
+        }
+
+    private:
+        CONDITION_VARIABLE condition_;
+#else
+        void notify_all() {
+            condition_.notify_all();
+        }
+
+        template<typename Predicate>
+        void wait(RegistryLock_& lock, Predicate predicate) {
+            condition_.wait(lock, predicate);
+        }
+
+    private:
+        std::condition_variable_any condition_;
+#endif
+    };
+
 public:
     /**
      * @brief Constructs a `Thread` instance.
@@ -115,7 +223,7 @@ public:
         }
 
         m_shouldQuit = false;
-        std::unique_lock<std::mutex> lock(m_startMutex);
+        RegistryLock_ lock(m_startMutex);
         m_appReady = false;
         m_thread = std::thread([this]() { threadEntry(); });
         m_startCv.wait(lock, [this]() { return m_appReady; });
@@ -164,7 +272,7 @@ public:
      *         event loop is not ready yet.
      */
     SwCoreApplication* application() const {
-        std::lock_guard<std::mutex> lock(m_appMutex);
+        RegistryLock_ lock(m_appMutex);
         return m_app;
     }
 
@@ -201,7 +309,7 @@ public:
             return true;
         }
         {
-            std::lock_guard<std::mutex> lock(m_pendingMutex);
+            RegistryLock_ lock(m_pendingMutex);
             PendingTask_ pending;
             pending.task = std::move(task);
             pending.lane = lane;
@@ -224,7 +332,7 @@ public:
 
         const auto id = std::this_thread::get_id();
         {
-            std::lock_guard<std::mutex> lock(registryMutex());
+            RegistryLock_ lock(registryMutex());
             auto it = registry().find(id);
             if (it != registry().end()) {
                 local = it->second;
@@ -259,7 +367,7 @@ public:
         if (!thread) {
             return false;
         }
-        std::lock_guard<std::mutex> lock(liveThreadsMutex());
+        RegistryLock_ lock(liveThreadsMutex());
         return liveThreads().count(thread) > 0;
     }
 
@@ -298,7 +406,7 @@ public:
         if (!object) {
             return;
         }
-        std::lock_guard<std::mutex> lock(m_objectsMutex);
+        RegistryLock_ lock(m_objectsMutex);
         m_objects.insert(object);
     }
 
@@ -309,7 +417,7 @@ public:
         if (!object) {
             return;
         }
-        std::lock_guard<std::mutex> lock(m_objectsMutex);
+        RegistryLock_ lock(m_objectsMutex);
         m_objects.erase(object);
     }
 
@@ -320,7 +428,7 @@ public:
      * @details Call this method to replace the currently stored value with the caller-provided one.
      */
     void setStartedCallback(std::function<void()> cb) {
-        std::lock_guard<std::mutex> lock(m_callbackMutex);
+        RegistryLock_ lock(m_callbackMutex);
         m_onStarted = std::move(cb);
     }
 
@@ -331,7 +439,7 @@ public:
      * @details Call this method to replace the currently stored value with the caller-provided one.
      */
     void setFinishedCallback(std::function<void()> cb) {
-        std::lock_guard<std::mutex> lock(m_callbackMutex);
+        RegistryLock_ lock(m_callbackMutex);
         m_onFinished = std::move(cb);
     }
 
@@ -355,12 +463,12 @@ private:
 
         m_ownedApp.reset(new SwCoreApplication());
         {
-            std::lock_guard<std::mutex> lock(m_appMutex);
+            RegistryLock_ lock(m_appMutex);
             m_app = m_ownedApp.get();
         }
 
         {
-            std::lock_guard<std::mutex> lock(m_startMutex);
+            RegistryLock_ lock(m_startMutex);
             m_running = true;
             m_appReady = true;
         }
@@ -374,14 +482,14 @@ private:
         }
 
         {
-            std::lock_guard<std::mutex> lock(m_appMutex);
+            RegistryLock_ lock(m_appMutex);
             m_app = nullptr;
         }
         m_ownedApp.reset();
 
         m_running = false;
         {
-            std::lock_guard<std::mutex> lock(m_startMutex);
+            RegistryLock_ lock(m_startMutex);
             m_appReady = false;
         }
         detachAllObjects();
@@ -393,7 +501,7 @@ private:
     void flushPendingTasks() {
         std::vector<PendingTask_> pending;
         {
-            std::lock_guard<std::mutex> lock(m_pendingMutex);
+            RegistryLock_ lock(m_pendingMutex);
             pending.swap(m_pendingTasks);
         }
         for (size_t i = 0; i < pending.size(); ++i) {
@@ -412,7 +520,7 @@ private:
     }
 
     void detachAllObjects() {
-        std::lock_guard<std::mutex> lock(m_objectsMutex);
+        RegistryLock_ lock(m_objectsMutex);
         m_objects.clear();
     }
 
@@ -421,12 +529,12 @@ private:
             return;
         }
         localThreadInstance() = thread;
-        std::lock_guard<std::mutex> lock(registryMutex());
+        RegistryLock_ lock(registryMutex());
         registry()[thread->m_threadId] = thread;
     }
 
     static void unregisterThreadInstance(const std::thread::id& id) {
-        std::lock_guard<std::mutex> lock(registryMutex());
+        RegistryLock_ lock(registryMutex());
         registry().erase(id);
     }
 
@@ -435,9 +543,9 @@ private:
         return s_thread;
     }
 
-    static std::mutex& registryMutex() {
-        static std::mutex s_mutex;
-        return s_mutex;
+    static RegistryMutex_& registryMutex() {
+        static RegistryMutex_* s_mutex = new RegistryMutex_();
+        return *s_mutex;
     }
 
     static std::map<std::thread::id, Thread*>& registry() {
@@ -449,7 +557,7 @@ private:
         if (!thread) {
             return;
         }
-        std::lock_guard<std::mutex> lock(liveThreadsMutex());
+        RegistryLock_ lock(liveThreadsMutex());
         liveThreads().insert(thread);
     }
 
@@ -457,13 +565,13 @@ private:
         if (!thread) {
             return;
         }
-        std::lock_guard<std::mutex> lock(liveThreadsMutex());
+        RegistryLock_ lock(liveThreadsMutex());
         liveThreads().erase(thread);
     }
 
-    static std::mutex& liveThreadsMutex() {
-        static std::mutex s_mutex;
-        return s_mutex;
+    static RegistryMutex_& liveThreadsMutex() {
+        static RegistryMutex_* s_mutex = new RegistryMutex_();
+        return *s_mutex;
     }
 
     static std::unordered_set<const Thread*>& liveThreads() {
@@ -474,7 +582,7 @@ private:
     void invokeStartedCallback() {
         std::function<void()> cb;
         {
-            std::lock_guard<std::mutex> lock(m_callbackMutex);
+            RegistryLock_ lock(m_callbackMutex);
             cb = m_onStarted;
         }
         if (cb) {
@@ -485,7 +593,7 @@ private:
     void invokeFinishedCallback() {
         std::function<void()> cb;
         {
-            std::lock_guard<std::mutex> lock(m_callbackMutex);
+            RegistryLock_ lock(m_callbackMutex);
             cb = m_onFinished;
         }
         if (cb) {
@@ -502,12 +610,12 @@ private:
 
     SwCoreApplication* m_app = nullptr;
     std::unique_ptr<SwCoreApplication> m_ownedApp;
-    mutable std::mutex m_appMutex;
-    std::condition_variable m_startCv;
-    std::mutex m_startMutex;
+    mutable RegistryMutex_ m_appMutex;
+    ThreadCondition_ m_startCv;
+    RegistryMutex_ m_startMutex;
     bool m_appReady = false;
 
-    std::mutex m_objectsMutex;
+    RegistryMutex_ m_objectsMutex;
     std::set<SwObject*> m_objects;
 
     struct PendingTask_ {
@@ -515,10 +623,10 @@ private:
         SwFiberLane lane = SwFiberLane::Normal;
     };
 
-    std::mutex m_pendingMutex;
+    RegistryMutex_ m_pendingMutex;
     std::vector<PendingTask_> m_pendingTasks;
 
-    std::mutex m_callbackMutex;
+    RegistryMutex_ m_callbackMutex;
     std::function<void()> m_onStarted;
     std::function<void()> m_onFinished;
 };

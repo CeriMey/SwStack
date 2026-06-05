@@ -102,6 +102,49 @@ enum class SwFutureYieldWaitKind {
     ResumeRequested
 };
 
+class SwFutureCondition_ {
+public:
+    SwFutureCondition_() {
+#if defined(_WIN32)
+        InitializeConditionVariable(&condition_);
+#endif
+    }
+
+    SwFutureCondition_(const SwFutureCondition_&) = delete;
+    SwFutureCondition_& operator=(const SwFutureCondition_&) = delete;
+
+    void notify_all() {
+#if defined(_WIN32)
+        WakeAllConditionVariable(&condition_);
+#else
+        condition_.notify_all();
+#endif
+    }
+
+    void wait(std::unique_lock<SwMutex>& lock) {
+#if defined(_WIN32)
+        SwMutex* mutex = lock.mutex();
+        if (!mutex) {
+            return;
+        }
+        if (mutex->isRecursive()) {
+            SleepConditionVariableCS(&condition_, mutex->nativeCriticalSectionHandle_(), INFINITE);
+        } else {
+            SleepConditionVariableSRW(&condition_, mutex->nativeSrwHandle_(), INFINITE, 0);
+        }
+#else
+        condition_.wait(lock);
+#endif
+    }
+
+private:
+#if defined(_WIN32)
+    CONDITION_VARIABLE condition_;
+#else
+    std::condition_variable_any condition_;
+#endif
+};
+
 struct SwFutureYieldWaiter {
     int yieldId;
     SwFutureYieldWaitKind kind;
@@ -119,7 +162,7 @@ struct SwFutureStorage {
     typedef T ValueType;
 
     SwMutex mutex;
-    std::condition_variable_any condition;
+    SwFutureCondition_ condition;
     bool started;
     bool finished;
     bool failed;
@@ -156,7 +199,7 @@ struct SwFutureStorage {
 template<>
 struct SwFutureStorage<void> {
     SwMutex mutex;
-    std::condition_variable_any condition;
+    SwFutureCondition_ condition;
     bool started;
     bool finished;
     bool failed;

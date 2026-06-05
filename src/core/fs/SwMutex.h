@@ -46,8 +46,20 @@
  *
  ***************************************************************************************************/
 
-#include <mutex>
 #include <chrono>
+#include <thread>
+
+#if defined(_WIN32)
+#include "platform/win/SwWindows.h"
+#else
+#include <mutex>
+#endif
+
+namespace sw {
+namespace detail {
+class SwFutureCondition_;
+}
+}
 
 /**
  * @class SwMutex
@@ -67,7 +79,18 @@ public:
      * @details The instance is initialized and prepared for immediate use.
      */
     explicit SwMutex(RecursionMode mode = NonRecursive)
-        : mode_(mode) {}
+        : mode_(mode) {
+#if defined(_WIN32)
+        InitializeSRWLock(&mutex_);
+        InitializeCriticalSection(&recursiveMutex_);
+#endif
+    }
+
+    ~SwMutex() {
+#if defined(_WIN32)
+        DeleteCriticalSection(&recursiveMutex_);
+#endif
+    }
 
     /**
      * @brief Constructs a `SwMutex` instance.
@@ -85,11 +108,19 @@ public:
      * @brief Performs the `lock` operation.
      */
     void lock() {
+#if defined(_WIN32)
+        if (mode_ == Recursive) {
+            EnterCriticalSection(&recursiveMutex_);
+        } else {
+            AcquireSRWLockExclusive(&mutex_);
+        }
+#else
         if (mode_ == Recursive) {
             recursiveMutex_.lock();
         } else {
             mutex_.lock();
         }
+#endif
     }
 
     /**
@@ -132,11 +163,19 @@ public:
      * @brief Performs the `unlock` operation.
      */
     void unlock() {
+#if defined(_WIN32)
+        if (mode_ == Recursive) {
+            LeaveCriticalSection(&recursiveMutex_);
+        } else {
+            ReleaseSRWLockExclusive(&mutex_);
+        }
+#else
         if (mode_ == Recursive) {
             recursiveMutex_.unlock();
         } else {
             mutex_.unlock();
         }
+#endif
     }
 
     /**
@@ -148,21 +187,50 @@ public:
     bool isRecursive() const { return mode_ == Recursive; }
 
 private:
+    friend class sw::detail::SwFutureCondition_;
+
+#if defined(_WIN32)
+    SRWLOCK* nativeSrwHandle_() { return &mutex_; }
+    CRITICAL_SECTION* nativeCriticalSectionHandle_() { return &recursiveMutex_; }
+#endif
+
     bool tryImmediate() {
+#if defined(_WIN32)
+        return (mode_ == Recursive)
+            ? TryEnterCriticalSection(&recursiveMutex_) != FALSE
+            : TryAcquireSRWLockExclusive(&mutex_) != FALSE;
+#else
         return (mode_ == Recursive)
             ? recursiveMutex_.try_lock()
             : mutex_.try_lock();
+#endif
     }
 
     bool tryFor(std::chrono::milliseconds timeout) {
+#if defined(_WIN32)
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        do {
+            if (tryImmediate()) {
+                return true;
+            }
+            ::Sleep(1);
+        } while (std::chrono::steady_clock::now() < deadline);
+        return false;
+#else
         return (mode_ == Recursive)
             ? recursiveMutex_.try_lock_for(timeout)
             : mutex_.try_lock_for(timeout);
+#endif
     }
 
     RecursionMode mode_;
+#if defined(_WIN32)
+    SRWLOCK mutex_;
+    CRITICAL_SECTION recursiveMutex_;
+#else
     std::timed_mutex mutex_;
     std::recursive_timed_mutex recursiveMutex_;
+#endif
 };
 
 /**

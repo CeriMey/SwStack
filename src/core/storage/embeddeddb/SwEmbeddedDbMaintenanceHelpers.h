@@ -57,12 +57,12 @@ inline void SwEmbeddedDb::rebuildReadOnlySnapshotLocked_() {
 }
 
 inline bool SwEmbeddedDb::resolveValueThreadSafe_(swEmbeddedDbDetail::PrimaryRecord_& record) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    SwEmbeddedDbLock_ lock(mutex_);
     return resolveValueLocked_(record);
 }
 
 inline unsigned long long SwEmbeddedDb::nextTableIdThreadSafe_() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    SwEmbeddedDbLock_ lock(mutex_);
     return manifest_.nextTableId++;
 }
 

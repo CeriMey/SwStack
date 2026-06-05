@@ -696,15 +696,11 @@ private:
         std::memset(&adapterLuid, 0, sizeof(adapterLuid));
         m_fnGetLuid(m_adapter, &adapterLuid);
         if (!configureWindowsInterface_(adapterLuid, address, prefix, m_mtu)) {
+            const DWORD setupError = GetLastError();
             swCWarning(kSwLogCategory_SwTun)
                 << "[SwTun] Native Windows interface setup failed (err="
-                << static_cast<unsigned long>(GetLastError())
-                << ")";
-            m_fnClose(m_adapter);
-            m_adapter = nullptr;
-            FreeLibrary(m_wintunDll);
-            m_wintunDll = nullptr;
-            return false;
+                << static_cast<unsigned long>(setupError)
+                << "); continuing with deferred interface configuration";
         }
 
         // Start session (4 MB ring)

@@ -11,6 +11,9 @@
 #include "SwObject.h"
 #include "SwRuntimeTelemetry.h"
 #include "SwString.h"
+#if defined(_WIN32)
+#include "platform/win/SwWindows.h"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -162,6 +165,65 @@ public:
 
 namespace sw_socket_traffic_monitor {
 
+class TelemetryMutex_ {
+public:
+    TelemetryMutex_() {
+#if defined(_WIN32)
+        InitializeCriticalSection(&mutex_);
+#endif
+    }
+
+    ~TelemetryMutex_() {
+#if defined(_WIN32)
+        DeleteCriticalSection(&mutex_);
+#endif
+    }
+
+    TelemetryMutex_(const TelemetryMutex_&) = delete;
+    TelemetryMutex_& operator=(const TelemetryMutex_&) = delete;
+
+    void lock() {
+#if defined(_WIN32)
+        EnterCriticalSection(&mutex_);
+#else
+        mutex_.lock();
+#endif
+    }
+
+    void unlock() {
+#if defined(_WIN32)
+        LeaveCriticalSection(&mutex_);
+#else
+        mutex_.unlock();
+#endif
+    }
+
+private:
+#if defined(_WIN32)
+    CRITICAL_SECTION mutex_;
+#else
+    std::mutex mutex_;
+#endif
+};
+
+class TelemetryLock_ {
+public:
+    explicit TelemetryLock_(TelemetryMutex_& mutex)
+        : mutex_(mutex) {
+        mutex_.lock();
+    }
+
+    ~TelemetryLock_() {
+        mutex_.unlock();
+    }
+
+    TelemetryLock_(const TelemetryLock_&) = delete;
+    TelemetryLock_& operator=(const TelemetryLock_&) = delete;
+
+private:
+    TelemetryMutex_& mutex_;
+};
+
 struct SocketState_ {
     SwObject* socketObject;
     std::atomic<unsigned long long> rxBytesTotal;
@@ -173,7 +235,7 @@ struct SocketState_ {
     std::atomic<unsigned long long> pendingDatagramCount;
     std::atomic<long long> lastActivityNs;
     std::atomic<bool> open;
-    mutable std::mutex metaMutex;
+    mutable TelemetryMutex_ metaMutex;
     SwSocketTrafficTransportKind transportKind;
     SwString socketClassName;
     SwString localAddress;
@@ -206,15 +268,29 @@ struct SocketBaseline_ {
           txBytesTotal(0) {}
 };
 
+struct SocketMetadataSnapshot_ {
+    SwSocketTrafficTransportKind transportKind;
+    SwString socketClassName;
+    SwString localAddress;
+    unsigned short localPort;
+    SwString peerAddress;
+    unsigned short peerPort;
+
+    SocketMetadataSnapshot_()
+        : transportKind(SwSocketTrafficTransportKind::Tcp),
+          localPort(0),
+          peerPort(0) {}
+};
+
 inline long long nowNs_() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
                std::chrono::steady_clock::now().time_since_epoch())
         .count();
 }
 
-inline std::mutex& registryMutex_() {
-    static std::mutex mutex;
-    return mutex;
+inline TelemetryMutex_& registryMutex_() {
+    static TelemetryMutex_* mutex = new TelemetryMutex_();
+    return *mutex;
 }
 
 inline SwMap<SwObject*, std::shared_ptr<SocketState_>>& registry_() {
@@ -313,17 +389,13 @@ inline std::shared_ptr<SocketState_> ensureState_(SwObject* socketObject) {
         return std::shared_ptr<SocketState_>();
     }
 
-    std::lock_guard<std::mutex> lock(registryMutex_());
+    TelemetryLock_ lock(registryMutex_());
     SwMap<SwObject*, std::shared_ptr<SocketState_>>& states = registry_();
     if (states.contains(socketObject)) {
         return states[socketObject];
     }
 
     std::shared_ptr<SocketState_> state(new SocketState_(socketObject));
-    {
-        std::lock_guard<std::mutex> metaLock(state->metaMutex);
-        state->socketClassName = socketObject->className();
-    }
     states[socketObject] = state;
     return state;
 }
@@ -335,10 +407,10 @@ inline std::shared_ptr<SocketState_> registerSocket(SwObject* socketObject, SwSo
     }
     state->open.store(false, std::memory_order_relaxed);
     {
-        std::lock_guard<std::mutex> metaLock(state->metaMutex);
+        TelemetryLock_ metaLock(state->metaMutex);
         state->transportKind = kind;
-        if (socketObject) {
-            state->socketClassName = socketObject->className();
+        if (state->socketClassName.isEmpty()) {
+            state->socketClassName = transportName_(kind) + " socket";
         }
     }
     return state;
@@ -348,7 +420,7 @@ inline void unregisterSocket(SwObject* socketObject) {
     if (!socketObject) {
         return;
     }
-    std::lock_guard<std::mutex> lock(registryMutex_());
+    TelemetryLock_ lock(registryMutex_());
     registry_().remove(socketObject);
 }
 
@@ -356,7 +428,7 @@ inline void setTransportKind(const std::shared_ptr<SocketState_>& state, SwSocke
     if (!state) {
         return;
     }
-    std::lock_guard<std::mutex> metaLock(state->metaMutex);
+    TelemetryLock_ metaLock(state->metaMutex);
     state->transportKind = kind;
 }
 
@@ -387,7 +459,7 @@ inline void updateEndpoints(const std::shared_ptr<SocketState_>& state,
     if (!state) {
         return;
     }
-    std::lock_guard<std::mutex> metaLock(state->metaMutex);
+    TelemetryLock_ metaLock(state->metaMutex);
     state->localAddress = localAddress;
     state->localPort = localPort;
     state->peerAddress = peerAddress;
@@ -456,6 +528,22 @@ inline void updateUdpStats(SwObject* socketObject,
                    pendingDatagramCount);
 }
 
+inline SocketMetadataSnapshot_ metadataSnapshot_(const std::shared_ptr<SocketState_>& state) {
+    SocketMetadataSnapshot_ snapshot;
+    if (!state) {
+        return snapshot;
+    }
+
+    TelemetryLock_ metaLock(state->metaMutex);
+    snapshot.transportKind = state->transportKind;
+    snapshot.socketClassName = state->socketClassName;
+    snapshot.localAddress = state->localAddress;
+    snapshot.localPort = state->localPort;
+    snapshot.peerAddress = state->peerAddress;
+    snapshot.peerPort = state->peerPort;
+    return snapshot;
+}
+
 inline SwObject* resolveConsumerObject_(SwObject* socketObject) {
     SwObject* current = socketObject ? socketObject->parent() : nullptr;
     while (current) {
@@ -469,7 +557,7 @@ inline SwObject* resolveConsumerObject_(SwObject* socketObject) {
 
 inline SwList<std::shared_ptr<SocketState_>> registrySnapshot_() {
     SwList<std::shared_ptr<SocketState_>> snapshot;
-    std::lock_guard<std::mutex> lock(registryMutex_());
+    TelemetryLock_ lock(registryMutex_());
     for (SwMap<SwObject*, std::shared_ptr<SocketState_>>::const_iterator it = registry_().begin();
          it != registry_().end();
          ++it) {
@@ -694,21 +782,14 @@ private:
                 continue;
             }
 
-            SwSocketTrafficTransportKind transportKind = SwSocketTrafficTransportKind::Tcp;
-            SwString socketClassName;
-            SwString localAddress;
-            unsigned short localPort = 0;
-            SwString peerAddress;
-            unsigned short peerPort = 0;
-            {
-                std::lock_guard<std::mutex> metaLock(state->metaMutex);
-                transportKind = state->transportKind;
-                socketClassName = state->socketClassName;
-                localAddress = state->localAddress;
-                localPort = state->localPort;
-                peerAddress = state->peerAddress;
-                peerPort = state->peerPort;
-            }
+            const sw_socket_traffic_monitor::SocketMetadataSnapshot_ metadata =
+                sw_socket_traffic_monitor::metadataSnapshot_(state);
+            const SwSocketTrafficTransportKind transportKind = metadata.transportKind;
+            const SwString socketClassName = metadata.socketClassName;
+            const SwString localAddress = metadata.localAddress;
+            const unsigned short localPort = metadata.localPort;
+            const SwString peerAddress = metadata.peerAddress;
+            const unsigned short peerPort = metadata.peerPort;
 
             if (!sw_socket_traffic_monitor::transportEnabled_(transportKind, config_)) {
                 continue;

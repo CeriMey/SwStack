@@ -81,7 +81,7 @@ inline void SwEmbeddedDb::flushBackground_() {
     while (true) {
         swEmbeddedDbDetail::MemTable_ mem;
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            SwEmbeddedDbLock_ lock(mutex_);
             if (immutables_.isEmpty() || closing_) {
                 flushScheduled_ = false;
                 return;
@@ -99,7 +99,7 @@ inline void SwEmbeddedDb::flushBackground_() {
 inline void SwEmbeddedDb::flushAllSync_() {
     SwList<swEmbeddedDbDetail::MemTable_> pendingMems;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        SwEmbeddedDbLock_ lock(mutex_);
         pendingMems.append(immutables_.begin(), immutables_.end());
         if (!mutable_.primary.isEmpty() || !mutable_.secondary.isEmpty()) {
             pendingMems.append(mutable_);
@@ -113,7 +113,7 @@ inline void SwEmbeddedDb::flushAllSync_() {
 
     if (pendingMems.isEmpty()) {
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            SwEmbeddedDbLock_ lock(mutex_);
             if (!closing_) {
                 cleanupCoveredWalFilesLocked_();
             }

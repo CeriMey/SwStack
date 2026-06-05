@@ -50,6 +50,10 @@
 #include "SwCoreApplication.h"
 #include "atomic/thread.h"
 
+#if defined(_WIN32)
+#include "platform/win/SwWindows.h"
+#endif
+
 #include <iostream>
 #include <map>
 #include <vector>
@@ -704,6 +708,65 @@ protected:
     using ConnectionMap = SwMap<SwString, ConnectionList>;
     using TypedConnectionMap = SwMap<SignalKey, ConnectionList>;
     using ReceiverBackrefCounts = SwMap<SwObject*, int>;
+
+    class BackrefMutex_ {
+    public:
+        BackrefMutex_() {
+#if defined(_WIN32)
+            InitializeCriticalSection(&mutex_);
+#endif
+        }
+
+        ~BackrefMutex_() {
+#if defined(_WIN32)
+            DeleteCriticalSection(&mutex_);
+#endif
+        }
+
+        BackrefMutex_(const BackrefMutex_&) = delete;
+        BackrefMutex_& operator=(const BackrefMutex_&) = delete;
+
+        void lock() {
+#if defined(_WIN32)
+            EnterCriticalSection(&mutex_);
+#else
+            mutex_.lock();
+#endif
+        }
+
+        void unlock() {
+#if defined(_WIN32)
+            LeaveCriticalSection(&mutex_);
+#else
+            mutex_.unlock();
+#endif
+        }
+
+    private:
+#if defined(_WIN32)
+        CRITICAL_SECTION mutex_;
+#else
+        std::mutex mutex_;
+#endif
+    };
+
+    class BackrefLock_ {
+    public:
+        explicit BackrefLock_(BackrefMutex_& mutex)
+            : mutex_(mutex) {
+            mutex_.lock();
+        }
+
+        ~BackrefLock_() {
+            mutex_.unlock();
+        }
+
+        BackrefLock_(const BackrefLock_&) = delete;
+        BackrefLock_& operator=(const BackrefLock_&) = delete;
+
+    private:
+        BackrefMutex_& mutex_;
+    };
 
     SwMap<SwString, void*> __nameToFunction__;
     /**
@@ -2242,7 +2305,7 @@ protected:
         if (!sender || amount <= 0) {
             return;
         }
-        std::lock_guard<std::mutex> lock(receiverBackrefsMutex_);
+        BackrefLock_ lock(receiverBackrefsMutex_);
         receiverBackrefs_[sender] += amount;
     }
 
@@ -2250,7 +2313,7 @@ protected:
         if (!sender || amount <= 0) {
             return;
         }
-        std::lock_guard<std::mutex> lock(receiverBackrefsMutex_);
+        BackrefLock_ lock(receiverBackrefsMutex_);
         auto it = receiverBackrefs_.find(sender);
         if (it == receiverBackrefs_.end()) {
             return;
@@ -2284,7 +2347,7 @@ protected:
 
     SwVector<SwObject*> senderBackrefSnapshot_() {
         SwVector<SwObject*> senders;
-        std::lock_guard<std::mutex> lock(receiverBackrefsMutex_);
+        BackrefLock_ lock(receiverBackrefsMutex_);
         for (auto it = receiverBackrefs_.begin(); it != receiverBackrefs_.end(); ++it) {
             senders.push_back(it->first);
         }
@@ -2325,7 +2388,7 @@ private:
     mutable SwReadWriteLock connectionsMutex_;
     ConnectionMap connections;
     TypedConnectionMap typedConnections;
-    mutable std::mutex receiverBackrefsMutex_;
+    mutable BackrefMutex_ receiverBackrefsMutex_;
     ReceiverBackrefCounts receiverBackrefs_;
     SwObject* currentSender = nullptr;
     ThreadHandle* m_threadAffinity = nullptr;

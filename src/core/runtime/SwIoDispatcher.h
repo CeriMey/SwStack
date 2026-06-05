@@ -28,6 +28,52 @@
 
 static constexpr const char* kSwLogCategory_SwIoDispatcher = "sw.core.runtime.swiodispatcher";
 
+#if defined(_WIN32)
+class SwIoDispatcherMutex_ {
+public:
+    SwIoDispatcherMutex_() noexcept {
+        ::InitializeSRWLock(&lock_);
+    }
+
+    SwIoDispatcherMutex_(const SwIoDispatcherMutex_&) = delete;
+    SwIoDispatcherMutex_& operator=(const SwIoDispatcherMutex_&) = delete;
+
+    void lock() noexcept {
+        ::AcquireSRWLockExclusive(&lock_);
+    }
+
+    void unlock() noexcept {
+        ::ReleaseSRWLockExclusive(&lock_);
+    }
+
+private:
+    SRWLOCK lock_{};
+};
+
+class SwIoDispatcherLock_ {
+public:
+    explicit SwIoDispatcherLock_(SwIoDispatcherMutex_& mutex) noexcept
+        : mutex_(&mutex) {
+        mutex_->lock();
+    }
+
+    ~SwIoDispatcherLock_() {
+        if (mutex_) {
+            mutex_->unlock();
+        }
+    }
+
+    SwIoDispatcherLock_(const SwIoDispatcherLock_&) = delete;
+    SwIoDispatcherLock_& operator=(const SwIoDispatcherLock_&) = delete;
+
+private:
+    SwIoDispatcherMutex_* mutex_{nullptr};
+};
+#else
+using SwIoDispatcherMutex_ = std::mutex;
+using SwIoDispatcherLock_ = std::lock_guard<std::mutex>;
+#endif
+
 class SwIoDispatcher {
 public:
     enum EventFlag : uint32_t {
@@ -60,7 +106,7 @@ public:
 #if defined(_WIN32)
         std::vector<std::shared_ptr<Entry_>> entries;
         {
-            std::lock_guard<std::mutex> lock(m_mutex);
+            SwIoDispatcherLock_ lock(m_mutex);
             if (m_shutdown) {
                 return;
             }
@@ -85,7 +131,7 @@ public:
             m_linuxThread.join();
         }
 
-        std::lock_guard<std::mutex> lock(m_mutex);
+        SwIoDispatcherLock_ lock(m_mutex);
         m_entries.clear();
 
         if (m_linuxWakeFd >= 0) {
@@ -123,7 +169,7 @@ public:
             return 0;
         }
 
-        std::lock_guard<std::mutex> lock(m_mutex);
+        SwIoDispatcherLock_ lock(m_mutex);
         if (m_shutdown) {
             unregisterWindowsEntry_(entry);
             return 0;
@@ -156,7 +202,7 @@ public:
         }
 
         {
-            std::lock_guard<std::mutex> lock(m_mutex);
+            SwIoDispatcherLock_ lock(m_mutex);
             if (m_shutdown.load()) {
                 ::epoll_ctl(m_linuxEpollFd, EPOLL_CTL_DEL, fd, nullptr);
                 return 0;
@@ -171,7 +217,7 @@ public:
     bool updateFd(Token token, EventMask events) {
         std::shared_ptr<Entry_> entry;
         {
-            std::lock_guard<std::mutex> lock(m_mutex);
+            SwIoDispatcherLock_ lock(m_mutex);
             auto it = m_entries.find(token);
             if (it == m_entries.end()) {
                 return false;
@@ -203,7 +249,7 @@ public:
 
         std::shared_ptr<Entry_> entry;
         {
-            std::lock_guard<std::mutex> lock(m_mutex);
+            SwIoDispatcherLock_ lock(m_mutex);
             auto it = m_entries.find(token);
             if (it == m_entries.end()) {
                 return;
@@ -245,7 +291,7 @@ private:
 #endif
     };
 
-    std::mutex m_mutex;
+    SwIoDispatcherMutex_ m_mutex;
     std::unordered_map<Token, std::shared_ptr<Entry_>> m_entries;
     std::atomic<bool> m_shutdown{false};
     std::atomic<Token> m_nextToken{1};
@@ -413,7 +459,7 @@ private:
 
                 std::shared_ptr<Entry_> entry;
                 {
-                    std::lock_guard<std::mutex> lock(m_mutex);
+                    SwIoDispatcherLock_ lock(m_mutex);
                     auto it = m_entries.find(static_cast<Token>(events[static_cast<size_t>(i)].data.u64));
                     if (it == m_entries.end()) {
                         continue;

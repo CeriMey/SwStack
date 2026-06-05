@@ -290,6 +290,119 @@ class SwCoreApplication {
     friend class SwEventLoop;
 
 private:
+    struct RegistryMutex_ {
+#if defined(_WIN32)
+        RegistryMutex_() {
+            InitializeCriticalSection(&section);
+        }
+
+        ~RegistryMutex_() {
+            DeleteCriticalSection(&section);
+        }
+
+        RegistryMutex_(const RegistryMutex_&) = delete;
+        RegistryMutex_& operator=(const RegistryMutex_&) = delete;
+
+        CRITICAL_SECTION section;
+#else
+        std::mutex mutex;
+#endif
+    };
+
+    class RegistryLock_ {
+    public:
+        explicit RegistryLock_(RegistryMutex_& mutex)
+            : mutex_(mutex) {
+            lock();
+        }
+
+        ~RegistryLock_() {
+            if (locked_) {
+                unlock();
+            }
+        }
+
+        void lock() {
+            if (locked_) {
+                return;
+            }
+#if defined(_WIN32)
+            EnterCriticalSection(&mutex_.section);
+#else
+            mutex_.mutex.lock();
+#endif
+            locked_ = true;
+        }
+
+        void unlock() {
+            if (!locked_) {
+                return;
+            }
+            locked_ = false;
+#if defined(_WIN32)
+            LeaveCriticalSection(&mutex_.section);
+#else
+            mutex_.mutex.unlock();
+#endif
+        }
+
+        RegistryLock_(const RegistryLock_&) = delete;
+        RegistryLock_& operator=(const RegistryLock_&) = delete;
+
+#if defined(_WIN32)
+        CRITICAL_SECTION* nativeHandle_() {
+            return &mutex_.section;
+        }
+#endif
+
+    private:
+        RegistryMutex_& mutex_;
+        bool locked_ = false;
+    };
+
+    class RuntimeCondition_ {
+    public:
+#if defined(_WIN32)
+        RuntimeCondition_() {
+            InitializeConditionVariable(&condition_);
+        }
+
+        void notify_one() {
+            WakeConditionVariable(&condition_);
+        }
+
+        void notify_all() {
+            WakeAllConditionVariable(&condition_);
+        }
+
+        template<typename Predicate>
+        void wait(RegistryLock_& lock, Predicate predicate) {
+            while (!predicate()) {
+                SleepConditionVariableCS(&condition_, lock.nativeHandle_(), INFINITE);
+            }
+        }
+
+    private:
+        CONDITION_VARIABLE condition_;
+#else
+        void notify_one() {
+            condition_.notify_one();
+        }
+
+        void notify_all() {
+            condition_.notify_all();
+        }
+
+        template<typename Predicate>
+        void wait(RegistryLock_& lock, Predicate predicate) {
+            condition_.wait(lock, predicate);
+        }
+
+    private:
+        std::condition_variable_any condition_;
+#endif
+    };
+
     struct PostedObjectEvent_ {
         SwObject* receiver{nullptr};
         std::unique_ptr<SwEvent> event;
@@ -580,7 +693,7 @@ public:
     static bool requestQuitAllInstances() {
         bool requested = false;
         {
-            std::lock_guard<std::mutex> lock(instanceRegistryMutex());
+            RegistryLock_ lock(instanceRegistryMutex());
             for (auto& kv : instanceRegistry()) {
                 if (!kv.second) continue;
                 kv.second->quit();
@@ -592,7 +705,7 @@ public:
 
     static SwList<SwCoreApplication*> instancesSnapshot() {
         SwList<SwCoreApplication*> apps;
-        std::lock_guard<std::mutex> lock(instanceRegistryMutex());
+        RegistryLock_ lock(instanceRegistryMutex());
         for (std::map<std::thread::id, SwCoreApplication*>::const_iterator it = instanceRegistry().begin();
              it != instanceRegistry().end();
              ++it) {
@@ -608,7 +721,7 @@ public:
             return;
         }
 
-        std::lock_guard<std::mutex> lock(instanceRegistryObserversMutex_());
+        RegistryLock_ lock(instanceRegistryObserversMutex_());
         std::vector<SwCoreApplicationRegistryObserver*>& observers = instanceRegistryObservers_();
         if (std::find(observers.begin(), observers.end(), observer) == observers.end()) {
             observers.push_back(observer);
@@ -620,7 +733,7 @@ public:
             return;
         }
 
-        std::lock_guard<std::mutex> lock(instanceRegistryObserversMutex_());
+        RegistryLock_ lock(instanceRegistryObserversMutex_());
         std::vector<SwCoreApplicationRegistryObserver*>& observers = instanceRegistryObservers_();
         observers.erase(std::remove(observers.begin(), observers.end(), observer), observers.end());
     }
@@ -634,7 +747,7 @@ public:
         descriptor.applicationId = runtimeApplicationId_;
         descriptor.threadId = runtimeThreadId_;
         {
-            std::lock_guard<std::mutex> lock(runtimeDescriptorMutex_);
+            RegistryLock_ lock(runtimeDescriptorMutex_);
             descriptor.runtimeKind = runtimeKind_;
             descriptor.label = runtimeLabel_;
             descriptor.isGuiRuntime = runtimeIsGui_;
@@ -651,7 +764,7 @@ public:
 
     void setRuntimeApplicationLabel(const SwString& label) {
         {
-            std::lock_guard<std::mutex> lock(runtimeDescriptorMutex_);
+            RegistryLock_ lock(runtimeDescriptorMutex_);
             runtimeLabel_ = label.trimmed();
         }
         announceRuntimeApplicationRegistered_();
@@ -691,7 +804,7 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     double getLoadPercentage() const {
-        std::lock_guard<std::mutex> lock(measurementsMutex_);
+        RegistryLock_ lock(measurementsMutex_);
         if (totalTimeMicroseconds == 0) {
             return 0.0;
         }
@@ -705,7 +818,7 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     double getLastSecondLoadPercentage() {
-        std::lock_guard<std::mutex> lock(measurementsMutex_);
+        RegistryLock_ lock(measurementsMutex_);
         auto now = std::chrono::steady_clock::now();
         auto oneSecondAgo = now - std::chrono::seconds(1);
 
@@ -757,7 +870,7 @@ public:
         }
 
         {
-            std::lock_guard<std::mutex> lock(profilerSessionsMutex_);
+            RegistryLock_ lock(profilerSessionsMutex_);
             for (size_t i = 0; i < profilerSessions_.size(); ++i) {
                 if (profilerSessions_[i].get() == session.get()) {
                     return false;
@@ -782,7 +895,7 @@ public:
 
         std::shared_ptr<SwRuntimeProfilerSession> removedSession;
         {
-            std::lock_guard<std::mutex> lock(profilerSessionsMutex_);
+            RegistryLock_ lock(profilerSessionsMutex_);
             for (size_t i = 0; i < profilerSessions_.size(); ++i) {
                 if (profilerSessions_[i].get() != session) {
                     continue;
@@ -804,7 +917,7 @@ public:
     void detachAllProfilerSessions() {
         SwList<std::shared_ptr<SwRuntimeProfilerSession>> sessions;
         {
-            std::lock_guard<std::mutex> lock(profilerSessionsMutex_);
+            RegistryLock_ lock(profilerSessionsMutex_);
             sessions = profilerSessions_;
             profilerSessions_.clear();
         }
@@ -823,7 +936,7 @@ public:
         }
 
         {
-            std::lock_guard<std::mutex> lock(telemetrySessionsMutex_);
+            RegistryLock_ lock(telemetrySessionsMutex_);
             for (size_t i = 0; i < telemetrySessions_.size(); ++i) {
                 if (telemetrySessions_[i].get() == session.get()) {
                     return false;
@@ -846,7 +959,7 @@ public:
 
         std::shared_ptr<SwRuntimeTelemetrySession> removedSession;
         {
-            std::lock_guard<std::mutex> lock(telemetrySessionsMutex_);
+            RegistryLock_ lock(telemetrySessionsMutex_);
             for (size_t i = 0; i < telemetrySessions_.size(); ++i) {
                 if (telemetrySessions_[i].get() != session) {
                     continue;
@@ -864,7 +977,7 @@ public:
     void detachAllTelemetrySessions() {
         SwList<std::shared_ptr<SwRuntimeTelemetrySession>> sessions;
         {
-            std::lock_guard<std::mutex> lock(telemetrySessionsMutex_);
+            RegistryLock_ lock(telemetrySessionsMutex_);
             sessions = telemetrySessions_;
             telemetrySessions_.clear();
         }
@@ -926,7 +1039,7 @@ private:
     void cleanupTimerStorage_() {
         SwList<_T*> timersToDelete;
         {
-            std::lock_guard<std::mutex> lock(eventQueueMutex);
+            RegistryLock_ lock(eventQueueMutex);
             auto appendUniqueTimer = [&timersToDelete](_T* timer) {
                 if (!timer) {
                     return;
@@ -980,7 +1093,7 @@ public:
         postedEvent.priority = priority;
 
         {
-            std::lock_guard<std::mutex> lock(eventQueueMutex);
+            RegistryLock_ lock(eventQueueMutex);
             if (priority > 0) {
                 priorityPostedEventQueue_.push_back(std::move(postedEvent));
             } else {
@@ -1128,7 +1241,7 @@ public:
                  SwFiberLane lane = SwFiberLane::Normal) {
         int timerId;
         {
-            std::lock_guard<std::mutex> lock(eventQueueMutex);
+            RegistryLock_ lock(eventQueueMutex);
             timerId = nextTimerId++;
             timers.insert(timerId, new _T(callback, interval, singleShot, lane));
         }
@@ -1142,7 +1255,7 @@ public:
      */
     void removeTimer(int timerId) {
         {
-            std::lock_guard<std::mutex> lock(eventQueueMutex);
+            RegistryLock_ lock(eventQueueMutex);
             auto it = timers.find(timerId);
             if (it != timers.end()) {
                 _T* toDelete = it->second;
@@ -1321,7 +1434,7 @@ public:
              }
          }
 #endif
-         std::unique_lock<std::mutex> lock(eventQueueMutex);
+         RegistryLock_ lock(eventQueueMutex);
 
         // Wait for an event if the queue is empty and waiting is allowed
         if (priorityPostedEventQueue_.empty() &&
@@ -1380,7 +1493,7 @@ public:
         lock.unlock();
 
         {
-            std::lock_guard<std::mutex> lock(eventQueueMutex);
+            RegistryLock_ lock(eventQueueMutex);
             if (!priorityPostedEventQueue_.empty() ||
                 !postedEventQueue_.empty()) {
                 return 0;
@@ -1398,7 +1511,7 @@ public:
      * @return `true` if there are pending events or timers, `false` otherwise.
      */
     bool hasPendingEvents() {
-        std::lock_guard<std::mutex> lock(eventQueueMutex);
+        RegistryLock_ lock(eventQueueMutex);
         return !priorityPostedEventQueue_.empty() ||
                !postedEventQueue_.empty() ||
                !timers.empty() ||
@@ -1408,7 +1521,7 @@ public:
 protected:
     void setRuntimeApplicationKind(const SwString& runtimeKind, bool isGuiRuntime) {
         {
-            std::lock_guard<std::mutex> lock(runtimeDescriptorMutex_);
+            RegistryLock_ lock(runtimeDescriptorMutex_);
             runtimeKind_ = runtimeKind.trimmed();
             runtimeIsGui_ = isGuiRuntime;
         }
@@ -1425,12 +1538,12 @@ protected:
     }
 
     SwList<std::shared_ptr<SwRuntimeTelemetrySession>> telemetrySessionsSnapshot_() const {
-        std::lock_guard<std::mutex> lock(telemetrySessionsMutex_);
+        RegistryLock_ lock(telemetrySessionsMutex_);
         return telemetrySessions_;
     }
 
     SwList<std::shared_ptr<SwRuntimeProfilerSession>> profilerSessionsSnapshot_() const {
-        std::lock_guard<std::mutex> lock(profilerSessionsMutex_);
+        RegistryLock_ lock(profilerSessionsMutex_);
         return profilerSessions_;
     }
 
@@ -1488,7 +1601,7 @@ protected:
 
         uint64_t sumBusy = 0;
         uint64_t sumTotal = 0;
-        std::lock_guard<std::mutex> lock(measurementsMutex_);
+        RegistryLock_ lock(measurementsMutex_);
         for (std::deque<IterationMeasurement>::const_iterator it = measurements.begin();
              it != measurements.end();
              ++it) {
@@ -1507,7 +1620,7 @@ protected:
     void recordRuntimeIterationMeasurement_(const std::chrono::steady_clock::time_point& iterationEnd,
                                             uint64_t busyMicroseconds,
                                             uint64_t totalMicroseconds) {
-        std::lock_guard<std::mutex> lock(measurementsMutex_);
+        RegistryLock_ lock(measurementsMutex_);
         totalBusyTimeMicroseconds += busyMicroseconds;
         totalTimeMicroseconds += totalMicroseconds;
         measurements.push_back({
@@ -1526,7 +1639,7 @@ protected:
         SwRuntimeIterationSnapshot snapshot;
         snapshot.busyMicroseconds = busyElapsedIteration;
         {
-            std::lock_guard<std::mutex> lock(measurementsMutex_);
+            RegistryLock_ lock(measurementsMutex_);
             if (!measurements.empty()) {
                 snapshot.totalMicroseconds = measurements.back().totalMicroseconds;
             }
@@ -1538,7 +1651,7 @@ protected:
         snapshot.lastSecondLoadPercentage = runtimeLastSecondLoadPercentage_();
         snapshot.fiberPoolStats = fiberPool_.stats();
         {
-            std::lock_guard<std::mutex> lock(eventQueueMutex);
+            RegistryLock_ lock(eventQueueMutex);
             snapshot.postedEventCount = static_cast<int>(postedEventQueue_.size());
             snapshot.priorityPostedEventCount = static_cast<int>(priorityPostedEventQueue_.size());
             snapshot.timerCount = static_cast<int>(timers.size());
@@ -1590,7 +1703,7 @@ private:
             return true;
         }
 
-        std::lock_guard<std::mutex> registryLock(instanceRegistryMutex());
+        RegistryLock_ registryLock(instanceRegistryMutex());
         for (auto& kv : instanceRegistry()) {
             SwCoreApplication* app = kv.second;
             if (!app || app == tlsInstance) {
@@ -1617,7 +1730,7 @@ private:
             bool found = false;
 
             {
-                std::lock_guard<std::mutex> lock(eventQueueMutex);
+                RegistryLock_ lock(eventQueueMutex);
                 auto matchEvent = [receiver, type](const PostedObjectEvent_& candidate) {
                     if (receiver && candidate.receiver != receiver) {
                         return false;
@@ -1999,9 +2112,9 @@ private:
     }
 #endif
 
-    static std::mutex& instanceRegistryMutex() {
-        static std::mutex registryMutex;
-        return registryMutex;
+    static RegistryMutex_& instanceRegistryMutex() {
+        static RegistryMutex_* registryMutex = new RegistryMutex_();
+        return *registryMutex;
     }
 
     static std::map<std::thread::id, SwCoreApplication*>& instanceRegistry() {
@@ -2009,9 +2122,9 @@ private:
         return registry;
     }
 
-    static std::mutex& instanceRegistryObserversMutex_() {
-        static std::mutex observersMutex;
-        return observersMutex;
+    static RegistryMutex_& instanceRegistryObserversMutex_() {
+        static RegistryMutex_* observersMutex = new RegistryMutex_();
+        return *observersMutex;
     }
 
     static std::vector<SwCoreApplicationRegistryObserver*>& instanceRegistryObservers_() {
@@ -2032,7 +2145,7 @@ private:
         const SwRuntimeApplicationDescriptor descriptor = runtimeApplicationDescriptor();
         std::vector<SwCoreApplicationRegistryObserver*> observers;
         {
-            std::lock_guard<std::mutex> lock(instanceRegistryObserversMutex_());
+            RegistryLock_ lock(instanceRegistryObserversMutex_());
             observers = instanceRegistryObservers_();
         }
         for (std::size_t i = 0; i < observers.size(); ++i) {
@@ -2045,7 +2158,7 @@ private:
     static void announceRuntimeApplicationUnregistered_(const SwRuntimeApplicationDescriptor& descriptor) {
         std::vector<SwCoreApplicationRegistryObserver*> observers;
         {
-            std::lock_guard<std::mutex> lock(instanceRegistryObserversMutex_());
+            RegistryLock_ lock(instanceRegistryObserversMutex_());
             observers = instanceRegistryObservers_();
         }
         for (std::size_t i = 0; i < observers.size(); ++i) {
@@ -2058,7 +2171,7 @@ private:
     static void bindInstanceToCurrentThread(SwCoreApplication* app) {
         setThreadLocalInstance_(app);
         {
-            std::lock_guard<std::mutex> lock(instanceRegistryMutex());
+            RegistryLock_ lock(instanceRegistryMutex());
             instanceRegistry()[std::this_thread::get_id()] = app;
         }
     }
@@ -2071,7 +2184,7 @@ private:
         }
 
         {
-            std::lock_guard<std::mutex> lock(instanceRegistryMutex());
+            RegistryLock_ lock(instanceRegistryMutex());
             std::map<std::thread::id, SwCoreApplication*>::iterator it =
                 instanceRegistry().find(std::this_thread::get_id());
             if (it != instanceRegistry().end() && it->second == app) {
@@ -2363,7 +2476,7 @@ protected:
         int minTimeUntilNext = (std::numeric_limits<int>::max)();
 
         {
-            std::lock_guard<std::mutex> lock(eventQueueMutex);
+            RegistryLock_ lock(eventQueueMutex);
             for (auto it = timers.begin(); it != timers.end(); ) {
                 const int currentTimerId = it.key();
                 _T* currentTimer = it->second;
@@ -2410,7 +2523,7 @@ protected:
                     delete toDelete;
                 };
                 if (!postEventOnLaneImpl_(std::move(timerEvent), timerLane, false)) {
-                    std::lock_guard<std::mutex> lock(eventQueueMutex);
+                    RegistryLock_ lock(eventQueueMutex);
                     toDelete->dispatchPending = false;
                     timers.insert(rt.timerId, toDelete);
                 }
@@ -2430,7 +2543,7 @@ protected:
                     }
                 };
                 if (!postEventOnLaneImpl_(std::move(timerEvent), timerLane, false)) {
-                    std::lock_guard<std::mutex> lock(eventQueueMutex);
+                    RegistryLock_ lock(eventQueueMutex);
                     t->dispatchPending = false;
                 }
             }
@@ -2438,7 +2551,7 @@ protected:
 
         // Compute next wake-up under a single lock.
         {
-            std::lock_guard<std::mutex> lock(eventQueueMutex);
+            RegistryLock_ lock(eventQueueMutex);
             for (const auto& kv : timers) {
                 _T* currentTimer = kv.second;
                 if (!currentTimer) {
@@ -2517,8 +2630,8 @@ protected:
     std::queue<std::function<void()>> priorityEventQueue; ///< High-priority event queue.
     std::deque<PostedObjectEvent_> priorityPostedEventQueue_; ///< High-priority object-event queue.
     std::vector<SwObject*> applicationEventFilters_; ///< Application-wide event filters.
-    std::mutex eventQueueMutex; ///< Mutex protecting access to the event queue.
-    std::condition_variable cv; ///< Condition variable for event waiting.
+    RegistryMutex_ eventQueueMutex; ///< Mutex protecting access to the event queue.
+    RuntimeCondition_ cv; ///< Condition variable for event waiting.
 
     struct IterationMeasurement {
         std::chrono::steady_clock::time_point timestamp;
@@ -2527,7 +2640,7 @@ protected:
     };
     // Queue des mesures sur la dernière seconde environ
     std::deque<IterationMeasurement> measurements;
-    mutable std::mutex measurementsMutex_; ///< Protects measurements, totalBusyTimeMicroseconds, totalTimeMicroseconds.
+    mutable RegistryMutex_ measurementsMutex_; ///< Protects measurements, totalBusyTimeMicroseconds, totalTimeMicroseconds.
 
     uint64_t totalBusyTimeMicroseconds = 0;
     uint64_t totalTimeMicroseconds = 0;
@@ -2543,14 +2656,14 @@ protected:
     int processingTimersDepth_ = 0;
     SwList<_T*> pendingTimerDeletes_;
     SwMap<SwString, SwString> parsedArguments; ///< Parsed command-line arguments.
-    mutable std::mutex runtimeDescriptorMutex_;
+    mutable RegistryMutex_ runtimeDescriptorMutex_;
     SwString runtimeKind_{"core"};
     SwString runtimeLabel_{};
     bool runtimeIsGui_{false};
-    mutable std::mutex profilerSessionsMutex_;
+    mutable RegistryMutex_ profilerSessionsMutex_;
     SwList<std::shared_ptr<SwRuntimeProfilerSession>> profilerSessions_;
     ProfilerRelay_ profilerRelay_;
-    mutable std::mutex telemetrySessionsMutex_;
+    mutable RegistryMutex_ telemetrySessionsMutex_;
     SwList<std::shared_ptr<SwRuntimeTelemetrySession>> telemetrySessions_;
 
     std::atomic<LPVOID> m_runningFiber{nullptr}; ///< Pointer to the currently running fiber.

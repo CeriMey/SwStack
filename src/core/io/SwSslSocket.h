@@ -226,10 +226,20 @@ protected:
         }
 
         uint32_t events = SwIoDispatcher::Readable | SwIoDispatcher::Error | SwIoDispatcher::Hangup;
-        if (m_connecting || m_tlsPhase == TlsPhase::Handshake || !m_writeBuffer.isEmpty() ||
-            m_activeOperation == TlsOperation::Write ||
-            (m_activeOperation == TlsOperation::Read && m_waitingFor == WaitCondition::Writable) ||
-            (m_activeOperation == TlsOperation::Handshake && m_waitingFor == WaitCondition::Writable)) {
+        bool wantsWritable = m_connecting;
+        if (m_activeOperation != TlsOperation::None) {
+            wantsWritable = wantsWritable ||
+                            m_waitingFor == WaitCondition::Writable ||
+                            (m_waitingFor == WaitCondition::None &&
+                             (m_activeOperation == TlsOperation::Handshake ||
+                              m_activeOperation == TlsOperation::Write ||
+                              !m_writeBuffer.isEmpty()));
+        } else {
+            wantsWritable = wantsWritable ||
+                            m_tlsPhase == TlsPhase::Handshake ||
+                            !m_writeBuffer.isEmpty();
+        }
+        if (wantsWritable) {
             events |= SwIoDispatcher::Writable;
         }
         return events;

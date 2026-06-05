@@ -73,8 +73,8 @@ public:
      */
     explicit SwWebSocketServer(SwObject* parent = nullptr)
         : SwObject(parent) {
-        m_tcpServer = new SwTcpServer(this);
-        m_sslServer = new SwSslServer(this);
+        m_tcpServer = new SwTcpServer();
+        m_sslServer = new SwSslServer();
         connect(m_tcpServer, &SwTcpServer::newConnection, this, &SwWebSocketServer::onNewTcpConnection_);
         connect(m_sslServer, &SwTcpServer::newConnection, this, &SwWebSocketServer::onNewTcpConnection_);
     }
@@ -86,6 +86,10 @@ public:
      */
     ~SwWebSocketServer() override {
         close();
+        delete m_tcpServer;
+        m_tcpServer = nullptr;
+        delete m_sslServer;
+        m_sslServer = nullptr;
     }
 
     /**
@@ -140,6 +144,14 @@ public:
      */
     void setSupportedSubprotocols(const SwList<SwString>& subprotocols) {
         m_supportedSubprotocols = subprotocols;
+    }
+
+    void setPerMessageDeflateEnabled(bool enabled) {
+        m_perMessageDeflateEnabled = enabled;
+    }
+
+    bool perMessageDeflateEnabled() const {
+        return m_perMessageDeflateEnabled;
     }
 
     /**
@@ -198,6 +210,7 @@ private:
 
         auto* ws = new SwWebSocket(SwWebSocket::ServerRole, this);
         ws->setSupportedSubprotocols(m_supportedSubprotocols);
+        ws->setPerMessageDeflateEnabled(m_perMessageDeflateEnabled);
         m_handshakeComplete[ws] = false;
 
         SwObject::connect(ws, &SwWebSocket::connected, [this, ws]() {
@@ -226,6 +239,7 @@ private:
     SwTcpServer* m_tcpServer = nullptr;
     SwSslServer* m_sslServer = nullptr;
     SwList<SwString> m_supportedSubprotocols;
+    bool m_perMessageDeflateEnabled = true;
     SwList<SwWebSocket*> m_pendingSockets;
     SwMap<SwWebSocket*, bool> m_handshakeComplete;
 };

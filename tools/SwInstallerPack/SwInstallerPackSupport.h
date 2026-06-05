@@ -101,6 +101,28 @@ inline SwString byteArrayInitializer(const SwByteArray& bytes) {
     return SwString(oss.str());
 }
 
+inline SwString byteStringLiteral(const SwByteArray& bytes) {
+    if (bytes.isEmpty()) {
+        return "\"\"";
+    }
+
+    std::ostringstream oss;
+    oss << std::hex << std::setfill('0');
+    const size_t kBytesPerLiteralLine = 48;
+    for (size_t i = 0; i < bytes.size(); ++i) {
+        if (i % kBytesPerLiteralLine == 0) {
+            if (i != 0) {
+                oss << "\"\n";
+            }
+            oss << "    \"";
+        }
+        oss << "\\x" << std::setw(2)
+            << static_cast<unsigned int>(static_cast<unsigned char>(bytes.constData()[i]));
+    }
+    oss << "\"";
+    return SwString(oss.str());
+}
+
 inline bool readFileBytes(const std::filesystem::path& path, SwByteArray& out, SwString* errOut) {
     std::ifstream file(path, std::ios::binary);
     if (!file.is_open()) {
@@ -197,6 +219,31 @@ inline bool collectFiles(const std::filesystem::path& root,
     return true;
 }
 
+inline size_t chunkCountForBytes(const SwByteArray& bytes, size_t chunkSize) {
+    if (bytes.isEmpty()) {
+        return 0;
+    }
+    if (chunkSize == 0) {
+        chunkSize = 1024 * 1024;
+    }
+    return (bytes.size() + chunkSize - 1) / chunkSize;
+}
+
+inline SwByteArray chunkBytes(const SwByteArray& bytes, size_t chunkIndex, size_t chunkSize) {
+    if (bytes.isEmpty()) {
+        return SwByteArray();
+    }
+    if (chunkSize == 0) {
+        chunkSize = 1024 * 1024;
+    }
+    const size_t offset = chunkIndex * chunkSize;
+    if (offset >= bytes.size()) {
+        return SwByteArray();
+    }
+    const size_t size = std::min(chunkSize, bytes.size() - offset);
+    return SwByteArray(bytes.constData() + offset, size);
+}
+
 inline std::string generatedHeaderText(const SwString& symbol,
                                        const SwString& payloadName,
                                        const SwList<PackedFile>& files) {
@@ -207,8 +254,8 @@ inline std::string generatedHeaderText(const SwString& symbol,
     oss << "namespace swinstaller {\nnamespace generated {\n\n";
 
     for (size_t i = 0; i < files.size(); ++i) {
-        oss << "static const unsigned char " << safeSymbol.toStdString() << "_blob_" << i
-            << "[] = { " << byteArrayInitializer(files[i].storedData).toStdString() << " };\n";
+        oss << "static const char " << safeSymbol.toStdString() << "_blob_" << i
+            << "[] =\n" << byteStringLiteral(files[i].storedData).toStdString() << ";\n";
     }
     if (!files.isEmpty()) {
         oss << "\n";
@@ -228,7 +275,8 @@ inline std::string generatedHeaderText(const SwString& symbol,
         oss << "            f.originalSize = " << static_cast<long long>(files[i].originalData.size()) << ";\n";
         oss << "            f.storedSize = " << static_cast<long long>(files[i].storedData.size()) << ";\n";
         oss << "            f.compressed = " << (files[i].compressed ? "true" : "false") << ";\n";
-        oss << "            f.bytes = " << safeSymbol.toStdString() << "_blob_" << i << ";\n";
+        oss << "            f.bytes = reinterpret_cast<const unsigned char*>("
+            << safeSymbol.toStdString() << "_blob_" << i << ");\n";
         oss << "            p.files.append(f);\n";
         oss << "        }\n";
     }
@@ -236,6 +284,144 @@ inline std::string generatedHeaderText(const SwString& symbol,
     oss << "    }();\n";
     oss << "    return payload;\n";
     oss << "}\n\n";
+    oss << "} // namespace generated\n";
+    oss << "} // namespace swinstaller\n";
+    return oss.str();
+}
+
+inline std::string generatedDeclarationHeaderText(const SwString& symbol) {
+    const SwString safeSymbol = sanitizeSymbol(symbol);
+    std::ostringstream oss;
+    oss << "#pragma once\n\n";
+    oss << "#include \"SwInstallerPayload.h\"\n\n";
+    oss << "namespace swinstaller {\nnamespace generated {\n\n";
+    oss << "const ::swinstaller::SwInstallerEmbeddedPayload& "
+        << safeSymbol.toStdString() << "();\n\n";
+    oss << "} // namespace generated\n";
+    oss << "} // namespace swinstaller\n";
+    return oss.str();
+}
+
+inline std::string generatedSourceText(const SwString& symbol,
+                                       const SwString& payloadName,
+                                       const SwList<PackedFile>& files,
+                                       const SwString& headerIncludeName) {
+    const SwString safeSymbol = sanitizeSymbol(symbol);
+    std::ostringstream oss;
+    oss << "#include " << cppQuoted(headerIncludeName).toStdString() << "\n\n";
+    oss << "namespace swinstaller {\nnamespace generated {\n\n";
+
+    for (size_t i = 0; i < files.size(); ++i) {
+        oss << "static const char " << safeSymbol.toStdString() << "_blob_" << i
+            << "[] =\n" << byteStringLiteral(files[i].storedData).toStdString() << ";\n";
+    }
+    if (!files.isEmpty()) {
+        oss << "\n";
+    }
+
+    oss << "const ::swinstaller::SwInstallerEmbeddedPayload& "
+        << safeSymbol.toStdString() << "() {\n";
+    oss << "    static ::swinstaller::SwInstallerEmbeddedPayload payload = []() {\n";
+    oss << "        ::swinstaller::SwInstallerEmbeddedPayload p;\n";
+    oss << "        p.payloadId = " << cppQuoted(safeSymbol).toStdString() << ";\n";
+    oss << "        p.displayName = " << cppQuoted(payloadName).toStdString() << ";\n";
+    for (size_t i = 0; i < files.size(); ++i) {
+        oss << "        {\n";
+        oss << "            ::swinstaller::SwInstallerEmbeddedFile f;\n";
+        oss << "            f.relativePath = " << cppQuoted(files[i].relativePath).toStdString() << ";\n";
+        oss << "            f.checksumSha256 = " << cppQuoted(files[i].checksumSha256).toStdString() << ";\n";
+        oss << "            f.originalSize = " << static_cast<long long>(files[i].originalData.size()) << ";\n";
+        oss << "            f.storedSize = " << static_cast<long long>(files[i].storedData.size()) << ";\n";
+        oss << "            f.compressed = " << (files[i].compressed ? "true" : "false") << ";\n";
+        oss << "            f.bytes = reinterpret_cast<const unsigned char*>("
+            << safeSymbol.toStdString() << "_blob_" << i << ");\n";
+        oss << "            p.files.append(f);\n";
+        oss << "        }\n";
+    }
+    oss << "        return p;\n";
+    oss << "    }();\n";
+    oss << "    return payload;\n";
+    oss << "}\n\n";
+    oss << "} // namespace generated\n";
+    oss << "} // namespace swinstaller\n";
+    return oss.str();
+}
+
+inline std::string generatedManifestSourceText(const SwString& symbol,
+                                               const SwString& payloadName,
+                                               const SwList<PackedFile>& files,
+                                               const SwString& headerIncludeName,
+                                               size_t chunkSize) {
+    const SwString safeSymbol = sanitizeSymbol(symbol);
+    std::ostringstream oss;
+    oss << "#include " << cppQuoted(headerIncludeName).toStdString() << "\n\n";
+    oss << "namespace swinstaller {\nnamespace generated {\n\n";
+
+    size_t globalChunkIndex = 0;
+    for (size_t i = 0; i < files.size(); ++i) {
+        const size_t chunkCount = chunkCountForBytes(files[i].storedData, chunkSize);
+        for (size_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
+            oss << "extern const char " << safeSymbol.toStdString()
+                << "_blob_" << globalChunkIndex++ << "[];\n";
+        }
+    }
+    if (globalChunkIndex > 0) {
+        oss << "\n";
+    }
+
+    oss << "const ::swinstaller::SwInstallerEmbeddedPayload& "
+        << safeSymbol.toStdString() << "() {\n";
+    oss << "    static ::swinstaller::SwInstallerEmbeddedPayload payload = []() {\n";
+    oss << "        ::swinstaller::SwInstallerEmbeddedPayload p;\n";
+    oss << "        p.payloadId = " << cppQuoted(safeSymbol).toStdString() << ";\n";
+    oss << "        p.displayName = " << cppQuoted(payloadName).toStdString() << ";\n";
+    globalChunkIndex = 0;
+    for (size_t i = 0; i < files.size(); ++i) {
+        oss << "        {\n";
+        oss << "            ::swinstaller::SwInstallerEmbeddedFile f;\n";
+        oss << "            f.relativePath = " << cppQuoted(files[i].relativePath).toStdString() << ";\n";
+        oss << "            f.checksumSha256 = " << cppQuoted(files[i].checksumSha256).toStdString() << ";\n";
+        oss << "            f.originalSize = " << static_cast<long long>(files[i].originalData.size()) << ";\n";
+        oss << "            f.storedSize = " << static_cast<long long>(files[i].storedData.size()) << ";\n";
+        oss << "            f.compressed = " << (files[i].compressed ? "true" : "false") << ";\n";
+        const size_t chunkCount = chunkCountForBytes(files[i].storedData, chunkSize);
+        for (size_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
+            const SwByteArray chunk = chunkBytes(files[i].storedData, chunkIndex, chunkSize);
+            oss << "            {\n";
+            oss << "                ::swinstaller::SwInstallerEmbeddedChunk chunk;\n";
+            oss << "                chunk.bytes = reinterpret_cast<const unsigned char*>("
+                << safeSymbol.toStdString() << "_blob_" << globalChunkIndex++ << ");\n";
+            oss << "                chunk.size = " << static_cast<long long>(chunk.size()) << ";\n";
+            oss << "                f.chunks.append(chunk);\n";
+            oss << "            }\n";
+        }
+        oss << "            p.files.append(f);\n";
+        oss << "        }\n";
+    }
+    oss << "        return p;\n";
+    oss << "    }();\n";
+    oss << "    return payload;\n";
+    oss << "}\n\n";
+    oss << "} // namespace generated\n";
+    oss << "} // namespace swinstaller\n";
+    return oss.str();
+}
+
+inline std::string generatedEmptyBlobSourceText(const SwString& headerIncludeName) {
+    (void)headerIncludeName;
+    return "\n";
+}
+
+inline std::string generatedBlobSourceText(const SwString& symbol,
+                                           const SwByteArray& bytes,
+                                           size_t index,
+                                           const SwString& headerIncludeName) {
+    (void)headerIncludeName;
+    const SwString safeSymbol = sanitizeSymbol(symbol);
+    std::ostringstream oss;
+    oss << "namespace swinstaller {\nnamespace generated {\n\n";
+    oss << "extern const char " << safeSymbol.toStdString() << "_blob_" << index
+        << "[] =\n" << byteStringLiteral(bytes).toStdString() << ";\n\n";
     oss << "} // namespace generated\n";
     oss << "} // namespace swinstaller\n";
     return oss.str();

@@ -615,18 +615,15 @@ public:
      * @return The requested send Binary Message.
      */
     int64_t sendBinaryMessage(const SwByteArray& message) {
-        SwByteArray payload = message;
-        bool rsv1 = false;
         if (m_pmd.negotiated) {
             SwByteArray compressed;
-            if (!deflateMessage_(payload, compressed)) {
+            if (!deflateMessage_(message, compressed)) {
                 reportError_(kErrorCompressionFailed);
                 return -1;
             }
-            payload = compressed;
-            rsv1 = true;
+            return sendDataFrame(kOpBinary, compressed, true);
         }
-        return sendDataFrame(kOpBinary, payload, rsv1);
+        return sendDataFrame(kOpBinary, message, false);
     }
 
     /**
@@ -1541,20 +1538,23 @@ private:
             }
         }
 
-        SwByteArray payloadOut = payload;
+        const SwByteArray* payloadOut = &payload;
+        SwByteArray maskedPayload;
         if (mask) {
             frame.append(static_cast<char>(maskKey[0]));
             frame.append(static_cast<char>(maskKey[1]));
             frame.append(static_cast<char>(maskKey[2]));
             frame.append(static_cast<char>(maskKey[3]));
-            for (size_t i = 0; i < payloadOut.size(); ++i) {
-                payloadOut[i] = static_cast<char>(
-                    static_cast<unsigned char>(payloadOut[i]) ^ maskKey[i % 4]);
+            maskedPayload = payload;
+            for (size_t i = 0; i < maskedPayload.size(); ++i) {
+                maskedPayload[i] = static_cast<char>(
+                    static_cast<unsigned char>(maskedPayload[i]) ^ maskKey[i % 4]);
             }
+            payloadOut = &maskedPayload;
         }
 
-        if (!payloadOut.isEmpty()) {
-            frame.append(payloadOut.constData(), payloadOut.size());
+        if (!payloadOut->isEmpty()) {
+            frame.append(payloadOut->constData(), payloadOut->size());
         }
         return frame;
     }

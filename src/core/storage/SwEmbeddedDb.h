@@ -11,6 +11,9 @@
 #include "SwString.h"
 #include "SwThreadPool.h"
 #include "platform/SwDbPlatform.h"
+#if defined(_WIN32)
+#include "platform/win/SwWindows.h"
+#endif
 #include "third_party/miniz/miniz.h"
 
 #include <algorithm>
@@ -100,6 +103,178 @@ struct SwDbMetrics {
     unsigned long long readCacheEntryCount{0};
     unsigned long long readCacheHitCount{0};
     unsigned long long readCacheMissCount{0};
+};
+
+class SwEmbeddedDbMutex_ {
+public:
+    SwEmbeddedDbMutex_() {
+#if defined(_WIN32)
+        InitializeCriticalSection(&mutex_);
+#endif
+    }
+
+    ~SwEmbeddedDbMutex_() {
+#if defined(_WIN32)
+        DeleteCriticalSection(&mutex_);
+#endif
+    }
+
+    SwEmbeddedDbMutex_(const SwEmbeddedDbMutex_&) = delete;
+    SwEmbeddedDbMutex_& operator=(const SwEmbeddedDbMutex_&) = delete;
+
+    void lock() {
+#if defined(_WIN32)
+        EnterCriticalSection(&mutex_);
+#else
+        mutex_.lock();
+#endif
+    }
+
+    void unlock() {
+#if defined(_WIN32)
+        LeaveCriticalSection(&mutex_);
+#else
+        mutex_.unlock();
+#endif
+    }
+
+#if defined(_WIN32)
+    CRITICAL_SECTION* nativeHandle() { return &mutex_; }
+#endif
+
+private:
+#if defined(_WIN32)
+    CRITICAL_SECTION mutex_;
+#else
+    std::mutex mutex_;
+#endif
+};
+
+class SwEmbeddedDbLock_ {
+public:
+    explicit SwEmbeddedDbLock_(SwEmbeddedDbMutex_& mutex)
+        : mutex_(mutex),
+          locked_(true) {
+        mutex_.lock();
+    }
+
+    ~SwEmbeddedDbLock_() {
+        if (locked_) {
+            mutex_.unlock();
+        }
+    }
+
+    SwEmbeddedDbLock_(const SwEmbeddedDbLock_&) = delete;
+    SwEmbeddedDbLock_& operator=(const SwEmbeddedDbLock_&) = delete;
+
+    void lock() {
+        if (!locked_) {
+            mutex_.lock();
+            locked_ = true;
+        }
+    }
+
+    void unlock() {
+        if (locked_) {
+            mutex_.unlock();
+            locked_ = false;
+        }
+    }
+
+private:
+    friend class SwEmbeddedDbCondition_;
+
+#if defined(_WIN32)
+    CRITICAL_SECTION* nativeHandle_() { return mutex_.nativeHandle(); }
+#endif
+
+    SwEmbeddedDbMutex_& mutex_;
+    bool locked_;
+};
+
+class SwEmbeddedDbCondition_ {
+public:
+    SwEmbeddedDbCondition_() {
+#if defined(_WIN32)
+        InitializeConditionVariable(&condition_);
+#endif
+    }
+
+    SwEmbeddedDbCondition_(const SwEmbeddedDbCondition_&) = delete;
+    SwEmbeddedDbCondition_& operator=(const SwEmbeddedDbCondition_&) = delete;
+
+    void notify_one() {
+#if defined(_WIN32)
+        WakeConditionVariable(&condition_);
+#else
+        condition_.notify_one();
+#endif
+    }
+
+    void notify_all() {
+#if defined(_WIN32)
+        WakeAllConditionVariable(&condition_);
+#else
+        condition_.notify_all();
+#endif
+    }
+
+    template <typename Predicate>
+    void wait(SwEmbeddedDbLock_& lock, Predicate predicate) {
+#if defined(_WIN32)
+        while (!predicate()) {
+            SleepConditionVariableCS(&condition_, lock.nativeHandle_(), INFINITE);
+        }
+#else
+        condition_.wait(lock, predicate);
+#endif
+    }
+
+    template <typename Rep, typename Period, typename Predicate>
+    bool wait_for(SwEmbeddedDbLock_& lock,
+                  const std::chrono::duration<Rep, Period>& timeout,
+                  Predicate predicate) {
+#if defined(_WIN32)
+        if (predicate()) {
+            return true;
+        }
+
+        const std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + timeout;
+        while (!predicate()) {
+            const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+            if (now >= deadline) {
+                return predicate();
+            }
+            const DWORD timeoutMs = timeoutMilliseconds_(deadline - now);
+            const BOOL woke = SleepConditionVariableCS(&condition_, lock.nativeHandle_(), timeoutMs);
+            if (!woke && GetLastError() == ERROR_TIMEOUT) {
+                return predicate();
+            }
+        }
+        return true;
+#else
+        return condition_.wait_for(lock, timeout, predicate);
+#endif
+    }
+
+private:
+#if defined(_WIN32)
+    template <typename Rep, typename Period>
+    static DWORD timeoutMilliseconds_(const std::chrono::duration<Rep, Period>& duration) {
+        const long long milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+        if (milliseconds <= 0) {
+            return 0;
+        }
+        if (milliseconds >= static_cast<long long>(INFINITE)) {
+            return INFINITE - 1;
+        }
+        return static_cast<DWORD>(milliseconds);
+    }
+
+    CONDITION_VARIABLE condition_;
+#else
+    std::condition_variable_any condition_;
+#endif
 };
 
 class SwDbWriteBatch {
@@ -500,8 +675,8 @@ private:
                                          swEmbeddedDbDetail::PrimaryRecord_& record);
     static std::string trimText_(const std::string& input);
 
-    mutable std::mutex mutex_;
-    std::condition_variable commitCv_;
+    mutable SwEmbeddedDbMutex_ mutex_;
+    SwEmbeddedDbCondition_ commitCv_;
     std::atomic<bool> opened_{false};
     SwEmbeddedDbOptions options_;
     SwString dbPath_;
@@ -517,9 +692,10 @@ private:
     SwHash<SwString, std::vector<std::shared_ptr<swEmbeddedDbDetail::TableHandle_>>> indexTableHandlesNewestFirst_;
     std::shared_ptr<swEmbeddedDbDetail::SnapshotState_> readOnlySnapshotState_;
     swDbPlatform::FileLock writerLock_;
+    bool writerLockHeld_{false};
     swDbPlatform::RandomAccessFile activeWalFile_;
     std::deque<std::shared_ptr<WriteRequest_>> pendingWrites_;
-    std::condition_variable writeServiceCv_;
+    SwEmbeddedDbCondition_ writeServiceCv_;
     std::thread writeServiceThread_;
     bool writeServiceRunning_{false};
     bool writeServiceStop_{false};

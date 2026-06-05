@@ -30,7 +30,7 @@ public:
         unsigned long long stableManifestId = 0;
 
         {
-            std::lock_guard<std::mutex> lock(db_.mutex_);
+            SwEmbeddedDbLock_ lock(db_.mutex_);
             if (db_.closing_ ||
                 db_.options_.readOnly ||
                 db_.compactionScheduled_ ||
@@ -83,7 +83,7 @@ public:
         }
 
         if (!hasGarbage) {
-            std::lock_guard<std::mutex> lock(db_.mutex_);
+            SwEmbeddedDbLock_ lock(db_.mutex_);
             db_.blobGcScheduled_ = false;
             return;
         }
@@ -119,7 +119,7 @@ public:
                                                                   swEmbeddedDbDetail::blobFileName_(newBlobFileId)),
                                            swDbPlatform::RandomAccessFile::OpenMode::AppendCreate,
                                            &error)) {
-                            std::lock_guard<std::mutex> lock(db_.mutex_);
+                            SwEmbeddedDbLock_ lock(db_.mutex_);
                             db_.blobGcScheduled_ = false;
                             swCError(kSwLogCategory_SwEmbeddedDb) << error;
                             return;
@@ -127,7 +127,7 @@ public:
                         blobFileOpened = true;
                     }
                     if (!db_.externalizeBlobValueToFile_(blobFile, newBlobFileId, record)) {
-                        std::lock_guard<std::mutex> lock(db_.mutex_);
+                        SwEmbeddedDbLock_ lock(db_.mutex_);
                         db_.blobGcScheduled_ = false;
                         return;
                     }
@@ -154,7 +154,7 @@ public:
                         (void)swDbPlatform::removeFile(
                             swDbPlatform::joinPath(db_.blobDir_, swEmbeddedDbDetail::blobFileName_(newBlobFileId)));
                     }
-                    std::lock_guard<std::mutex> lock(db_.mutex_);
+                    SwEmbeddedDbLock_ lock(db_.mutex_);
                     db_.blobGcScheduled_ = false;
                     swCError(kSwLogCategory_SwEmbeddedDb) << error;
                     return;
@@ -169,7 +169,7 @@ public:
                     (void)swDbPlatform::removeFile(
                         swDbPlatform::joinPath(db_.blobDir_, swEmbeddedDbDetail::blobFileName_(newBlobFileId)));
                 }
-                std::lock_guard<std::mutex> lock(db_.mutex_);
+                SwEmbeddedDbLock_ lock(db_.mutex_);
                 db_.blobGcScheduled_ = false;
                 swCError(kSwLogCategory_SwEmbeddedDb) << tableStatus.message();
                 return;
@@ -184,7 +184,7 @@ public:
                     (void)swDbPlatform::removeFile(
                         swDbPlatform::joinPath(db_.blobDir_, swEmbeddedDbDetail::blobFileName_(newBlobFileId)));
                 }
-                std::lock_guard<std::mutex> lock(db_.mutex_);
+                SwEmbeddedDbLock_ lock(db_.mutex_);
                 db_.blobGcScheduled_ = false;
                 swCError(kSwLogCategory_SwEmbeddedDb) << openStatus.message();
                 return;
@@ -194,7 +194,7 @@ public:
 
         bool committed = false;
         {
-            std::lock_guard<std::mutex> lock(db_.mutex_);
+            SwEmbeddedDbLock_ lock(db_.mutex_);
             if (db_.closing_ ||
                 db_.options_.readOnly ||
                 db_.compactionScheduled_ ||

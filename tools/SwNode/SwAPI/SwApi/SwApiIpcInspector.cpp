@@ -288,6 +288,15 @@ SwJsonArray SwApiIpcInspector::rpcsForTarget(const Target& target, bool includeS
     const SwJsonArray sigs = signalsForTarget(target, includeStale);
 
     const int kRpcPrefixLen = static_cast<int>(SwString("__rpc__|").size());
+    auto stripCapacityTag = [](const SwString& rawMethod) -> SwString {
+        const int sep = rawMethod.indexOf("|");
+        if (sep <= 0) return rawMethod;
+        const SwString tag = rawMethod.left(sep);
+        for (char c : tag.toStdString()) {
+            if (c < '0' || c > '9') return rawMethod;
+        }
+        return rawMethod.mid(sep + 1);
+    };
 
     for (size_t i = 0; i < sigs.size(); ++i) {
         const SwJsonValue v = sigs[i];
@@ -297,7 +306,8 @@ SwJsonArray SwApiIpcInspector::rpcsForTarget(const Target& target, bool includeS
         const SwString sig = SwString(o["signal"].toString());
         if (!sig.startsWith("__rpc__|")) continue;
 
-        const SwString method = sig.mid(kRpcPrefixLen);
+        const SwString queueMethod = sig.mid(kRpcPrefixLen);
+        const SwString method = stripCapacityTag(queueMethod);
         const SwString typeName = SwString(o["typeName"].toString());
         SwStringList args = parseTypeArgs_(typeName);
 
@@ -310,6 +320,7 @@ SwJsonArray SwApiIpcInspector::rpcsForTarget(const Target& target, bool includeS
 
         SwJsonObject item;
         item["method"] = SwJsonValue(method.toStdString());
+        item["queueMethod"] = SwJsonValue(queueMethod.toStdString());
         item["requestSignal"] = SwJsonValue(sig.toStdString());
         item["requestTypeId"] = o["typeId"];
         item["requestTypeName"] = SwJsonValue(typeName.toStdString());

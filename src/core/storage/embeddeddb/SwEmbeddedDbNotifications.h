@@ -55,7 +55,7 @@ inline void SwEmbeddedDb::maybeRefreshFromNotifications_() {
             return;
         }
     } else {
-        std::lock_guard<std::mutex> lock(mutex_);
+        SwEmbeddedDbLock_ lock(mutex_);
         hinted = hinted ||
                  publishedSequence > lastVisibleSequence_ ||
                  publishedManifestId > manifest_.manifestId;

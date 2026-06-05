@@ -60,7 +60,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
-#include <iostream>
 #include <thread>
 static constexpr const char* kSwLogCategory_SwUdpSocket = "sw.core.io.swudpsocket";
 

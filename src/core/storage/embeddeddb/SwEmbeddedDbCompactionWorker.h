@@ -46,7 +46,7 @@ public:
     void runL0Compaction(SwList<swEmbeddedDbDetail::TableMeta_> primaryL0,
                          SwHash<SwString, SwList<swEmbeddedDbDetail::TableMeta_> > indexL0) {
         {
-            std::lock_guard<std::mutex> lock(db_.mutex_);
+            SwEmbeddedDbLock_ lock(db_.mutex_);
             if (db_.closing_) {
                 db_.compactionScheduled_ = false;
                 return;
@@ -55,7 +55,7 @@ public:
 
         SwHash<SwString, std::shared_ptr<swEmbeddedDbDetail::TableHandle_>> handles;
         {
-            std::lock_guard<std::mutex> lock(db_.mutex_);
+            SwEmbeddedDbLock_ lock(db_.mutex_);
             if (db_.closing_) {
                 db_.compactionScheduled_ = false;
                 return;
@@ -86,7 +86,7 @@ public:
 
             for (std::size_t i = 0; i < primaryL0.size(); ++i) {
                 if (db_.closing_) {
-                    std::lock_guard<std::mutex> lock(db_.mutex_);
+                    SwEmbeddedDbLock_ lock(db_.mutex_);
                     db_.compactionScheduled_ = false;
                     return;
                 }
@@ -95,7 +95,7 @@ public:
                 }
                 SwList<swEmbeddedDbDetail::TableRecord_> records;
                 if (!handles.value(primaryL0[i].fileName)->iterateAll(records)) {
-                    std::lock_guard<std::mutex> lock(db_.mutex_);
+                    SwEmbeddedDbLock_ lock(db_.mutex_);
                     db_.compactionScheduled_ = false;
                     return;
                 }
@@ -106,7 +106,7 @@ public:
                     minSequence = (minSequence == 0) ? record.sequence : std::min(minSequence, record.sequence);
                     maxSequence = std::max(maxSequence, record.sequence);
                     if (!record.deleted && !swEmbeddedDbDetail::decodePrimaryPayload_(records[j].payload, record)) {
-                        std::lock_guard<std::mutex> lock(db_.mutex_);
+                        SwEmbeddedDbLock_ lock(db_.mutex_);
                         db_.compactionScheduled_ = false;
                         return;
                     }
@@ -145,7 +145,7 @@ public:
                 meta.recordCount = static_cast<unsigned long long>(records.size());
                 const SwDbStatus status = db_.writeTableFile_(meta, records);
                 if (!status.ok()) {
-                    std::lock_guard<std::mutex> lock(db_.mutex_);
+                    SwEmbeddedDbLock_ lock(db_.mutex_);
                     db_.compactionScheduled_ = false;
                     swCError(kSwLogCategory_SwEmbeddedDb) << status.message();
                     return;
@@ -161,7 +161,7 @@ public:
         });
         for (std::size_t i = 0; i < indexNames.size(); ++i) {
             if (db_.closing_) {
-                std::lock_guard<std::mutex> lock(db_.mutex_);
+                SwEmbeddedDbLock_ lock(db_.mutex_);
                 db_.compactionScheduled_ = false;
                 return;
             }
@@ -175,7 +175,7 @@ public:
                 }
                 SwList<swEmbeddedDbDetail::TableRecord_> records;
                 if (!handles.value(metas[j].fileName)->iterateAll(records)) {
-                    std::lock_guard<std::mutex> lock(db_.mutex_);
+                    SwEmbeddedDbLock_ lock(db_.mutex_);
                     db_.compactionScheduled_ = false;
                     return;
                 }
@@ -218,7 +218,7 @@ public:
             meta.recordCount = static_cast<unsigned long long>(records.size());
             const SwDbStatus status = db_.writeTableFile_(meta, records);
             if (!status.ok()) {
-                std::lock_guard<std::mutex> lock(db_.mutex_);
+                SwEmbeddedDbLock_ lock(db_.mutex_);
                 db_.compactionScheduled_ = false;
                 swCError(kSwLogCategory_SwEmbeddedDb) << status.message();
                 return;
@@ -230,14 +230,14 @@ public:
         SwHash<SwString, std::shared_ptr<swEmbeddedDbDetail::TableHandle_>> openedHandles;
         for (std::size_t i = 0; i < newTables.size(); ++i) {
             if (db_.closing_) {
-                std::lock_guard<std::mutex> lock(db_.mutex_);
+                SwEmbeddedDbLock_ lock(db_.mutex_);
                 db_.compactionScheduled_ = false;
                 return;
             }
             std::shared_ptr<swEmbeddedDbDetail::TableHandle_> handle(new swEmbeddedDbDetail::TableHandle_());
             SwDbStatus status;
             if (!handle->open(db_.dbPath_, newTables[i], db_.options_, db_.readCacheManager_, status)) {
-                std::lock_guard<std::mutex> lock(db_.mutex_);
+                SwEmbeddedDbLock_ lock(db_.mutex_);
                 db_.compactionScheduled_ = false;
                 swCError(kSwLogCategory_SwEmbeddedDb) << status.message();
                 return;
@@ -247,7 +247,7 @@ public:
 
         bool persisted = false;
         {
-            std::lock_guard<std::mutex> lock(db_.mutex_);
+            SwEmbeddedDbLock_ lock(db_.mutex_);
             if (db_.closing_) {
                 db_.compactionScheduled_ = false;
                 return;

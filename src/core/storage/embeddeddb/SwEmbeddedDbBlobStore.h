@@ -51,7 +51,7 @@ inline bool SwEmbeddedDb::externalizeBlobValueToFile_(swDbPlatform::RandomAccess
     ref.flags = 0u;
 
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        SwEmbeddedDbLock_ lock(mutex_);
         metrics_.blobBytesWritten += static_cast<unsigned long long>(record.value.size());
     }
 

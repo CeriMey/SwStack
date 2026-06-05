@@ -5,8 +5,8 @@ struct SwEmbeddedDb::WriteRequest_ {
     bool waitForDurable{true};
     bool done{false};
     SwDbStatus status;
-    std::mutex mutex;
-    std::condition_variable cv;
+    SwEmbeddedDbMutex_ mutex;
+    SwEmbeddedDbCondition_ cv;
 };
 
 namespace swEmbeddedDbDetail {
@@ -48,7 +48,7 @@ private:
         }
 
         {
-            std::lock_guard<std::mutex> lock(db_.mutex_);
+            SwEmbeddedDbLock_ lock(db_.mutex_);
             if (db_.closing_) {
                 return SwDbStatus(SwDbStatus::NotOpen, "database is closing");
             }
@@ -67,7 +67,7 @@ private:
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - encodeStart).count());
 
         {
-            std::lock_guard<std::mutex> lock(db_.mutex_);
+            SwEmbeddedDbLock_ lock(db_.mutex_);
             if (db_.closing_) {
                 return SwDbStatus(SwDbStatus::NotOpen, "database is closing");
             }
@@ -95,7 +95,7 @@ private:
             return SwDbStatus::success();
         }
 
-        std::unique_lock<std::mutex> waitLock(request->mutex);
+        SwEmbeddedDbLock_ waitLock(request->mutex);
         request->cv.wait(waitLock, [&request]() { return request->done; });
         return request->status;
     }
@@ -438,7 +438,7 @@ private:
 inline void SwEmbeddedDb::startWriteService_() {
     stopWriteService_();
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        SwEmbeddedDbLock_ lock(mutex_);
         writeServiceStop_ = false;
         writeServiceStopped_ = false;
         writeServiceFlushRequested_ = false;
@@ -449,7 +449,7 @@ inline void SwEmbeddedDb::startWriteService_() {
 
 inline void SwEmbeddedDb::stopWriteService_() {
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        SwEmbeddedDbLock_ lock(mutex_);
         if (!writeServiceRunning_ && !writeServiceThread_.joinable()) {
             writeServiceStop_ = false;
             writeServiceStopped_ = true;
@@ -463,7 +463,7 @@ inline void SwEmbeddedDb::stopWriteService_() {
         writeServiceThread_.join();
     }
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        SwEmbeddedDbLock_ lock(mutex_);
         writeServiceRunning_ = false;
         writeServiceStop_ = false;
         writeServiceStopped_ = true;
@@ -486,7 +486,7 @@ inline SwDbStatus SwEmbeddedDb::drainWriteRequests_(SwList<std::shared_ptr<Write
         *stopOut = false;
     }
 
-    std::unique_lock<std::mutex> lock(mutex_);
+    SwEmbeddedDbLock_ lock(mutex_);
     writeServiceCv_.wait(lock, [this]() {
         return writeServiceStop_ || !pendingWrites_.empty();
     });
@@ -523,7 +523,7 @@ inline SwDbStatus SwEmbeddedDb::commitWriteRequests_(const SwList<std::shared_pt
     }
 
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        SwEmbeddedDbLock_ lock(mutex_);
         if (!backgroundWriteError_.ok()) {
             return backgroundWriteError_;
         }
@@ -561,7 +561,7 @@ inline SwDbStatus SwEmbeddedDb::commitWriteRequests_(const SwList<std::shared_pt
         std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - syncStart).count());
 
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        SwEmbeddedDbLock_ lock(mutex_);
         lastDurableSequence_ = std::max(lastDurableSequence_, targetSequence);
         metrics_.lastDurableSequence = lastDurableSequence_;
         metrics_.walAppendMicros += walAppendMicros;
@@ -577,7 +577,7 @@ inline void SwEmbeddedDb::finalizeWriteRequests_(const SwList<std::shared_ptr<Wr
                                                  const SwDbStatus& status,
                                                  unsigned long long durableSequence) {
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        SwEmbeddedDbLock_ lock(mutex_);
         if (!status.ok() && backgroundWriteError_.ok()) {
             backgroundWriteError_ = status;
         }
@@ -592,7 +592,7 @@ inline void SwEmbeddedDb::finalizeWriteRequests_(const SwList<std::shared_ptr<Wr
         if (!group[i]) {
             continue;
         }
-        std::lock_guard<std::mutex> doneLock(group[i]->mutex);
+        SwEmbeddedDbLock_ doneLock(group[i]->mutex);
         group[i]->status = status;
         group[i]->done = true;
         group[i]->cv.notify_all();
@@ -630,7 +630,7 @@ inline SwDbStatus SwEmbeddedDb::syncInternal_(bool allowClosed) {
 
     unsigned long long targetSequence = 0;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        SwEmbeddedDbLock_ lock(mutex_);
         if (!allowClosed && closing_) {
             return SwDbStatus(SwDbStatus::NotOpen, "database is closing");
         }
@@ -646,7 +646,7 @@ inline SwDbStatus SwEmbeddedDb::syncInternal_(bool allowClosed) {
 
     wakeWriteService_();
 
-    std::unique_lock<std::mutex> lock(mutex_);
+    SwEmbeddedDbLock_ lock(mutex_);
     commitCv_.wait(lock, [this, targetSequence]() {
         return !backgroundWriteError_.ok() ||
                lastDurableSequence_ >= targetSequence ||

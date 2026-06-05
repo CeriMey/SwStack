@@ -49,6 +49,11 @@ inline SwString swInstallerNormalizePath(SwString path) {
     return path;
 }
 
+struct SwInstallerEmbeddedChunk {
+    const unsigned char* bytes{nullptr};
+    long long size{0};
+};
+
 struct SwInstallerEmbeddedFile {
     SwString relativePath;
     SwString checksumSha256;
@@ -56,6 +61,7 @@ struct SwInstallerEmbeddedFile {
     long long storedSize{0};
     bool compressed{false};
     const unsigned char* bytes{nullptr};
+    SwList<SwInstallerEmbeddedChunk> chunks;
 };
 
 struct SwInstallerEmbeddedPayload {
@@ -292,13 +298,39 @@ private:
 
     static bool decodeFile_(const SwInstallerEmbeddedFile& file, SwByteArray& out, SwString* errOut) {
         out.clear();
-        if (!file.bytes || file.storedSize < 0 || file.originalSize < 0) {
+        if ((!file.bytes && file.chunks.isEmpty() && file.storedSize > 0) ||
+            file.storedSize < 0 ||
+            file.originalSize < 0) {
             setErr_(errOut, SwString("invalid payload blob for: ") + file.relativePath);
             return false;
         }
 
+        SwByteArray stored;
+        if (!file.chunks.isEmpty()) {
+            long long accumulatedSize = 0;
+            for (size_t i = 0; i < file.chunks.size(); ++i) {
+                const SwInstallerEmbeddedChunk& chunk = file.chunks[i];
+                if (!chunk.bytes || chunk.size < 0) {
+                    setErr_(errOut, SwString("invalid payload chunk for: ") + file.relativePath);
+                    return false;
+                }
+                if (chunk.size > 0) {
+                    stored.append(reinterpret_cast<const char*>(chunk.bytes),
+                                  static_cast<size_t>(chunk.size));
+                    accumulatedSize += chunk.size;
+                }
+            }
+            if (accumulatedSize != file.storedSize) {
+                setErr_(errOut, SwString("payload chunk size mismatch for: ") + file.relativePath);
+                return false;
+            }
+        } else if (file.storedSize > 0) {
+            stored.append(reinterpret_cast<const char*>(file.bytes),
+                          static_cast<size_t>(file.storedSize));
+        }
+
         if (!file.compressed) {
-            out.append(reinterpret_cast<const char*>(file.bytes), static_cast<size_t>(file.storedSize));
+            out = stored;
             return true;
         }
 
@@ -311,8 +343,8 @@ private:
         std::vector<unsigned char> decoded(static_cast<size_t>(file.originalSize));
         const int rc = mz_uncompress(decoded.data(),
                                      &destLen,
-                                     reinterpret_cast<const unsigned char*>(file.bytes),
-                                     static_cast<mz_ulong>(file.storedSize));
+                                     reinterpret_cast<const unsigned char*>(stored.constData()),
+                                     static_cast<mz_ulong>(stored.size()));
         if (rc != MZ_OK) {
             setErr_(errOut, SwString("payload decompression failed for: ") + file.relativePath);
             return false;

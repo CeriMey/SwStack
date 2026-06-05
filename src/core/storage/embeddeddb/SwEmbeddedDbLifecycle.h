@@ -36,12 +36,13 @@ public:
             if (!db_.writerLock_.lockExclusive(swDbPlatform::joinPath(db_.dbPath_, "LOCK"), &lockError)) {
                 return SwDbStatus(SwDbStatus::Busy, lockError);
             }
+            db_.writerLockHeld_ = true;
         } else if (!swDbPlatform::directoryExists(db_.dbPath_)) {
             return SwDbStatus(SwDbStatus::NotOpen, "database directory does not exist");
         }
 
         {
-            std::lock_guard<std::mutex> lock(db_.mutex_);
+            SwEmbeddedDbLock_ lock(db_.mutex_);
             const SwDbStatus status = db_.loadFromDisk_(true);
             if (!status.ok()) {
                 return status;
@@ -65,7 +66,7 @@ public:
         db_.setupShmNotifications_();
         db_.opened_.store(true, std::memory_order_release);
         if (!db_.options_.readOnly) {
-            std::lock_guard<std::mutex> lock(db_.mutex_);
+            SwEmbeddedDbLock_ lock(db_.mutex_);
             db_.publishShmNotificationLocked_();
         }
         return SwDbStatus::success();
@@ -73,14 +74,19 @@ public:
 
     void close() {
         const bool wasOpen = db_.opened_.exchange(false, std::memory_order_acq_rel);
-        if (!wasOpen && !db_.writerLock_.isLocked()) {
-            resetState();
+        if (!wasOpen) {
+            if (db_.writerLockHeld_) {
+                db_.activeWalFile_.close();
+                db_.writerLock_.unlock();
+                db_.writerLockHeld_ = false;
+                resetState();
+            }
             return;
         }
 
-        if (!db_.options_.readOnly && db_.writerLock_.isLocked()) {
+        if (!db_.options_.readOnly && db_.writerLockHeld_) {
             {
-                std::lock_guard<std::mutex> lock(db_.mutex_);
+                SwEmbeddedDbLock_ lock(db_.mutex_);
                 db_.closing_ = true;
             }
             const SwDbStatus syncStatus = db_.syncInternal_(true);
@@ -91,14 +97,17 @@ public:
             drainPendingWrites();
             db_.flushAllSync_();
         } else {
-            std::lock_guard<std::mutex> lock(db_.mutex_);
+            SwEmbeddedDbLock_ lock(db_.mutex_);
             db_.closing_ = true;
         }
 
-        db_.backgroundPool_.waitForDone(15000);
+        if (!db_.backgroundPool_.stopIdleWorkers(15000)) {
+            swCWarning(kSwLogCategory_SwEmbeddedDb) << "timed out waiting for background workers to become idle";
+        }
         db_.teardownShmNotifications_();
         db_.activeWalFile_.close();
         db_.writerLock_.unlock();
+        db_.writerLockHeld_ = false;
         resetState();
     }
 
@@ -112,7 +121,7 @@ public:
         if (db_.options_.readOnly) {
             std::shared_ptr<swEmbeddedDbDetail::SnapshotState_> snapshotState;
             {
-                std::lock_guard<std::mutex> lock(db_.mutex_);
+                SwEmbeddedDbLock_ lock(db_.mutex_);
                 db_.metrics_.getCount += 1;
                 snapshotState = db_.readOnlySnapshotState_;
             }
@@ -130,7 +139,7 @@ public:
                 return SwDbStatus::success();
             }
         }
-        std::lock_guard<std::mutex> lock(db_.mutex_);
+        SwEmbeddedDbLock_ lock(db_.mutex_);
         db_.metrics_.getCount += 1;
         swEmbeddedDbDetail::PrimaryRecord_ record;
         if (!db_.lookupPrimaryLocked_(primaryKey, record, true)) {
@@ -164,7 +173,7 @@ public:
         if (!db_.options_.readOnly) {
             return SwDbStatus::success();
         }
-        std::lock_guard<std::mutex> lock(db_.mutex_);
+        SwEmbeddedDbLock_ lock(db_.mutex_);
         return db_.loadFromDisk_(false);
     }
 
@@ -174,7 +183,7 @@ public:
             return snapshot;
         }
         db_.maybeRefreshFromNotifications_();
-        std::lock_guard<std::mutex> lock(db_.mutex_);
+        SwEmbeddedDbLock_ lock(db_.mutex_);
         db_.metrics_.snapshotCount += 1;
         if (db_.options_.readOnly && db_.readOnlySnapshotState_) {
             snapshot.state_ = db_.readOnlySnapshotState_;
@@ -198,7 +207,7 @@ public:
     }
 
     void resetState() {
-        std::lock_guard<std::mutex> lock(db_.mutex_);
+        SwEmbeddedDbLock_ lock(db_.mutex_);
         db_.manifest_ = swEmbeddedDbDetail::Manifest_();
         db_.mutable_ = swEmbeddedDbDetail::MemTable_();
         db_.immutables_.clear();
@@ -207,6 +216,7 @@ public:
         db_.indexTableHandlesNewestFirst_.clear();
         db_.readOnlySnapshotState_.reset();
         db_.pendingWrites_.clear();
+        db_.writerLockHeld_ = false;
         db_.writeServiceStop_ = false;
         db_.writeServiceRunning_ = false;
         db_.writeServiceStopped_ = false;
@@ -234,12 +244,12 @@ public:
     void drainPendingWrites() {
         std::deque<std::shared_ptr<SwEmbeddedDb::WriteRequest_>> pending;
         {
-            std::lock_guard<std::mutex> lock(db_.mutex_);
+            SwEmbeddedDbLock_ lock(db_.mutex_);
             pending.swap(db_.pendingWrites_);
             db_.metrics_.pendingWriteCount = 0;
         }
         for (std::size_t i = 0; i < pending.size(); ++i) {
-            std::lock_guard<std::mutex> doneLock(pending[i]->mutex);
+            SwEmbeddedDbLock_ doneLock(pending[i]->mutex);
             pending[i]->status = SwDbStatus(SwDbStatus::NotOpen, "database is closing");
             pending[i]->done = true;
             pending[i]->cv.notify_all();
@@ -247,7 +257,7 @@ public:
     }
 
     static SwDbMetrics metricsSnapshot(const SwEmbeddedDb& db) {
-        std::lock_guard<std::mutex> lock(db.mutex_);
+        SwEmbeddedDbLock_ lock(db.mutex_);
         SwDbMetrics metrics = db.metrics_;
         metrics.pendingWriteCount = static_cast<unsigned long long>(db.pendingWrites_.size());
         metrics.tableCount = static_cast<unsigned long long>(db.manifest_.tables.size());
