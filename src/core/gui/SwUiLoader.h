@@ -79,6 +79,7 @@
 
 #include "core/io/SwFile.h"
 #include "SwXmlDocument.h"
+#include "SwUiLoaderConnections.h"
 
 namespace swui {
 
@@ -246,10 +247,7 @@ inline UiFactory::UiFactory() {
 }
 
 inline SwString UiFactory::qtAliasToSw_(const SwString& qtClass) {
-    if (!qtClass.isEmpty() && qtClass[0] == 'Q') {
-        return SwString("Sw") + qtClass.mid(1);
-    }
-    return qtClass;
+    return compat::widgetClassToSw(qtClass);
 }
 
 inline int UiLoader::toInt_(const SwString& s, int def) {
@@ -282,27 +280,7 @@ inline bool UiLoader::toBool_(SwString s, bool def) {
 }
 
 inline SwString UiLoader::propertyNameToSw_(const SwString& name) {
-    // Support lower camelCase names by mapping the ones we use.
-    if (name == "objectName") return "ObjectName";
-    if (name == "toolTip") return "ToolTips";
-    if (name == "styleSheet") return "StyleSheet";
-    if (name == "enabled") return "Enable";
-    if (name == "visible") return "Visible";
-    if (name == "text") return "Text";
-    if (name == "title") return "Text";
-    if (name == "placeholderText") return "Placeholder";
-    if (name == "readOnly") return "ReadOnly";
-    if (name == "geometry") return "geometry";
-
-    // Generic: lower camelCase -> PascalCase.
-    if (!name.isEmpty() && name[0] >= 'a' && name[0] <= 'z') {
-        SwString out = name;
-        out[0] = static_cast<char>(out[0] - ('a' - 'A'));
-        return out;
-    }
-
-    // Already PascalCase (Sw-style).
-    return name;
+    return compat::propertyNameToSw(name);
 }
 
 inline DrawTextFormats UiLoader::alignmentFromQtSet_(SwString value) {
@@ -1319,6 +1297,7 @@ inline UiLoader::LoadResult UiLoader::loadFromString(const SwString& xml, SwWidg
                 }
                 return out;
             }
+            detail::connectDeclaredUiConnections(win, *uiRoot);
             out.root = win;
             out.ok = true;
             return out;
@@ -1333,6 +1312,7 @@ inline UiLoader::LoadResult UiLoader::loadFromString(const SwString& xml, SwWidg
             }
             return out;
         }
+        detail::connectDeclaredUiConnections(embedded, *uiRoot);
         out.root = embedded;
         out.ok = true;
         return out;
@@ -1346,6 +1326,7 @@ inline UiLoader::LoadResult UiLoader::loadFromString(const SwString& xml, SwWidg
         return out;
     }
 
+    detail::connectDeclaredUiConnections(createdRoot, *uiRoot);
     out.root = createdRoot;
     out.ok = true;
     return out;
