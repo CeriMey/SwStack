@@ -381,14 +381,14 @@ private:
 
     static SwString encodeMessageJson_(const FireBDMessage& msg) {
         SwJsonObject o;
-        o["messageId"] = SwJsonValue(msg.messageId.toStdString());
-        o["conversationId"] = SwJsonValue(msg.conversationId.toStdString());
-        o["fromUserId"] = SwJsonValue(msg.fromUserId.toStdString());
-        o["toUserId"] = SwJsonValue(msg.toUserId.toStdString());
-        o["text"] = SwJsonValue(msg.text.toStdString());
-        o["kind"] = SwJsonValue(msg.kind.toStdString());
-        o["payload"] = SwJsonValue(msg.payload.toStdString());
-        o["meta"] = SwJsonValue(msg.meta.toStdString());
+        o["messageId"] = SwJsonValue(msg.messageId);
+        o["conversationId"] = SwJsonValue(msg.conversationId);
+        o["fromUserId"] = SwJsonValue(msg.fromUserId);
+        o["toUserId"] = SwJsonValue(msg.toUserId);
+        o["text"] = SwJsonValue(msg.text);
+        o["kind"] = SwJsonValue(msg.kind);
+        o["payload"] = SwJsonValue(msg.payload);
+        o["meta"] = SwJsonValue(msg.meta);
         o["sentAtMs"] = SwJsonValue(static_cast<long long>(msg.sentAtMs));
         SwJsonDocument doc(o);
         return doc.toJson(SwJsonDocument::JsonFormat::Compact);
@@ -396,12 +396,12 @@ private:
 
     static SwString encodeStatusEventJson_(const FireBDStatusEvent& ev) {
         SwJsonObject o;
-        o["eventId"] = SwJsonValue(ev.eventId.toStdString());
-        o["messageId"] = SwJsonValue(ev.messageId.toStdString());
-        o["conversationId"] = SwJsonValue(ev.conversationId.toStdString());
-        o["fromUserId"] = SwJsonValue(ev.fromUserId.toStdString());
-        o["toUserId"] = SwJsonValue(ev.toUserId.toStdString());
-        o["status"] = SwJsonValue(fireBdStatusToString(ev.status).toStdString());
+        o["eventId"] = SwJsonValue(ev.eventId);
+        o["messageId"] = SwJsonValue(ev.messageId);
+        o["conversationId"] = SwJsonValue(ev.conversationId);
+        o["fromUserId"] = SwJsonValue(ev.fromUserId);
+        o["toUserId"] = SwJsonValue(ev.toUserId);
+        o["status"] = SwJsonValue(fireBdStatusToString(ev.status));
         o["atMs"] = SwJsonValue(static_cast<long long>(ev.atMs));
         SwJsonDocument doc(o);
         return doc.toJson(SwJsonDocument::JsonFormat::Compact);
@@ -606,7 +606,7 @@ private:
 
         SwJsonObject patch;
         for (int i = 0; i < keys.size(); ++i) {
-            patch[keys[i].toStdString()] = SwJsonValue(); // null -> delete key
+            patch[keys[i]] = SwJsonValue(); // null -> delete key
         }
         SwJsonDocument doc(patch);
         const SwString bodyStr = doc.toJson(SwJsonDocument::JsonFormat::Compact);

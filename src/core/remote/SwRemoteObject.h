@@ -1324,7 +1324,7 @@ class SwRemoteObject : public SwObject {
 	        for (auto it = userTouchedPaths_.begin(); it != userTouchedPaths_.end(); ++it) {
 	            const SwString path = normalizeConfigPath_(it.key());
 	            if (path.isEmpty()) continue;
-	            touched.append(SwJsonValue(path.toStdString()));
+	            touched.append(SwJsonValue(path));
 	        }
 	        meta[userMetaTouchedKey_()] = SwJsonValue(touched);
 	
@@ -2223,10 +2223,10 @@ protected:
 
     template <typename T>
     static SwJsonValue valueToJson_(const T& v) {
-        return SwJsonValue(valueToString_<T>(v).toStdString());
+        return SwJsonValue(valueToString_<T>(v));
     }
 
-    static SwJsonValue valueToJson_(const SwString& v) { return SwJsonValue(v.toStdString()); }
+    static SwJsonValue valueToJson_(const SwString& v) { return SwJsonValue(v); }
     static SwJsonValue valueToJson_(const bool& v) { return SwJsonValue(v); }
     static SwJsonValue valueToJson_(const int& v) { return SwJsonValue(v); }
     static SwJsonValue valueToJson_(const float& v) { return SwJsonValue(static_cast<double>(v)); }
@@ -2238,7 +2238,7 @@ protected:
         if (tn == typeid(int).name()) return SwJsonValue(v.get<int>());
         if (tn == typeid(float).name()) return SwJsonValue(static_cast<double>(v.get<float>()));
         if (tn == typeid(double).name()) return SwJsonValue(v.get<double>());
-        if (tn == typeid(SwString).name()) return SwJsonValue(v.get<SwString>().toStdString());
+        if (tn == typeid(SwString).name()) return SwJsonValue(v.get<SwString>());
         if (tn == typeid(SwJsonValue).name()) return v.get<SwJsonValue>();
         if (tn == typeid(SwJsonObject).name()) return SwJsonValue(v.get<SwJsonObject>());
         if (tn == typeid(SwJsonArray).name()) return SwJsonValue(v.get<SwJsonArray>());
@@ -2247,7 +2247,7 @@ protected:
         const SwJsonValue j = v.toJsonValue();
         if (!j.isNull()) return j;
         const SwString s = v.toString();
-        if (!s.isEmpty()) return SwJsonValue(s.toStdString());
+        if (!s.isEmpty()) return SwJsonValue(s);
         return SwJsonValue();
     }
 

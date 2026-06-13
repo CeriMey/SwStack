@@ -257,6 +257,26 @@ public:
         return fileStream_.good();
     }
 
+    SwByteArray read(int64_t maxSize = 0) override {
+        if (currentMode_ != Read) {
+            swCError(kSwLogCategory_SwFile) << "Fichier non ouvert en mode lecture.";
+        }
+
+        if (maxSize > 0) {
+            std::string buffer(static_cast<size_t>(maxSize), '\0');
+            fileStream_.read(&buffer[0], static_cast<std::streamsize>(buffer.size()));
+            buffer.resize(static_cast<size_t>(fileStream_.gcount()));
+            return SwByteArray(buffer);
+        }
+
+        std::ostringstream buffer;
+        buffer << fileStream_.rdbuf();
+        if (fileStream_.fail() && !fileStream_.eof()) {
+            return SwByteArray();
+        }
+        return SwByteArray(buffer.str());
+    }
+
     /**
      * @brief Returns the current all.
      * @return The current all.

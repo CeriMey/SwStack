@@ -189,14 +189,14 @@ int SwApiGraphCommand::cmdConnections_() {
         for (SwMap<SwString, SwApiGraphConnectionGroup>::const_iterator it = groups.cbegin(); it != groups.cend(); ++it) {
             const SwApiGraphConnectionGroup& g = it.value();
             SwJsonObject x;
-            x["domain"] = SwJsonValue(g.domain.toStdString());
-            x["object"] = SwJsonValue(g.object.toStdString());
-            x["signal"] = SwJsonValue(g.signal.toStdString());
-            x["pubTarget"] = SwJsonValue(g.pubTarget.toStdString());
+            x["domain"] = SwJsonValue(g.domain);
+            x["object"] = SwJsonValue(g.object);
+            x["signal"] = SwJsonValue(g.signal);
+            x["pubTarget"] = SwJsonValue(g.pubTarget);
 
             SwJsonArray subArr;
             for (SwMap<SwString, bool>::const_iterator sit = g.subTargets.begin(); sit != g.subTargets.end(); ++sit) {
-                subArr.append(SwJsonValue(sit.key().toStdString()));
+                subArr.append(SwJsonValue(sit.key()));
             }
             x["subTargets"] = SwJsonValue(subArr);
             out.append(SwJsonValue(x));
@@ -212,9 +212,9 @@ int SwApiGraphCommand::cmdConnections_() {
         const SwJsonValue v = out[i];
         if (!v.isObject()) continue;
         const SwJsonObject o(v.toObject());
-        std::cout << "domain=" << SwString(o["domain"].toString()).toStdString()
-                  << " object=" << SwString(o["object"].toString()).toStdString()
-                  << " signal=" << SwString(o["signal"].toString()).toStdString() << "\n";
+        std::cout << "domain=" << o["domain"].toString().toStdString()
+                  << " object=" << o["object"].toString().toStdString()
+                  << " signal=" << o["signal"].toString().toStdString() << "\n";
     }
     return 0;
 }

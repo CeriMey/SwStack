@@ -49,10 +49,10 @@
 
 #include <string>
 #include <memory>
-#include <iostream>
-#include <sstream>
 #include <cmath>
 #include <cstdint>
+
+#include "SwString.h"
 
 class SwJsonObject;
 class SwJsonArray;
@@ -103,13 +103,13 @@ public:
      * @brief Constructs a SwJsonValue from a string.
      * @param value The string value.
      */
-    SwJsonValue(const std::string& value) : type_(Type::String), stringValue_(value) {}
+    SwJsonValue(const SwString& value) : type_(Type::String), stringValue_(value) {}
 
     /**
      * @brief Constructs a SwJsonValue from a C-style string.
      * @param value The C-style string value.
      */
-    SwJsonValue(const char* value) : type_(Type::String), stringValue_(value ? std::string(value) : "") {}
+    SwJsonValue(const char* value) : type_(Type::String), stringValue_(value ? SwString(value) : SwString()) {}
 
     /**
      * @brief Constructs a SwJsonValue from a shared pointer to a SwJsonObject.
@@ -355,11 +355,11 @@ public:
      * @brief Converts the value to a string.
      * @return The string representation of the value.
      */
-    std::string toString(const std::string& defaultValue = "") const {
+    SwString toString(const SwString& defaultValue = SwString()) const {
         if (type_ == Type::String) return stringValue_;
         if (type_ == Type::Boolean) return boolValue_ ? "true" : "false";
-        if (type_ == Type::Integer) return std::to_string(intValue_);
-        if (type_ == Type::Double) return std::to_string(doubleValue_);
+        if (type_ == Type::Integer) return SwString::number(static_cast<long long>(intValue_));
+        if (type_ == Type::Double) return SwString::number(doubleValue_);
         if (type_ == Type::Null) return "null";
         return defaultValue;
     }
@@ -384,37 +384,16 @@ public:
      * @param indentLevel The current level of indentation for nested structures.
      * @return A JSON-formatted string representation of the value.
      */
-    std::string toJsonString() const {
-        std::ostringstream os;
-
-        if (type_ == Type::String) {
-            os << "\"" << escapeString(stringValue_) << "\"";
-        } else if (type_ == Type::Boolean) {
-            os << (boolValue_ ? "true" : "false");
-        } else if (type_ == Type::Integer) {
-            os << intValue_;
-        } else if (type_ == Type::Double) {
-            os << doubleValue_;
-        } else if (type_ == Type::Null) {
-            os << "null";
-        } else if (type_ == Type::Object) {
-            os << "SwJsonValue(Object)";
-        } else if (type_ == Type::Array) {
-            os << "SwJsonValue(Array)";
-        } else {
-            os << "null"; // Par défaut
-        }
-
-        return os.str();
-    }
+    SwString toJsonString(bool compact = true, int indentLevel = 0) const;
 
     /**
      * @brief Escapes a string so that it can be safely embedded in JSON output.
      */
-    static std::string escapeString(const std::string& value) {
-        std::string result;
-        result.reserve(value.size());
-        for (unsigned char c : value) {
+    static SwString escapeString(const SwString& value) {
+        const std::string raw = value.toStdString();
+        SwString result;
+        result.reserve(raw.size());
+        for (unsigned char c : raw) {
             switch (c) {
             case '\"': result += "\\\""; break;
             case '\\': result += "\\\\"; break;
@@ -426,14 +405,14 @@ public:
             default:
                 if (c < 0x20) {
                     static const char* hexDigits = "0123456789ABCDEF";
-                    result.push_back('\\');
-                    result.push_back('u');
-                    result.push_back('0');
-                    result.push_back('0');
-                    result.push_back(hexDigits[(c >> 4) & 0x0F]);
-                    result.push_back(hexDigits[c & 0x0F]);
+                    result.append('\\');
+                    result.append('u');
+                    result.append('0');
+                    result.append('0');
+                    result.append(hexDigits[(c >> 4) & 0x0F]);
+                    result.append(hexDigits[c & 0x0F]);
                 } else {
-                    result.push_back(static_cast<char>(c));
+                    result.append(static_cast<char>(c));
                 }
                 break;
             }
@@ -446,19 +425,7 @@ public:
      * @param other The SwJsonValue to compare to.
      * @return true if the values are equal, false otherwise.
      */
-    bool operator==(const SwJsonValue& other) const {
-        if (type_ != other.type_) return false;
-        switch (type_) {
-        case Type::Null: return true;
-        case Type::Boolean: return boolValue_ == other.boolValue_;
-        case Type::Integer: return intValue_ == other.intValue_;
-        case Type::Double: return doubleValue_ == other.doubleValue_;
-        case Type::String: return stringValue_ == other.stringValue_;
-        case Type::Object: return objectValue_ == other.objectValue_;
-        case Type::Array: return arrayValue_ == other.arrayValue_;
-        }
-        return false;
-    }
+    bool operator==(const SwJsonValue& other) const;
 
     /**
      * @brief Compares two SwJsonValue objects for inequality.
@@ -521,7 +488,13 @@ private:
     bool boolValue_ = false; ///< The boolean value.
     std::int64_t intValue_ = 0; ///< The integer value.
     double doubleValue_ = 0.0; ///< The double value.
-    std::string stringValue_; ///< The string value.
+    SwString stringValue_; ///< The string value.
     std::shared_ptr<SwJsonObject> objectValue_; ///< The JSON object value.
     std::shared_ptr<SwJsonArray> arrayValue_; ///< The JSON array value.
 };
+
+#ifndef SW_JSON_VALUE_NO_AUTO_INLINE
+#include "SwJsonObject.h"
+#include "SwJsonArray.h"
+#include "SwJsonInline.h"
+#endif

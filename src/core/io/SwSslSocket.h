@@ -88,34 +88,41 @@ public:
         return m_tlsPhase == TlsPhase::Encrypted;
     }
 
-    SwString read(int64_t maxSize = 0) override {
+    SwByteArray read(int64_t maxSize = 0) override {
         if (m_tlsPhase == TlsPhase::Disabled) {
             return SwTcpSocket::read(maxSize);
         }
         if (state() != ConnectedState) {
-            return "";
+            return SwByteArray();
         }
         if (m_tlsDecryptedBuffer.isEmpty()) {
-            return "";
+            return SwByteArray();
         }
 
         const size_t toRead =
             (maxSize > 0 && maxSize < static_cast<int64_t>(m_tlsDecryptedBuffer.size())) ? static_cast<size_t>(maxSize)
-                                                                                         : m_tlsDecryptedBuffer.size();
-        SwString result = SwString::fromLatin1(m_tlsDecryptedBuffer.data(), static_cast<int>(toRead));
+                                                                                          : m_tlsDecryptedBuffer.size();
+        SwByteArray result(m_tlsDecryptedBuffer.constData(), toRead);
         m_tlsDecryptedBuffer.remove(0, static_cast<int>(toRead));
         closeIfRemoteClosedAndIdle_();
         return result;
     }
 
     bool write(const SwString& data) override {
+        return write(SwByteArray(data.data(), data.size()));
+    }
+
+    bool write(const SwByteArray& data) override {
         if (m_tlsPhase == TlsPhase::Disabled) {
             return SwTcpSocket::write(data);
         }
         if (!isSocketValid_() || state() != ConnectedState) {
             return false;
         }
-        m_writeBuffer.append(data.toStdString());
+        if (data.isEmpty()) {
+            return true;
+        }
+        m_writeBuffer.append(data.constData(), data.size());
         scheduleTlsService_();
         return true;
     }

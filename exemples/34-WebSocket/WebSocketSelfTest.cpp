@@ -148,7 +148,7 @@ int main(int argc, char* argv[]) {
 
         SwObject::connect(conn.socket, SIGNAL(readyRead), [&]() {
             while (true) {
-                SwString chunk = conn.socket->read();
+                SwString chunk(conn.socket->read().toStdString());
                 if (chunk.isEmpty()) {
                     break;
                 }

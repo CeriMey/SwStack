@@ -227,7 +227,7 @@ private slots:
         swCDebug(kSwLogCategory_SwNetworkAccessManager) << "[SwNetworkAccessManager] readyRead";
         bool received = false;
         while (true) {
-            SwString chunk = m_socket->read();
+            SwString chunk(m_socket->read().toStdString());
             if (chunk.isEmpty()) {
                 break;
             }

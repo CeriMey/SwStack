@@ -637,7 +637,7 @@ private:
             }
             for (auto &key : node.toObject().keys()) {
                 SwString childPath = path.isEmpty() ? key : (path + "/" + key);
-                printHelpRecursive(node.toObject().data()[key.toStdString()], childPath, output);
+                printHelpRecursive(node.toObject().data()[key], childPath, output);
             }
         } else {
             // Leaf node

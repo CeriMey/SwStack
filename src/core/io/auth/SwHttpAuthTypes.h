@@ -166,10 +166,11 @@ namespace swHttpAuthDetail {
 
 inline SwString normalizeEmail(const SwString& email) {
     SwString value = email.trimmed().toLower();
-    const int displayStart = value.lastIndexOf("<");
-    const int displayEnd = value.lastIndexOf(">");
-    if (displayStart >= 0 && displayEnd > displayStart) {
-        value = value.mid(displayStart + 1, displayEnd - displayStart - 1).trimmed().toLower();
+    const std::size_t displayStart = value.lastIndexOf("<");
+    const std::size_t displayEnd = value.lastIndexOf(">");
+    if (displayStart != std::string::npos && displayEnd != std::string::npos && displayEnd > displayStart) {
+        value = value.mid(static_cast<int>(displayStart + 1),
+                          static_cast<int>(displayEnd - displayStart - 1)).trimmed().toLower();
     }
     return value;
 }
@@ -621,7 +622,7 @@ inline SwString buildSessionCookie(const SwString& cookieName,
 inline SwJsonArray toJsonArray(const SwList<SwString>& values) {
     SwJsonArray array;
     for (std::size_t i = 0; i < values.size(); ++i) {
-        array.append(values[i].toStdString());
+        array.append(values[i]);
     }
     return array;
 }

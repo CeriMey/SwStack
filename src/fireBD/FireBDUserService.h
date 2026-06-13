@@ -245,7 +245,7 @@ public:
 
                     // Create pseudo index mapping.
                     SwJsonObject idx;
-                    idx["phone"] = SwJsonValue(rec.phone.toStdString());
+                    idx["phone"] = SwJsonValue(rec.phone);
                     SwJsonDocument doc(idx);
                     const SwString idxBodyStr = doc.toJson(SwJsonDocument::JsonFormat::Compact);
                     const SwByteArray idxBody = SwByteArray(idxBodyStr.toStdString());
@@ -630,12 +630,12 @@ private:
 
     static SwString encodeUserJson_(const FireBDUserRecord& rec) {
         SwJsonObject o;
-        o["phone"] = SwJsonValue(rec.phone.toStdString());
-        o["pseudo"] = SwJsonValue(rec.pseudo.toStdString());
-        o["firstName"] = SwJsonValue(rec.firstName.toStdString());
-        o["lastName"] = SwJsonValue(rec.lastName.toStdString());
-        o["passSalt"] = SwJsonValue(rec.passSalt.toStdString());
-        o["passHash"] = SwJsonValue(rec.passHash.toStdString());
+        o["phone"] = SwJsonValue(rec.phone);
+        o["pseudo"] = SwJsonValue(rec.pseudo);
+        o["firstName"] = SwJsonValue(rec.firstName);
+        o["lastName"] = SwJsonValue(rec.lastName);
+        o["passSalt"] = SwJsonValue(rec.passSalt);
+        o["passHash"] = SwJsonValue(rec.passHash);
         o["createdAtMs"] = SwJsonValue(static_cast<long long>(rec.createdAtMs));
         SwJsonDocument doc(o);
         return doc.toJson(SwJsonDocument::JsonFormat::Compact);

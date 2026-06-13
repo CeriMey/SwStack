@@ -166,8 +166,10 @@ sw_add_example_subdirectory(exemples/63-SwVtpUdpLoopback ON)
 sw_add_example_subdirectory(exemples/64-SwVtpPlayer ON)
 sw_add_example_subdirectory(exemples/65-MediaServerArchitectureSelfTest ON)
 sw_add_example_subdirectory(exemples/66-MediaTransportEndToEndSelfTest ON)
-sw_add_example_subdirectory(exemples/67-SdpMediaOptionsSelfTest OFF)
-sw_add_example_subdirectory(sandbox/SwMainWindowApplication OFF)
+  sw_add_example_subdirectory(exemples/67-SdpMediaOptionsSelfTest OFF)
+  sw_add_example_subdirectory(exemples/69-ObsbotOnvifRtspGateway OFF)
+  sw_add_example_subdirectory(exemples/70-SwJsonSelfTest OFF)
+  sw_add_example_subdirectory(sandbox/SwMainWindowApplication OFF)
 endif()
 
 # Sw "nodes"/tools

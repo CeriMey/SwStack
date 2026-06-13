@@ -117,9 +117,9 @@ public:
      * @param maxSize Value passed to the method.
      * @return The resulting read.
      */
-    virtual SwString read(int64_t maxSize = 0) {
+    virtual SwByteArray read(int64_t maxSize = 0) {
         SW_UNUSED(maxSize)
-        return "";
+        return SwByteArray();
     }
 
     /**

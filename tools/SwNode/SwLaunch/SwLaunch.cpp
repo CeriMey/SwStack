@@ -835,24 +835,140 @@ static bool hasProcessFlag_(ProcessFlags flags, ProcessFlags bit) {
 #endif
 }
 
-static uint64_t remoteObjectLastSeenMs_(const SwString& domain, const SwString& objectFqn) {
-    uint64_t best = 0;
-    if (domain.isEmpty() || objectFqn.isEmpty()) return best;
+struct RemoteObjectRegistryProbe_ {
+    uint64_t lastSeenMs{0};
+    uint64_t ownerPid{0};
+    uint64_t firstObjectPid{0};
+    uint64_t firstObjectLastSeenMs{0};
+    size_t entries{0};
+    size_t objectEntries{0};
+    size_t configEntries{0};
+    SwString signal;
+    SwString shmName;
+    SwString firstObjectSignal;
+};
 
-    SwJsonArray all = sw::ipc::shmRegistrySnapshot(domain);
+static SwString registryDisplayPath_(const SwString& domain) {
+    const SwString segment = sw::ipc::shmRegistrySegmentName(domain);
+#if defined(_WIN32)
+    return segment;
+#else
+    if (segment.startsWith("/")) return SwString("/dev/shm") + segment;
+    return SwString("/dev/shm/") + segment;
+#endif
+}
+
+static RemoteObjectRegistryProbe_ remoteObjectRegistryProbe_(const SwString& domain,
+                                                             const SwString& objectFqn,
+                                                             bool fresh) {
+    RemoteObjectRegistryProbe_ probe;
+    if (domain.isEmpty() || objectFqn.isEmpty()) return probe;
+
+    SwJsonArray all = fresh ? sw::ipc::shmRegistrySnapshotFresh(domain) : sw::ipc::shmRegistrySnapshot(domain);
+    probe.entries = all.size();
     for (size_t i = 0; i < all.size(); ++i) {
         const SwJsonValue v = all[i];
         if (!v.isObject()) continue;
         const SwJsonObject o(v.toObject());
         if (SwString(o["object"].toString()) != objectFqn) continue;
-
         const SwString sig = SwString(o["signal"].toString());
-        if (!sig.startsWith("__config__|")) continue; // presence marker for SwRemoteObject
-
         const uint64_t t = static_cast<uint64_t>(o["lastSeenMs"].toDouble());
-        if (t > best) best = t;
+        ++probe.objectEntries;
+        if (probe.objectEntries == 1) {
+            probe.firstObjectPid = static_cast<uint64_t>(o["pid"].toInt());
+            probe.firstObjectLastSeenMs = t;
+            probe.firstObjectSignal = sig;
+        }
+
+        if (!sig.startsWith("__config__|")) continue; // presence marker for SwRemoteObject
+        ++probe.configEntries;
+
+        if (t > probe.lastSeenMs) {
+            probe.lastSeenMs = t;
+            probe.ownerPid = static_cast<uint64_t>(o["pid"].toInt());
+            probe.signal = sig;
+            probe.shmName = SwString(o["shmName"].toString());
+        }
     }
-    return best;
+    return probe;
+}
+
+static bool shouldRestartForMissingHeartbeat_(const char* unitKind,
+                                              const SwString& domain,
+                                              const SwString& objectFqn,
+                                              uint64_t now,
+                                              uint64_t startMs,
+                                              bool& everOnline,
+                                              uint64_t& lastSeenMs,
+                                              int disconnectTimeoutMs,
+                                              uint64_t childPid) {
+    const RemoteObjectRegistryProbe_ cached = remoteObjectRegistryProbe_(domain, objectFqn, false);
+    if (cached.lastSeenMs != 0) {
+        everOnline = true;
+        lastSeenMs = cached.lastSeenMs;
+        return false;
+    }
+
+    const uint64_t ref = everOnline ? lastSeenMs : startMs;
+    if (ref == 0) return false;
+    if (now < ref) return false;
+
+    const uint64_t offlineMs = now - ref;
+    if (offlineMs < static_cast<uint64_t>(disconnectTimeoutMs)) return false;
+
+    const RemoteObjectRegistryProbe_ fresh = remoteObjectRegistryProbe_(domain, objectFqn, true);
+    if (fresh.lastSeenMs != 0) {
+        everOnline = true;
+        lastSeenMs = fresh.lastSeenMs;
+        swWarning() << "[launcher] registry heartbeat recovered after fresh IPC reopen kind=" << unitKind
+                    << " id=" << objectFqn
+                    << " domain=" << domain
+                    << " registry=" << registryDisplayPath_(domain)
+                    << " childPid=" << childPid
+                    << " registryPid=" << fresh.ownerPid
+                    << " lastSeenMs=" << fresh.lastSeenMs
+                    << " signal=" << fresh.signal
+                    << " shmName=" << fresh.shmName
+                    << " cachedEntries=" << cached.entries
+                    << " cachedObjectEntries=" << cached.objectEntries
+                    << " cachedConfigEntries=" << cached.configEntries
+                    << " cachedFirstSignal=" << cached.firstObjectSignal
+                    << " cachedFirstPid=" << cached.firstObjectPid
+                    << " cachedFirstLastSeenMs=" << cached.firstObjectLastSeenMs
+                    << " freshEntries=" << fresh.entries
+                    << " freshObjectEntries=" << fresh.objectEntries
+                    << " freshConfigEntries=" << fresh.configEntries
+                    << " freshFirstSignal=" << fresh.firstObjectSignal
+                    << " freshFirstPid=" << fresh.firstObjectPid
+                    << " freshFirstLastSeenMs=" << fresh.firstObjectLastSeenMs;
+        return false;
+    }
+
+    const uint64_t ageMs = (startMs != 0 && now >= startMs) ? (now - startMs) : 0;
+    swWarning() << "[launcher] " << unitKind << " offline (registry heartbeat) => restart"
+                << " id=" << objectFqn
+                << " domain=" << domain
+                << " objectFqn=" << objectFqn
+                << " registry=" << registryDisplayPath_(domain)
+                << " childPid=" << childPid
+                << " ageMs=" << ageMs
+                << " offlineMs=" << offlineMs
+                << " timeoutMs=" << disconnectTimeoutMs
+                << " everOnline=" << (everOnline ? "true" : "false")
+                << " lastSeenMs=" << lastSeenMs
+                << " cachedEntries=" << cached.entries
+                << " cachedObjectEntries=" << cached.objectEntries
+                << " cachedConfigEntries=" << cached.configEntries
+                << " cachedFirstSignal=" << cached.firstObjectSignal
+                << " cachedFirstPid=" << cached.firstObjectPid
+                << " cachedFirstLastSeenMs=" << cached.firstObjectLastSeenMs
+                << " freshEntries=" << fresh.entries
+                << " freshObjectEntries=" << fresh.objectEntries
+                << " freshConfigEntries=" << fresh.configEntries
+                << " freshFirstSignal=" << fresh.firstObjectSignal
+                << " freshFirstPid=" << fresh.firstObjectPid
+                << " freshFirstLastSeenMs=" << fresh.firstObjectLastSeenMs;
+    return true;
 }
 
 enum class ChildLogLevel_ {
@@ -1007,11 +1123,11 @@ class LaunchContainerProcess : public SwObject {
         process_ = new SwProcess(this);
 
         SwObject::connect(process_, SIGNAL(readyReadStdOut), std::function<void()>([this]() {
-            forwardChildChunk_(id_, /*fromStdErr=*/false, process_->read());
+            forwardChildChunk_(id_, /*fromStdErr=*/false, SwString(process_->read().toStdString()));
         }));
 
         SwObject::connect(process_, SIGNAL(readyReadStdErr), std::function<void()>([this]() {
-            forwardChildChunk_(id_, /*fromStdErr=*/true, process_->readStdErr());
+            forwardChildChunk_(id_, /*fromStdErr=*/true, SwString(process_->readStdErr().toStdString()));
         }));
 
         SwObject::connect(process_, SIGNAL(processTerminated), std::function<void(int)>([this](int exitCode) {
@@ -1171,21 +1287,17 @@ class LaunchContainerProcess : public SwObject {
         if (!process_ || !process_->isOpen()) return;
 
         const uint64_t now = nowMonotonicMs_();
-        const uint64_t seen = remoteObjectLastSeenMs_(sys_, id_);
-        if (seen != 0) {
-            everOnline_ = true;
-            lastSeenMs_ = seen;
-            return;
+        if (shouldRestartForMissingHeartbeat_("container",
+                                              sys_,
+                                              id_,
+                                              now,
+                                              startMs_,
+                                              everOnline_,
+                                              lastSeenMs_,
+                                              disconnectTimeoutMs_,
+                                              process_->processId())) {
+            restartDueToDisconnect_();
         }
-
-        const uint64_t ref = everOnline_ ? lastSeenMs_ : startMs_;
-        if (ref == 0) return;
-        if (now < ref) return;
-
-        if ((now - ref) < static_cast<uint64_t>(disconnectTimeoutMs_)) return;
-
-        swWarning() << "[launcher] container offline (registry heartbeat) => restart id=" << id_;
-        restartDueToDisconnect_();
     }
 
     void restartDueToDisconnect_() {
@@ -1235,7 +1347,7 @@ class LaunchContainerProcess : public SwObject {
                         continue;
                     }
                     const SwString stripped = stripKnownLibrarySuffix_(SwString(v.toString()));
-                    out.append(SwJsonValue(stripped.toStdString()));
+                    out.append(SwJsonValue(stripped));
                 }
                 compOut["plugins"] = SwJsonValue(out);
             } else {
@@ -1318,8 +1430,8 @@ class LaunchContainerProcess : public SwObject {
 
     void drainPendingOutput_() {
         if (!process_) return;
-        forwardChildChunk_(id_, /*fromStdErr=*/false, process_->read());
-        forwardChildChunk_(id_, /*fromStdErr=*/true, process_->readStdErr());
+        forwardChildChunk_(id_, /*fromStdErr=*/false, SwString(process_->read().toStdString()));
+        forwardChildChunk_(id_, /*fromStdErr=*/true, SwString(process_->readStdErr().toStdString()));
     }
 };
 
@@ -1338,11 +1450,11 @@ class LaunchNodeProcess : public SwObject {
         process_ = new SwProcess(this);
 
         SwObject::connect(process_, SIGNAL(readyReadStdOut), std::function<void()>([this]() {
-            forwardChildChunk_(id_, /*fromStdErr=*/false, process_->read());
+            forwardChildChunk_(id_, /*fromStdErr=*/false, SwString(process_->read().toStdString()));
         }));
 
         SwObject::connect(process_, SIGNAL(readyReadStdErr), std::function<void()>([this]() {
-            forwardChildChunk_(id_, /*fromStdErr=*/true, process_->readStdErr());
+            forwardChildChunk_(id_, /*fromStdErr=*/true, SwString(process_->readStdErr().toStdString()));
         }));
 
         SwObject::connect(process_, SIGNAL(processTerminated), std::function<void(int)>([this](int exitCode) {
@@ -1508,21 +1620,17 @@ class LaunchNodeProcess : public SwObject {
         if (!process_ || !process_->isOpen()) return;
 
         const uint64_t now = nowMonotonicMs_();
-        const uint64_t seen = remoteObjectLastSeenMs_(sys_, id_);
-        if (seen != 0) {
-            everOnline_ = true;
-            lastSeenMs_ = seen;
-            return;
+        if (shouldRestartForMissingHeartbeat_("node",
+                                              sys_,
+                                              id_,
+                                              now,
+                                              startMs_,
+                                              everOnline_,
+                                              lastSeenMs_,
+                                              disconnectTimeoutMs_,
+                                              process_->processId())) {
+            restartDueToDisconnect_();
         }
-
-        const uint64_t ref = everOnline_ ? lastSeenMs_ : startMs_;
-        if (ref == 0) return;
-        if (now < ref) return;
-
-        if ((now - ref) < static_cast<uint64_t>(disconnectTimeoutMs_)) return;
-
-        swWarning() << "[launcher] node offline (registry heartbeat) => restart id=" << id_;
-        restartDueToDisconnect_();
     }
 
     void restartDueToDisconnect_() {
@@ -1633,8 +1741,8 @@ class LaunchNodeProcess : public SwObject {
 
     void drainPendingOutput_() {
         if (!process_) return;
-        forwardChildChunk_(id_, /*fromStdErr=*/false, process_->read());
-        forwardChildChunk_(id_, /*fromStdErr=*/true, process_->readStdErr());
+        forwardChildChunk_(id_, /*fromStdErr=*/false, SwString(process_->read().toStdString()));
+        forwardChildChunk_(id_, /*fromStdErr=*/true, SwString(process_->readStdErr().toStdString()));
     }
 };
 

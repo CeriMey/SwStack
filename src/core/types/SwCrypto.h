@@ -480,6 +480,10 @@ public:
         return computeHMAC_SHA256(data, key);
     }
 
+    static std::string keyedHashSHA256(const std::string& data, const std::string& key) {
+        return hexEncode(generateKeyedHashSHA256(data, key));
+    }
+
     // AES (ECB, padding PKCS#7 manuel pour compatibilité)
     /**
      * @brief Performs the `encryptAES` operation.

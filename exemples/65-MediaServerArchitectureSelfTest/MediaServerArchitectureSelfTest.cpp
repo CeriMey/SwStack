@@ -212,7 +212,7 @@ bool readRtspResponse(SwCoreApplication& app,
                           std::chrono::milliseconds(timeoutMs);
     while (std::chrono::steady_clock::now() < deadline) {
         (void)app.processEvent(false);
-        const SwString chunk = socket.read();
+        const SwString chunk(socket.read().toStdString());
         if (!chunk.isEmpty()) {
             buffer += chunk.toStdString();
         }

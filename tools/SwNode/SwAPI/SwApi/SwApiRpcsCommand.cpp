@@ -80,7 +80,7 @@ static bool findSignalInRegistryForTarget(const SwString& domain,
         out.signal = signalName;
         out.shmName = SwString(o["shmName"].toString());
         out.typeName = SwString(o["typeName"].toString());
-        out.typeId = parseHexU64(SwString(o["typeId"].toString()).toStdString());
+        out.typeId = parseHexU64(o["typeId"].toString().toStdString());
         return true;
     }
     return false;
@@ -134,7 +134,7 @@ static bool findRpcRequestQueueForMethod(const SwString& domain,
         out.signal = signal;
         out.shmName = SwString(o["shmName"].toString());
         out.typeName = SwString(o["typeName"].toString());
-        out.typeId = parseHexU64(SwString(o["typeId"].toString()).toStdString());
+        out.typeId = parseHexU64(o["typeId"].toString().toStdString());
         queueMethodOut = queueMethod;
         return true;
     }
@@ -317,7 +317,7 @@ static bool encodeJsonArg(sw::ipc::detail::Encoder& enc, const std::string& type
         if (v.isBool()) { out = v.toBool(); return true; }
         if (v.isInt()) { out = (v.toInt() != 0); return true; }
         if (v.isString()) {
-            const std::string s = SwString(v.toString()).toStdString();
+            const std::string s = v.toString().toStdString();
             out = (s == "1" || s == "true" || s == "TRUE" || s == "True");
             return true;
         }
@@ -326,7 +326,7 @@ static bool encodeJsonArg(sw::ipc::detail::Encoder& enc, const std::string& type
     auto asInt = [](const SwJsonValue& v, int& out) -> bool {
         if (v.isInt()) { out = v.toInt(); return true; }
         if (v.isDouble()) { out = static_cast<int>(v.toDouble()); return true; }
-        if (v.isString()) { out = std::atoi(SwString(v.toString()).toStdString().c_str()); return true; }
+        if (v.isString()) { out = std::atoi(v.toString().toStdString().c_str()); return true; }
         if (v.isBool()) { out = v.toBool() ? 1 : 0; return true; }
         return false;
     };
@@ -334,7 +334,7 @@ static bool encodeJsonArg(sw::ipc::detail::Encoder& enc, const std::string& type
         if (v.isInt()) { out = static_cast<uint32_t>(v.toInt()); return true; }
         if (v.isDouble()) { out = static_cast<uint32_t>(v.toDouble()); return true; }
         if (v.isString()) {
-            const std::string s = SwString(v.toString()).toStdString();
+            const std::string s = v.toString().toStdString();
             out = static_cast<uint32_t>(std::strtoul(s.c_str(), NULL, 10));
             return true;
         }
@@ -345,7 +345,7 @@ static bool encodeJsonArg(sw::ipc::detail::Encoder& enc, const std::string& type
         if (v.isInt()) { out = static_cast<uint64_t>(v.toInt()); return true; }
         if (v.isDouble()) { out = static_cast<uint64_t>(v.toDouble()); return true; }
         if (v.isString()) {
-            const std::string s = SwString(v.toString()).toStdString();
+            const std::string s = v.toString().toStdString();
             out = static_cast<uint64_t>(std::strtoull(s.c_str(), NULL, 10));
             return true;
         }
@@ -355,7 +355,7 @@ static bool encodeJsonArg(sw::ipc::detail::Encoder& enc, const std::string& type
     auto asDouble = [](const SwJsonValue& v, double& out) -> bool {
         if (v.isDouble()) { out = v.toDouble(); return true; }
         if (v.isInt()) { out = static_cast<double>(v.toInt()); return true; }
-        if (v.isString()) { out = std::atof(SwString(v.toString()).toStdString().c_str()); return true; }
+        if (v.isString()) { out = std::atof(v.toString().toStdString().c_str()); return true; }
         if (v.isBool()) { out = v.toBool() ? 1.0 : 0.0; return true; }
         return false;
     };
@@ -367,7 +367,7 @@ static bool encodeJsonArg(sw::ipc::detail::Encoder& enc, const std::string& type
         return false;
     };
     auto asBytes = [](const SwJsonValue& v, SwByteArray& out) -> bool {
-        if (v.isString()) { out = SwByteArray(SwString(v.toString()).toStdString()); return true; }
+        if (v.isString()) { out = SwByteArray(v.toString().toStdString()); return true; }
         return false;
     };
 
@@ -451,7 +451,7 @@ static bool decodeJsonValueByType(sw::ipc::detail::Decoder& dec, const std::stri
     if (isBytesType(type)) {
         SwByteArray x;
         if (!sw::ipc::detail::Codec<SwByteArray>::read(dec, x)) { err = "rpc: decode failed (SwByteArray)"; return false; }
-        out = SwJsonValue(SwString(std::string(x.constData(), x.size())));
+        out = SwJsonValue(SwString(x.constData(), x.size()));
         return true;
     }
 
@@ -492,7 +492,7 @@ static bool parseTokenByType(const std::string& type, const SwString& tok, SwJso
         return true;
     }
     if (isStringType(type) || isBytesType(type)) {
-        out = SwJsonValue(tok.toStdString());
+        out = SwJsonValue(tok);
         return true;
     }
 
@@ -544,7 +544,7 @@ int SwApiRpcsCommand::cmdList_() {
         const SwJsonValue v = rpcs[i];
         if (!v.isObject()) continue;
         const SwJsonObject o(v.toObject());
-        std::cout << SwString(o["method"].toString()).toStdString() << "\n";
+        std::cout << o["method"].toString().toStdString() << "\n";
     }
     return 0;
 }
@@ -734,7 +734,7 @@ int SwApiRpcsCommand::cmdCall_() {
         if (json) {
             SwJsonObject o;
             o["ok"] = SwJsonValue(false);
-            o["method"] = SwJsonValue(method.toStdString());
+            o["method"] = SwJsonValue(method);
             o["callId"] = SwJsonValue(std::to_string(callId));
             o["error"] = SwJsonValue("rpc: timeout");
             std::cout << SwApiJson::toJson(o, pretty).toStdString() << "\n";
@@ -747,11 +747,11 @@ int SwApiRpcsCommand::cmdCall_() {
     if (json) {
         SwJsonObject o;
         o["ok"] = SwJsonValue(ok);
-        o["method"] = SwJsonValue(method.toStdString());
+        o["method"] = SwJsonValue(method);
         o["callId"] = SwJsonValue(std::to_string(callId));
-        o["returnType"] = SwJsonValue(retType.toStdString());
+        o["returnType"] = SwJsonValue(retType);
         if (!ok) {
-            o["error"] = SwJsonValue(rpcErr.toStdString());
+            o["error"] = SwJsonValue(rpcErr);
         } else if (hasRet) {
             o["result"] = result;
         }

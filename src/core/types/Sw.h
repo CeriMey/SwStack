@@ -48,6 +48,8 @@
 
 
 #include "SwFlags.h"
+#include <cctype>
+#include <string>
 #ifndef SW_UNUSED
 #define SW_UNUSED(x) (void)(x);
 #endif
@@ -243,6 +245,130 @@ enum class EchoModeEnum {
     PasswordEcho,               // Masque le texte (comme un champ de mot de passe)
     PasswordEchoOnEdit,         // Masque le texte sauf pendant la modification
 };
+
+namespace SwEnumDetail {
+inline std::string trimAsciiCopy(const std::string& value) {
+    auto begin = value.begin();
+    auto end = value.end();
+    while (begin != end && std::isspace(static_cast<unsigned char>(*begin))) {
+        ++begin;
+    }
+    while (end != begin && std::isspace(static_cast<unsigned char>(*(end - 1)))) {
+        --end;
+    }
+    return std::string(begin, end);
+}
+
+inline std::string normalizeEnumToken(const std::string& value) {
+    const std::string trimmed = trimAsciiCopy(value);
+    std::string result;
+    result.reserve(trimmed.size());
+    for (unsigned char ch : trimmed) {
+        if (ch == '-' || ch == '_') {
+            continue;
+        }
+        result.push_back(static_cast<char>(std::tolower(ch)));
+    }
+    return result;
+}
+
+inline bool parseEnumInt(const std::string& value, int& out) {
+    const std::string trimmed = trimAsciiCopy(value);
+    if (trimmed.empty()) {
+        return false;
+    }
+
+    try {
+        std::size_t parsed = 0;
+        const int parsedValue = std::stoi(trimmed, &parsed, 0);
+        if (parsed != trimmed.size()) {
+            return false;
+        }
+        out = parsedValue;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+} // namespace SwEnumDetail
+
+inline std::string swCursorTypeToString(CursorType value) {
+    switch (value) {
+    case CursorType::Arrow: return "Arrow";
+    case CursorType::Hand: return "Hand";
+    case CursorType::IBeam: return "IBeam";
+    case CursorType::Cross: return "Cross";
+    case CursorType::Wait: return "Wait";
+    case CursorType::SizeAll: return "SizeAll";
+    case CursorType::SizeNS: return "SizeNS";
+    case CursorType::SizeWE: return "SizeWE";
+    case CursorType::SizeNWSE: return "SizeNWSE";
+    case CursorType::SizeNESW: return "SizeNESW";
+    case CursorType::Default: return "Default";
+    }
+    return std::to_string(static_cast<int>(value));
+}
+
+inline CursorType swCursorTypeFromString(const std::string& value,
+                                         CursorType fallback = CursorType::Default) {
+    const std::string token = SwEnumDetail::normalizeEnumToken(value);
+    if (token == "arrow") return CursorType::Arrow;
+    if (token == "hand") return CursorType::Hand;
+    if (token == "ibeam") return CursorType::IBeam;
+    if (token == "cross") return CursorType::Cross;
+    if (token == "wait") return CursorType::Wait;
+    if (token == "sizeall") return CursorType::SizeAll;
+    if (token == "sizens") return CursorType::SizeNS;
+    if (token == "sizewe") return CursorType::SizeWE;
+    if (token == "sizenwse") return CursorType::SizeNWSE;
+    if (token == "sizenesw") return CursorType::SizeNESW;
+    if (token == "default") return CursorType::Default;
+
+    int parsed = 0;
+    return SwEnumDetail::parseEnumInt(value, parsed) ? static_cast<CursorType>(parsed) : fallback;
+}
+
+inline std::string swFocusPolicyToString(FocusPolicyEnum value) {
+    switch (value) {
+    case FocusPolicyEnum::Accept: return "Accept";
+    case FocusPolicyEnum::Strong: return "Strong";
+    case FocusPolicyEnum::NoFocus: return "NoFocus";
+    }
+    return std::to_string(static_cast<int>(value));
+}
+
+inline FocusPolicyEnum swFocusPolicyFromString(const std::string& value,
+                                               FocusPolicyEnum fallback = FocusPolicyEnum::Accept) {
+    const std::string token = SwEnumDetail::normalizeEnumToken(value);
+    if (token == "accept") return FocusPolicyEnum::Accept;
+    if (token == "strong") return FocusPolicyEnum::Strong;
+    if (token == "nofocus") return FocusPolicyEnum::NoFocus;
+
+    int parsed = 0;
+    return SwEnumDetail::parseEnumInt(value, parsed) ? static_cast<FocusPolicyEnum>(parsed) : fallback;
+}
+
+inline std::string swEchoModeToString(EchoModeEnum value) {
+    switch (value) {
+    case EchoModeEnum::NormalEcho: return "NormalEcho";
+    case EchoModeEnum::NoEcho: return "NoEcho";
+    case EchoModeEnum::PasswordEcho: return "PasswordEcho";
+    case EchoModeEnum::PasswordEchoOnEdit: return "PasswordEchoOnEdit";
+    }
+    return std::to_string(static_cast<int>(value));
+}
+
+inline EchoModeEnum swEchoModeFromString(const std::string& value,
+                                         EchoModeEnum fallback = EchoModeEnum::NormalEcho) {
+    const std::string token = SwEnumDetail::normalizeEnumToken(value);
+    if (token == "normalecho") return EchoModeEnum::NormalEcho;
+    if (token == "noecho") return EchoModeEnum::NoEcho;
+    if (token == "passwordecho") return EchoModeEnum::PasswordEcho;
+    if (token == "passwordechoonedit") return EchoModeEnum::PasswordEchoOnEdit;
+
+    int parsed = 0;
+    return SwEnumDetail::parseEnumInt(value, parsed) ? static_cast<EchoModeEnum>(parsed) : fallback;
+}
 
 enum FontWeight {
     DontCare = 0,

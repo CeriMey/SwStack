@@ -1034,17 +1034,27 @@ inline SwByteArray::SwByteArray(std::initializer_list<char> list)
 }
 
 inline SwByteArray::SwByteArray(const SwByteArray& other)
-    : buffer_(other.buffer_),
-      size_(other.size_),
+    : buffer_((other.null_ ? 0 : other.size_) + 1, '\0'),
+      size_(other.null_ ? 0 : other.size_),
       null_(other.null_) {
-    ensureNullTerminator();
+    if (size_ > 0 && !other.buffer_.empty()) {
+        const size_t bytesToCopy = std::min(size_, other.buffer_.size());
+        std::copy(other.buffer_.begin(),
+                  other.buffer_.begin() + static_cast<std::ptrdiff_t>(bytesToCopy),
+                  buffer_.begin());
+    }
 }
 
 inline SwByteArray::SwByteArray(SwByteArray&& other) noexcept
     : buffer_(std::move(other.buffer_)),
-      size_(other.size_),
+      size_(other.null_ ? 0 : other.size_),
       null_(other.null_) {
-    ensureNullTerminator();
+    if (buffer_.empty()) {
+        buffer_.assign(1, '\0');
+    } else if (buffer_.size() < size_ + 1) {
+        buffer_.resize(size_ + 1, '\0');
+    }
+    buffer_[static_cast<std::ptrdiff_t>(size_)] = '\0';
     other.size_ = 0;
     other.null_ = true;
     other.buffer_.assign(1, '\0');
@@ -1054,10 +1064,17 @@ inline SwByteArray& SwByteArray::operator=(const SwByteArray& other) {
     if (this == &other) {
         return *this;
     }
-    buffer_ = other.buffer_;
-    size_ = other.size_;
+    const size_t copiedSize = other.null_ ? 0 : other.size_;
+    std::vector<char> copied(copiedSize + 1, '\0');
+    if (copiedSize > 0 && !other.buffer_.empty()) {
+        const size_t bytesToCopy = std::min(copiedSize, other.buffer_.size());
+        std::copy(other.buffer_.begin(),
+                  other.buffer_.begin() + static_cast<std::ptrdiff_t>(bytesToCopy),
+                  copied.begin());
+    }
+    buffer_.swap(copied);
+    size_ = copiedSize;
     null_ = other.null_;
-    ensureNullTerminator();
     return *this;
 }
 
@@ -1066,9 +1083,14 @@ inline SwByteArray& SwByteArray::operator=(SwByteArray&& other) noexcept {
         return *this;
     }
     buffer_ = std::move(other.buffer_);
-    size_ = other.size_;
+    size_ = other.null_ ? 0 : other.size_;
     null_ = other.null_;
-    ensureNullTerminator();
+    if (buffer_.empty()) {
+        buffer_.assign(1, '\0');
+    } else if (buffer_.size() < size_ + 1) {
+        buffer_.resize(size_ + 1, '\0');
+    }
+    buffer_[static_cast<std::ptrdiff_t>(size_)] = '\0';
     other.size_ = 0;
     other.null_ = true;
     other.buffer_.assign(1, '\0');

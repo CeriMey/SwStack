@@ -54,7 +54,7 @@ int SwApiSignalsCommand::cmdList_() {
         const SwJsonValue v = sigs[i];
         if (!v.isObject()) continue;
         const SwJsonObject o(v.toObject());
-        std::cout << SwString(o["signal"].toString()).toStdString() << "\n";
+        std::cout << o["signal"].toString().toStdString() << "\n";
     }
     return 0;
 }
@@ -178,7 +178,7 @@ static bool asString(const SwJsonValue& v, SwString& out) {
 
 static bool asBytes(const SwJsonValue& v, SwByteArray& out) {
     if (v.isString()) {
-        out = SwByteArray(SwString(v.toString()).toStdString());
+        out = SwByteArray(v.toString().toStdString());
         return true;
     }
     return false;
@@ -313,7 +313,7 @@ int SwApiSignalsCommand::cmdPublish_() {
     } else {
         // args()[0]=publish args()[1]=target args()[2]=signal args()[3...]=args
         for (size_t i = 3; i < args().size(); ++i) {
-            argsArr.append(SwJsonValue(args()[i].toStdString()));
+            argsArr.append(SwJsonValue(args()[i]));
         }
     }
 
@@ -405,9 +405,9 @@ int SwApiSignalsCommand::cmdPublish_() {
     if (jsonOut) {
         SwJsonObject o;
         o["ok"] = SwJsonValue(ok);
-        o["target"] = SwJsonValue(target.toString().toStdString());
-        o["signal"] = SwJsonValue(sigName.toStdString());
-        o["typeName"] = SwJsonValue(typeName.toStdString());
+        o["target"] = SwJsonValue(target.toString());
+        o["signal"] = SwJsonValue(sigName);
+        o["typeName"] = SwJsonValue(typeName);
         std::cout << SwApiJson::toJson(o, pretty).toStdString() << "\n";
         return ok ? 0 : 3;
     }

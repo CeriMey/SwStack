@@ -102,8 +102,8 @@ inline SwStringList discoverRpcTargets(const SwString& domain,
         if (!v.isObject()) continue;
         const SwJsonObject o(v.toObject());
 
-        const std::string object = SwString(o["object"].toString()).toStdString();
-        const std::string signal = SwString(o["signal"].toString()).toStdString();
+        const std::string object = o["object"].toString().toStdString();
+        const std::string signal = o["signal"].toString().toStdString();
         if (signal.size() < kRpcPrefix.size()) continue;
         if (signal.compare(0, kRpcPrefix.size(), kRpcPrefix) != 0) continue;
 
@@ -112,7 +112,7 @@ inline SwStringList discoverRpcTargets(const SwString& domain,
             continue;
         }
 
-        const std::string typeIdHex = SwString(o["typeId"].toString()).toStdString();
+        const std::string typeIdHex = o["typeId"].toString().toStdString();
         foundByObject[object][method] = typeIdHex;
     }
 
@@ -244,7 +244,7 @@ public:
 
             if (SwString(o["object"].toString()) != object_) continue;
 
-            const std::string sig = SwString(o["signal"].toString()).toStdString();
+            const std::string sig = o["signal"].toString().toStdString();
             if (sig.size() < kRpcPrefix.size()) continue;
             if (sig.compare(0, kRpcPrefix.size(), kRpcPrefix) != 0) continue;
 
@@ -288,10 +288,10 @@ public:
             const SwJsonObject o(v.toObject());
 
             if (SwString(o["object"].toString()) != object_) continue;
-            if (SwString(o["signal"].toString()).toStdString() != wantSig) continue;
+            if (o["signal"].toString().toStdString() != wantSig) continue;
 
             const uint32_t pid = static_cast<uint32_t>(o["pid"].toInt());
-            const std::string t = SwString(o["typeName"].toString()).toStdString();
+            const std::string t = o["typeName"].toString().toStdString();
             if (!preferPid || pid == preferPid) {
                 typeName = t;
                 break;
@@ -372,7 +372,7 @@ private:
 
             if (!anyPrefer) anyPrefer = pid;
 
-            const std::string sig = SwString(o["signal"].toString()).toStdString();
+            const std::string sig = o["signal"].toString().toStdString();
             if (sig.rfind("__config__|", 0) == 0) {
                 if (!cfgPrefer) cfgPrefer = pid;
             } else if (sig.rfind("__rpc__|", 0) == 0) {

@@ -1451,12 +1451,19 @@ public:
     size_t utf32Size() const {
         try {
 #ifdef _WIN32
-            // Convert to UTF-32 via UTF-16 -> UTF-8 -> UTF-32 for simplicity
             std::wstring w = toStdWString();
-            std::wstring_convert<std::codecvt_utf8<wchar_t>> conv8;
-            std::string u8 = conv8.to_bytes(w);
-            std::u32string u32 = std::wstring_convert<std::codecvt_utf8<char32_t>, char32_t>{}.from_bytes(u8);
-            return u32.size();
+            size_t count = 0;
+            for (size_t i = 0; i < w.size(); ++i) {
+                const uint32_t codeUnit = static_cast<uint32_t>(w[i]);
+                if (codeUnit >= 0xD800u && codeUnit <= 0xDBFFu && i + 1 < w.size()) {
+                    const uint32_t nextCodeUnit = static_cast<uint32_t>(w[i + 1]);
+                    if (nextCodeUnit >= 0xDC00u && nextCodeUnit <= 0xDFFFu) {
+                        ++i;
+                    }
+                }
+                ++count;
+            }
+            return count;
 #else
             std::u32string u32 = std::wstring_convert<std::codecvt_utf8<char32_t>, char32_t>{}.from_bytes(data_);
             return u32.size();

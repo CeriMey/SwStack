@@ -547,14 +547,14 @@ class SwPluginLoader : public SwObject {
             out = state->library.introspectionJson();
         } else {
             out["loaded"] = SwJsonValue(false);
-            out["requestedPath"] = SwJsonValue(fileName_.toStdString());
+            out["requestedPath"] = SwJsonValue(fileName_);
             out["path"] = SwJsonValue("");
-            out["lastError"] = SwJsonValue(lastError_.toStdString());
-            out["platformPrefix"] = SwJsonValue(SwLibrary::platformPrefix().toStdString());
-            out["platformSuffix"] = SwJsonValue(SwLibrary::platformSuffix().toStdString());
+            out["lastError"] = SwJsonValue(lastError_);
+            out["platformPrefix"] = SwJsonValue(SwLibrary::platformPrefix());
+            out["platformSuffix"] = SwJsonValue(SwLibrary::platformSuffix());
         }
-        out["pluginLoaderFileName"] = SwJsonValue(fileName().toStdString());
-        out["pluginLoaderError"] = SwJsonValue(errorString().toStdString());
+        out["pluginLoaderFileName"] = SwJsonValue(fileName());
+        out["pluginLoaderError"] = SwJsonValue(errorString());
         return out;
     }
 

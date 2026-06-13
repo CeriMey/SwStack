@@ -342,15 +342,15 @@ class SwLibrary {
         SwJsonObject o;
 
         o["loaded"] = SwJsonValue(isLoaded());
-        o["requestedPath"] = SwJsonValue(requestedPath_.toStdString());
-        o["path"] = SwJsonValue(path_.toStdString());
-        o["lastError"] = SwJsonValue(lastError_.toStdString());
-        o["platformPrefix"] = SwJsonValue(platformPrefix().toStdString());
-        o["platformSuffix"] = SwJsonValue(platformSuffix().toStdString());
+        o["requestedPath"] = SwJsonValue(requestedPath_);
+        o["path"] = SwJsonValue(path_);
+        o["lastError"] = SwJsonValue(lastError_);
+        o["platformPrefix"] = SwJsonValue(platformPrefix());
+        o["platformSuffix"] = SwJsonValue(platformSuffix());
 
         const std::uintptr_t h = reinterpret_cast<std::uintptr_t>(handle_);
         o["nativeHandle"] = SwJsonValue(static_cast<long long>(reinterpret_cast<std::intptr_t>(handle_)));
-        o["nativeHandleHex"] = SwJsonValue(ptrHex_(h).toStdString());
+        o["nativeHandleHex"] = SwJsonValue(ptrHex_(h));
 
         // File info (best effort).
         if (!path_.isEmpty()) {
@@ -370,9 +370,9 @@ class SwLibrary {
         for (size_t i = 0; i < loadAttempts_.size(); ++i) {
             const LoadAttempt& a = loadAttempts_[i];
             SwJsonObject ao;
-            ao["path"] = SwJsonValue(a.path.toStdString());
+            ao["path"] = SwJsonValue(a.path);
             ao["ok"] = SwJsonValue(a.ok);
-            if (!a.error.isEmpty()) ao["error"] = SwJsonValue(a.error.toStdString());
+            if (!a.error.isEmpty()) ao["error"] = SwJsonValue(a.error);
             if (a.nativeError != 0) ao["nativeError"] = SwJsonValue(static_cast<long long>(a.nativeError));
             attempts.append(SwJsonValue(ao));
         }
@@ -382,9 +382,9 @@ class SwLibrary {
         for (size_t i = 0; i < symbolLookups_.size(); ++i) {
             const SymbolLookup& s = symbolLookups_[i];
             SwJsonObject so;
-            so["symbol"] = SwJsonValue(s.symbol.toStdString());
+            so["symbol"] = SwJsonValue(s.symbol);
             so["ok"] = SwJsonValue(s.ok);
-            so["address"] = SwJsonValue(ptrHex_(s.address).toStdString());
+            so["address"] = SwJsonValue(ptrHex_(s.address));
             syms.append(SwJsonValue(so));
         }
         o["symbolLookups"] = SwJsonValue(syms);

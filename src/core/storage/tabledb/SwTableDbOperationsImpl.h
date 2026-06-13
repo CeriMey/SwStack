@@ -21,7 +21,7 @@ inline SwDbStatus SwTableDb::insertRow(const SwTableSchema& schema,
         return normalizeStatus;
     }
     SwDbWriteBatch batch;
-    batch.put(rowPrimaryKey_(schema.tableId, row.value("rowId").toString().c_str()),
+    batch.put(rowPrimaryKey_(schema.tableId, row.value("rowId").toString()),
               jsonBytes_(row),
               secondaryKeysForRow_(schema, row));
     const SwDbStatus writeStatus = db_.write(batch);
@@ -148,7 +148,7 @@ inline SwDbStatus SwTableDb::queryRows(const SwTableSchema& schema,
         primaryEnd = primaryStart;
         primaryEnd.append('\xff');
         if (scanOp == "eq" || scanOp == "prefix") {
-            const SwString prefix = scanValue.toString().c_str();
+            const SwString prefix = scanValue.toString();
             primaryStart = rowPrimaryStart_(schema.tableId, prefix);
             primaryEnd = rowPrimaryEnd_(schema.tableId, prefix);
         }
@@ -194,9 +194,9 @@ inline SwDbStatus SwTableDb::queryRows(const SwTableSchema& schema,
 
     auto compareRows = [&](const SwJsonObject& lhs, const SwJsonObject& rhs) -> int {
         return compareOrderedValues(sortValueForRow_(lhs, sortBy),
-                                    lhs.value("rowId").toString().c_str(),
+                                    lhs.value("rowId").toString(),
                                     sortValueForRow_(rhs, sortBy),
-                                    rhs.value("rowId").toString().c_str());
+                                    rhs.value("rowId").toString());
     };
 
     auto matchesAllFilters = [&](const SwJsonObject& row) -> bool {
@@ -213,7 +213,7 @@ inline SwDbStatus SwTableDb::queryRows(const SwTableSchema& schema,
             return true;
         }
         return compareOrderedValues(sortValueForRow_(row, sortBy),
-                                    row.value("rowId").toString().c_str(),
+                                    row.value("rowId").toString(),
                                     cursorSortValue,
                                     cursorRowId) > 0;
     };
@@ -316,7 +316,7 @@ inline SwDbStatus SwTableDb::queryRows(const SwTableSchema& schema,
     if (outResult->hasMore && !outResult->rows.isEmpty()) {
         const SwJsonObject& tail = outResult->rows[outResult->rows.size() - 1];
         outResult->nextCursor =
-            makeCursor_(sortValueForRow_(tail, sortBy), tail.value("rowId").toString().c_str());
+            makeCursor_(sortValueForRow_(tail, sortBy), tail.value("rowId").toString());
     }
     return SwDbStatus::success();
 }
@@ -368,7 +368,7 @@ inline SwDbStatus SwTableDb::migrateTable(const SwTableSchema& currentSchema,
         if (!rowStatus.ok()) {
             return rowStatus;
         }
-        const SwString rowId = currentRow.value("rowId").toString().c_str();
+        const SwString rowId = currentRow.value("rowId").toString();
         if (currentSchema.tableId != nextSchema.tableId) {
             batch.erase(rowPrimaryKey_(currentSchema.tableId, rowId));
         }

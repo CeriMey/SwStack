@@ -162,6 +162,30 @@ public:
         m_trustedCaFile = path;
     }
 
+    void setTcpReceiveBufferSize(int bytes) {
+        if (bytes <= 0) {
+            return;
+        }
+        m_tcpReceiveBufferSize = bytes;
+        applyTcpSocketBufferSettings_();
+    }
+
+    void setTcpSendBufferSize(int bytes) {
+        if (bytes <= 0) {
+            return;
+        }
+        m_tcpSendBufferSize = bytes;
+        applyTcpSocketBufferSettings_();
+    }
+
+    int requestedTcpReceiveBufferSize() const {
+        return m_tcpReceiveBufferSize;
+    }
+
+    int requestedTcpSendBufferSize() const {
+        return m_tcpSendBufferSize;
+    }
+
     /**
      * @brief Returns the current origin.
      * @return The current origin.
@@ -1121,6 +1145,7 @@ private:
 
         m_sslSocket = m_secure ? new SwSslSocket(this) : nullptr;
         m_socket = m_sslSocket ? static_cast<SwAbstractSocket*>(m_sslSocket) : new SwTcpSocket(this);
+        applyTcpSocketBufferSettings_();
         if (m_sslSocket) {
             m_sslSocket->setPeerHostName(m_host);
             if (!m_trustedCaFile.isEmpty()) {
@@ -2026,7 +2051,7 @@ private slots:
         }
 
         while (true) {
-            SwString chunk = m_socket->read();
+            SwString chunk(m_socket->read().toStdString());
             if (chunk.isEmpty()) {
                 break;
             }
@@ -2249,6 +2274,7 @@ private:
 
         m_socket = socket;
         m_socket->setParent(this);
+        applyTcpSocketBufferSettings_();
 
         connect(m_socket, &SwAbstractSocket::disconnected, this, &SwWebSocket::onTcpDisconnected);
         connect(m_socket, &SwAbstractSocket::errorOccurred, this, &SwWebSocket::onTcpError);
@@ -2549,9 +2575,20 @@ private:
     }
 
 private:
+    void applyTcpSocketBufferSettings_() {
+        SwTcpSocket* tcpSocket = dynamic_cast<SwTcpSocket*>(m_socket);
+        if (!tcpSocket) {
+            return;
+        }
+        tcpSocket->setReceiveBufferSize(m_tcpReceiveBufferSize);
+        tcpSocket->setSendBufferSize(m_tcpSendBufferSize);
+    }
+
     SwAbstractSocket* m_socket = nullptr;
     SwSslSocket* m_sslSocket = nullptr;
     SwString m_trustedCaFile;
+    int m_tcpReceiveBufferSize = 0;
+    int m_tcpSendBufferSize = 0;
 
     SwString m_requestUrl;
     SwString m_scheme;

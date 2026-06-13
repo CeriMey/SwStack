@@ -32,7 +32,7 @@ private slots:
         }
 
         while (true) {
-            SwString chunk = client_->read();
+            SwString chunk(client_->read().toStdString());
             if (chunk.isEmpty()) {
                 break;
             }
@@ -152,7 +152,7 @@ private:
         }
 
         while (true) {
-            SwString chunk = upstream_->read();
+            SwString chunk(upstream_->read().toStdString());
             if (chunk.isEmpty()) {
                 break;
             }
@@ -247,7 +247,7 @@ int main(int argc, char* argv[]) {
 
         SwObject::connect(redirectConn.socket, SIGNAL(readyRead), [&]() {
             while (true) {
-                SwString chunk = redirectConn.socket->read();
+                SwString chunk(redirectConn.socket->read().toStdString());
                 if (chunk.isEmpty()) {
                     break;
                 }

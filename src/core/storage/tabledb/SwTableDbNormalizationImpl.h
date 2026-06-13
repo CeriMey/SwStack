@@ -82,7 +82,7 @@ inline SwDbStatus SwTableDb::coerceValue_(const SwString& columnType,
         if (value.isEmpty()) {
             return SwDbStatus(SwDbStatus::InvalidArgument, "Datetime cannot be empty");
         }
-        outValue = SwJsonValue(value.toStdString());
+        outValue = SwJsonValue(value);
         return SwDbStatus::success();
     }
     if (normalized == "json") {
@@ -122,9 +122,9 @@ inline SwDbStatus SwTableDb::normalizeRowForCreate_(const SwTableSchema& schema,
         outRow[column.columnId] = value;
     }
     const SwString timestamp = nowIso_();
-    outRow["rowId"] = nextRowId_().toStdString();
-    outRow["createdAt"] = timestamp.toStdString();
-    outRow["updatedAt"] = timestamp.toStdString();
+    outRow["rowId"] = nextRowId_();
+    outRow["createdAt"] = timestamp;
+    outRow["updatedAt"] = timestamp;
     return SwDbStatus::success();
 }
 
@@ -152,7 +152,7 @@ inline SwDbStatus SwTableDb::normalizeRowForUpdate_(const SwTableSchema& schema,
             return SwDbStatus(SwDbStatus::InvalidArgument, "Patch would violate non-null column");
         }
     }
-    outRow["updatedAt"] = nowIso_().toStdString();
+    outRow["updatedAt"] = nowIso_();
     return SwDbStatus::success();
 }
 
@@ -251,7 +251,7 @@ inline SwJsonValue SwTableDb::sortValueForRow_(const SwJsonObject& row, const Sw
 inline SwString SwTableDb::makeCursor_(const SwJsonValue& sortValue, const SwString& rowId) {
     SwJsonObject object;
     object["sortValue"] = sortValue;
-    object["rowId"] = rowId.toStdString();
+    object["rowId"] = rowId;
     return SwString(jsonBytes_(object).toBase64().toStdString());
 }
 
@@ -266,7 +266,7 @@ inline bool SwTableDb::parseCursor_(const SwString& cursor, SwJsonValue& sortVal
         return false;
     }
     sortValueOut = object.value("sortValue");
-    rowIdOut = object.value("rowId").toString().c_str();
+    rowIdOut = object.value("rowId").toString();
     return true;
 }
 
@@ -307,7 +307,7 @@ inline SwByteArray SwTableDb::encodeIndexValue_(const SwString& columnType,
 inline SwMap<SwString, SwList<SwByteArray>> SwTableDb::secondaryKeysForRow_(const SwTableSchema& schema,
                                                                             const SwJsonObject& row) {
     SwMap<SwString, SwList<SwByteArray>> secondary;
-    const SwString rowId = row.value("rowId").toString().c_str();
+    const SwString rowId = row.value("rowId").toString();
     const SwByteArray rowSuffix = swTableDbDetail::rowSuffix_(rowId);
 
     SwList<SwByteArray> createdKeys;
@@ -359,7 +359,7 @@ inline SwDbStatus SwTableDb::buildMigratedRow_(const SwTableSchema& currentSchem
     outRow = SwJsonObject();
     outRow["rowId"] = currentRow.value("rowId").toString();
     outRow["createdAt"] = currentRow.value("createdAt").toString();
-    outRow["updatedAt"] = nowIso_().toStdString();
+    outRow["updatedAt"] = nowIso_();
     for (std::size_t i = 0; i < nextSchema.columns.size(); ++i) {
         const SwTableColumn& column = nextSchema.columns[i];
         SwJsonValue value;

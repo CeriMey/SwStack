@@ -33,6 +33,7 @@
 #include "SwCoreApplication.h"
 #include "SwDebug.h"
 #include "SwEventLoop.h"
+#include "SwHostResolver.h"
 #include "SwSocketTrafficTelemetry.h"
 #include "SwTimer.h"
 
@@ -93,8 +94,22 @@ public:
 
     bool connectToHost(const SwString& host, uint16_t port) override {
         close();
-        m_lastHost = host;
+        m_lastHost = host;          // keep the ORIGINAL host (TLS SNI fallback, logging)
         m_remoteClosed = false;
+
+        // Cache-first DNS via SwHostResolver: substitute a known/just-resolved IP literal
+        // so the getaddrinfo below performs NO blocking DNS for an already-seen host (a
+        // cache hit is instant; a numeric IP parses with no network I/O). A cache miss
+        // resolves once here (same as before) and caches it for next time. SNI and cert
+        // verification use SwSslSocket::m_peerHostName (the original host), not m_lastHost,
+        // so substituting the IP for the connection target does not affect TLS.
+        SwString resolveHost = host;
+        if (!SwHostResolver::isNumericHost(host)) {
+            const SwString resolvedIp = SwHostResolver::instance().resolveBlockingAndCache(host);
+            if (!resolvedIp.isEmpty()) {
+                resolveHost = resolvedIp;
+            }
+        }
 
         struct addrinfo hints {};
         hints.ai_family = AF_UNSPEC;
@@ -102,7 +117,7 @@ public:
         hints.ai_protocol = IPPROTO_TCP;
 
         struct addrinfo* result = nullptr;
-        const int resolveRc = ::getaddrinfo(host.toStdString().c_str(),
+        const int resolveRc = ::getaddrinfo(resolveHost.toStdString().c_str(),
                                             SwString::number(port).toStdString().c_str(),
                                             &hints,
                                             &result);
@@ -148,6 +163,8 @@ public:
                 ::closesocket(candidateSocket);
                 continue;
             }
+            applySocketBufferSizeToHandle_(candidateSocket, SO_RCVBUF, m_receiveBufferSize, "receive");
+            applySocketBufferSizeToHandle_(candidateSocket, SO_SNDBUF, m_sendBufferSize, "send");
 
             const int connectResult = ::connect(candidateSocket,
                                                 ptr->ai_addr,
@@ -178,6 +195,8 @@ public:
                 continue;
             }
             setNonBlocking_(fd);
+            applySocketBufferSizeToHandle_(fd, SO_RCVBUF, m_receiveBufferSize, "receive");
+            applySocketBufferSizeToHandle_(fd, SO_SNDBUF, m_sendBufferSize, "send");
             if (::connect(fd, ptr->ai_addr, ptr->ai_addrlen) == 0) {
                 m_connecting = false;
                 connectedImmediately = true;
@@ -297,9 +316,9 @@ public:
         setState(UnconnectedState);
     }
 
-    SwString read(int64_t maxSize = 0) override {
+    SwByteArray read(int64_t maxSize = 0) override {
         if (!isSocketValid_() || state() != ConnectedState) {
-            return "";
+            return SwByteArray();
         }
 
         char buffer[1024];
@@ -310,12 +329,12 @@ public:
         const int ret = ::recv(m_socket, buffer, toRead, 0);
         if (ret > 0) {
             incrementTotalReceivedBytes_(static_cast<size_t>(ret));
-            return SwString::fromLatin1(buffer, ret);
+            return SwByteArray(buffer, static_cast<size_t>(ret));
         }
         if (ret == 0) {
             m_remoteClosed = true;
             close();
-            return "";
+            return SwByteArray();
         }
 
         const int err = WSAGetLastError();
@@ -326,25 +345,32 @@ public:
         const ssize_t ret = ::recv(m_socket, buffer, static_cast<size_t>(toRead), 0);
         if (ret > 0) {
             incrementTotalReceivedBytes_(static_cast<size_t>(ret));
-            return SwString::fromLatin1(buffer, static_cast<int>(ret));
+            return SwByteArray(buffer, static_cast<size_t>(ret));
         }
         if (ret == 0) {
             m_remoteClosed = true;
             close();
-            return "";
+            return SwByteArray();
         }
         if (errno != EWOULDBLOCK && errno != EAGAIN) {
             emit errorOccurred(errno);
         }
 #endif
-        return "";
+        return SwByteArray();
     }
 
     bool write(const SwString& data) override {
+        return write(SwByteArray(data.data(), data.size()));
+    }
+
+    bool write(const SwByteArray& data) override {
         if (!isSocketValid_() || state() != ConnectedState) {
             return false;
         }
-        m_writeBuffer.append(data.toStdString());
+        if (data.isEmpty()) {
+            return true;
+        }
+        m_writeBuffer.append(data.constData(), data.size());
         onWriteQueued_();
         return true;
     }
@@ -389,6 +415,42 @@ public:
 
     unsigned long long totalSentBytes() const {
         return totalSentBytes_.load(std::memory_order_relaxed);
+    }
+
+    void setReceiveBufferSize(int bytes) {
+        if (bytes <= 0) {
+            return;
+        }
+        m_receiveBufferSize = bytes;
+        if (isSocketValid_()) {
+            applyReceiveBufferSize_();
+        }
+    }
+
+    void setSendBufferSize(int bytes) {
+        if (bytes <= 0) {
+            return;
+        }
+        m_sendBufferSize = bytes;
+        if (isSocketValid_()) {
+            applySendBufferSize_();
+        }
+    }
+
+    int requestedReceiveBufferSize() const {
+        return m_receiveBufferSize;
+    }
+
+    int requestedSendBufferSize() const {
+        return m_sendBufferSize;
+    }
+
+    int actualReceiveBufferSize() const {
+        return socketIntOption_(SO_RCVBUF);
+    }
+
+    int actualSendBufferSize() const {
+        return socketIntOption_(SO_SNDBUF);
     }
 
     SwString localAddress() const {
@@ -449,6 +511,7 @@ public:
         if (!isSocketValid_()) {
             return;
         }
+        applySocketBufferSizes_();
 
 #if defined(_WIN32)
         u_long mode = 1;
@@ -506,6 +569,8 @@ protected:
     std::atomic<unsigned long long> totalReceivedBytes_{0};
     std::atomic<unsigned long long> totalSentBytes_{0};
     SwSocketTrafficStateHandle socketTrafficState_;
+    int m_receiveBufferSize = 0;
+    int m_sendBufferSize = 0;
 
 #if defined(_WIN32)
     WSAEVENT m_event = NULL;
@@ -523,6 +588,26 @@ protected:
 
     intptr_t nativeSocket_() const {
         return static_cast<intptr_t>(m_socket);
+    }
+
+    int socketIntOption_(int option) const {
+        if (!isSocketValid_()) {
+            return 0;
+        }
+        return socketIntOptionForHandle_(m_socket, option);
+    }
+
+    void applyReceiveBufferSize_() {
+        applySocketBufferSizeToHandle_(m_socket, SO_RCVBUF, m_receiveBufferSize, "receive");
+    }
+
+    void applySendBufferSize_() {
+        applySocketBufferSizeToHandle_(m_socket, SO_SNDBUF, m_sendBufferSize, "send");
+    }
+
+    void applySocketBufferSizes_() {
+        applyReceiveBufferSize_();
+        applySendBufferSize_();
     }
 
     virtual bool handleTransportConnectedEvent_() {
@@ -642,6 +727,80 @@ protected:
     }
 
 private:
+    static bool isNativeSocketValid_(SwNativeSocketHandle socket) {
+#if defined(_WIN32)
+        return socket != INVALID_SOCKET;
+#else
+        return socket >= 0;
+#endif
+    }
+
+    static int socketIntOptionForHandle_(SwNativeSocketHandle socket, int option) {
+        if (!isNativeSocketValid_(socket)) {
+            return 0;
+        }
+        int value = 0;
+#if defined(_WIN32)
+        int length = sizeof(value);
+        if (::getsockopt(socket,
+                         SOL_SOCKET,
+                         option,
+                         reinterpret_cast<char*>(&value),
+                         &length) != 0) {
+            return 0;
+        }
+#else
+        socklen_t length = sizeof(value);
+        if (::getsockopt(socket, SOL_SOCKET, option, &value, &length) != 0) {
+            return 0;
+        }
+#endif
+        return value;
+    }
+
+    static int lastSocketError_() {
+#if defined(_WIN32)
+        return WSAGetLastError();
+#else
+        return errno;
+#endif
+    }
+
+    static void applySocketBufferSizeToHandle_(SwNativeSocketHandle socket,
+                                               int option,
+                                               int bytes,
+                                               const char* label) {
+        if (bytes <= 0 || !isNativeSocketValid_(socket)) {
+            return;
+        }
+        int desired = bytes;
+        int rc = 0;
+#if defined(_WIN32)
+        rc = ::setsockopt(socket,
+                          SOL_SOCKET,
+                          option,
+                          reinterpret_cast<const char*>(&desired),
+                          sizeof(desired));
+#else
+        rc = ::setsockopt(socket, SOL_SOCKET, option, &desired, sizeof(desired));
+#endif
+        if (rc != 0) {
+            swCWarning(kSwLogCategory_SwTcpSocket)
+                << "[SwTcpSocket] Failed to apply " << label
+                << " buffer size=" << bytes
+                << " error=" << lastSocketError_();
+            return;
+        }
+
+        const int actual = socketIntOptionForHandle_(socket, option);
+        if (actual > 0 && actual < bytes) {
+            swCWarning(kSwLogCategory_SwTcpSocket)
+                << "[SwTcpSocket] " << label
+                << " buffer requested=" << bytes
+                << " actual=" << actual;
+        }
+    }
+
     SwString socketAddressToString_(const sockaddr_storage& address) const {
         char buffer[INET6_ADDRSTRLEN] = {0};
         if (address.ss_family == AF_INET) {

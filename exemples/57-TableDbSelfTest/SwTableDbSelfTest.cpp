@@ -378,7 +378,7 @@ void runMigrationTests_(TestRunner_& runner) {
         const SwDbStatus insertStatus =
             db.insertRow(baseSchema, makeInventoryRow_("item-1", "7", "12"), &createdRow);
         runner.expect(insertStatus.ok(), "Insert migration baseline row", insertStatus.message().toStdString());
-        const SwString rowId = createdRow.value("rowId").toString().c_str();
+        const SwString rowId = createdRow.value("rowId").toString();
 
         const SwTableSchema addedSchema = schemaWithAddedCategory_(baseSchema);
         const SwDbStatus addColumnStatus = db.migrateTable(baseSchema, addedSchema);

@@ -12,7 +12,7 @@ NodeDelegateModel::NodeDelegateModel(const SwString& context)
 SwJsonObject NodeDelegateModel::save() const
 {
     SwJsonObject modelJson;
-    modelJson["model-name"] = name().toStdString();
+    modelJson["model-name"] = name();
     return modelJson;
 }
 

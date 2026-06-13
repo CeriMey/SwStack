@@ -60,9 +60,9 @@ void SwApiPingCommand::start() {
     if (json) {
         SwJsonObject o;
         o["ok"] = SwJsonValue(ok);
-        o["target"] = SwJsonValue(target.toString().toStdString());
+        o["target"] = SwJsonValue(target.toString());
         o["n"] = SwJsonValue(n);
-        o["s"] = SwJsonValue(s.toStdString());
+        o["s"] = SwJsonValue(s);
         std::cout << SwApiJson::toJson(o, pretty).toStdString() << "\n";
     } else {
         std::cout << (ok ? "ok" : "failed") << "\n";

@@ -163,11 +163,11 @@ SwJsonArray SwApiIpcInspector::nodesForDomain(const SwString& domain, bool inclu
         if (objName.isEmpty()) continue;
 
         SwJsonObject d;
-        d["target"] = SwJsonValue((domain + "/" + objectFqn).toStdString());
-        d["domain"] = SwJsonValue(domain.toStdString());
-        d["nameSpace"] = SwJsonValue(nsPart.toStdString());
-        d["objectName"] = SwJsonValue(objName.toStdString());
-        d["object"] = SwJsonValue(objectFqn.toStdString());
+        d["target"] = SwJsonValue((domain + "/" + objectFqn));
+        d["domain"] = SwJsonValue(domain);
+        d["nameSpace"] = SwJsonValue(nsPart);
+        d["objectName"] = SwJsonValue(objName);
+        d["object"] = SwJsonValue(objectFqn);
         d["lastSeenMs"] = SwJsonValue(static_cast<double>(a.lastSeenMs));
         d["alive"] = SwJsonValue(a.pids.size() != 0);
 
@@ -180,7 +180,7 @@ SwJsonArray SwApiIpcInspector::nodesForDomain(const SwString& domain, bool inclu
 
         SwJsonArray cfgIds;
         for (size_t k = 0; k < a.configIds.size(); ++k) {
-            cfgIds.append(SwJsonValue(a.configIds[k].toStdString()));
+            cfgIds.append(SwJsonValue(a.configIds[k]));
         }
         d["configIds"] = SwJsonValue(cfgIds);
 
@@ -239,7 +239,7 @@ SwStringList SwApiIpcInspector::parseTypeArgs_(const SwString& typeName) {
 SwJsonArray SwApiIpcInspector::argTypesToJson_(const SwStringList& types) {
     SwJsonArray arr;
     for (size_t i = 0; i < types.size(); ++i) {
-        arr.append(SwJsonValue(types[i].toStdString()));
+        arr.append(SwJsonValue(types[i]));
     }
     return arr;
 }
@@ -266,8 +266,8 @@ SwJsonArray SwApiIpcInspector::signalsForTarget(const Target& target, bool inclu
 
         const SwString sig = SwString(o["signal"].toString());
         SwJsonObject item;
-        item["signal"] = SwJsonValue(sig.toStdString());
-        item["kind"] = SwJsonValue(kindForSignal_(sig).toStdString());
+        item["signal"] = SwJsonValue(sig);
+        item["kind"] = SwJsonValue(kindForSignal_(sig));
         item["pid"] = o["pid"];
         item["lastSeenMs"] = o["lastSeenMs"];
         item["typeId"] = o["typeId"];
@@ -319,11 +319,11 @@ SwJsonArray SwApiIpcInspector::rpcsForTarget(const Target& target, bool includeS
         }
 
         SwJsonObject item;
-        item["method"] = SwJsonValue(method.toStdString());
-        item["queueMethod"] = SwJsonValue(queueMethod.toStdString());
-        item["requestSignal"] = SwJsonValue(sig.toStdString());
+        item["method"] = SwJsonValue(method);
+        item["queueMethod"] = SwJsonValue(queueMethod);
+        item["requestSignal"] = SwJsonValue(sig);
         item["requestTypeId"] = o["typeId"];
-        item["requestTypeName"] = SwJsonValue(typeName.toStdString());
+        item["requestTypeName"] = SwJsonValue(typeName);
         item["args"] = SwJsonValue(argTypesToJson_(args));
         out.append(SwJsonValue(item));
     }
@@ -460,11 +460,11 @@ bool SwApiIpcInspector::nodeInfo(const Target& target, SwJsonObject& out, SwStri
         objName = target.object.mid(static_cast<int>(slash + 1));
     }
 
-    out["target"] = SwJsonValue(target.toString().toStdString());
-    out["domain"] = SwJsonValue(target.domain.toStdString());
-    out["object"] = SwJsonValue(target.object.toStdString());
-    out["nameSpace"] = SwJsonValue(nsPart.toStdString());
-    out["objectName"] = SwJsonValue(objName.toStdString());
+    out["target"] = SwJsonValue(target.toString());
+    out["domain"] = SwJsonValue(target.domain);
+    out["object"] = SwJsonValue(target.object);
+    out["nameSpace"] = SwJsonValue(nsPart);
+    out["objectName"] = SwJsonValue(objName);
     out["lastSeenMs"] = SwJsonValue(static_cast<double>(lastSeen));
     out["alive"] = SwJsonValue(pids.size() != 0);
     out["signalCount"] = SwJsonValue(static_cast<int>(sigs.size()));
@@ -479,7 +479,7 @@ bool SwApiIpcInspector::nodeInfo(const Target& target, SwJsonObject& out, SwStri
 
     SwJsonArray cfgArr;
     for (size_t i = 0; i < configIds.size(); ++i) {
-        cfgArr.append(SwJsonValue(configIds[i].toStdString()));
+        cfgArr.append(SwJsonValue(configIds[i]));
     }
     out["configIds"] = SwJsonValue(cfgArr);
 

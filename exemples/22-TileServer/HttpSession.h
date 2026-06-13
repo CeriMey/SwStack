@@ -33,7 +33,7 @@ public:
 private slots:
     void onReadyRead() {
         if (!m_socket) return;
-        SwString chunk = m_socket->read();
+        SwString chunk(m_socket->read().toStdString());
         if (chunk.isEmpty()) return;
         m_buffer.append(chunk);
 

@@ -83,6 +83,8 @@ public:
      */
     SwJsonDocument(const SwJsonObject& object) : rootValue_(object) {}
 
+    SwJsonDocument(const SwJsonValue& value) : rootValue_(value) {}
+
     /**
      * @brief Constructor to initialize a SwJsonDocument with a JSON array.
      *
@@ -114,6 +116,10 @@ public:
         rootValue_ = SwJsonValue(array);
     }
 
+    void setValue(const SwJsonValue& value) {
+        rootValue_ = value;
+    }
+
     /**
      * @brief Checks if the root of the JSON document is a JSON object.
      *
@@ -131,6 +137,15 @@ public:
      * @return `true` if the root is a JSON array, `false` otherwise.
      */
     bool isArray() const { return rootValue_.isArray(); }
+
+    bool isNull() const { return rootValue_.isNull(); }
+
+    bool isEmpty() const {
+        if (rootValue_.isNull()) return true;
+        if (rootValue_.isObject()) return rootValue_.toObject().isEmpty();
+        if (rootValue_.isArray()) return rootValue_.toArray().isEmpty();
+        return false;
+    }
 
     /**
      * @brief Returns the current object.
@@ -255,11 +270,15 @@ public:
      *
      * @return A SwJsonDocument constructed from the parsed JSON string. If parsing fails, an empty document is returned.
      */
-    static SwJsonDocument fromJson(const std::string& jsonString, const SwString& decryptionKey = "") {
+    static SwJsonDocument fromJson(const SwString& jsonString, const SwString& decryptionKey = "") {
         SwJsonDocument doc;
         SwString errorMessage;
         doc.loadFromJson(jsonString, errorMessage, decryptionKey);
         return doc;
+    }
+
+    static SwJsonDocument fromJson(const char* jsonString, const SwString& decryptionKey = "") {
+        return fromJson(jsonString ? SwString(jsonString) : SwString(), decryptionKey);
     }
 
         /**
@@ -274,11 +293,16 @@ public:
      *
      * @return A SwJsonDocument constructed from the parsed JSON string. If parsing fails, an empty document is returned.
      */
-    static SwJsonDocument fromJson(const std::string& jsonString, SwString& errorMessage, const SwString& decryptionKey = "") {
+    static SwJsonDocument fromJson(const SwString& jsonString, SwString& errorMessage, const SwString& decryptionKey = "") {
         SwJsonDocument doc;
         doc.loadFromJson(jsonString, errorMessage, decryptionKey);
         return doc;
     }
+
+    static SwJsonDocument fromJson(const char* jsonString, SwString& errorMessage, const SwString& decryptionKey = "") {
+        return fromJson(jsonString ? SwString(jsonString) : SwString(), errorMessage, decryptionKey);
+    }
+
     /**
      * @brief Loads a JSON document from a JSON string.
      *
@@ -327,6 +351,74 @@ public:
 private:
     SwJsonValue rootValue_; // Racine du document
 
+    static SwString encryptedScalarPayload(const SwString& type, const SwString& value)
+    {
+        return SwString("__swjson:v1:") + type + ":" + value;
+    }
+
+    static bool decodeEncryptedScalarPayload(const SwString& payload, SwJsonValue& outValue)
+    {
+        const SwString prefix("__swjson:v1:");
+        if (!payload.startsWith(prefix)) {
+            return false;
+        }
+
+        const SwString body = payload.mid(static_cast<int>(prefix.size()));
+        const int separator = body.indexOf(':');
+        if (separator < 0) {
+            return false;
+        }
+
+        const SwString type = body.left(separator);
+        const SwString value = body.mid(separator + 1);
+        if (type == "string") {
+            outValue = SwJsonValue(value);
+            return true;
+        }
+        if (type == "bool") {
+            if (value == "true") {
+                outValue = SwJsonValue(true);
+                return true;
+            }
+            if (value == "false") {
+                outValue = SwJsonValue(false);
+                return true;
+            }
+            return false;
+        }
+        if (type == "int") {
+            std::string raw = value.toStdString();
+            errno = 0;
+            char* endPtr = nullptr;
+            long long parsed = std::strtoll(raw.c_str(), &endPtr, 10);
+            if (endPtr != raw.c_str() + raw.size() || errno == ERANGE) {
+                return false;
+            }
+            outValue = SwJsonValue(static_cast<long long>(parsed));
+            return true;
+        }
+        if (type == "double") {
+            std::string raw = value.toStdString();
+            errno = 0;
+            char* endPtr = nullptr;
+            double parsed = std::strtod(raw.c_str(), &endPtr);
+            if (endPtr != raw.c_str() + raw.size() || errno == ERANGE) {
+                return false;
+            }
+            outValue = SwJsonValue(parsed);
+            return true;
+        }
+        if (type == "null") {
+            if (!value.isEmpty()) {
+                return false;
+            }
+            outValue = SwJsonValue();
+            return true;
+        }
+
+        return false;
+    }
+
     /**
      * @brief Recursively generates a JSON string from a SwJsonValue.
      *
@@ -340,62 +432,71 @@ private:
         SwString indent = pretty ? SwString(indentLevel * 2, ' ') : SwString("");
         SwString childIndent = pretty ? SwString((indentLevel + 1) * 2, ' ') : SwString("");
 
-        auto processValue = [&](const SwString& val) -> SwString {
-            return encryptionKey.isEmpty() ? val : val.encryptAES(encryptionKey);
-        };
-
         auto appendEscaped = [&](const SwString& raw) {
-            SwString processed = processValue(raw);
-            SwString escaped = SwString(SwJsonValue::escapeString(processed.toStdString()));
+            SwString escaped = SwJsonValue::escapeString(raw);
             output += "\"";
             output += escaped;
             output += "\"";
         };
 
+        auto appendEncryptedScalar = [&](const SwString& type, const SwString& raw) {
+            appendEscaped(encryptedScalarPayload(type, raw).encryptAES(encryptionKey));
+        };
+
         if (value.isString()) {
-            appendEscaped(SwString(value.toString()));
+            if (encryptionKey.isEmpty()) {
+                appendEscaped(value.toString());
+            } else {
+                appendEncryptedScalar("string", value.toString());
+            }
         } else if (value.isBool()) {
             SwString boolStr = value.toBool() ? "true" : "false";
-            output += SwString("%1").arg(processValue(boolStr));
+            if (encryptionKey.isEmpty()) output += boolStr;
+            else appendEncryptedScalar("bool", boolStr);
         } else if (value.isInt()) {
             SwString intStr = SwString::number(value.toLongLong());
-            output += SwString("%1").arg(processValue(intStr));
+            if (encryptionKey.isEmpty()) output += intStr;
+            else appendEncryptedScalar("int", intStr);
         } else if (value.isDouble()) {
             SwString doubleStr = SwString::number(value.toDouble());
-            output += SwString("%1").arg(processValue(doubleStr));
+            if (encryptionKey.isEmpty()) output += doubleStr;
+            else appendEncryptedScalar("double", doubleStr);
         } else if (value.isNull()) {
-            output += "null";
+            if (encryptionKey.isEmpty()) output += "null";
+            else appendEncryptedScalar("null", SwString());
         } else if (value.isObject()) {
-            SwJsonObject obj = value.toObject();
-            if(!obj.isEmpty()){
+            auto obj = value.toObjectPtr();
+            if(obj && !obj->isEmpty()){
                 output += pretty ? "{\n" : "{";
                 bool first = true;
-                for (const auto& pair : obj.data()) {
+                const auto& objectData = obj->dataRef();
+                for (const auto& pair : objectData) {
                     if (!first) output += pretty ? ",\n" : ",";
                     first = false;
 
                     if (pretty) output += childIndent;
-                    SwString escapedKey = SwString(SwJsonValue::escapeString(pair.first));
+                    SwString escapedKey = SwJsonValue::escapeString(pair.first);
                     output += "\"";
                     output += escapedKey;
                     output += "\": ";
                     generateJson(pair.second, output, pretty, indentLevel + 1, encryptionKey);
                 }
-                if (pretty && !obj.data().empty()) output += SwString("\n") + indent;
+                if (pretty && !objectData.empty()) output += SwString("\n") + indent;
                 output += "}";
             } else {
                 output += "{}";
             }
         } else if (value.isArray()) {
-            SwJsonArray arr = value.toArray();
-            if(!arr.isEmpty()){
+            auto arr = value.toArrayPtr();
+            if(arr && !arr->isEmpty()){
                 output += pretty ? "[\n" : "[";
-                for (size_t i = 0; i < arr.data().size(); ++i) {
+                const auto& arrayData = arr->dataRef();
+                for (size_t i = 0; i < arrayData.size(); ++i) {
                     if (i > 0) output += pretty ? ",\n" : ",";
                     if (pretty) output += childIndent;
-                    generateJson(arr.data()[i], output, pretty, indentLevel + 1, encryptionKey);
+                    generateJson(arrayData[i], output, pretty, indentLevel + 1, encryptionKey);
                 }
-                if (pretty && !arr.data().empty()) output += SwString("\n") + indent;
+                if (pretty && !arrayData.empty()) output += SwString("\n") + indent;
                 output += "]";
             } else {
                 output += "[]";
@@ -449,6 +550,11 @@ private:
             }
 
             auto interpretDecrypted = [&](const SwString& decrypted) -> SwJsonValue {
+                SwJsonValue typedValue;
+                if (decodeEncryptedScalarPayload(decrypted, typedValue)) {
+                    return typedValue;
+                }
+
                 if (decrypted == "true") return SwJsonValue(true);
                 if (decrypted == "false") return SwJsonValue(false);
                 if (decrypted == "null") return SwJsonValue();
@@ -501,14 +607,14 @@ private:
                     reportError(errorMessage, jsonString, index, "Unable to decrypt string value");
                     return SwJsonValue();
                 }
+
+                SwJsonValue typedValue;
+                if (decodeEncryptedScalarPayload(value, typedValue)) {
+                    return typedValue;
+                }
             }
 
-            if (value == "true") return SwJsonValue(true);
-            if (value == "false") return SwJsonValue(false);
-            if (value == "null") return SwJsonValue();
-            if (value.isInt()) return SwJsonValue(value.toLongLong());
-            if (value.isFloat()) return SwJsonValue(value.toFloat());
-            return SwJsonValue(value.toStdString());
+            return SwJsonValue(value);
         }
 
         if (std::isdigit(static_cast<unsigned char>(c)) || c == '-' || c == 't' || c == 'f' || c == 'n' || !decryptionKey.isEmpty()) {
@@ -585,7 +691,7 @@ private:
 
             SwJsonValue value = parseJson(jsonString, index, decryptionKey, errorMessage);
             if (!errorMessage.isEmpty()) return SwJsonValue();
-            object.insert(key.toStdString(), value);
+            object.insert(key, value);
 
             while (index < jsonString.size() && std::isspace(static_cast<unsigned char>(jsonString[index]))) ++index;
             if (index >= jsonString.size()) {
@@ -674,13 +780,13 @@ private:
      */
     SwString parseString(const SwString& jsonString, size_t& index, SwString& errorMessage) const {
         ++index;
-        std::string result;
+        SwString result;
 
         while (index < jsonString.size()) {
             char c = jsonString[index];
             if (c == '\"') {
                 ++index;
-                return SwString(result);
+                return result;
             }
 
             if (c == '\\') {
@@ -691,14 +797,14 @@ private:
                 }
                 char escapeChar = jsonString[index];
                 switch (escapeChar) {
-                case '\"': result.push_back('\"'); ++index; break;
-                case '\\': result.push_back('\\'); ++index; break;
-                case '/':  result.push_back('/'); ++index; break;
-                case 'b':  result.push_back('\b'); ++index; break;
-                case 'f':  result.push_back('\f'); ++index; break;
-                case 'n':  result.push_back('\n'); ++index; break;
-                case 'r':  result.push_back('\r'); ++index; break;
-                case 't':  result.push_back('\t'); ++index; break;
+                case '\"': result.append('\"'); ++index; break;
+                case '\\': result.append('\\'); ++index; break;
+                case '/':  result.append('/'); ++index; break;
+                case 'b':  result.append('\b'); ++index; break;
+                case 'f':  result.append('\f'); ++index; break;
+                case 'n':  result.append('\n'); ++index; break;
+                case 'r':  result.append('\r'); ++index; break;
+                case 't':  result.append('\t'); ++index; break;
                 case 'u': {
                     ++index;
                     std::uint32_t codePoint = parseUnicodeEscapeSequence(jsonString, index, errorMessage);
@@ -739,7 +845,7 @@ private:
                 return SwString();
             }
 
-            result.push_back(c);
+            result.append(c);
             ++index;
         }
 
@@ -889,7 +995,7 @@ private:
     }
 
     bool appendUtf8FromCodePoint(std::uint32_t codePoint,
-                                 std::string& output,
+                                 SwString& output,
                                  SwString& errorMessage,
                                  size_t errorIndex,
                                  const SwString& jsonString) const {
@@ -899,19 +1005,19 @@ private:
         }
 
         if (codePoint <= 0x7F) {
-            output.push_back(static_cast<char>(codePoint));
+            output.append(static_cast<char>(codePoint));
         } else if (codePoint <= 0x7FF) {
-            output.push_back(static_cast<char>(0xC0 | ((codePoint >> 6) & 0x1F)));
-            output.push_back(static_cast<char>(0x80 | (codePoint & 0x3F)));
+            output.append(static_cast<char>(0xC0 | ((codePoint >> 6) & 0x1F)));
+            output.append(static_cast<char>(0x80 | (codePoint & 0x3F)));
         } else if (codePoint <= 0xFFFF) {
-            output.push_back(static_cast<char>(0xE0 | ((codePoint >> 12) & 0x0F)));
-            output.push_back(static_cast<char>(0x80 | ((codePoint >> 6) & 0x3F)));
-            output.push_back(static_cast<char>(0x80 | (codePoint & 0x3F)));
+            output.append(static_cast<char>(0xE0 | ((codePoint >> 12) & 0x0F)));
+            output.append(static_cast<char>(0x80 | ((codePoint >> 6) & 0x3F)));
+            output.append(static_cast<char>(0x80 | (codePoint & 0x3F)));
         } else {
-            output.push_back(static_cast<char>(0xF0 | ((codePoint >> 18) & 0x07)));
-            output.push_back(static_cast<char>(0x80 | ((codePoint >> 12) & 0x3F)));
-            output.push_back(static_cast<char>(0x80 | ((codePoint >> 6) & 0x3F)));
-            output.push_back(static_cast<char>(0x80 | (codePoint & 0x3F)));
+            output.append(static_cast<char>(0xF0 | ((codePoint >> 18) & 0x07)));
+            output.append(static_cast<char>(0x80 | ((codePoint >> 12) & 0x3F)));
+            output.append(static_cast<char>(0x80 | ((codePoint >> 6) & 0x3F)));
+            output.append(static_cast<char>(0x80 | (codePoint & 0x3F)));
         }
         return true;
     }
@@ -919,12 +1025,10 @@ private:
     void reportError(SwString& errorMessage,
                      const SwString& jsonString,
                      size_t errorIndex,
-                     const std::string& message) const {
+                     const SwString& message) const {
         if (!errorMessage.isEmpty()) {
             return;
         }
-        std::ostringstream os;
-        os << message << " (index " << errorIndex << ")";
         size_t startContext = errorIndex > 20 ? errorIndex - 20 : 0;
         size_t endContext = (std::min)(jsonString.size(), errorIndex + 20);
         const size_t contextLen = endContext - startContext;
@@ -934,10 +1038,12 @@ private:
         const int ctxLen = contextLen <= static_cast<size_t>(std::numeric_limits<int>::max())
                                ? static_cast<int>(contextLen)
                                : std::numeric_limits<int>::max();
-        os << " near \""
-           << jsonString.mid(ctxStart, ctxLen).toStdString()
-           << "\"";
-        errorMessage = os.str();
+        errorMessage = message +
+                       " (index " +
+                       SwString::number(static_cast<unsigned long long>(errorIndex)) +
+                       ") near \"" +
+                       jsonString.mid(ctxStart, ctxLen) +
+                       "\"";
     }
 };
 

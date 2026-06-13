@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <functional>
 #include <iomanip>
 #include <sstream>
 #include <string>
@@ -49,6 +50,11 @@ struct SwDomainTlsConfig {
 };
 
 struct SwMailConfig {
+    // Lot 2 : authentification du courrier entrant (chemin port 25 uniquement).
+    // Tag = évalue + ajoute Authentication-Results sans jamais rejeter (défaut).
+    // Enforce = peut rejeter, mais seulement sur policy DMARC explicite.
+    enum class InboundAuthMode { Off = 0, Tag, Enforce };
+
     struct OutboundRelay {
         SwString host;
         uint16_t port = 0;
@@ -75,6 +81,10 @@ struct SwMailConfig {
     int authThrottleMaxAttempts = 8;
     SwString adminRoutePrefix = "/api/admin/mail";
     bool enableDkimSigning = true;
+    // --- Lot 2 inbound auth ---
+    InboundAuthMode inboundAuthMode = InboundAuthMode::Tag;
+    bool inboundDmarcEnforceReject = true;  // verrou de sécurité ; un échec SPF/DKIM seul ne rejette JAMAIS
+    int inboundAuthDnsTimeoutMs = 2500;
     OutboundRelay outboundRelay;
 };
 
@@ -108,6 +118,11 @@ struct SwMailAlias {
     SwString updatedAt;
 };
 
+struct SwMailResolvedForward {
+    SwString aliasAddress;
+    SwString target;
+};
+
 struct SwMailMailbox {
     SwString accountAddress;
     SwString name;
@@ -130,6 +145,7 @@ struct SwMailMessageEntry {
     SwList<SwString> cc;
     SwList<SwString> bcc;
     SwString messageId;
+    SwString authResults;  // Lot 2 : valeur Authentication-Results persistée (sans le nom de champ)
     unsigned long long sizeBytes = 0;
     SwByteArray rawMessage;
 };
@@ -183,6 +199,46 @@ struct SwMailMetrics {
     unsigned long long outboundDeferred = 0;
     unsigned long long outboundFailed = 0;
     unsigned long long authFailures = 0;
+    unsigned long long forwardedMessages = 0;
+    unsigned long long forwardLoopsDropped = 0;
+    unsigned long long srsBouncesRouted = 0;
+    unsigned long long inboundSpfFail = 0;
+    unsigned long long inboundDkimPass = 0;
+    unsigned long long inboundDmarcPass = 0;
+    unsigned long long inboundDmarcReject = 0;
+};
+
+// Lot 2 : événement émis par SwMailService vers l'hôte (in-process). L'hôte VIGIL
+// branchera dessus ses webhooks workspace, notifications et activity log.
+struct SwMailEvent {
+    enum class Type {
+        MessageReceived,
+        MessageForwarded,
+        DeliverySucceeded,
+        DeliveryDeferred,
+        DeliveryFailed,
+        BounceReceived
+    };
+    Type type = Type::MessageReceived;
+    SwString account;
+    SwString messageId;
+    SwString from;
+    SwString to;
+    SwString detail;
+    SwString error;
+    long long timestampMs = 0;
+
+    static SwString typeName(Type t) {
+        switch (t) {
+            case Type::MessageReceived: return "message.received";
+            case Type::MessageForwarded: return "message.forwarded";
+            case Type::DeliverySucceeded: return "delivery.succeeded";
+            case Type::DeliveryDeferred: return "delivery.deferred";
+            case Type::DeliveryFailed: return "delivery.failed";
+            case Type::BounceReceived: return "bounce.received";
+        }
+        return "unknown";
+    }
 };
 
 namespace swMailDetail {
@@ -190,7 +246,7 @@ namespace swMailDetail {
 inline SwString trimAngleBrackets(const SwString& value) {
     SwString out = value.trimmed();
     if (out.startsWith("<") && out.endsWith(">") && out.size() >= 2) {
-        out = out.mid(1, out.size() - 2).trimmed();
+        out = out.mid(1, static_cast<int>(out.size() - 2)).trimmed();
     }
     return out;
 }
@@ -216,10 +272,11 @@ inline SwString normalizeMailboxName(const SwString& name) {
 
 inline SwString canonicalAddress(const SwString& address) {
     SwString value = stripSmtpPathDecorators(address).trimmed().toLower();
-    const int displayStart = value.lastIndexOf("<");
-    const int displayEnd = value.lastIndexOf(">");
-    if (displayStart >= 0 && displayEnd > displayStart) {
-        value = value.mid(displayStart + 1, displayEnd - displayStart - 1).trimmed().toLower();
+    const std::size_t displayStart = value.lastIndexOf("<");
+    const std::size_t displayEnd = value.lastIndexOf(">");
+    if (displayStart != std::string::npos && displayEnd != std::string::npos && displayEnd > displayStart) {
+        value = value.mid(static_cast<int>(displayStart + 1),
+                          static_cast<int>(displayEnd - displayStart - 1)).trimmed().toLower();
     }
     return value;
 }
@@ -484,7 +541,7 @@ inline bool parseJsonObject(const SwByteArray& bytes, SwJsonObject& outObject) {
 inline SwJsonArray toJsonArray(const SwList<SwString>& values) {
     SwJsonArray array;
     for (std::size_t i = 0; i < values.size(); ++i) {
-        array.append(values[i].toStdString());
+        array.append(values[i]);
     }
     return array;
 }
@@ -693,6 +750,95 @@ inline SwList<SwString> parseAddressListHeader(const SwString& value) {
 inline SwString headerValue(const SwByteArray& rawMessage, const SwString& key) {
     const SwMap<SwString, SwString> headers = parseHeaders(rawMessage);
     return headers.value(key.toLower());
+}
+
+// Supprime tous les champs d'en-tête nommés `name` (en-tête + lignes de continuation),
+// en préservant le corps. Sert à retirer les Authentication-Results forgés avant
+// d'insérer le nôtre (RFC 8601 §5 : anti-forgery).
+inline SwByteArray removeHeaderFields(const SwByteArray& rawMessage, const SwString& name) {
+    const std::string raw = rawMessage.toStdString();
+    const std::size_t headerEnd = raw.find("\r\n\r\n");
+    if (headerEnd == std::string::npos) {
+        return rawMessage;  // pas de séparation en-têtes/corps : on ne touche à rien
+    }
+    const std::string headerBlock = raw.substr(0, headerEnd);
+    const std::string rest = raw.substr(headerEnd);  // "\r\n\r\n" + corps
+    const std::string prefix = name.trimmed().toLower().toStdString() + ":";
+
+    std::vector<std::string> lines;
+    std::size_t pos = 0;
+    while (true) {
+        const std::size_t e = headerBlock.find("\r\n", pos);
+        if (e == std::string::npos) {
+            lines.push_back(headerBlock.substr(pos));
+            break;
+        }
+        lines.push_back(headerBlock.substr(pos, e - pos));
+        pos = e + 2;
+    }
+
+    std::string out;
+    bool dropping = false;
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        const std::string& line = lines[i];
+        const bool continuation = !line.empty() && (line[0] == ' ' || line[0] == '\t');
+        if (!continuation) {
+            std::string head = line.substr(0, std::min(line.size(), prefix.size()));
+            for (std::size_t k = 0; k < head.size(); ++k) {
+                head[k] = static_cast<char>(std::tolower(static_cast<unsigned char>(head[k])));
+            }
+            dropping = (head == prefix);
+        }
+        if (!dropping) {
+            if (!out.empty()) {
+                out += "\r\n";
+            }
+            out += line;
+        }
+    }
+    return SwByteArray(out + rest);
+}
+
+inline SwList<SwString> headerOccurrences(const SwByteArray& rawMessage, const SwString& key) {
+    SwList<SwString> values;
+    const std::string raw = rawMessage.toStdString();
+    const std::string prefix = key.toLower().toStdString() + ":";
+    const std::size_t headerEnd = raw.find("\r\n\r\n");
+    const std::size_t textEnd = (headerEnd == std::string::npos) ? raw.size() : headerEnd;
+
+    std::string currentValue;
+    bool collecting = false;
+    std::size_t pos = 0;
+    while (pos < textEnd) {
+        std::size_t lineEnd = raw.find("\r\n", pos);
+        if (lineEnd == std::string::npos || lineEnd > textEnd) {
+            lineEnd = textEnd;
+        }
+        const std::string line = raw.substr(pos, lineEnd - pos);
+        pos = (lineEnd >= textEnd) ? textEnd : lineEnd + 2;
+
+        if (line.empty()) {
+            break;
+        }
+        if (collecting && (line[0] == ' ' || line[0] == '\t')) {
+            currentValue += " " + SwString(line).trimmed().toStdString();
+            continue;
+        }
+        if (collecting) {
+            values.append(SwString(currentValue).trimmed());
+            collecting = false;
+            currentValue.clear();
+        }
+        if (line.size() >= prefix.size() &&
+            SwString(line.substr(0, prefix.size())).toLower().toStdString() == prefix) {
+            currentValue = line.substr(prefix.size());
+            collecting = true;
+        }
+    }
+    if (collecting) {
+        values.append(SwString(currentValue).trimmed());
+    }
+    return values;
 }
 
 inline SwList<SwString> defaultMailboxNames() {

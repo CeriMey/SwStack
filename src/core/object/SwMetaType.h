@@ -73,7 +73,9 @@ public:
         JsonValue,
         JsonObject,
         JsonArray,
-        Any
+        Any,
+        Int64,
+        UInt64
     };
 
     /**
@@ -91,6 +93,10 @@ public:
         SW_MT_CHECK(int, Int);
         SW_MT_CHECK(unsigned int, UInt);
         SW_MT_CHECK(uint32_t, UInt);
+        SW_MT_CHECK(long long, Int64);
+        SW_MT_CHECK(std::int64_t, Int64);
+        SW_MT_CHECK(unsigned long long, UInt64);
+        SW_MT_CHECK(std::uint64_t, UInt64);
         SW_MT_CHECK(double, Double);
         SW_MT_CHECK(float, Float);
         SW_MT_CHECK(class SwString, String);

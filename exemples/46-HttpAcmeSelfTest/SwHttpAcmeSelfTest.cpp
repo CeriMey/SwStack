@@ -14,7 +14,6 @@
 #include <openssl/bio.h>
 #include <openssl/bn.h>
 #include <openssl/buffer.h>
-#include <openssl/ec.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <openssl/x509.h>
@@ -96,12 +95,12 @@ static bool parseJoseRequest_(const SwByteArray& body,
         return false;
     }
 
-    const SwByteArray protectedRaw = base64UrlDecode_(envelope.value("protected").toString().c_str());
+    const SwByteArray protectedRaw = base64UrlDecode_(envelope.value("protected").toString());
     if (!parseJsonObject_(protectedRaw, protectedObjectOut)) {
         return false;
     }
 
-    const SwString payloadB64 = envelope.value("payload").toString().c_str();
+    const SwString payloadB64 = envelope.value("payload").toString();
     if (!payloadB64.isEmpty()) {
         payloadRawOut = base64UrlDecode_(payloadB64);
         (void)parseJsonObject_(payloadRawOut, payloadObjectOut);
@@ -110,8 +109,8 @@ static bool parseJoseRequest_(const SwByteArray& body,
 }
 
 static SwString jwkThumbprint_(const SwJsonObject& jwk) {
-    const SwString x = jwk.value("x").toString().c_str();
-    const SwString y = jwk.value("y").toString().c_str();
+    const SwString x = jwk.value("x").toString();
+    const SwString y = jwk.value("y").toString();
     const SwString canonical =
         SwString("{\"crv\":\"P-256\",\"kty\":\"EC\",\"x\":\"") + x + "\",\"y\":\"" + y + "\"}";
     unsigned char hash[SHA256_DIGEST_LENGTH] = {0};
@@ -351,9 +350,9 @@ bool HttpAcmeSelfTestRunner::sendJson_(SwHttpContext& ctx, int status, const SwJ
 void HttpAcmeSelfTestRunner::configureFakeAcmeServer_() {
     m_fakeAcmeApp.get("/directory", [this](SwHttpContext& ctx) {
         SwJsonObject object;
-        object["newNonce"] = (acmeBaseUrl_() + "/new-nonce").toStdString();
-        object["newAccount"] = (acmeBaseUrl_() + "/new-account").toStdString();
-        object["newOrder"] = (acmeBaseUrl_() + "/new-order").toStdString();
+        object["newNonce"] = (acmeBaseUrl_() + "/new-nonce");
+        object["newAccount"] = (acmeBaseUrl_() + "/new-account");
+        object["newOrder"] = (acmeBaseUrl_() + "/new-order");
         sendJson_(ctx, 200, object);
     });
 
@@ -387,12 +386,12 @@ void HttpAcmeSelfTestRunner::configureFakeAcmeServer_() {
         m_order.token = "token-" + SwString::number(m_order.id);
 
         SwJsonArray authzs;
-        authzs.append(SwJsonValue((acmeBaseUrl_() + "/authz/" + SwString::number(m_order.id)).toStdString()));
+        authzs.append(SwJsonValue((acmeBaseUrl_() + "/authz/" + SwString::number(m_order.id))));
 
         SwJsonObject object;
         object["status"] = "pending";
         object["authorizations"] = authzs;
-        object["finalize"] = (acmeBaseUrl_() + "/finalize/" + SwString::number(m_order.id)).toStdString();
+        object["finalize"] = (acmeBaseUrl_() + "/finalize/" + SwString::number(m_order.id));
         sendJson_(ctx, 201, object, acmeBaseUrl_() + "/order/" + SwString::number(m_order.id));
     });
 
@@ -405,8 +404,8 @@ void HttpAcmeSelfTestRunner::configureFakeAcmeServer_() {
 
         SwJsonObject challenge;
         challenge["type"] = "http-01";
-        challenge["url"] = (acmeBaseUrl_() + "/challenge/" + SwString::number(m_order.id)).toStdString();
-        challenge["token"] = m_order.token.toStdString();
+        challenge["url"] = (acmeBaseUrl_() + "/challenge/" + SwString::number(m_order.id));
+        challenge["token"] = m_order.token;
         challenge["status"] = m_order.authorizationValid ? "valid" : "pending";
 
         SwJsonArray challenges;
@@ -452,7 +451,7 @@ void HttpAcmeSelfTestRunner::configureFakeAcmeServer_() {
             return;
         }
 
-        const SwByteArray csrDer = base64UrlDecode_(payloadObject.value("csr").toString().c_str());
+        const SwByteArray csrDer = base64UrlDecode_(payloadObject.value("csr").toString());
         if (!signCertificateFromCsrDer_(csrDer,
                                         m_caCertPem,
                                         m_caKeyPem,
@@ -465,7 +464,7 @@ void HttpAcmeSelfTestRunner::configureFakeAcmeServer_() {
         m_order.finalized = true;
         SwJsonObject object;
         object["status"] = "valid";
-        object["certificate"] = (acmeBaseUrl_() + "/cert/" + SwString::number(m_order.id)).toStdString();
+        object["certificate"] = (acmeBaseUrl_() + "/cert/" + SwString::number(m_order.id));
         sendJson_(ctx, 200, object);
     });
 
@@ -479,7 +478,7 @@ void HttpAcmeSelfTestRunner::configureFakeAcmeServer_() {
         SwJsonObject object;
         object["status"] = m_order.finalized ? "valid" : "pending";
         if (m_order.finalized) {
-            object["certificate"] = (acmeBaseUrl_() + "/cert/" + SwString::number(m_order.id)).toStdString();
+            object["certificate"] = (acmeBaseUrl_() + "/cert/" + SwString::number(m_order.id));
         }
         sendJson_(ctx, 200, object);
     });
@@ -576,20 +575,11 @@ int main(int argc, char* argv[]) {
 
 static bool generateEcPrivateKeyPem_(SwString& outPem) {
     outPem.clear();
-    EVP_PKEY* pkey = EVP_PKEY_new();
-    EC_KEY* ecKey = nullptr;
+    EVP_PKEY* pkey = EVP_EC_gen("prime256v1");
     BIO* bio = nullptr;
     if (!pkey) {
         return false;
     }
-
-    ecKey = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
-    if (!ecKey || EC_KEY_generate_key(ecKey) != 1 || EVP_PKEY_assign_EC_KEY(pkey, ecKey) != 1) {
-        if (ecKey) EC_KEY_free(ecKey);
-        EVP_PKEY_free(pkey);
-        return false;
-    }
-    ecKey = nullptr;
 
     bio = BIO_new(BIO_s_mem());
     if (!bio || PEM_write_bio_PrivateKey(bio, pkey, nullptr, nullptr, 0, nullptr, nullptr) != 1) {

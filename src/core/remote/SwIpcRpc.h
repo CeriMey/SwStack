@@ -63,6 +63,22 @@
 namespace sw {
 namespace ipc {
 
+class RpcSpinMutex_ {
+public:
+    void lock() {
+        while (flag_.test_and_set(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+    }
+
+    void unlock() {
+        flag_.clear(std::memory_order_release);
+    }
+
+private:
+    std::atomic_flag flag_ = ATOMIC_FLAG_INIT;
+};
+
 struct RpcContext {
     uint32_t clientPid{0};
     SwString clientInfo;
@@ -158,7 +174,7 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     SwString lastError() const {
-        std::lock_guard<std::mutex> lk(mutex_);
+        std::lock_guard<RpcSpinMutex_> lk(mutex_);
         return lastError_;
     }
 
@@ -176,7 +192,7 @@ public:
 
         Waiter waiter;
         {
-            std::lock_guard<std::mutex> lk(mutex_);
+            std::lock_guard<RpcSpinMutex_> lk(mutex_);
             pending_[callId] = Pending(callId, &waiter);
         }
 
@@ -264,7 +280,7 @@ public:
         const uint64_t callId = nextCallId_++;
 
         {
-            std::lock_guard<std::mutex> lk(mutex_);
+            std::lock_guard<RpcSpinMutex_> lk(mutex_);
             pending_[callId] = Pending(callId, std::move(onOk));
         }
 
@@ -400,7 +416,7 @@ private:
     void onResponse_(uint64_t callId, bool ok, const SwString& err, const Ret& value) {
         Pending p;
         {
-            std::lock_guard<std::mutex> lk(mutex_);
+            std::lock_guard<RpcSpinMutex_> lk(mutex_);
             typename std::map<uint64_t, Pending>::iterator it = pending_.find(callId);
             if (it == pending_.end()) return;
             p = it->second;
@@ -415,7 +431,7 @@ private:
     }
 
     bool erasePending_(uint64_t callId) {
-        std::lock_guard<std::mutex> lk(mutex_);
+        std::lock_guard<RpcSpinMutex_> lk(mutex_);
         typename std::map<uint64_t, Pending>::iterator it = pending_.find(callId);
         if (it == pending_.end()) return false;
         pending_.erase(it);
@@ -423,12 +439,12 @@ private:
     }
 
     void setLastError_(const SwString& e) const {
-        std::lock_guard<std::mutex> lk(mutex_);
+        std::lock_guard<RpcSpinMutex_> lk(mutex_);
         lastError_ = e;
     }
 
     void clearLastError_() const {
-        std::lock_guard<std::mutex> lk(mutex_);
+        std::lock_guard<RpcSpinMutex_> lk(mutex_);
         lastError_.clear();
     }
 
@@ -448,7 +464,7 @@ private:
     std::function<HANDLE()> respWakeEvent_;
 #endif
 
-    mutable std::mutex mutex_;
+    mutable RpcSpinMutex_ mutex_;
     mutable SwString lastError_;
     std::map<uint64_t, Pending> pending_;
     std::atomic<uint64_t> nextCallId_{1};
@@ -505,7 +521,7 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     SwString lastError() const {
-        std::lock_guard<std::mutex> lk(mutex_);
+        std::lock_guard<RpcSpinMutex_> lk(mutex_);
         return lastError_;
     }
 
@@ -522,7 +538,7 @@ public:
 
         Waiter waiter;
         {
-            std::lock_guard<std::mutex> lk(mutex_);
+            std::lock_guard<RpcSpinMutex_> lk(mutex_);
             pending_[callId] = Pending(callId, &waiter);
         }
 
@@ -603,7 +619,7 @@ public:
         clearLastError_();
         const uint64_t callId = nextCallId_++;
         {
-            std::lock_guard<std::mutex> lk(mutex_);
+            std::lock_guard<RpcSpinMutex_> lk(mutex_);
             pending_[callId] = Pending(callId, std::move(onDone));
         }
 
@@ -737,7 +753,7 @@ private:
     void onResponse_(uint64_t callId, bool ok, const SwString& err) {
         Pending p;
         {
-            std::lock_guard<std::mutex> lk(mutex_);
+            std::lock_guard<RpcSpinMutex_> lk(mutex_);
             typename std::map<uint64_t, Pending>::iterator it = pending_.find(callId);
             if (it == pending_.end()) return;
             p = it->second;
@@ -752,7 +768,7 @@ private:
     }
 
     bool erasePending_(uint64_t callId) {
-        std::lock_guard<std::mutex> lk(mutex_);
+        std::lock_guard<RpcSpinMutex_> lk(mutex_);
         typename std::map<uint64_t, Pending>::iterator it = pending_.find(callId);
         if (it == pending_.end()) return false;
         pending_.erase(it);
@@ -760,12 +776,12 @@ private:
     }
 
     void setLastError_(const SwString& e) const {
-        std::lock_guard<std::mutex> lk(mutex_);
+        std::lock_guard<RpcSpinMutex_> lk(mutex_);
         lastError_ = e;
     }
 
     void clearLastError_() const {
-        std::lock_guard<std::mutex> lk(mutex_);
+        std::lock_guard<RpcSpinMutex_> lk(mutex_);
         lastError_.clear();
     }
 
@@ -785,7 +801,7 @@ private:
     std::function<HANDLE()> respWakeEvent_;
 #endif
 
-    mutable std::mutex mutex_;
+    mutable RpcSpinMutex_ mutex_;
     mutable SwString lastError_;
     std::map<uint64_t, Pending> pending_;
     std::atomic<uint64_t> nextCallId_{1};

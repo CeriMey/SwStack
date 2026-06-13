@@ -749,7 +749,7 @@ private:
             return;
         }
         for (;;) {
-            SwString chunk = m_rtspSocket->read(4096);
+            SwString chunk(m_rtspSocket->read(4096).toStdString());
             if (chunk.isEmpty()) {
                 break;
             }
@@ -1840,7 +1840,7 @@ private:
                               std::chrono::milliseconds(std::max(0, timeoutMs));
         while (std::chrono::steady_clock::now() < deadline) {
             for (;;) {
-                SwString chunk = m_rtspSocket->read(4096);
+                SwString chunk(m_rtspSocket->read(4096).toStdString());
                 if (chunk.isEmpty()) {
                     break;
                 }

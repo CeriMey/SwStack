@@ -90,9 +90,9 @@ static void printTargetRegistry(const SwString& sysName, const SwString& objectF
         if (SwString(o["object"].toString()) != objectFqn) continue;
 
         Entry e;
-        e.signal = SwString(o["signal"].toString()).toStdString();
-        e.typeName = SwString(o["typeName"].toString()).toStdString();
-        e.shmName = SwString(o["shmName"].toString()).toStdString();
+        e.signal = o["signal"].toString().toStdString();
+        e.typeName = o["typeName"].toString().toStdString();
+        e.shmName = o["shmName"].toString().toStdString();
         e.pid = static_cast<uint32_t>(o["pid"].toInt());
         e.lastSeenMs = static_cast<uint64_t>(o["lastSeenMs"].toDouble());
         entries.push_back(e);

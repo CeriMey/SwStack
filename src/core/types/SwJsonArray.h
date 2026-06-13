@@ -47,12 +47,20 @@
  */
 
 
+#ifndef SW_JSON_VALUE_NO_AUTO_INLINE
+#define SW_JSON_VALUE_NO_AUTO_INLINE
+#define SW_JSON_VALUE_NO_AUTO_INLINE_LOCAL
+#endif
 #include "SwJsonValue.h"
+#ifdef SW_JSON_VALUE_NO_AUTO_INLINE_LOCAL
+#undef SW_JSON_VALUE_NO_AUTO_INLINE
+#undef SW_JSON_VALUE_NO_AUTO_INLINE_LOCAL
+#endif
+
+#include "SwString.h"
 
 #include <memory>
 #include <vector>
-#include <string>
-#include <sstream>
 
 /**
  * @class SwJsonArray
@@ -151,12 +159,34 @@ public:
         return data_[index];
     }
 
+    SwJsonValue at(size_t index) const {
+        return (*this)[index];
+    }
+
+    SwJsonValue first() const {
+        if (data_.empty()) {
+            throw std::out_of_range("Array is empty");
+        }
+        return data_.front();
+    }
+
+    SwJsonValue last() const {
+        if (data_.empty()) {
+            throw std::out_of_range("Array is empty");
+        }
+        return data_.back();
+    }
+
     /**
      * @brief Appends a value to the end of the array.
      * @param value The SwJsonValue to add.
      */
     void append(const SwJsonValue& value) {
         data_.push_back(value);
+    }
+
+    void prepend(const SwJsonValue& value) {
+        data_.insert(data_.begin(), value);
     }
 
     /**
@@ -172,6 +202,13 @@ public:
         data_.insert(data_.begin() + index, value);
     }
 
+    void replace(size_t index, const SwJsonValue& value) {
+        if (index >= data_.size()) {
+            throw std::out_of_range("Index out of bounds");
+        }
+        data_[index] = value;
+    }
+
     /**
      * @brief Removes a value at a specific index.
      * @param index The position of the value to remove.
@@ -182,6 +219,19 @@ public:
             throw std::out_of_range("Index out of bounds");
         }
         data_.erase(data_.begin() + index);
+    }
+
+    void removeAt(size_t index) {
+        remove(index);
+    }
+
+    SwJsonValue takeAt(size_t index) {
+        if (index >= data_.size()) {
+            throw std::out_of_range("Index out of bounds");
+        }
+        SwJsonValue value = data_[index];
+        data_.erase(data_.begin() + index);
+        return value;
     }
 
     /**
@@ -224,31 +274,7 @@ public:
      * @param indentLevel The current level of indentation for nested structures.
      * @return A JSON-formatted string representation of the array.
      */
-    std::string toJsonString(bool compact = true, int indentLevel = 0) const {
-        std::ostringstream os;
-        std::string indent(indentLevel * 2, ' '); // Indentation pour le niveau actuel
-        std::string childIndent((indentLevel + 1) * 2, ' '); // Indentation pour les enfants
-
-        os << (compact ? "[" : "[\n");
-        for (size_t i = 0; i < data_.size(); ++i) {
-            if (i > 0) os << (compact ? "," : ",\n"); // Pas de saut de ligne pour le premier élément
-
-            if (!compact) os << childIndent; // Indenter chaque élément sauf le dernier
-
-            const auto& value = data_[i];
-            if (value.isObject()) {
-                os << indent << "{SwJsonValue(Object)}";
-            } else if (value.isArray()) {
-                os << value.toArray().toJsonString(compact, indentLevel + 1);
-            } else {
-                os << value.toJsonString();
-            }
-        }
-
-        if (!compact && !data_.empty()) os << "\n" << indent; // Fermer avec indentation uniquement si le tableau n'est pas vide
-        os << "]";
-        return os.str();
-    }
+    SwString toJsonString(bool compact = true, int indentLevel = 0) const;
 
     /**
      * @brief Retrieves the internal data of the array.
@@ -259,6 +285,14 @@ public:
         return data_;
     }
 
+    const std::vector<SwJsonValue>& dataRef() const
+    {
+        return data_;
+    }
+
 private:
     std::vector<SwJsonValue> data_; ///< Stores the elements of the array.
 };
+
+#include "SwJsonObject.h"
+#include "SwJsonInline.h"

@@ -299,7 +299,7 @@ private slots:
         }
 
         while (true) {
-            SwString chunk = m_socket->read();
+            SwString chunk(m_socket->read().toStdString());
             if (chunk.isEmpty()) {
                 break;
             }

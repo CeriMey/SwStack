@@ -57,6 +57,9 @@
 #include <cstring>
 #include <cmath>
 #include <cstdint>
+#include <type_traits>
+#include <mutex>
+#include <sstream>
 #include "SwString.h"
 #include "SwJsonValue.h"
 #include "SwJsonObject.h"
@@ -77,6 +80,28 @@ static constexpr const char* kSwLogCategory_SwAny = "sw.core.types.swany";
 class SwAny {
 
 protected:
+    static std::uint64_t parseUInt64_(const SwString& value, bool* ok = nullptr) {
+        const std::string text = value.trimmed().toStdString();
+        if (text.empty() || text[0] == '-') {
+            if (ok) *ok = false;
+            return 0;
+        }
+
+        try {
+            std::size_t parsedChars = 0;
+            const unsigned long long parsed = std::stoull(text, &parsedChars, 0);
+            if (parsedChars != text.size()) {
+                if (ok) *ok = false;
+                return 0;
+            }
+            if (ok) *ok = true;
+            return static_cast<std::uint64_t>(parsed);
+        } catch (...) {
+            if (ok) *ok = false;
+            return 0;
+        }
+    }
+
     /**
      * @brief Returns the current register All Type Once.
      * @return The current register All Type Once.
@@ -110,81 +135,30 @@ protected:
 
         registerStringSerialization<CursorType>(
             [](const CursorType& v) -> SwString {
-                switch (v) {
-                case CursorType::Arrow: return SwString("Arrow");
-                case CursorType::Hand: return SwString("Hand");
-                case CursorType::IBeam: return SwString("IBeam");
-                case CursorType::Cross: return SwString("Cross");
-                case CursorType::Wait: return SwString("Wait");
-                case CursorType::SizeAll: return SwString("SizeAll");
-                case CursorType::SizeNS: return SwString("SizeNS");
-                case CursorType::SizeWE: return SwString("SizeWE");
-                case CursorType::SizeNWSE: return SwString("SizeNWSE");
-                case CursorType::SizeNESW: return SwString("SizeNESW");
-                case CursorType::Default: return SwString("Default");
-                }
-                return SwString::number(static_cast<int>(v));
+                return SwString(swCursorTypeToString(v));
             },
             [](const SwString& s) -> CursorType {
-                const SwString t = s.trimmed().toLower();
-                if (t == "arrow") return CursorType::Arrow;
-                if (t == "hand") return CursorType::Hand;
-                if (t == "ibeam" || t == "i-beam") return CursorType::IBeam;
-                if (t == "cross") return CursorType::Cross;
-                if (t == "wait") return CursorType::Wait;
-                if (t == "sizeall") return CursorType::SizeAll;
-                if (t == "sizens") return CursorType::SizeNS;
-                if (t == "sizewe") return CursorType::SizeWE;
-                if (t == "sizenwse") return CursorType::SizeNWSE;
-                if (t == "sizenesw") return CursorType::SizeNESW;
-                if (t == "default") return CursorType::Default;
-                bool ok = false;
-                int iv = t.toInt(&ok);
-                return ok ? static_cast<CursorType>(iv) : CursorType::Default;
+                return swCursorTypeFromString(s.toStdString());
             });
 
         registerStringSerialization<FocusPolicyEnum>(
             [](const FocusPolicyEnum& v) -> SwString {
-                switch (v) {
-                case FocusPolicyEnum::Accept: return SwString("Accept");
-                case FocusPolicyEnum::Strong: return SwString("Strong");
-                case FocusPolicyEnum::NoFocus: return SwString("NoFocus");
-                }
-                return SwString::number(static_cast<int>(v));
+                return SwString(swFocusPolicyToString(v));
             },
             [](const SwString& s) -> FocusPolicyEnum {
-                const SwString t = s.trimmed().toLower();
-                if (t == "accept") return FocusPolicyEnum::Accept;
-                if (t == "strong") return FocusPolicyEnum::Strong;
-                if (t == "nofocus" || t == "no_focus" || t == "no-focus") return FocusPolicyEnum::NoFocus;
-                bool ok = false;
-                int iv = t.toInt(&ok);
-                return ok ? static_cast<FocusPolicyEnum>(iv) : FocusPolicyEnum::Accept;
+                return swFocusPolicyFromString(s.toStdString());
             });
 
         registerStringSerialization<EchoModeEnum>(
             [](const EchoModeEnum& v) -> SwString {
-                switch (v) {
-                case EchoModeEnum::NormalEcho: return SwString("NormalEcho");
-                case EchoModeEnum::NoEcho: return SwString("NoEcho");
-                case EchoModeEnum::PasswordEcho: return SwString("PasswordEcho");
-                case EchoModeEnum::PasswordEchoOnEdit: return SwString("PasswordEchoOnEdit");
-                }
-                return SwString::number(static_cast<int>(v));
+                return SwString(swEchoModeToString(v));
             },
             [](const SwString& s) -> EchoModeEnum {
-                const SwString t = s.trimmed().toLower();
-                if (t == "normalecho") return EchoModeEnum::NormalEcho;
-                if (t == "noecho") return EchoModeEnum::NoEcho;
-                if (t == "passwordecho") return EchoModeEnum::PasswordEcho;
-                if (t == "passwordechoonedit") return EchoModeEnum::PasswordEchoOnEdit;
-                bool ok = false;
-                int iv = t.toInt(&ok);
-                return ok ? static_cast<EchoModeEnum>(iv) : EchoModeEnum::NormalEcho;
+                return swEchoModeFromString(s.toStdString());
             });
 
         SwAny::registerConversion<const char*, SwString>([](const char* cstr) {
-            return SwString(cstr);
+            return cstr ? SwString(cstr) : SwString();
         });
 
         // std::string -> SwString
@@ -197,18 +171,13 @@ protected:
             return s.toStdString();
         });
 
-        // Conversion depuis SwString vers const char*
-        // On utilise un buffer thread_local pour assurer la validité du pointeur c_str.
-        SwAny::registerConversion<SwString, const char*>([](const SwString& s) {
-            thread_local static std::string buffer;
-            buffer = s.toStdString();
-            return buffer.c_str();
-        });
-
         // Conversion depuis SwString vers std::vector<uint8_t> (byte array)
         SwAny::registerConversion<SwString, std::vector<uint8_t>>([](const SwString& s) {
             const std::string& strVal = s.toStdString();
             return std::vector<uint8_t>(strVal.begin(), strVal.end());
+        });
+        SwAny::registerConversion<std::vector<uint8_t>, SwString>([](const std::vector<uint8_t>& bytes) {
+            return SwString(std::string(bytes.begin(), bytes.end()));
         });
 
         // Conversion depuis SwString vers int
@@ -227,6 +196,24 @@ protected:
         SwAny::registerConversion<long long, SwString>([](long long v) {
             return SwString::number(v);
         });
+        SwAny::registerConversion<SwString, std::int64_t>([](const SwString& s) {
+            return static_cast<std::int64_t>(s.toLongLong());
+        });
+        SwAny::registerConversion<std::int64_t, SwString>([](std::int64_t v) {
+            return SwString::number(static_cast<long long>(v));
+        });
+        SwAny::registerConversion<SwString, std::uint64_t>([](const SwString& s) {
+            return parseUInt64_(s);
+        });
+        SwAny::registerConversion<std::uint64_t, SwString>([](std::uint64_t v) {
+            return SwString::number(static_cast<unsigned long long>(v));
+        });
+        SwAny::registerConversion<SwString, unsigned long long>([](const SwString& s) {
+            return static_cast<unsigned long long>(parseUInt64_(s));
+        });
+        SwAny::registerConversion<unsigned long long, SwString>([](unsigned long long v) {
+            return SwString::number(v);
+        });
         SwAny::registerConversion<int, long long>([](int v) {
             return static_cast<long long>(v);
         });
@@ -236,6 +223,43 @@ protected:
                 return 0;
             }
             return static_cast<int>(v);
+        });
+        SwAny::registerConversion<int, std::int64_t>([](int v) {
+            return static_cast<std::int64_t>(v);
+        });
+        SwAny::registerConversion<std::int64_t, int>([](std::int64_t v) {
+            if (v < static_cast<std::int64_t>(std::numeric_limits<int>::min()) ||
+                v > static_cast<std::int64_t>(std::numeric_limits<int>::max())) {
+                return 0;
+            }
+            return static_cast<int>(v);
+        });
+        SwAny::registerConversion<int, std::uint64_t>([](int v) {
+            return v < 0 ? 0ull : static_cast<std::uint64_t>(v);
+        });
+        SwAny::registerConversion<std::uint64_t, int>([](std::uint64_t v) {
+            if (v > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+                return 0;
+            }
+            return static_cast<int>(v);
+        });
+        SwAny::registerConversion<uint32_t, std::uint64_t>([](uint32_t v) {
+            return static_cast<std::uint64_t>(v);
+        });
+        SwAny::registerConversion<std::uint64_t, uint32_t>([](std::uint64_t v) {
+            if (v > static_cast<std::uint64_t>(std::numeric_limits<uint32_t>::max())) {
+                return 0u;
+            }
+            return static_cast<uint32_t>(v);
+        });
+        SwAny::registerConversion<long long, std::uint64_t>([](long long v) {
+            return v < 0 ? 0ull : static_cast<std::uint64_t>(v);
+        });
+        SwAny::registerConversion<std::uint64_t, long long>([](std::uint64_t v) {
+            if (v > static_cast<std::uint64_t>(std::numeric_limits<long long>::max())) {
+                return 0ll;
+            }
+            return static_cast<long long>(v);
         });
 
         // Conversion depuis SwString vers float
@@ -250,7 +274,7 @@ protected:
         });
         // Conversion depuis SwString vers double
         SwAny::registerConversion<SwString, double>([](const SwString& s) {
-            return static_cast<double>(s.toFloat());
+            return s.toDouble();
         });
         SwAny::registerConversion<double, SwString>([](double v) {
             std::ostringstream oss;
@@ -312,6 +336,9 @@ private:
         bool b;
         int i;
         long long i64;
+        std::int64_t stdI64;
+        unsigned long long u64;
+        std::uint64_t stdU64;
         float f;
         double d;
         uint32_t u32;
@@ -346,6 +373,23 @@ public:
      * @details The instance is initialized and prepared for immediate use.
      */
     SwAny(long long value) { ensureRegistryInitialized(); store(value); }
+    template <typename T,
+              typename std::enable_if<std::is_same<T, std::int64_t>::value &&
+                                      !std::is_same<std::int64_t, long long>::value,
+                                      int>::type = 0>
+    SwAny(T value) { ensureRegistryInitialized(); store(value); }
+    /**
+     * @brief Constructs a `SwAny` instance.
+     * @param value Value passed to the method.
+     *
+     * @details The instance is initialized and prepared for immediate use.
+     */
+    SwAny(unsigned long long value) { ensureRegistryInitialized(); store(value); }
+    template <typename T,
+              typename std::enable_if<std::is_same<T, std::uint64_t>::value &&
+                                      !std::is_same<std::uint64_t, unsigned long long>::value,
+                                      long>::type = 0>
+    SwAny(T value) { ensureRegistryInitialized(); store(value); }
     /**
      * @brief Constructs a `SwAny` instance.
      * @param value Value passed to the method.
@@ -372,7 +416,7 @@ public:
      *
      * @details The instance is initialized and prepared for immediate use.
      */
-    SwAny(const char* value) { ensureRegistryInitialized(); store(std::string(value)); }
+    SwAny(const char* value) { ensureRegistryInitialized(); store(std::string(value ? value : "")); }
     /**
      * @brief Constructs a `SwAny` instance.
      * @param value Value passed to the method.
@@ -412,6 +456,11 @@ public:
         copyFrom(other);
     }
 
+    SwAny(SwAny&& other) {
+        ensureRegistryInitialized();
+        moveFrom(std::move(other));
+    }
+
     /**
      * @brief Constructs a `SwAny` instance.
      *
@@ -419,16 +468,6 @@ public:
      */
     SwAny() : typeNameStr("") {
         ensureRegistryInitialized();
-    }
-
-    /**
-     * @brief Sets the type Name.
-     * @param typeName Value passed to the method.
-     *
-     * @details Call this method to replace the currently stored value with the caller-provided one.
-     */
-    void setTypeName(const std::string& typeName){
-        typeNameStr = typeName;
     }
 
     // Opérateur d'assignation pour copier les valeurs
@@ -441,6 +480,14 @@ public:
         if (this != &other) {
             clear();
             copyFrom(other);
+        }
+        return *this;
+    }
+
+    SwAny& operator=(SwAny&& other) {
+        if (this != &other) {
+            clear();
+            moveFrom(std::move(other));
         }
         return *this;
     }
@@ -489,6 +536,22 @@ public:
      * @return The requested operator =.
      */
     SwAny& operator=(long long v) { store(v); return *this; }
+    template <typename T,
+              typename std::enable_if<std::is_same<T, std::int64_t>::value &&
+                                      !std::is_same<std::int64_t, long long>::value,
+                                      int>::type = 0>
+    SwAny& operator=(T v) { store(v); return *this; }
+    /**
+     * @brief Performs the `operator=` operation.
+     * @param v Value passed to the method.
+     * @return The requested operator =.
+     */
+    SwAny& operator=(unsigned long long v) { store(v); return *this; }
+    template <typename T,
+              typename std::enable_if<std::is_same<T, std::uint64_t>::value &&
+                                      !std::is_same<std::uint64_t, unsigned long long>::value,
+                                      long>::type = 0>
+    SwAny& operator=(T v) { store(v); return *this; }
 
     // Destructeur
     /**
@@ -510,9 +573,20 @@ public:
     static void registerConversion(std::function<To(const From&)> converterFunc) {
         auto fromName = std::string(typeid(From).name());
         auto toName = std::string(typeid(To).name());
+        std::lock_guard<std::mutex> lock(registryMutex());
 
         // Enregistrer dans la map qu'une conversion de fromName vers toName est possible
-        getConversionRules()[fromName].push_back(toName);
+        auto& targets = getConversionRules()[fromName];
+        bool alreadyRegistered = false;
+        for (const auto& target : targets) {
+            if (target == toName) {
+                alreadyRegistered = true;
+                break;
+            }
+        }
+        if (!alreadyRegistered) {
+            targets.push_back(toName);
+        }
 
         // Enregistrer la fonction de conversion dans une autre map
         // Ici on encapsule converterFunc dans un lambda générique prenant un SwAny et retournant un SwAny
@@ -538,6 +612,7 @@ public:
             return true;
         }
         // Vérification des règles de conversion
+        std::lock_guard<std::mutex> lock(registryMutex());
         auto& rules = getConversionRules();
         auto it = rules.find(typeNameStr);
         if (it != rules.end()) {
@@ -591,16 +666,23 @@ public:
         }
 
         // Vérifions si une règle de conversion existe
-        auto& converters = getConverters();
-        auto key = std::make_pair(typeNameStr, targetName);
-        auto it = converters.find(key);
-        if (it != converters.end()) {
-            // Appeler la fonction de conversion
-            return it->second(*this);
-        } else {
-            swCError(kSwLogCategory_SwAny) << "No conversion rule registered from " << typeNameStr << " to " << targetName;
-            return SwAny(); // Retourne un SwAny vide si impossible
+        std::function<SwAny(const SwAny&)> converter;
+        {
+            std::lock_guard<std::mutex> lock(registryMutex());
+            auto& converters = getConverters();
+            auto key = std::make_pair(typeNameStr, targetName);
+            auto it = converters.find(key);
+            if (it != converters.end()) {
+                converter = it->second;
+            }
         }
+
+        if (converter) {
+            return converter(*this);
+        }
+
+        swCError(kSwLogCategory_SwAny) << "No conversion rule registered from " << typeNameStr << " to " << targetName;
+        return SwAny(); // Retourne un SwAny vide si impossible
     }
 
     // Version template qui appelle la version string
@@ -658,14 +740,19 @@ public:
         const std::string tBool  = typeid(bool).name();
         const std::string tInt   = typeid(int).name();
         const std::string tInt64 = typeid(long long).name();
+        const std::string tStdInt64 = typeid(std::int64_t).name();
+        const std::string tUInt64 = typeid(std::uint64_t).name();
+        const std::string tULongLong = typeid(unsigned long long).name();
         const std::string tFloat = typeid(float).name();
         const std::string tDouble= typeid(double).name();
         const std::string tBytes = typeid(std::vector<uint8_t>).name();
 
-        if (src == tSw || src == tStd || src == tBool || src == tInt || src == tInt64 ||
+        if (src == tSw || src == tStd || src == tBool || src == tInt ||
+            src == tInt64 || src == tStdInt64 || src == tUInt64 || src == tULongLong ||
             src == tFloat || src == tDouble || src == tBytes)
             return true;
 
+        std::lock_guard<std::mutex> lock(registryMutex());
         const auto& rules = getConversionRules();
 
         // 1) Vérifier qu'on peut faire src -> (SwString|std::string)
@@ -771,15 +858,21 @@ public:
         const std::string tBool   = typeid(bool).name();
         const std::string tInt   = typeid(int).name();
         const std::string tInt64 = typeid(long long).name();
+        const std::string tStdInt64 = typeid(std::int64_t).name();
+        const std::string tUInt64 = typeid(std::uint64_t).name();
+        const std::string tULongLong = typeid(unsigned long long).name();
         const std::string tFloat = typeid(float).name();
         const std::string tDouble= typeid(double).name();
         const std::string tBytes = typeid(std::vector<uint8_t>).name();
 
         // Trivial pour TOUS les types natifs du Storage (on garantit leurs conversions ci-dessous)
         if (typeName == tBool || typeName == tSw || typeName == tStd || typeName == tInt ||
-            typeName == tInt64 ||
+            typeName == tInt64 || typeName == tStdInt64 || typeName == tUInt64 ||
+            typeName == tULongLong ||
             typeName == tFloat || typeName == tDouble || typeName == tBytes)
             return true;
+
+        std::lock_guard<std::mutex> lock(registryMutex());
 
         const auto& mData  = getDynamicDataMap();
         if (mData.find(typeName) != mData.end()) return true;
@@ -821,16 +914,18 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     static void registerMetaType() {
-        auto typeName = typeid(T).name();
+        const std::string typeName = typeid(T).name();
+        std::lock_guard<std::mutex> lock(registryMutex());
 
         // Déplacement dynamique
-        getDynamicMoveFromMap()[typeName] = [](SwAny& self, SwAny&& other) {
+        getDynamicMoveFromMap()[typeName] = [typeName](SwAny& self, SwAny&& other) {
             if (self.storage.dynamic) {
                 delete static_cast<T*>(self.storage.dynamic); // Nettoyer si nécessaire
             }
             self.storage.dynamic = other.storage.dynamic; // Déplacer les données
             other.storage.dynamic = nullptr;             // Vider l'ancien stockage
-            self.typeNameStr = std::move(other.typeNameStr);
+            self.typeNameStr = typeName;
+            other.typeNameStr.clear();
         };
 
         // Clear dynamique
@@ -851,17 +946,23 @@ public:
         };
 
         // FromVoidPtr dynamique
-        getDynamicFromVoidPtrMap()[typeName] = [typeName](void* ptr) -> SwAny {
-            SwAny any;
-            any.setTypeName(typeName);
+        getDynamicFromVoidPtrMap()[typeName] = [](void* ptr) -> SwAny {
             T *temp = static_cast<T*>(ptr);
-            any.store(*temp);
-            return any;
+            return SwAny::from(*temp);
         };
     }
 
 
     // Créer une instance depuis un type
+    template <typename T>
+    static void ensureDynamicMetaTypeRegistered() {
+        static bool registered = []() {
+            registerMetaType<T>();
+            return true;
+        }();
+        (void)registered;
+    }
+
     template <typename T>
     /**
      * @brief Performs the `from` operation.
@@ -902,6 +1003,9 @@ public:
             return SwAny(*static_cast<int*>(ptr));
         } else if (typeNameStr == typeid(long long).name()) {
             return SwAny(*static_cast<long long*>(ptr));
+        } else if (!std::is_same<std::int64_t, long long>::value &&
+                   typeNameStr == typeid(std::int64_t).name()) {
+            return SwAny(*static_cast<std::int64_t*>(ptr));
         } else if (typeNameStr == typeid(float).name()) {
             return SwAny(*static_cast<float*>(ptr));
         } else if (typeNameStr == typeid(double).name()) {
@@ -909,6 +1013,11 @@ public:
         } else if (typeNameStr == typeid(uint32_t).name() ||
                    typeNameStr == typeid(unsigned int).name()) {
             return SwAny(*static_cast<uint32_t*>(ptr));
+        } else if (typeNameStr == typeid(unsigned long long).name()) {
+            return SwAny(*static_cast<unsigned long long*>(ptr));
+        } else if (!std::is_same<std::uint64_t, unsigned long long>::value &&
+                   typeNameStr == typeid(std::uint64_t).name()) {
+            return SwAny(*static_cast<std::uint64_t*>(ptr));
         } else if (typeNameStr == typeid(std::string).name()) {
             return SwAny(*static_cast<std::string*>(ptr));
         } else if (typeNameStr == typeid(std::vector<uint8_t>).name()) {
@@ -916,21 +1025,29 @@ public:
         }
 
         // Gestion des types dynamiques
-        auto& dynamicMap = getDynamicFromVoidPtrMap();
-        auto it = dynamicMap.find(typeNameStr);
-        if (it != dynamicMap.end()) {
-            return it->second(ptr); // Appel de la fonction dynamique
+        std::function<SwAny(void*)> fromVoidPtr;
+        {
+            std::lock_guard<std::mutex> lock(registryMutex());
+            auto& dynamicMap = getDynamicFromVoidPtrMap();
+            auto it = dynamicMap.find(typeNameStr);
+            if (it != dynamicMap.end()) {
+                fromVoidPtr = it->second;
+            }
+        }
+        if (fromVoidPtr) {
+            return fromVoidPtr(ptr); // Appel de la fonction dynamique
         }
 
         // Si le type n'est pas trouvé, afficher un message clair
         swCError(kSwLogCategory_SwAny) << "Error: Type '" << typeNameStr << "' not found in dynamic type map.";
         swCError(kSwLogCategory_SwAny) << "Available types in the map:";
 
-        for (const auto& entry : dynamicMap) {
-            swCError(kSwLogCategory_SwAny) << "  - " << entry.first; // Afficher tous les types enregistrés
+        {
+            std::lock_guard<std::mutex> lock(registryMutex());
+            for (const auto& entry : getDynamicFromVoidPtrMap()) {
+                swCError(kSwLogCategory_SwAny) << "  - " << entry.first; // Afficher tous les types enregistrés
+            }
         }
-
-        // Aucun type trouvé, retourner une instance vide
         return SwAny();
     }
 
@@ -989,6 +1106,9 @@ public:
             return const_cast<void*>(static_cast<const void*>(&storage.i));
         } else if (typeNameStr == typeid(long long).name()) {
             return const_cast<void*>(static_cast<const void*>(&storage.i64));
+        } else if (!std::is_same<std::int64_t, long long>::value &&
+                   typeNameStr == typeid(std::int64_t).name()) {
+            return const_cast<void*>(static_cast<const void*>(&storage.stdI64));
         } else if (typeNameStr == typeid(float).name()) {
             return const_cast<void*>(static_cast<const void*>(&storage.f));
         } else if (typeNameStr == typeid(double).name()) {
@@ -996,6 +1116,11 @@ public:
         } else if (typeNameStr == typeid(uint32_t).name() ||
                    typeNameStr == typeid(unsigned int).name()) {
             return const_cast<void*>(static_cast<const void*>(&storage.u32));
+        } else if (typeNameStr == typeid(unsigned long long).name()) {
+            return const_cast<void*>(static_cast<const void*>(&storage.u64));
+        } else if (!std::is_same<std::uint64_t, unsigned long long>::value &&
+                   typeNameStr == typeid(std::uint64_t).name()) {
+            return const_cast<void*>(static_cast<const void*>(&storage.stdU64));
         } else if (typeNameStr == typeid(std::string).name()) {
             return const_cast<void*>(static_cast<const void*>(&storage.str));
         } else if (typeNameStr == typeid(std::vector<uint8_t>).name()) {
@@ -1003,19 +1128,16 @@ public:
         }
 
         // Gestion des types dynamiques
-        auto& dynamicDataMap = getDynamicDataMap();
-        auto it = dynamicDataMap.find(typeNameStr);
-        if (it != dynamicDataMap.end()) {
-            return it->second(*this); // Appel de la fonction pour récupérer les données dynamiques
+        std::function<void*(const SwAny&)> dataGetter;
+        {
+            std::lock_guard<std::mutex> lock(registryMutex());
+            auto& dynamicDataMap = getDynamicDataMap();
+            auto it = dynamicDataMap.find(typeNameStr);
+            if (it != dynamicDataMap.end()) {
+                dataGetter = it->second;
+            }
         }
-
-        // Fallback: if stored via template store<T>(), the pointer is in storage.dynamic
-        if (storage.dynamic) {
-            return storage.dynamic;
-        }
-
-        // Aucun type trouvé, retourne nullptr
-        return nullptr;
+        return dataGetter ? dataGetter(*this) : nullptr;
     }
 
 
@@ -1046,6 +1168,10 @@ public:
         } else if (otherTypeName == typeid(long long).name()) {
             storage.i64 = other.storage.i64;
             typeNameStr = otherTypeName;
+        } else if (!std::is_same<std::int64_t, long long>::value &&
+                   otherTypeName == typeid(std::int64_t).name()) {
+            storage.stdI64 = other.storage.stdI64;
+            typeNameStr = otherTypeName;
         } else if (otherTypeName == typeid(float).name()) {
             storage.f = other.storage.f;
             typeNameStr = otherTypeName;
@@ -1056,6 +1182,13 @@ public:
                    otherTypeName == typeid(unsigned int).name()) {
             storage.u32 = other.storage.u32;
             typeNameStr = otherTypeName;
+        } else if (otherTypeName == typeid(unsigned long long).name()) {
+            storage.u64 = other.storage.u64;
+            typeNameStr = otherTypeName;
+        } else if (!std::is_same<std::uint64_t, unsigned long long>::value &&
+                   otherTypeName == typeid(std::uint64_t).name()) {
+            storage.stdU64 = other.storage.stdU64;
+            typeNameStr = otherTypeName;
         } else if (otherTypeName == typeid(std::string).name()) {
             new (&storage.str) std::string(other.storage.str);
             typeNameStr = otherTypeName;
@@ -1065,15 +1198,21 @@ public:
         }
         // Gestion des types dynamiques
         else {
-            auto& dynamicCopyMap = getDynamicCopyFromMap();
-            auto it = dynamicCopyMap.find(otherTypeName);
-            if (it != dynamicCopyMap.end()) {
-                it->second(*this, other); // Appel de la fonction dynamique pour copier
+            std::function<void(SwAny&, const SwAny&)> copyFrom;
+            {
+                std::lock_guard<std::mutex> lock(registryMutex());
+                auto& dynamicCopyMap = getDynamicCopyFromMap();
+                auto it = dynamicCopyMap.find(otherTypeName);
+                if (it != dynamicCopyMap.end()) {
+                    copyFrom = it->second;
+                }
             }
-            // Copie générique des données dynamiques si aucune fonction n'est définie
+            if (copyFrom) {
+                copyFrom(*this, other); // Appel de la fonction dynamique pour copier
+            }
+            // Sans règle enregistrée, copier le pointeur dynamique serait dangereux.
             else if (other.storage.dynamic) {
-                storage.dynamic = other.storage.dynamic; // Copie directe
-                typeNameStr = otherTypeName;
+                swCError(kSwLogCategory_SwAny) << "Cannot copy unregistered dynamic SwAny type: " << otherTypeName;
             }
         }
     }
@@ -1086,7 +1225,8 @@ public:
      */
     void moveFrom(SwAny&& other) {
         // Déplacer le type du nom
-        typeNameStr = std::move(other.typeNameStr);
+        const std::string otherTypeName = other.typeNameStr;
+        typeNameStr = otherTypeName;
 
         if (typeNameStr.empty()) {
             other.clear();
@@ -1094,10 +1234,23 @@ public:
         }
 
         // Cas spécifiques pour les types natifs ou gérés explicitement
-        if (typeNameStr == typeid(int).name()) {
+        if (typeNameStr == typeid(bool).name()) {
+            storage.b = other.storage.b;
+        } else if (typeNameStr == typeid(int).name()) {
             storage.i = other.storage.i;
         } else if (typeNameStr == typeid(long long).name()) {
             storage.i64 = other.storage.i64;
+        } else if (!std::is_same<std::int64_t, long long>::value &&
+                   typeNameStr == typeid(std::int64_t).name()) {
+            storage.stdI64 = other.storage.stdI64;
+        } else if (typeNameStr == typeid(uint32_t).name() ||
+                   typeNameStr == typeid(unsigned int).name()) {
+            storage.u32 = other.storage.u32;
+        } else if (typeNameStr == typeid(unsigned long long).name()) {
+            storage.u64 = other.storage.u64;
+        } else if (!std::is_same<std::uint64_t, unsigned long long>::value &&
+                   typeNameStr == typeid(std::uint64_t).name()) {
+            storage.stdU64 = other.storage.stdU64;
         } else if (typeNameStr == typeid(float).name()) {
             storage.f = other.storage.f;
         } else if (typeNameStr == typeid(double).name()) {
@@ -1109,15 +1262,23 @@ public:
         }
         // Gestion des types dynamiques enregistrés
         else {
-            auto& dynamicMoveMap = getDynamicMoveFromMap();
-            auto it = dynamicMoveMap.find(typeNameStr);
-            if (it != dynamicMoveMap.end()) {
-                it->second(*this, std::move(other));
+            std::function<void(SwAny&, SwAny&&)> moveFrom;
+            {
+                std::lock_guard<std::mutex> lock(registryMutex());
+                auto& dynamicMoveMap = getDynamicMoveFromMap();
+                auto it = dynamicMoveMap.find(typeNameStr);
+                if (it != dynamicMoveMap.end()) {
+                    moveFrom = it->second;
+                }
             }
-            // Déplacement brut pour les types dynamiques non enregistrés
+            if (moveFrom) {
+                moveFrom(*this, std::move(other));
+            }
+            // Sans règle enregistrée, déplacer le pointeur dynamique serait dangereux.
             else if (other.storage.dynamic) {
-                storage.dynamic = other.storage.dynamic;
-                other.storage.dynamic = nullptr;
+                swCError(kSwLogCategory_SwAny) << "Cannot move unregistered dynamic SwAny type: " << typeNameStr;
+                typeNameStr.clear();
+                storage.dynamic = nullptr;
             }
         }
 
@@ -1135,15 +1296,34 @@ public:
      * @brief Performs the `store` operation.
      * @param value Value passed to the method.
      */
-    void store(const T& value) {
+    typename std::enable_if<
+        !(std::is_same<T, std::int64_t>::value &&
+          !std::is_same<std::int64_t, long long>::value) &&
+        !(std::is_same<T, std::uint64_t>::value &&
+          !std::is_same<std::uint64_t, unsigned long long>::value),
+        void>::type store(const T& value) {
+        ensureDynamicMetaTypeRegistered<T>();
+        T* copy = new T(value);
         clear();
-        storage.dynamic = new T(value);
+        storage.dynamic = copy;
         typeNameStr = typeid(T).name();
     }
-    /**
-     * @brief Performs the `store` operation.
-     */
-    void store(void* ptr) { clear(); storage.dynamic = ptr; }
+    template <typename T>
+    typename std::enable_if<std::is_same<T, std::int64_t>::value &&
+                            !std::is_same<std::int64_t, long long>::value,
+                            void>::type store(T val) {
+        clear();
+        storage.stdI64 = val;
+        typeNameStr = typeid(std::int64_t).name();
+    }
+    template <typename T>
+    typename std::enable_if<std::is_same<T, std::uint64_t>::value &&
+                            !std::is_same<std::uint64_t, unsigned long long>::value,
+                            void>::type store(T val) {
+        clear();
+        storage.stdU64 = val;
+        typeNameStr = typeid(std::uint64_t).name();
+    }
     /**
      * @brief Performs the `store` operation.
      * @param b Value passed to the method.
@@ -1159,6 +1339,11 @@ public:
      * @param i64 Value passed to the method.
      */
     void store(long long val) { clear(); storage.i64 = val; typeNameStr = typeid(long long).name(); }
+    /**
+     * @brief Performs the `store` operation.
+     * @param u64 Value passed to the method.
+     */
+    void store(unsigned long long val) { clear(); storage.u64 = val; typeNameStr = typeid(unsigned long long).name(); }
     /**
      * @brief Performs the `store` operation.
      * @param f Value passed to the method.
@@ -1201,10 +1386,17 @@ public:
     void clear() {
         if (!typeNameStr.empty()) {
             // Utilisation de _dynamicClear si une fonction correspondante existe pour ce type
-            auto& dynamicClearMap = getDynamicClearMap(); // Accès à la map _dynamicClear
-            auto it = dynamicClearMap.find(typeNameStr);
-            if (it != dynamicClearMap.end()) {
-                it->second(*this); // Appel de la fonction de destruction dynamique
+            std::function<void(SwAny&)> clearFunc;
+            {
+                std::lock_guard<std::mutex> lock(registryMutex());
+                auto& dynamicClearMap = getDynamicClearMap(); // Accès à la map _dynamicClear
+                auto it = dynamicClearMap.find(typeNameStr);
+                if (it != dynamicClearMap.end()) {
+                    clearFunc = it->second;
+                }
+            }
+            if (clearFunc) {
+                clearFunc(*this); // Appel de la fonction de destruction dynamique
             } else if (typeNameStr == typeid(std::string).name()) {
                 storage.str.~basic_string();
             } else if (typeNameStr == typeid(std::vector<uint8_t>).name()) {
@@ -1293,6 +1485,11 @@ public:
         return converters;
     }
 
+    static std::mutex& registryMutex() {
+        static std::mutex mutex;
+        return mutex;
+    }
+
 
 public:
 
@@ -1309,10 +1506,18 @@ public:
             return get<int>() != 0;
         } else if (typeNameStr == typeid(long long).name()) {
             return get<long long>() != 0;
+        } else if (!std::is_same<std::int64_t, long long>::value &&
+                   typeNameStr == typeid(std::int64_t).name()) {
+            return get<std::int64_t>() != 0;
         } else if (typeNameStr == typeid(unsigned int).name()) {
             return get<unsigned int>() != 0;
         } else if (typeNameStr == typeid(uint32_t).name()) {
             return get<uint32_t>() != 0u;
+        } else if (typeNameStr == typeid(unsigned long long).name()) {
+            return get<unsigned long long>() != 0ull;
+        } else if (!std::is_same<std::uint64_t, unsigned long long>::value &&
+                   typeNameStr == typeid(std::uint64_t).name()) {
+            return get<std::uint64_t>() != 0ull;
         } else if (typeNameStr == typeid(double).name()) {
             return std::fabs(get<double>()) > std::numeric_limits<double>::epsilon();
         } else if (typeNameStr == typeid(float).name()) {
@@ -1353,6 +1558,16 @@ public:
             }
             if (ok) *ok = true;
             return static_cast<int>(value);
+        } else if (!std::is_same<std::int64_t, long long>::value &&
+                   typeNameStr == typeid(std::int64_t).name()) {
+            const std::int64_t value = get<std::int64_t>();
+            if (value < static_cast<std::int64_t>(std::numeric_limits<int>::min()) ||
+                value > static_cast<std::int64_t>(std::numeric_limits<int>::max())) {
+                if (ok) *ok = false;
+                return 0;
+            }
+            if (ok) *ok = true;
+            return static_cast<int>(value);
         } else if (typeNameStr == typeid(unsigned int).name()) {
             const unsigned int value = get<unsigned int>();
             if (value > static_cast<unsigned int>(std::numeric_limits<int>::max())) {
@@ -1364,6 +1579,23 @@ public:
         } else if (typeNameStr == typeid(uint32_t).name()) {
             const uint32_t value = get<uint32_t>();
             if (value > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
+                if (ok) *ok = false;
+                return 0;
+            }
+            if (ok) *ok = true;
+            return static_cast<int>(value);
+        } else if (typeNameStr == typeid(unsigned long long).name()) {
+            const unsigned long long value = get<unsigned long long>();
+            if (value > static_cast<unsigned long long>(std::numeric_limits<int>::max())) {
+                if (ok) *ok = false;
+                return 0;
+            }
+            if (ok) *ok = true;
+            return static_cast<int>(value);
+        } else if (!std::is_same<std::uint64_t, unsigned long long>::value &&
+                   typeNameStr == typeid(std::uint64_t).name()) {
+            const std::uint64_t value = get<std::uint64_t>();
+            if (value > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
                 if (ok) *ok = false;
                 return 0;
             }
@@ -1416,6 +1648,10 @@ public:
         if (typeNameStr == typeid(long long).name()) {
             if (ok) *ok = true;
             return get<long long>();
+        } else if (!std::is_same<std::int64_t, long long>::value &&
+                   typeNameStr == typeid(std::int64_t).name()) {
+            if (ok) *ok = true;
+            return static_cast<long long>(get<std::int64_t>());
         } else if (typeNameStr == typeid(int).name()) {
             if (ok) *ok = true;
             return static_cast<long long>(get<int>());
@@ -1425,6 +1661,23 @@ public:
         } else if (typeNameStr == typeid(uint32_t).name()) {
             if (ok) *ok = true;
             return static_cast<long long>(get<uint32_t>());
+        } else if (typeNameStr == typeid(unsigned long long).name()) {
+            const unsigned long long value = get<unsigned long long>();
+            if (value > static_cast<unsigned long long>(std::numeric_limits<long long>::max())) {
+                if (ok) *ok = false;
+                return 0;
+            }
+            if (ok) *ok = true;
+            return static_cast<long long>(value);
+        } else if (!std::is_same<std::uint64_t, unsigned long long>::value &&
+                   typeNameStr == typeid(std::uint64_t).name()) {
+            const std::uint64_t value = get<std::uint64_t>();
+            if (value > static_cast<std::uint64_t>(std::numeric_limits<long long>::max())) {
+                if (ok) *ok = false;
+                return 0;
+            }
+            if (ok) *ok = true;
+            return static_cast<long long>(value);
         } else if (typeNameStr == typeid(bool).name()) {
             if (ok) *ok = true;
             return get<bool>() ? 1ll : 0ll;
@@ -1461,6 +1714,119 @@ public:
         return 0;
     }
 
+    /**
+     * @brief Performs the `toInt64` operation.
+     * @param ok Optional flag updated to report success.
+     * @return The requested signed 64-bit integer.
+     */
+    std::int64_t toInt64(bool* ok = nullptr) const {
+        return static_cast<std::int64_t>(toLongLong(ok));
+    }
+
+    /**
+     * @brief Performs the `toUInt64` operation.
+     * @param ok Optional flag updated to report success.
+     * @return The requested unsigned 64-bit integer.
+     */
+    std::uint64_t toUInt64(bool* ok = nullptr) const {
+        if (typeNameStr.empty()) {
+            if (ok) *ok = false;
+            return 0;
+        }
+        if (typeNameStr == typeid(unsigned long long).name()) {
+            if (ok) *ok = true;
+            return static_cast<std::uint64_t>(get<unsigned long long>());
+        }
+        if (!std::is_same<std::uint64_t, unsigned long long>::value &&
+            typeNameStr == typeid(std::uint64_t).name()) {
+            if (ok) *ok = true;
+            return get<std::uint64_t>();
+        }
+        if (typeNameStr == typeid(uint32_t).name()) {
+            if (ok) *ok = true;
+            return static_cast<std::uint64_t>(get<uint32_t>());
+        }
+        if (typeNameStr == typeid(unsigned int).name()) {
+            if (ok) *ok = true;
+            return static_cast<std::uint64_t>(get<unsigned int>());
+        }
+        if (typeNameStr == typeid(int).name()) {
+            const int value = get<int>();
+            if (value < 0) {
+                if (ok) *ok = false;
+                return 0;
+            }
+            if (ok) *ok = true;
+            return static_cast<std::uint64_t>(value);
+        }
+        if (typeNameStr == typeid(long long).name()) {
+            const long long value = get<long long>();
+            if (value < 0) {
+                if (ok) *ok = false;
+                return 0;
+            }
+            if (ok) *ok = true;
+            return static_cast<std::uint64_t>(value);
+        }
+        if (!std::is_same<std::int64_t, long long>::value &&
+            typeNameStr == typeid(std::int64_t).name()) {
+            const std::int64_t value = get<std::int64_t>();
+            if (value < 0) {
+                if (ok) *ok = false;
+                return 0;
+            }
+            if (ok) *ok = true;
+            return static_cast<std::uint64_t>(value);
+        }
+        if (typeNameStr == typeid(bool).name()) {
+            if (ok) *ok = true;
+            return get<bool>() ? 1ull : 0ull;
+        }
+        if (typeNameStr == typeid(float).name()) {
+            const float value = get<float>();
+            const long double wide = static_cast<long double>(value);
+            if (!std::isfinite(value) || wide < 0.0L ||
+                wide > static_cast<long double>(std::numeric_limits<std::uint64_t>::max())) {
+                if (ok) *ok = false;
+                return 0;
+            }
+            if (ok) *ok = true;
+            return static_cast<std::uint64_t>(value);
+        }
+        if (typeNameStr == typeid(double).name()) {
+            const double value = get<double>();
+            const long double wide = static_cast<long double>(value);
+            if (!std::isfinite(value) || wide < 0.0L ||
+                wide > static_cast<long double>(std::numeric_limits<std::uint64_t>::max())) {
+                if (ok) *ok = false;
+                return 0;
+            }
+            if (ok) *ok = true;
+            return static_cast<std::uint64_t>(value);
+        }
+        if (typeNameStr == typeid(SwString).name()) {
+            return parseUInt64_(get<SwString>(), ok);
+        }
+        if (typeNameStr == typeid(std::string).name()) {
+            return parseUInt64_(SwString(get<std::string>()), ok);
+        }
+        if (canConvert<std::uint64_t>()) {
+            SwAny converted = convert<std::uint64_t>();
+            if (ok) *ok = true;
+            return converted.get<std::uint64_t>();
+        }
+        if (ok) *ok = false;
+        return 0;
+    }
+
+    /**
+     * @brief Performs the `toULongLong` operation.
+     * @param ok Optional flag updated to report success.
+     * @return The requested unsigned long long integer.
+     */
+    unsigned long long toULongLong(bool* ok = nullptr) const {
+        return static_cast<unsigned long long>(toUInt64(ok));
+    }
 
     /**
  * @brief Convertit la valeur stockée dans SwAny en un float.
@@ -1471,15 +1837,51 @@ public:
  * @return float La valeur convertie si possible, sinon retourne 0.0f avec un message d'erreur dans swCError(kSwLogCategory_SwAny).
  */
     float toFloat() const {
+        if (typeNameStr.empty()) {
+            return 0.0f;
+        }
         if (typeNameStr == typeid(float).name()) {
             return get<float>();
+        } else if (typeNameStr == typeid(double).name()) {
+            const double value = get<double>();
+            if (!std::isfinite(value) ||
+                value < -static_cast<double>(std::numeric_limits<float>::max()) ||
+                value > static_cast<double>(std::numeric_limits<float>::max())) {
+                return 0.0f;
+            }
+            return static_cast<float>(value);
+        } else if (typeNameStr == typeid(bool).name()) {
+            return get<bool>() ? 1.0f : 0.0f;
+        } else if (typeNameStr == typeid(int).name()) {
+            return static_cast<float>(get<int>());
+        } else if (typeNameStr == typeid(long long).name()) {
+            return static_cast<float>(get<long long>());
+        } else if (!std::is_same<std::int64_t, long long>::value &&
+                   typeNameStr == typeid(std::int64_t).name()) {
+            return static_cast<float>(get<std::int64_t>());
+        } else if (typeNameStr == typeid(unsigned int).name()) {
+            return static_cast<float>(get<unsigned int>());
+        } else if (typeNameStr == typeid(uint32_t).name()) {
+            return static_cast<float>(get<uint32_t>());
+        } else if (typeNameStr == typeid(unsigned long long).name()) {
+            return static_cast<float>(get<unsigned long long>());
+        } else if (!std::is_same<std::uint64_t, unsigned long long>::value &&
+                   typeNameStr == typeid(std::uint64_t).name()) {
+            return static_cast<float>(get<std::uint64_t>());
+        } else if (typeNameStr == typeid(SwString).name()) {
+            bool ok = false;
+            const float value = get<SwString>().toFloat(&ok);
+            if (ok) return value;
+        } else if (typeNameStr == typeid(std::string).name()) {
+            bool ok = false;
+            const float value = SwString(get<std::string>()).toFloat(&ok);
+            if (ok) return value;
         } else if (canConvert<float>()) {
             SwAny converted = convert<float>();
             return converted.get<float>();
-        } else {
-            // swCError(kSwLogCategory_SwAny) << "Error: Not convertible to float. Current type: " << typeNameStr;
-            return 0.0f;
         }
+        // swCError(kSwLogCategory_SwAny) << "Error: Not convertible to float. Current type: " << typeNameStr;
+        return 0.0f;
     }
 
     /**
@@ -1509,11 +1911,22 @@ public:
         if (typeNameStr == typeid(long long).name()) {
             return static_cast<double>(get<long long>());
         }
+        if (!std::is_same<std::int64_t, long long>::value &&
+            typeNameStr == typeid(std::int64_t).name()) {
+            return static_cast<double>(get<std::int64_t>());
+        }
         if (typeNameStr == typeid(unsigned int).name()) {
             return static_cast<double>(get<unsigned int>());
         }
         if (typeNameStr == typeid(uint32_t).name()) {
             return static_cast<double>(get<uint32_t>());
+        }
+        if (typeNameStr == typeid(unsigned long long).name()) {
+            return static_cast<double>(get<unsigned long long>());
+        }
+        if (!std::is_same<std::uint64_t, unsigned long long>::value &&
+            typeNameStr == typeid(std::uint64_t).name()) {
+            return static_cast<double>(get<std::uint64_t>());
         }
         if (typeNameStr == typeid(SwString).name()) {
             bool ok=false;
@@ -1559,12 +1972,41 @@ public:
                 return std::numeric_limits<uint32_t>::max();
             }
             return static_cast<uint32_t>(v);
+        } else if (!std::is_same<std::int64_t, long long>::value &&
+                   typeNameStr == typeid(std::int64_t).name()) {
+            const std::int64_t v = get<std::int64_t>();
+            if (v < 0) return 0u;
+            if (v > static_cast<std::int64_t>(std::numeric_limits<uint32_t>::max())) {
+                return std::numeric_limits<uint32_t>::max();
+            }
+            return static_cast<uint32_t>(v);
+        } else if (typeNameStr == typeid(unsigned long long).name()) {
+            const unsigned long long v = get<unsigned long long>();
+            if (v > static_cast<unsigned long long>(std::numeric_limits<uint32_t>::max())) {
+                return std::numeric_limits<uint32_t>::max();
+            }
+            return static_cast<uint32_t>(v);
+        } else if (!std::is_same<std::uint64_t, unsigned long long>::value &&
+                   typeNameStr == typeid(std::uint64_t).name()) {
+            const std::uint64_t v = get<std::uint64_t>();
+            if (v > static_cast<std::uint64_t>(std::numeric_limits<uint32_t>::max())) {
+                return std::numeric_limits<uint32_t>::max();
+            }
+            return static_cast<uint32_t>(v);
         } else if (typeNameStr == typeid(double).name()) {
             const double v = get<double>();
-            return v < 0.0 ? 0u : static_cast<uint32_t>(v);
+            if (!std::isfinite(v) || v < 0.0) return 0u;
+            if (v > static_cast<double>(std::numeric_limits<uint32_t>::max())) {
+                return std::numeric_limits<uint32_t>::max();
+            }
+            return static_cast<uint32_t>(v);
         } else if (typeNameStr == typeid(float).name()) {
             const float v = get<float>();
-            return v < 0.f ? 0u : static_cast<uint32_t>(v);
+            if (!std::isfinite(v) || v < 0.f) return 0u;
+            if (v > static_cast<float>(std::numeric_limits<uint32_t>::max())) {
+                return std::numeric_limits<uint32_t>::max();
+            }
+            return static_cast<uint32_t>(v);
         } else if (typeNameStr == typeid(bool).name()) {
             return get<bool>() ? 1u : 0u;
         } else if (typeNameStr == typeid(SwString).name()) {
@@ -1731,11 +2173,22 @@ inline bool operator==(const SwAny& lhs, const SwAny& rhs)
         if (lt == typeid(long long).name())
             return lhs.get<long long>() == rhs.get<long long>();
 
+        if (!std::is_same<std::int64_t, long long>::value &&
+            lt == typeid(std::int64_t).name())
+            return lhs.get<std::int64_t>() == rhs.get<std::int64_t>();
+
         if (lt == typeid(unsigned int).name())
             return lhs.get<unsigned int>() == rhs.get<unsigned int>();
 
         if (lt == typeid(uint32_t).name())
             return lhs.get<uint32_t>() == rhs.get<uint32_t>();
+
+        if (lt == typeid(unsigned long long).name())
+            return lhs.get<unsigned long long>() == rhs.get<unsigned long long>();
+
+        if (!std::is_same<std::uint64_t, unsigned long long>::value &&
+            lt == typeid(std::uint64_t).name())
+            return lhs.get<std::uint64_t>() == rhs.get<std::uint64_t>();
 
         if (lt == typeid(float).name())
             return lhs.get<float>() == rhs.get<float>();

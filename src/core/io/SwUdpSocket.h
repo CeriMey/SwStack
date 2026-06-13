@@ -48,6 +48,7 @@
 #include "SwString.h"
 #include "SwByteArray.h"
 #include "SwDebug.h"
+#include "SwHostResolver.h"
 #include "SwMutex.h"
 #include "SwList.h"
 #include "SwPair.h"
@@ -233,8 +234,19 @@ public:
      * @return `true` on success; otherwise `false`.
      */
     bool connectToHost(const SwString& host, uint16_t port) {
+        // Cache-first DNS (SwHostResolver): substitute a known/just-resolved IP literal so
+        // resolveRemoteAddress_ performs NO blocking DNS for an already-seen host. A cache
+        // hit (or numeric IP) is instant — important because UDP callers (e.g. the mesh
+        // datalink) send the bind datagram immediately after connectToHost returns.
+        SwString connectHost = host;
+        if (!SwHostResolver::isNumericHost(host)) {
+            const SwString resolvedIp = SwHostResolver::instance().resolveBlockingAndCache(host);
+            if (!resolvedIp.isEmpty()) {
+                connectHost = resolvedIp;
+            }
+        }
         ResolvedAddress addr{};
-        if (!resolveRemoteAddress_(host, port, addr)) {
+        if (!resolveRemoteAddress_(connectHost, port, addr)) {
             setSocketError(SocketError::HostNotFoundError, SwString("Invalid host address"));
             return false;
         }
@@ -488,6 +500,10 @@ public:
      * @return `true` on success; otherwise `false`.
      */
     bool write(const SwString& data) override {
+        return write(SwByteArray(data.data(), data.size()));
+    }
+
+    bool write(const SwByteArray& data) override {
         return writeDatagram(data) >= 0;
     }
 
@@ -496,9 +512,9 @@ public:
      * @param maxSize Value passed to the method.
      * @return The resulting read.
      */
-    SwString read(int64_t maxSize = 0) override {
+    SwByteArray read(int64_t maxSize = 0) override {
         if (!hasPendingDatagrams()) {
-            return SwString();
+            return SwByteArray();
         }
         const int sizeHint = pendingDatagramSize();
         SwByteArray buffer;
@@ -506,10 +522,10 @@ public:
         char* raw = buffer.isEmpty() ? nullptr : buffer.data();
         const int64_t bytes = readDatagram(raw, static_cast<int64_t>(buffer.size()));
         if (bytes <= 0) {
-            return SwString();
+            return SwByteArray();
         }
         buffer.resize(static_cast<size_t>(bytes));
-        return SwString(buffer.constData());
+        return buffer;
     }
 
     /**
@@ -693,6 +709,32 @@ public:
         if (isSocketValid()) {
             applyReceiveBufferSize();
         }
+    }
+
+    void setSendBufferSize(int bytes) {
+        if (bytes <= 0) {
+            return;
+        }
+        m_sendBufferSize = bytes;
+        if (isSocketValid()) {
+            applySendBufferSize();
+        }
+    }
+
+    int requestedReceiveBufferSize() const {
+        return m_receiveBufferSize;
+    }
+
+    int requestedSendBufferSize() const {
+        return m_sendBufferSize;
+    }
+
+    int actualReceiveBufferSize() const {
+        return socketIntOption_(SO_RCVBUF);
+    }
+
+    int actualSendBufferSize() const {
+        return socketIntOption_(SO_SNDBUF);
     }
 
     /**
@@ -894,6 +936,7 @@ private:
             m_dualStackEnabled = (rc == 0 && dualStack);
         }
         applyReceiveBufferSize();
+        applySendBufferSize();
         applyBroadcastMode();
         m_totalReceivedDatagrams.store(0);
         m_totalQueueDrops.store(0);
@@ -1471,20 +1514,67 @@ private:
 #endif
     }
 
-    void applyReceiveBufferSize() {
-        if (m_receiveBufferSize <= 0 || !isSocketValid()) {
+    int socketIntOption_(int option) const {
+        if (!isSocketValid()) {
+            return 0;
+        }
+        int value = 0;
+#if defined(_WIN32)
+        int length = sizeof(value);
+        if (getsockopt(m_socket,
+                       SOL_SOCKET,
+                       option,
+                       reinterpret_cast<char*>(&value),
+                       &length) != 0) {
+            return 0;
+        }
+#else
+        socklen_t length = sizeof(value);
+        if (getsockopt(m_socket, SOL_SOCKET, option, &value, &length) != 0) {
+            return 0;
+        }
+#endif
+        return value;
+    }
+
+    void applySocketBufferSize_(int option, int bytes, const char* label) {
+        if (bytes <= 0 || !isSocketValid()) {
             return;
         }
-        int desired = m_receiveBufferSize;
+        int desired = bytes;
+        int rc = 0;
 #if defined(_WIN32)
-        setsockopt(m_socket, SOL_SOCKET, SO_RCVBUF,
-                   reinterpret_cast<const char*>(&desired),
-                   sizeof(desired));
+        rc = setsockopt(m_socket,
+                        SOL_SOCKET,
+                        option,
+                        reinterpret_cast<const char*>(&desired),
+                        sizeof(desired));
 #else
-        setsockopt(m_socket, SOL_SOCKET, SO_RCVBUF,
-                   &desired,
-                   sizeof(desired));
+        rc = setsockopt(m_socket, SOL_SOCKET, option, &desired, sizeof(desired));
 #endif
+        if (rc != 0) {
+            swCWarning(kSwLogCategory_SwUdpSocket)
+                << "[SwUdpSocket] Failed to apply " << label
+                << " buffer size=" << bytes
+                << " error=" << lastErrorCode();
+            return;
+        }
+
+        const int actual = socketIntOption_(option);
+        if (actual > 0 && actual < bytes) {
+            swCWarning(kSwLogCategory_SwUdpSocket)
+                << "[SwUdpSocket] " << label
+                << " buffer requested=" << bytes
+                << " actual=" << actual;
+        }
+    }
+
+    void applyReceiveBufferSize() {
+        applySocketBufferSize_(SO_RCVBUF, m_receiveBufferSize, "receive");
+    }
+
+    void applySendBufferSize() {
+        applySocketBufferSize_(SO_SNDBUF, m_sendBufferSize, "send");
     }
 
     void applyBroadcastMode() {
@@ -1539,6 +1629,7 @@ private:
     std::atomic<uint64_t> m_pendingDatagramCount{0};
     std::atomic<bool> m_readyReadPosted{false};
     int m_receiveBufferSize{0};
+    int m_sendBufferSize{0};
     size_t m_maxDatagramSize{2048};
     size_t m_maxPendingDatagrams{512};
     size_t m_maxReadBatchDatagrams{128};

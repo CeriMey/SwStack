@@ -181,8 +181,8 @@ private:
         SwJsonArray arr;
         for (size_t i = 0; i < m_entries.size(); ++i) {
             SwJsonObject obj;
-            obj["name"] = SwJsonValue(m_entries[i].name.toStdString());
-            obj["url"] = SwJsonValue(m_entries[i].url.toStdString());
+            obj["name"] = SwJsonValue(m_entries[i].name);
+            obj["url"] = SwJsonValue(m_entries[i].url);
             arr.append(obj);
         }
         SwJsonDocument doc(arr);

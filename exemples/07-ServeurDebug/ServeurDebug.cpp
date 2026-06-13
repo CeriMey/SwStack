@@ -26,7 +26,7 @@ private slots:
         if (!m_client) return;
 
         // Lire toutes les données disponibles
-        SwString data = m_client->read();
+        SwString data(m_client->read().toStdString());
         if (!data.isEmpty()) {
             // Afficher les données reçues dans la console
             std::cout << "Données reçues du client : " << data.toStdString() << std::endl;

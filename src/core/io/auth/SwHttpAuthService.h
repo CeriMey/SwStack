@@ -163,17 +163,17 @@ inline SwString safeHeaderText_(const SwString& value) {
 
 inline SwJsonObject accountToJson_(const SwHttpAuthAccount& account) {
     SwJsonObject object;
-    object["accountId"] = account.accountId.toStdString();
-    object["subjectId"] = account.subjectId.toStdString();
-    object["email"] = account.email.toStdString();
+    object["accountId"] = account.accountId;
+    object["subjectId"] = account.subjectId;
+    object["email"] = account.email;
     object["emailVerified"] = !account.emailVerifiedAt.trimmed().isEmpty();
-    object["emailVerifiedAt"] = account.emailVerifiedAt.toStdString();
+    object["emailVerifiedAt"] = account.emailVerifiedAt;
     object["passwordResetRequired"] = account.passwordResetRequired;
     object["suspended"] = account.suspended;
     object["mfaTotpEnabled"] = account.mfaTotpEnabled;
-    object["mfaTotpEnabledAt"] = account.mfaTotpEnabledAt.toStdString();
-    object["createdAt"] = account.createdAt.toStdString();
-    object["updatedAt"] = account.updatedAt.toStdString();
+    object["mfaTotpEnabledAt"] = account.mfaTotpEnabledAt;
+    object["createdAt"] = account.createdAt;
+    object["updatedAt"] = account.updatedAt;
     return object;
 }
 
@@ -496,20 +496,6 @@ inline SwDbStatus SwHttpAuthService::login(const SwString& email,
             }
             return SwDbStatus(SwDbStatus::NotFound, "Invalid credentials");
         }
-
-        SwString resetToken;
-        const SwDbStatus challengeStatus =
-            m_store.createChallenge("reset_password", account.accountId, m_config.resetCodeTtlMs, &resetToken, nullptr);
-        if (!challengeStatus.ok()) {
-            if (outError) {
-                *outError = challengeStatus.message();
-            }
-            return challengeStatus;
-        }
-
-        if (outPasswordResetToken) {
-            *outPasswordResetToken = resetToken;
-        }
         if (outError) {
             *outError = "Password reset required";
         }
@@ -743,9 +729,9 @@ inline SwDbStatus SwHttpAuthService::beginTotpSetup(const SwString& rawToken,
                                ? identity.account.accountId
                                : identity.account.email.trimmed();
     SwJsonObject payload;
-    payload["secret"] = secret.toStdString();
-    payload["issuer"] = issuer.toStdString();
-    payload["label"] = label.toStdString();
+    payload["secret"] = secret;
+    payload["issuer"] = issuer;
+    payload["label"] = label;
 
     SwString setupToken;
     SwHttpAuthChallenge challenge;
@@ -826,7 +812,7 @@ inline SwDbStatus SwHttpAuthService::confirmTotpSetup(const SwString& rawToken,
     }
 
     const SwJsonObject payload = challenge.payload.toObject();
-    const SwString secret = payload.value("secret").toString().c_str();
+    const SwString secret = payload.value("secret").toString();
     if (secret.trimmed().isEmpty()) {
         if (outError) {
             *outError = "Invalid MFA setup challenge";
@@ -1103,6 +1089,13 @@ inline SwDbStatus SwHttpAuthService::resetPassword(const SwString& code,
         outError->clear();
     }
 
+    if (code.trimmed().isEmpty() || token.trimmed().isEmpty()) {
+        if (outError) {
+            *outError = "Reset code and token required";
+        }
+        return SwDbStatus(SwDbStatus::InvalidArgument, "Reset code and token required");
+    }
+
     SwHttpAuthChallenge challenge;
     SwDbStatus status = lookupChallenge_("reset_password", code, token, &challenge);
     if (!status.ok()) {
@@ -1286,7 +1279,7 @@ inline SwDbStatus SwHttpAuthService::requestEmailChange(const SwString& rawToken
     }
 
     SwJsonObject payload;
-    payload["newEmail"] = normalizedEmail.toStdString();
+    payload["newEmail"] = normalizedEmail;
 
     SwString rawChallengeToken;
     SwHttpAuthChallenge challenge;
@@ -1393,7 +1386,7 @@ inline SwDbStatus SwHttpAuthService::confirmEmailChange(const SwString& rawToken
 
     const SwJsonObject payload = challenge.payload.toObject();
     const SwString normalizedEmail =
-        swHttpAuthDetail::normalizeEmail(SwString(payload.value("newEmail").toString().c_str()));
+        swHttpAuthDetail::normalizeEmail(SwString(payload.value("newEmail").toString()));
     SwString localPart;
     SwString domain;
     if (!swHttpAuthDetail::splitEmail(normalizedEmail, localPart, domain)) {
@@ -1571,7 +1564,15 @@ inline SwDbStatus SwHttpAuthService::lookupChallenge_(const SwString& purpose,
     }
     const SwString normalizedPurpose = purpose.trimmed().toLower();
     if (!code.trimmed().isEmpty()) {
-        return m_store.getChallengeByCode(normalizedPurpose, code.trimmed().toUpper(), outChallenge);
+        SwDbStatus status = m_store.getChallengeByCode(normalizedPurpose, code.trimmed().toUpper(), outChallenge);
+        if (!status.ok()) {
+            return status;
+        }
+        if (!token.trimmed().isEmpty() &&
+            outChallenge->tokenHash != swHttpAuthDetail::hashSha256(token.trimmed())) {
+            return SwDbStatus(SwDbStatus::NotFound, "Challenge not found");
+        }
+        return SwDbStatus::success();
     }
     if (token.trimmed().isEmpty()) {
         return SwDbStatus(SwDbStatus::InvalidArgument, "Challenge code or token required");

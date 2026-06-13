@@ -150,6 +150,40 @@ public:
         m_perMessageDeflateEnabled = enabled;
     }
 
+    void setTcpReceiveBufferSize(int bytes) {
+        if (bytes <= 0) {
+            return;
+        }
+        m_tcpReceiveBufferSize = bytes;
+        if (m_tcpServer) {
+            m_tcpServer->setReceiveBufferSize(bytes);
+        }
+        if (m_sslServer) {
+            m_sslServer->setReceiveBufferSize(bytes);
+        }
+    }
+
+    void setTcpSendBufferSize(int bytes) {
+        if (bytes <= 0) {
+            return;
+        }
+        m_tcpSendBufferSize = bytes;
+        if (m_tcpServer) {
+            m_tcpServer->setSendBufferSize(bytes);
+        }
+        if (m_sslServer) {
+            m_sslServer->setSendBufferSize(bytes);
+        }
+    }
+
+    int requestedTcpReceiveBufferSize() const {
+        return m_tcpReceiveBufferSize;
+    }
+
+    int requestedTcpSendBufferSize() const {
+        return m_tcpSendBufferSize;
+    }
+
     bool perMessageDeflateEnabled() const {
         return m_perMessageDeflateEnabled;
     }
@@ -211,6 +245,8 @@ private:
         auto* ws = new SwWebSocket(SwWebSocket::ServerRole, this);
         ws->setSupportedSubprotocols(m_supportedSubprotocols);
         ws->setPerMessageDeflateEnabled(m_perMessageDeflateEnabled);
+        ws->setTcpReceiveBufferSize(m_tcpReceiveBufferSize);
+        ws->setTcpSendBufferSize(m_tcpSendBufferSize);
         m_handshakeComplete[ws] = false;
 
         SwObject::connect(ws, &SwWebSocket::connected, [this, ws]() {
@@ -240,6 +276,8 @@ private:
     SwSslServer* m_sslServer = nullptr;
     SwList<SwString> m_supportedSubprotocols;
     bool m_perMessageDeflateEnabled = true;
+    int m_tcpReceiveBufferSize = 0;
+    int m_tcpSendBufferSize = 0;
     SwList<SwWebSocket*> m_pendingSockets;
     SwMap<SwWebSocket*, bool> m_handshakeComplete;
 };

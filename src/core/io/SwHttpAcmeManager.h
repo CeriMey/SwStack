@@ -23,7 +23,7 @@
 #include <openssl/bio.h>
 #include <openssl/bn.h>
 #include <openssl/buffer.h>
-#include <openssl/ec.h>
+#include <openssl/core_names.h>
 #include <openssl/ecdsa.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
@@ -718,9 +718,9 @@ inline void SwHttpAcmeManager::loadDirectory_(uint64_t serial) {
                                  return;
                              }
 
-                             m_newNonceUrl = object.value("newNonce").toString().c_str();
-                             m_newAccountUrl = object.value("newAccount").toString().c_str();
-                             m_newOrderUrl = object.value("newOrder").toString().c_str();
+                             m_newNonceUrl = object.value("newNonce").toString();
+                             m_newAccountUrl = object.value("newAccount").toString();
+                             m_newOrderUrl = object.value("newOrder").toString();
                              if (m_newNonceUrl.isEmpty() || m_newAccountUrl.isEmpty() || m_newOrderUrl.isEmpty()) {
                                  failOperation_(serial, "ACME directory is missing mandatory endpoints");
                                  return;
@@ -744,7 +744,7 @@ inline void SwHttpAcmeManager::ensureAccount_(uint64_t serial) {
     payload["termsOfServiceAgreed"] = true;
     if (!m_config.contactEmail.trimmed().isEmpty()) {
         SwJsonArray contacts;
-        contacts.append(SwJsonValue(("mailto:" + m_config.contactEmail.trimmed()).toStdString()));
+        contacts.append(SwJsonValue("mailto:" + m_config.contactEmail.trimmed()));
         payload["contact"] = contacts;
     }
 
@@ -789,7 +789,7 @@ inline void SwHttpAcmeManager::createOrder_(uint64_t serial) {
     for (std::size_t i = 0; i < domains.size(); ++i) {
         SwJsonObject identifier;
         identifier["type"] = "dns";
-        identifier["value"] = domains[i].toStdString();
+        identifier["value"] = domains[i];
         identifiers.append(identifier);
     }
 
@@ -823,8 +823,8 @@ inline void SwHttpAcmeManager::createOrder_(uint64_t serial) {
                   }
 
                   m_orderUrl = headerValue_(result.headers, "location");
-                  m_finalizeUrl = object.value("finalize").toString().c_str();
-                  m_certificateUrl = object.contains("certificate") ? object.value("certificate").toString().c_str() : SwString();
+                  m_finalizeUrl = object.value("finalize").toString();
+                  m_certificateUrl = object.value("certificate").toString();
 
                   const SwJsonArray authorizations = object.value("authorizations").toArray();
                   if (m_orderUrl.isEmpty() || m_finalizeUrl.isEmpty() || authorizations.isEmpty()) {
@@ -834,7 +834,7 @@ inline void SwHttpAcmeManager::createOrder_(uint64_t serial) {
 
                   m_authorizationUrls.clear();
                   for (std::size_t i = 0; i < authorizations.size(); ++i) {
-                      const SwString authorizationUrl = authorizations[i].toString().c_str();
+                      const SwString authorizationUrl = authorizations[i].toString();
                       if (!authorizationUrl.isEmpty()) {
                           m_authorizationUrls.append(authorizationUrl);
                       }
@@ -866,7 +866,7 @@ inline void SwHttpAcmeManager::fetchAuthorization_(uint64_t serial) {
                       return;
                   }
 
-                  const SwString authStatus = object.value("status").toString().c_str();
+                  const SwString authStatus = object.value("status").toString();
                   if (authStatus == "valid") {
                       clearChallenge_();
                       if (m_authorizationIndex + 1 < m_authorizationUrls.size()) {
@@ -885,8 +885,8 @@ inline void SwHttpAcmeManager::fetchAuthorization_(uint64_t serial) {
                   for (size_t i = 0; i < challenges.size(); ++i) {
                       const SwJsonObject challenge = challenges[i].toObject();
                       if (challenge.value("type").toString() == "http-01") {
-                          challengeUrl = challenge.value("url").toString().c_str();
-                          token = challenge.value("token").toString().c_str();
+                          challengeUrl = challenge.value("url").toString();
+                          token = challenge.value("token").toString();
                           break;
                       }
                   }
@@ -947,7 +947,7 @@ inline void SwHttpAcmeManager::pollAuthorization_(uint64_t serial) {
                       return;
                   }
 
-                  const SwString authStatus = object.value("status").toString().c_str();
+                  const SwString authStatus = object.value("status").toString();
                   if (authStatus == "valid") {
                       clearChallenge_();
                       if (m_authorizationIndex + 1 < m_authorizationUrls.size()) {
@@ -992,7 +992,7 @@ inline void SwHttpAcmeManager::finalizeOrder_(uint64_t serial) {
     }
 
     SwJsonObject payload;
-    payload["csr"] = base64UrlEncode_(csrDer).toStdString();
+    payload["csr"] = base64UrlEncode_(csrDer);
     const SwString payloadJson = SwJsonDocument(payload).toJson(SwJsonDocument::JsonFormat::Compact);
     postJose_(serial,
               m_finalizeUrl,
@@ -1013,7 +1013,7 @@ inline void SwHttpAcmeManager::finalizeOrder_(uint64_t serial) {
                       return;
                   }
                   if (object.contains("certificate")) {
-                      m_certificateUrl = object.value("certificate").toString().c_str();
+                      m_certificateUrl = object.value("certificate").toString();
                   }
 
                   m_pollAttempts = 0;
@@ -1038,9 +1038,9 @@ inline void SwHttpAcmeManager::pollOrder_(uint64_t serial) {
                       return;
                   }
 
-                  const SwString orderStatus = object.value("status").toString().c_str();
+                  const SwString orderStatus = object.value("status").toString();
                   if (object.contains("certificate")) {
-                      m_certificateUrl = object.value("certificate").toString().c_str();
+                      m_certificateUrl = object.value("certificate").toString();
                   }
 
                   if (orderStatus == "valid" && !m_certificateUrl.isEmpty()) {
@@ -1205,8 +1205,8 @@ inline SwString SwHttpAcmeManager::acmeProblemDescription_(const SwJsonObject& o
     SwString description;
 
     const SwJsonObject identifier = object.value("identifier").toObject();
-    const SwString identifierType = identifier.value("type").toString().c_str();
-    const SwString identifierValue = identifier.value("value").toString().c_str();
+    const SwString identifierType = identifier.value("type").toString();
+    const SwString identifierValue = identifier.value("value").toString();
     if (!identifierType.isEmpty() || !identifierValue.isEmpty()) {
         description += "identifier=";
         if (!identifierType.isEmpty()) {
@@ -1217,8 +1217,8 @@ inline SwString SwHttpAcmeManager::acmeProblemDescription_(const SwJsonObject& o
 
     const SwJsonObject topError = object.value("error").toObject();
     if (!topError.isEmpty()) {
-        const SwString errorType = topError.value("type").toString().c_str();
-        const SwString errorDetail = topError.value("detail").toString().c_str();
+        const SwString errorType = topError.value("type").toString();
+        const SwString errorDetail = topError.value("detail").toString();
         if (!errorType.isEmpty()) {
             if (!description.isEmpty()) {
                 description += " ";
@@ -1236,16 +1236,16 @@ inline SwString SwHttpAcmeManager::acmeProblemDescription_(const SwJsonObject& o
     const SwJsonArray challenges = object.value("challenges").toArray();
     for (size_t i = 0; i < challenges.size(); ++i) {
         const SwJsonObject challenge = challenges[i].toObject();
-        const SwString challengeStatus = challenge.value("status").toString().c_str();
+        const SwString challengeStatus = challenge.value("status").toString();
         if (challengeStatus != "invalid") {
             continue;
         }
 
-        const SwString challengeType = challenge.value("type").toString().c_str();
-        const SwString challengeUrl = challenge.value("url").toString().c_str();
+        const SwString challengeType = challenge.value("type").toString();
+        const SwString challengeUrl = challenge.value("url").toString();
         const SwJsonObject challengeError = challenge.value("error").toObject();
-        const SwString challengeErrorType = challengeError.value("type").toString().c_str();
-        const SwString challengeErrorDetail = challengeError.value("detail").toString().c_str();
+        const SwString challengeErrorType = challengeError.value("type").toString();
+        const SwString challengeErrorDetail = challengeError.value("detail").toString();
 
         if (!challengeType.isEmpty()) {
             if (!description.isEmpty()) {
@@ -1347,22 +1347,22 @@ inline bool SwHttpAcmeManager::loadAccountState_() {
     }
 
     const SwJsonObject object = doc.object();
-    const SwString storedDirectory = object.value("directoryUrl").toString().c_str();
+    const SwString storedDirectory = object.value("directoryUrl").toString();
     if (!storedDirectory.isEmpty() && storedDirectory != m_config.directoryUrl) {
         m_accountUrl.clear();
         return true;
     }
 
-    m_accountUrl = object.value("accountUrl").toString().c_str();
+    m_accountUrl = object.value("accountUrl").toString();
     return true;
 }
 
 inline bool SwHttpAcmeManager::saveAccountState_() const {
     SwJsonObject object;
-    object["directoryUrl"] = m_config.directoryUrl.toStdString();
-    object["accountUrl"] = m_accountUrl.toStdString();
-    object["domain"] = m_config.domain.trimmed().toStdString();
-    object["contactEmail"] = m_config.contactEmail.trimmed().toStdString();
+    object["directoryUrl"] = m_config.directoryUrl;
+    object["accountUrl"] = m_accountUrl;
+    object["domain"] = m_config.domain.trimmed();
+    object["contactEmail"] = m_config.contactEmail.trimmed();
     return writeTextFileAtomic_(accountStateFilePath_(), SwJsonDocument(object).toJson(SwJsonDocument::JsonFormat::Compact));
 }
 
@@ -1375,7 +1375,7 @@ inline bool SwHttpAcmeManager::saveCertificateMetadata_(long long remainingSecon
     }
 
     SwJsonObject object;
-    object["domain"] = m_config.domain.trimmed().toStdString();
+    object["domain"] = m_config.domain.trimmed();
     object["subjectAlternativeNames"] = swMailDetail::toJsonArray(m_config.subjectAlternativeNames);
     object["issuedAtEpoch"] = static_cast<long long>(now);
     object["notAfterEpoch"] = static_cast<long long>(notAfter);
@@ -1523,12 +1523,12 @@ inline bool SwHttpAcmeManager::buildJoseBody_(const SwString& url,
 
     SwJsonObject protectedHeader;
     protectedHeader["alg"] = "ES256";
-    protectedHeader["nonce"] = m_nonce.toStdString();
-    protectedHeader["url"] = url.toStdString();
+    protectedHeader["nonce"] = m_nonce;
+    protectedHeader["url"] = url;
     if (useJwk) {
         protectedHeader["jwk"] = jwkMaterial.jwk;
     } else {
-        protectedHeader["kid"] = m_accountUrl.toStdString();
+        protectedHeader["kid"] = m_accountUrl;
     }
 
     const SwString protectedJson = SwJsonDocument(protectedHeader).toJson(SwJsonDocument::JsonFormat::Compact);
@@ -1542,9 +1542,9 @@ inline bool SwHttpAcmeManager::buildJoseBody_(const SwString& url,
     }
 
     SwJsonObject body;
-    body["protected"] = protectedB64.toStdString();
-    body["payload"] = payloadB64.toStdString();
-    body["signature"] = base64UrlEncode_(signature).toStdString();
+    body["protected"] = protectedB64;
+    body["payload"] = payloadB64;
+    body["signature"] = base64UrlEncode_(signature);
     outBody = SwJsonDocument(body).toJson(SwJsonDocument::JsonFormat::Compact);
     return true;
 }
@@ -1560,20 +1560,11 @@ inline void SwHttpAcmeManager::emitError_(const SwString& message) {
 
 inline bool SwHttpAcmeManager::generateEcPrivateKeyPem_(SwString& outPem) {
     outPem.clear();
-    EVP_PKEY* pkey = EVP_PKEY_new();
-    EC_KEY* ecKey = nullptr;
+    EVP_PKEY* pkey = EVP_EC_gen("prime256v1");
     BIO* bio = nullptr;
     if (!pkey) {
         return false;
     }
-
-    ecKey = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
-    if (!ecKey || EC_KEY_generate_key(ecKey) != 1 || EVP_PKEY_assign_EC_KEY(pkey, ecKey) != 1) {
-        if (ecKey) EC_KEY_free(ecKey);
-        EVP_PKEY_free(pkey);
-        return false;
-    }
-    ecKey = nullptr;
 
     bio = BIO_new(BIO_s_mem());
     if (!bio || PEM_write_bio_PrivateKey(bio, pkey, nullptr, nullptr, 0, nullptr, nullptr) != 1) {
@@ -1623,20 +1614,13 @@ inline SwHttpAcmeManager::JwkMaterial SwHttpAcmeManager::buildJwkMaterialFromPri
         return material;
     }
 
-    EC_KEY* ecKey = EVP_PKEY_get1_EC_KEY(pkey);
-    if (!ecKey) {
-        EVP_PKEY_free(pkey);
-        return material;
-    }
-
-    const EC_GROUP* group = EC_KEY_get0_group(ecKey);
-    const EC_POINT* point = EC_KEY_get0_public_key(ecKey);
-    BIGNUM* x = BN_new();
-    BIGNUM* y = BN_new();
-    if (!group || !point || !x || !y || EC_POINT_get_affine_coordinates_GFp(group, point, x, y, nullptr) != 1) {
+    BIGNUM* x = nullptr;
+    BIGNUM* y = nullptr;
+    if (EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_EC_PUB_X, &x) != 1 ||
+        EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_EC_PUB_Y, &y) != 1 ||
+        !x || !y) {
         if (x) BN_free(x);
         if (y) BN_free(y);
-        EC_KEY_free(ecKey);
         EVP_PKEY_free(pkey);
         return material;
     }
@@ -1646,7 +1630,6 @@ inline SwHttpAcmeManager::JwkMaterial SwHttpAcmeManager::buildJwkMaterialFromPri
     if (BN_bn2binpad(x, xRaw, 32) != 32 || BN_bn2binpad(y, yRaw, 32) != 32) {
         BN_free(x);
         BN_free(y);
-        EC_KEY_free(ecKey);
         EVP_PKEY_free(pkey);
         return material;
     }
@@ -1655,8 +1638,8 @@ inline SwHttpAcmeManager::JwkMaterial SwHttpAcmeManager::buildJwkMaterialFromPri
     const SwString yB64 = base64UrlEncode_(SwByteArray(reinterpret_cast<const char*>(yRaw), sizeof(yRaw)));
     material.jwk["kty"] = "EC";
     material.jwk["crv"] = "P-256";
-    material.jwk["x"] = xB64.toStdString();
-    material.jwk["y"] = yB64.toStdString();
+    material.jwk["x"] = xB64;
+    material.jwk["y"] = yB64;
 
     const SwString canonical = SwString("{\"crv\":\"P-256\",\"kty\":\"EC\",\"x\":\"") +
                                xB64 + "\",\"y\":\"" + yB64 + "\"}";
@@ -1667,7 +1650,6 @@ inline SwHttpAcmeManager::JwkMaterial SwHttpAcmeManager::buildJwkMaterialFromPri
 
     BN_free(x);
     BN_free(y);
-    EC_KEY_free(ecKey);
     EVP_PKEY_free(pkey);
     return material;
 }

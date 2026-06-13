@@ -9,11 +9,14 @@
 #include "mail/SwMailCommon.h"
 #include "mail/SwMailDkim.h"
 #include "mail/SwMailDnsClient.h"
+#include "mail/SwMailInboundAuth.h"
+#include "mail/SwMailSrs.h"
 #include "mail/SwMailStore.h"
 
 #include <atomic>
 #include <condition_variable>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <thread>
@@ -136,6 +139,8 @@ public:
     SwList<SwMailAccount> listAccounts();
     SwList<SwMailAlias> listAliases();
     SwDbStatus upsertAlias(const SwMailAlias& alias);
+    SwDbStatus getAlias(const SwString& address, SwMailAlias* outAlias);
+    SwDbStatus deleteAlias(const SwString& address);
     SwList<SwMailMailbox> listMailboxes(const SwString& address);
     SwList<SwMailMessageEntry> listMessages(const SwString& address, const SwString& mailboxName);
     SwList<SwMailQueueItem> listQueueItems();
@@ -181,6 +186,11 @@ public:
     bool isAuthAllowed(const SwString& remoteAddress);
     void registerAuthResult(const SwString& remoteAddress, bool success);
 
+    // Lot 2 : callback d'événements in-process. À poser AVANT start(). Le callback
+    // peut être invoqué depuis la boucle d'événements OU le thread de queue ; il
+    // doit être thread-safe, non bloquant, et ne pas laisser d'exception remonter.
+    void setEventCallback(std::function<void(const SwMailEvent&)> cb);
+
 private:
     friend class SwMailSmtpSession_;
     friend class SwMailImapSession_;
@@ -196,6 +206,8 @@ private:
     SwMailStore m_store;
     SwMailDnsClient m_dnsClient;
     SwMailMetrics m_metrics;
+    mutable std::mutex m_eventMutex;
+    std::function<void(const SwMailEvent&)> m_eventCallback;
 
     SwMailSocketServer_* m_smtpServer = nullptr;
     SwMailSocketServer_* m_submissionServer = nullptr;
@@ -225,6 +237,17 @@ private:
     void spawnSmtpSession_(SwSslSocket* socket, bool submissionMode);
     void spawnImapSession_(SwSslSocket* socket);
 
+    SwDbStatus enqueueOutbound_(const SwString& mailFrom,
+                                const SwList<SwString>& recipients,
+                                const SwByteArray& rawMessage,
+                                bool signWithDkim,
+                                SwString* outError);
+    SwDbStatus forwardResolvedTargets_(const SwString& mailFrom,
+                                       const SwList<SwMailResolvedForward>& forwards,
+                                       const SwByteArray& rawMessage,
+                                       SwString* outError);
+    bool decodeSrsRecipient_(const SwString& recipient, SwString* outOriginalSender);
+
     void queueLoop_();
     void wakeQueueWorker_();
     bool processQueueBatch_();
@@ -242,6 +265,8 @@ private:
     void requeueOrBounce_(SwMailQueueItem& item, const SwString& errorMessage);
     void emitLocalDsn_(const SwMailQueueItem& item, const SwString& errorMessage);
     void incrementMetric_(unsigned long long SwMailMetrics::*field, unsigned long long delta = 1);
+    SwMailDnsClient& dnsClient_();
+    void emitEvent_(const SwMailEvent& event);
 };
 
 namespace swMailServiceDetail {
@@ -776,6 +801,13 @@ inline bool smtpAuthenticateLogin_(BlockingSmtpSocket_& socket,
     return true;
 }
 
+inline SwMailEvent makeMailEvent_(SwMailEvent::Type type) {
+    SwMailEvent event;
+    event.type = type;
+    event.timestampMs = swMailDetail::currentEpochMs();
+    return event;
+}
+
 } // namespace swMailServiceDetail
 
 inline SwMailService::SwMailService(SwObject* parent)
@@ -951,6 +983,14 @@ inline SwDbStatus SwMailService::upsertAlias(const SwMailAlias& alias) {
     return m_store.upsertAlias(alias);
 }
 
+inline SwDbStatus SwMailService::getAlias(const SwString& address, SwMailAlias* outAlias) {
+    return m_store.getAlias(address, outAlias);
+}
+
+inline SwDbStatus SwMailService::deleteAlias(const SwString& address) {
+    return m_store.deleteAlias(address);
+}
+
 inline SwList<SwMailMailbox> SwMailService::listMailboxes(const SwString& address) {
     return m_store.listMailboxes(address);
 }
@@ -989,8 +1029,9 @@ inline SwDbStatus SwMailService::deliverLocalMessage(const SwString& mailFrom,
     if (outError) {
         outError->clear();
     }
-    SwList<SwString> expandedTargets;
-    const SwDbStatus resolveStatus = m_store.resolveLocalRecipients(recipients, &expandedTargets);
+    SwList<SwString> localTargets;
+    SwList<SwMailResolvedForward> forwardTargets;
+    const SwDbStatus resolveStatus = m_store.resolveRecipients(recipients, &localTargets, &forwardTargets);
     if (!resolveStatus.ok()) {
         if (outError) {
             *outError = resolveStatus.message();
@@ -1000,9 +1041,9 @@ inline SwDbStatus SwMailService::deliverLocalMessage(const SwString& mailFrom,
 
     const SwByteArray prepared = swMailDetail::ensureMessageEnvelopeHeaders(m_config, rawMessage, mailFrom, recipients);
     unsigned long long delivered = 0;
-    for (std::size_t i = 0; i < expandedTargets.size(); ++i) {
+    for (std::size_t i = 0; i < localTargets.size(); ++i) {
         const SwDbStatus appendStatus =
-            m_store.appendMessage(expandedTargets[i], "INBOX", prepared, SwList<SwString>(), SwString(), nullptr);
+            m_store.appendMessage(localTargets[i], "INBOX", prepared, SwList<SwString>(), SwString(), nullptr);
         if (!appendStatus.ok()) {
             if (outError) {
                 *outError = appendStatus.message();
@@ -1013,6 +1054,17 @@ inline SwDbStatus SwMailService::deliverLocalMessage(const SwString& mailFrom,
     }
     incrementMetric_(&SwMailMetrics::localDeliveries, delivered);
     incrementMetric_(&SwMailMetrics::inboundAccepted, delivered);
+
+    if (!forwardTargets.isEmpty()) {
+        SwString forwardError;
+        const SwDbStatus forwardStatus = forwardResolvedTargets_(mailFrom, forwardTargets, prepared, &forwardError);
+        if (!forwardStatus.ok()) {
+            if (outError) {
+                *outError = forwardError;
+            }
+            return forwardStatus;
+        }
+    }
     if (deliveredCountOut) {
         *deliveredCountOut = delivered;
     }
@@ -1023,9 +1075,29 @@ inline SwDbStatus SwMailService::enqueueRemoteMessage(const SwString& mailFrom,
                                                       const SwList<SwString>& recipients,
                                                       const SwByteArray& rawMessage,
                                                       SwString* outError) {
+    return enqueueOutbound_(mailFrom, recipients, rawMessage, true, outError);
+}
+
+inline SwDbStatus SwMailService::enqueueOutbound_(const SwString& mailFrom,
+                                                  const SwList<SwString>& recipients,
+                                                  const SwByteArray& rawMessage,
+                                                  bool signWithDkim,
+                                                  SwString* outError) {
     if (outError) {
         outError->clear();
     }
+    SwByteArray message = rawMessage;
+    bool messageSigned = !swMailDetail::headerValue(message, "dkim-signature").isEmpty();
+    if (signWithDkim && !messageSigned && m_config.enableDkimSigning) {
+        SwString selector;
+        SwString signError;
+        SwByteArray signedMessage = message;
+        if (SwMailDkimSigner::signMessage(m_config, m_store, signedMessage, selector, signError)) {
+            message = signedMessage;
+            messageSigned = true;
+        }
+    }
+
     const SwMap<SwString, SwList<SwString>> grouped = swMailServiceDetail::groupRecipientsByDomain_(recipients);
     for (SwMap<SwString, SwList<SwString>>::const_iterator it = grouped.begin(); it != grouped.end(); ++it) {
         if (it.key() == m_config.domain) {
@@ -1035,13 +1107,14 @@ inline SwDbStatus SwMailService::enqueueRemoteMessage(const SwString& mailFrom,
         item.id = swMailDetail::generateId("queue");
         item.envelope.mailFrom = swMailDetail::canonicalAddress(mailFrom);
         item.envelope.rcptTo = swMailDetail::normalizeRecipients(it.value());
-        item.rawMessage = rawMessage;
+        item.rawMessage = message;
         item.createdAtMs = swMailDetail::currentEpochMs();
         item.updatedAtMs = item.createdAtMs;
         item.nextAttemptAtMs = item.createdAtMs;
         item.expireAtMs = item.createdAtMs + static_cast<long long>(m_config.queueMaxAgeMs);
         item.dkimDomain = m_config.domain;
         item.dkimSelector = "swstack";
+        item.signedMessage = messageSigned;
         const SwDbStatus status = m_store.storeQueueItem(item);
         if (!status.ok()) {
             if (outError) {
@@ -1053,6 +1126,112 @@ inline SwDbStatus SwMailService::enqueueRemoteMessage(const SwString& mailFrom,
     }
     wakeQueueWorker_();
     return SwDbStatus::success();
+}
+
+inline SwDbStatus SwMailService::forwardResolvedTargets_(const SwString& mailFrom,
+                                                         const SwList<SwMailResolvedForward>& forwards,
+                                                         const SwByteArray& rawMessage,
+                                                         SwString* outError) {
+    if (outError) {
+        outError->clear();
+    }
+
+    SwMap<SwString, SwList<SwString>> targetsByAlias;
+    for (std::size_t i = 0; i < forwards.size(); ++i) {
+        targetsByAlias[forwards[i].aliasAddress].append(forwards[i].target);
+    }
+
+    const SwList<SwString> deliveredTo = swMailDetail::headerOccurrences(rawMessage, "delivered-to");
+    const std::size_t receivedCount = swMailDetail::headerOccurrences(rawMessage, "received").size();
+
+    unsigned long long forwardedCount = 0;
+    for (SwMap<SwString, SwList<SwString>>::const_iterator it = targetsByAlias.begin();
+         it != targetsByAlias.end();
+         ++it) {
+        const SwString aliasAddress = it.key();
+
+        bool loopDetected = receivedCount > 30;
+        for (std::size_t i = 0; !loopDetected && i < deliveredTo.size(); ++i) {
+            if (swMailDetail::canonicalAddress(deliveredTo[i]) == aliasAddress) {
+                loopDetected = true;
+            }
+        }
+        if (loopDetected) {
+            incrementMetric_(&SwMailMetrics::forwardLoopsDropped, 1);
+            swCWarning(kSwLogCategory_SwMail) << "[SwMailService] forwarding loop dropped alias="
+                                              << aliasAddress.toStdString();
+            continue;
+        }
+
+        // L'enveloppe est réécrite en SRS uniquement pour les expéditeurs externes :
+        // sans cela, SPF échoue chez le destinataire final et les bounces se perdent.
+        SwString envelopeFrom = swMailDetail::canonicalAddress(mailFrom);
+        if (!envelopeFrom.isEmpty()) {
+            SwString senderLocal;
+            SwString senderDomain;
+            if (swMailDetail::splitAddress(envelopeFrom, senderLocal, senderDomain) &&
+                senderDomain != m_config.domain) {
+                SwString secret;
+                if (m_store.ensureSrsSecret(&secret).ok()) {
+                    const SwString encoded = SwMailSrs::encode(secret, envelopeFrom, m_config.domain);
+                    if (!encoded.isEmpty()) {
+                        envelopeFrom = encoded;
+                    }
+                }
+            }
+        }
+
+        // Le message d'origine est conservé intact (signature DKIM d'origine
+        // préservée) ; seul un en-tête Delivered-To est ajouté pour la
+        // détection de boucle.
+        const SwString prefix = "Delivered-To: " + aliasAddress + "\r\n";
+        const SwByteArray forwardedMessage(prefix.toStdString() + rawMessage.toStdString());
+
+        SwString enqueueError;
+        const SwDbStatus status =
+            enqueueOutbound_(envelopeFrom, it.value(), forwardedMessage, false, &enqueueError);
+        if (!status.ok()) {
+            if (outError) {
+                *outError = enqueueError;
+            }
+            return status;
+        }
+        forwardedCount += it.value().size();
+        const SwString forwardMsgId = swMailDetail::headerValue(rawMessage, "message-id");
+        for (std::size_t i = 0; i < it.value().size(); ++i) {
+            SwMailEvent ev = swMailServiceDetail::makeMailEvent_(SwMailEvent::Type::MessageForwarded);
+            ev.account = aliasAddress;
+            ev.from = mailFrom;
+            ev.to = it.value()[i];
+            ev.messageId = forwardMsgId;
+            ev.detail = "alias=" + aliasAddress;
+            emitEvent_(ev);
+        }
+    }
+    if (forwardedCount > 0) {
+        incrementMetric_(&SwMailMetrics::forwardedMessages, forwardedCount);
+    }
+    return SwDbStatus::success();
+}
+
+inline bool SwMailService::decodeSrsRecipient_(const SwString& recipient, SwString* outOriginalSender) {
+    if (outOriginalSender) {
+        outOriginalSender->clear();
+    }
+    const SwString canonical = swMailDetail::canonicalAddress(recipient);
+    if (!SwMailSrs::isSrsAddress(canonical)) {
+        return false;
+    }
+    SwString localPart;
+    SwString domain;
+    if (!swMailDetail::splitAddress(canonical, localPart, domain) || domain != m_config.domain) {
+        return false;
+    }
+    SwString secret;
+    if (!m_store.ensureSrsSecret(&secret).ok()) {
+        return false;
+    }
+    return SwMailSrs::decode(secret, canonical, outOriginalSender, nullptr);
 }
 
 inline SwDbStatus SwMailService::appendSentMessage(const SwString& accountAddress, const SwByteArray& rawMessage) {
@@ -1293,6 +1472,7 @@ private:
     SwSslSocket* m_socket = nullptr;
     bool m_submissionMode = false;
     SwString m_remoteAddress;
+    SwString m_heloDomain;
     SwTimer m_idleTimer;
     std::string m_inputBuffer;
     std::string m_dataBuffer;
@@ -1374,8 +1554,10 @@ private:
         const SwString args = (space >= 0 ? line.mid(space + 1) : SwString()).trimmed();
 
         if (command == "EHLO") {
+            m_heloDomain = args.trimmed();
             handleEhlo_(args);
         } else if (command == "HELO") {
+            m_heloDomain = args.trimmed();
             sendLine_("250 " + m_service->config().mailHost);
         } else if (command == "NOOP") {
             sendLine_("250 OK");
@@ -1563,13 +1745,17 @@ private:
         }
 
         if (!m_submissionMode) {
-            SwList<SwString> single;
-            single.append(recipient);
-            SwList<SwString> resolved;
-            const SwDbStatus status = m_service->store().resolveLocalRecipients(single, &resolved);
-            if (!status.ok()) {
-                sendLine_("550 No such local recipient");
-                return;
+            SwString srsOriginalSender;
+            const bool isSrsBounceReturn = m_service->decodeSrsRecipient_(recipient, &srsOriginalSender);
+            if (!isSrsBounceReturn) {
+                SwList<SwString> single;
+                single.append(recipient);
+                SwList<SwString> resolved;
+                const SwDbStatus status = m_service->store().resolveLocalRecipients(single, &resolved);
+                if (!status.ok()) {
+                    sendLine_("550 No such local recipient");
+                    return;
+                }
             }
         }
 
@@ -1599,6 +1785,49 @@ private:
     void finalizeData_() {
         SwByteArray message(m_dataBuffer);
         message = swMailDetail::ensureMessageEnvelopeHeaders(m_service->config(), message, m_mailFrom, m_recipients);
+
+        // Lot 2 — authentification entrante (port 25 uniquement, jamais en submission).
+        // Évalue SPF/DKIM/DMARC, ajoute Authentication-Results, et rejette AVANT toute
+        // livraison/forwarding si la policy DMARC l'exige (protège la réputation IP).
+        if (!m_submissionMode &&
+            m_service->config().inboundAuthMode != SwMailConfig::InboundAuthMode::Off) {
+            SwMailDnsClient& dns = m_service->dnsClient_();
+            SwInboundAuthResult auth;
+            auth.spf = SwMailInboundAuth::evaluateSpf(dns, m_remoteAddress, m_mailFrom, m_heloDomain,
+                                                      &auth.spfMailfrom, &auth.spfAuthedDomain);
+            auth.dkim = SwMailInboundAuth::verifyDkim(dns, message, &auth.dkimDomain, &auth.dkimPassDomains);
+            int rejectCode = 550;
+            auth.dmarcDisposition = SwMailInboundAuth::evaluateDmarc(
+                dns, message, auth, m_service->config().inboundAuthMode, &rejectCode);
+
+            if (auth.spf == SwMailSpf::Result::Fail) {
+                m_service->incrementMetric_(&SwMailMetrics::inboundSpfFail, 1);
+            }
+            if (auth.dkim == SwMailDkim::VerifyResult::Pass) {
+                m_service->incrementMetric_(&SwMailMetrics::inboundDkimPass, 1);
+            }
+            if (auth.dmarcDisposition == SwMailDmarc::Disposition::Pass) {
+                m_service->incrementMetric_(&SwMailMetrics::inboundDmarcPass, 1);
+            }
+
+            // Anti-forgery (RFC 8601 §5) : retirer tout Authentication-Results déjà
+            // présent (potentiellement forgé par l'expéditeur) AVANT d'insérer le nôtre,
+            // sinon parseHeaders (last-wins) persisterait la valeur de l'attaquant.
+            message = swMailDetail::removeHeaderFields(message, "authentication-results");
+            const SwString ar =
+                SwMailInboundAuth::buildAuthenticationResults_(m_service->config().mailHost, auth);
+            message = SwByteArray(
+                ("Authentication-Results: " + ar + "\r\n" + SwString(message.toStdString())).toStdString());
+
+            if (m_service->config().inboundAuthMode == SwMailConfig::InboundAuthMode::Enforce &&
+                m_service->config().inboundDmarcEnforceReject && auth.dmarcReject) {
+                m_service->incrementMetric_(&SwMailMetrics::inboundDmarcReject, 1);
+                sendLine_(SwString::number(rejectCode) + " 5.7.1 Message rejected by DMARC policy");
+                resetTransaction_();
+                return;
+            }
+        }
+
         if (m_submissionMode && !m_authenticatedAddress.isEmpty() && m_service->config().enableDkimSigning) {
             SwString selector;
             SwString signError;
@@ -1610,7 +1839,15 @@ private:
 
         SwList<SwString> localRecipients;
         SwList<SwString> remoteRecipients;
+        SwList<SwString> srsOriginalSenders;
         for (std::size_t i = 0; i < m_recipients.size(); ++i) {
+            if (!m_submissionMode) {
+                SwString srsOriginalSender;
+                if (m_service->decodeSrsRecipient_(m_recipients[i], &srsOriginalSender)) {
+                    srsOriginalSenders.append(srsOriginalSender);
+                    continue;
+                }
+            }
             SwList<SwString> single;
             single.append(m_recipients[i]);
             SwList<SwString> resolved;
@@ -1622,6 +1859,28 @@ private:
         }
 
         SwString error;
+        // Bounce d'un mail forwardé : l'adresse SRS se décode vers l'expéditeur
+        // d'origine, le DSN lui est re-routé avec une enveloppe vide.
+        for (std::size_t i = 0; i < srsOriginalSenders.size(); ++i) {
+            const SwString original = srsOriginalSenders[i];
+            SwString originalLocal;
+            SwString originalDomain;
+            SwList<SwString> single;
+            single.append(original);
+            if (swMailDetail::splitAddress(original, originalLocal, originalDomain) &&
+                originalDomain == m_service->config().domain) {
+                (void)m_service->deliverLocalMessage(SwString(), single, message, nullptr, &error);
+            } else {
+                (void)m_service->enqueueOutbound_(SwString(), single, message, false, &error);
+            }
+            m_service->incrementMetric_(&SwMailMetrics::srsBouncesRouted, 1);
+            SwMailEvent bounceEv = swMailServiceDetail::makeMailEvent_(SwMailEvent::Type::BounceReceived);
+            bounceEv.account = original;
+            bounceEv.to = original;
+            bounceEv.from = m_mailFrom;
+            bounceEv.detail = "srs-bounce";
+            m_service->emitEvent_(bounceEv);
+        }
         unsigned long long deliveredLocal = 0;
         if (!localRecipients.isEmpty()) {
             const SwDbStatus status =
@@ -1630,6 +1889,15 @@ private:
                 sendLine_("550 Local delivery failed");
                 resetTransaction_();
                 return;
+            }
+            for (std::size_t i = 0; i < localRecipients.size(); ++i) {
+                SwMailEvent recvEv = swMailServiceDetail::makeMailEvent_(SwMailEvent::Type::MessageReceived);
+                recvEv.account = localRecipients[i];
+                recvEv.to = localRecipients[i];
+                recvEv.from = m_mailFrom;
+                recvEv.messageId = swMailDetail::headerValue(message, "message-id");
+                recvEv.detail = m_submissionMode ? "submission" : "inbound";
+                m_service->emitEvent_(recvEv);
             }
         }
         if (m_submissionMode && !m_authenticatedAddress.isEmpty()) {
@@ -1655,7 +1923,7 @@ private:
         if (!trimmed.toUpper().startsWith(keyword.toUpper())) {
             return false;
         }
-        SwString value = trimmed.mid(keyword.size()).trimmed();
+        SwString value = trimmed.mid(static_cast<int>(keyword.size())).trimmed();
         if (value.startsWith("<")) {
             const int closing = value.indexOf(">");
             if (closing < 0) {
@@ -2254,7 +2522,7 @@ private:
     static SwString unquote_(const SwString& value) {
         SwString out = value.trimmed();
         if (out.startsWith("\"") && out.endsWith("\"") && out.size() >= 2) {
-            out = out.mid(1, out.size() - 2);
+            out = out.mid(1, static_cast<int>(out.size() - 2));
         }
         return out;
     }
@@ -2262,7 +2530,7 @@ private:
     static SwList<SwString> parseFlagList_(const SwString& raw) {
         SwString text = raw.trimmed();
         if (text.startsWith("(") && text.endsWith(")") && text.size() >= 2) {
-            text = text.mid(1, text.size() - 2);
+            text = text.mid(1, static_cast<int>(text.size() - 2));
         }
         SwList<SwString> flags;
         SwList<SwString> atoms = parseAtoms_(text);
@@ -2600,6 +2868,14 @@ inline bool SwMailService::processQueueBatch_() {
             swCDebug(kSwLogCategory_SwMail) << "[SwMailService] queue item delivered id="
                                             << item.id.toStdString();
             incrementMetric_(&SwMailMetrics::outboundDelivered, 1);
+            SwMailEvent ev = swMailServiceDetail::makeMailEvent_(SwMailEvent::Type::DeliverySucceeded);
+            ev.from = item.envelope.mailFrom;
+            if (!item.envelope.rcptTo.isEmpty()) {
+                ev.to = item.envelope.rcptTo.first();
+            }
+            ev.messageId = swMailDetail::headerValue(item.rawMessage, "message-id");
+            ev.detail = "queue=" + item.id;
+            emitEvent_(ev);
             continue;
         }
         swCWarning(kSwLogCategory_SwMail) << "[SwMailService] queue item deferred id="
@@ -2819,6 +3095,15 @@ inline void SwMailService::requeueOrBounce_(SwMailQueueItem& item, const SwStrin
         (void)m_store.removeQueueItem(item.id);
         emitLocalDsn_(item, errorMessage);
         incrementMetric_(&SwMailMetrics::outboundFailed, 1);
+        SwMailEvent ev = swMailServiceDetail::makeMailEvent_(SwMailEvent::Type::DeliveryFailed);
+        ev.from = item.envelope.mailFrom;
+        if (!item.envelope.rcptTo.isEmpty()) {
+            ev.to = item.envelope.rcptTo.first();
+        }
+        ev.messageId = swMailDetail::headerValue(item.rawMessage, "message-id");
+        ev.detail = "queue=" + item.id;
+        ev.error = errorMessage;
+        emitEvent_(ev);
         return;
     }
     const long long delayMs = static_cast<long long>(m_config.queueRetryBaseMs) *
@@ -2826,12 +3111,44 @@ inline void SwMailService::requeueOrBounce_(SwMailQueueItem& item, const SwStrin
     item.nextAttemptAtMs = item.updatedAtMs + delayMs;
     (void)m_store.storeQueueItem(item);
     incrementMetric_(&SwMailMetrics::outboundDeferred, 1);
+    SwMailEvent ev = swMailServiceDetail::makeMailEvent_(SwMailEvent::Type::DeliveryDeferred);
+    ev.from = item.envelope.mailFrom;
+    if (!item.envelope.rcptTo.isEmpty()) {
+        ev.to = item.envelope.rcptTo.first();
+    }
+    ev.detail = "attempt=" + SwString::number(item.attemptCount);
+    ev.error = errorMessage;
+    emitEvent_(ev);
 }
 
 inline void SwMailService::emitLocalDsn_(const SwMailQueueItem& item, const SwString& errorMessage) {
     if (item.envelope.mailFrom.isEmpty()) {
         return;
     }
+
+    // Échec définitif d'un mail forwardé : l'enveloppe porte notre adresse SRS,
+    // le DSN doit repartir vers l'expéditeur d'origine.
+    SwString srsOriginalSender;
+    if (decodeSrsRecipient_(item.envelope.mailFrom, &srsOriginalSender)) {
+        const SwString dsnBody = swMailServiceDetail::buildDsnBody_(item, errorMessage);
+        SwList<SwString> recipient;
+        recipient.append(srsOriginalSender);
+        SwString originalLocal;
+        SwString originalDomain;
+        if (swMailDetail::splitAddress(srsOriginalSender, originalLocal, originalDomain) &&
+            originalDomain == m_config.domain) {
+            (void)deliverLocalMessage("mailer-daemon@" + m_config.domain,
+                                      recipient,
+                                      SwByteArray(dsnBody.toUtf8()),
+                                      nullptr,
+                                      nullptr);
+        } else {
+            (void)enqueueOutbound_(SwString(), recipient, SwByteArray(dsnBody.toUtf8()), true, nullptr);
+        }
+        incrementMetric_(&SwMailMetrics::srsBouncesRouted, 1);
+        return;
+    }
+
     SwMailAccount account;
     if (m_store.getAccount(item.envelope.mailFrom, &account).ok()) {
         SwList<SwString> recipient;
@@ -2848,4 +3165,34 @@ inline void SwMailService::emitLocalDsn_(const SwMailQueueItem& item, const SwSt
 inline void SwMailService::incrementMetric_(unsigned long long SwMailMetrics::*field, unsigned long long delta) {
     SwMutexLocker locker(&m_mutex);
     m_metrics.*field += delta;
+}
+
+inline SwMailDnsClient& SwMailService::dnsClient_() {
+    return m_dnsClient;
+}
+
+inline void SwMailService::setEventCallback(std::function<void(const SwMailEvent&)> cb) {
+    std::lock_guard<std::mutex> locker(m_eventMutex);
+    m_eventCallback = std::move(cb);
+}
+
+inline void SwMailService::emitEvent_(const SwMailEvent& event) {
+    // Copie sous verrou, invocation hors verrou : pas de deadlock si le callback
+    // réentre le service, et tolère une exception (le thread de queue ne doit pas
+    // terminer le process).
+    std::function<void(const SwMailEvent&)> cb;
+    {
+        std::lock_guard<std::mutex> locker(m_eventMutex);
+        cb = m_eventCallback;
+    }
+    if (!cb) {
+        return;
+    }
+    try {
+        cb(event);
+    } catch (const std::exception& ex) {
+        swCWarning(kSwLogCategory_SwMail) << "[SwMailService] event callback threw: " << ex.what();
+    } catch (...) {
+        swCWarning(kSwLogCategory_SwMail) << "[SwMailService] event callback threw (non-std)";
+    }
 }

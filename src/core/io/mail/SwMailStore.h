@@ -3,6 +3,7 @@
 #include "SwDebug.h"
 #include "SwEmbeddedDb.h"
 #include "SwMailCommon.h"
+#include "SwMailSrs.h"
 
 #define SW_MAIL_RETURN_IF_NOT_OPEN_() \
     if (!m_opened) { \
@@ -248,8 +249,8 @@ public:
         normalized.localPart = alias.localPart.trimmed().toLower();
         normalized.address = normalized.localPart + "@" + normalized.domain;
         normalized.targets = swMailDetail::normalizeRecipients(alias.targets);
-        if (normalized.domain != m_config.domain) {
-            return SwDbStatus(SwDbStatus::InvalidArgument, "Alias domain does not match store domain");
+        if (normalized.localPart.isEmpty() || normalized.domain.isEmpty()) {
+            return SwDbStatus(SwDbStatus::InvalidArgument, "Invalid alias address");
         }
         if (normalized.createdAt.isEmpty()) {
             normalized.createdAt = swMailDetail::currentIsoTimestamp();
@@ -269,9 +270,9 @@ public:
         if (!m_opened) {
             return aliases;
         }
-        const SwString start = swMailDetail::aliasesSecondaryKey(m_config.domain, SwString());
-        const SwString end = start + "\xff";
-        for (SwDbIterator it = m_db.scanIndex("mail.aliases", toSecondaryKey_(start), toSecondaryKey_(end));
+        // Scan primaire : les alias peuvent appartenir au domaine géré comme aux
+        // domaines custom hébergés, l'index secondaire est scopé par domaine.
+        for (SwDbIterator it = m_db.scanPrimary(SwByteArray("alias/"), SwByteArray("alias/\xff"));
              it.isValid();
              it.next()) {
             SwJsonObject object;
@@ -281,6 +282,88 @@ public:
             aliases.append(aliasFromJson_(object));
         }
         return aliases;
+    }
+
+    SwDbStatus getAlias(const SwString& address, SwMailAlias* outAlias) {
+        SwMutexLocker locker(&m_mutex);
+        SW_MAIL_RETURN_IF_NOT_OPEN_();
+        if (!outAlias) {
+            return SwDbStatus(SwDbStatus::InvalidArgument, "Missing output alias");
+        }
+        SwString localPart;
+        SwString domain;
+        if (!swMailDetail::splitAddress(address, localPart, domain)) {
+            return SwDbStatus(SwDbStatus::InvalidArgument, "Invalid alias address");
+        }
+        SwByteArray value;
+        const SwDbStatus status =
+            m_db.get(toPrimaryKey_(swMailDetail::aliasKey(domain, localPart)), &value, nullptr);
+        if (!status.ok()) {
+            return status;
+        }
+        SwJsonObject object;
+        if (!swMailDetail::parseJsonObject(value, object)) {
+            return SwDbStatus(SwDbStatus::Corruption, "Corrupt alias record");
+        }
+        *outAlias = aliasFromJson_(object);
+        return SwDbStatus::success();
+    }
+
+    SwDbStatus deleteAlias(const SwString& address) {
+        SwMutexLocker locker(&m_mutex);
+        SW_MAIL_RETURN_IF_NOT_OPEN_();
+        SwString localPart;
+        SwString domain;
+        if (!swMailDetail::splitAddress(address, localPart, domain)) {
+            return SwDbStatus(SwDbStatus::InvalidArgument, "Invalid alias address");
+        }
+        SwByteArray value;
+        const SwDbStatus status =
+            m_db.get(toPrimaryKey_(swMailDetail::aliasKey(domain, localPart)), &value, nullptr);
+        if (!status.ok()) {
+            return status;
+        }
+        SwDbWriteBatch batch;
+        batch.erase(toPrimaryKey_(swMailDetail::aliasKey(domain, localPart)));
+        return m_db.write(batch);
+    }
+
+    SwDbStatus ensureSrsSecret(SwString* outSecret) {
+        SwMutexLocker locker(&m_mutex);
+        SW_MAIL_RETURN_IF_NOT_OPEN_();
+        if (!outSecret) {
+            return SwDbStatus(SwDbStatus::InvalidArgument, "Missing output secret");
+        }
+        outSecret->clear();
+        SwByteArray value;
+        const SwDbStatus status = m_db.get(toPrimaryKey_(SwString("srs/secret")), &value, nullptr);
+        if (status.ok()) {
+            SwJsonObject object;
+            if (swMailDetail::parseJsonObject(value, object)) {
+                *outSecret = object.value("secret").toString();
+                if (!outSecret->isEmpty()) {
+                    return SwDbStatus::success();
+                }
+            }
+        } else if (status.code() != SwDbStatus::NotFound) {
+            return status;
+        }
+
+        const SwString secret = SwMailSrs::generateSecret();
+        if (secret.isEmpty()) {
+            return SwDbStatus(SwDbStatus::InvalidArgument, "Unable to generate SRS secret");
+        }
+        SwJsonObject object;
+        object["secret"] = secret;
+        object["createdAt"] = swMailDetail::currentIsoTimestamp();
+        SwDbWriteBatch batch;
+        batch.put(toPrimaryKey_(SwString("srs/secret")), swMailDetail::jsonToBytes(object));
+        const SwDbStatus writeStatus = m_db.write(batch);
+        if (!writeStatus.ok()) {
+            return writeStatus;
+        }
+        *outSecret = secret;
+        return SwDbStatus::success();
     }
 
     SwDbStatus ensureDefaultMailboxes(const SwString& accountAddress) {
@@ -362,6 +445,7 @@ public:
         if (entry.messageId.isEmpty()) {
             entry.messageId = swMailDetail::generateMessageId(m_config);
         }
+        entry.authResults = headers.value("authentication-results");  // Lot 2 : re-dérivé de l'en-tête
 
         mailbox.uidNext += 1;
         mailbox.totalCount += 1;
@@ -731,52 +815,15 @@ public:
         return records;
     }
 
-    SwDbStatus resolveLocalRecipients(const SwList<SwString>& recipients, SwList<SwString>* outTargets) {
-        SwMutexLocker locker(&m_mutex);
-        SW_MAIL_RETURN_IF_NOT_OPEN_();
-        if (!outTargets) {
-            return SwDbStatus(SwDbStatus::InvalidArgument, "Missing output targets");
-        }
-        outTargets->clear();
-        const SwList<SwString> normalizedRecipients = swMailDetail::normalizeRecipients(recipients);
-        for (std::size_t i = 0; i < normalizedRecipients.size(); ++i) {
-            const SwString recipient = normalizedRecipients[i];
-            SwMailAccount account;
-            if (loadAccountLocked_(recipient, account).ok()) {
-                outTargets->append(account.address);
-                continue;
-            }
+    // Résolution trois-voies : comptes locaux d'un côté, cibles externes issues
+    // d'alias de l'autre. L'expansion d'alias est récursive (profondeur bornée,
+    // cycles ignorés). Retourne NotFound si un destinataire de premier niveau
+    // n'est ni un compte ni un alias actif du domaine.
+    SwDbStatus resolveRecipients(const SwList<SwString>& recipients,
+                                 SwList<SwString>* outLocalTargets,
+                                 SwList<SwMailResolvedForward>* outForwardTargets);
 
-            SwString localPart;
-            SwString domain;
-            if (!swMailDetail::splitAddress(recipient, localPart, domain) || domain != m_config.domain) {
-                return SwDbStatus(SwDbStatus::NotFound, "Recipient not local: " + recipient);
-            }
-
-            SwByteArray value;
-            const SwDbStatus aliasStatus =
-                m_db.get(toPrimaryKey_(swMailDetail::aliasKey(domain, localPart)), &value, nullptr);
-            if (!aliasStatus.ok()) {
-                return SwDbStatus(SwDbStatus::NotFound, "Recipient not found: " + recipient);
-            }
-            SwJsonObject aliasObject;
-            if (!swMailDetail::parseJsonObject(value, aliasObject)) {
-                return SwDbStatus(SwDbStatus::Corruption, "Corrupt alias record");
-            }
-            SwMailAlias alias = aliasFromJson_(aliasObject);
-            if (!alias.active || alias.targets.isEmpty()) {
-                return SwDbStatus(SwDbStatus::NotFound, "Recipient disabled: " + recipient);
-            }
-            for (std::size_t j = 0; j < alias.targets.size(); ++j) {
-                const SwString canonical = swMailDetail::canonicalAddress(alias.targets[j]);
-                if (!canonical.isEmpty()) {
-                    outTargets->append(canonical);
-                }
-            }
-        }
-        *outTargets = swMailDetail::normalizeRecipients(*outTargets);
-        return SwDbStatus::success();
-    }
+    SwDbStatus resolveLocalRecipients(const SwList<SwString>& recipients, SwList<SwString>* outTargets);
 
 private:
     SwEmbeddedDb m_db;
@@ -860,6 +907,93 @@ private:
         return SwDbStatus::success();
     }
 
+    static constexpr int kMaxAliasDepth_ = 8;
+
+    SwDbStatus resolveRecipientLocked_(const SwString& address,
+                                       const SwString& rootRecipient,
+                                       int depth,
+                                       SwList<SwString>& visitedAliases,
+                                       SwList<SwString>* outLocalTargets,
+                                       SwList<SwMailResolvedForward>* outForwardTargets) {
+        if (depth > kMaxAliasDepth_) {
+            return SwDbStatus(SwDbStatus::InvalidArgument, "Alias expansion too deep: " + rootRecipient);
+        }
+
+        SwMailAccount account;
+        if (loadAccountLocked_(address, account).ok()) {
+            outLocalTargets->append(account.address);
+            return SwDbStatus::success();
+        }
+
+        SwString localPart;
+        SwString domain;
+        if (!swMailDetail::splitAddress(address, localPart, domain)) {
+            if (depth == 0) {
+                return SwDbStatus(SwDbStatus::NotFound, "Recipient not local: " + address);
+            }
+            return SwDbStatus::success();
+        }
+
+        // L'alias est cherché quel que soit le domaine : le domaine géré comme
+        // les domaines custom hébergés peuvent porter des alias.
+        SwByteArray value;
+        const SwDbStatus aliasStatus =
+            m_db.get(toPrimaryKey_(swMailDetail::aliasKey(domain, localPart)), &value, nullptr);
+        if (!aliasStatus.ok()) {
+            if (domain != m_config.domain) {
+                if (depth == 0) {
+                    return SwDbStatus(SwDbStatus::NotFound, "Recipient not local: " + address);
+                }
+                SwMailResolvedForward forward;
+                forward.aliasAddress = rootRecipient;
+                forward.target = address;
+                outForwardTargets->append(forward);
+                return SwDbStatus::success();
+            }
+            if (depth == 0) {
+                return SwDbStatus(SwDbStatus::NotFound, "Recipient not found: " + address);
+            }
+            // Cible d'alias locale inexistante : on l'ignore plutôt que d'échouer
+            // toute la livraison.
+            return SwDbStatus::success();
+        }
+        SwJsonObject aliasObject;
+        if (!swMailDetail::parseJsonObject(value, aliasObject)) {
+            return SwDbStatus(SwDbStatus::Corruption, "Corrupt alias record");
+        }
+        const SwMailAlias alias = aliasFromJson_(aliasObject);
+        if (!alias.active || alias.targets.isEmpty()) {
+            if (depth == 0) {
+                return SwDbStatus(SwDbStatus::NotFound, "Recipient disabled: " + address);
+            }
+            return SwDbStatus::success();
+        }
+
+        for (std::size_t i = 0; i < visitedAliases.size(); ++i) {
+            if (visitedAliases[i] == alias.address) {
+                return SwDbStatus::success();
+            }
+        }
+        visitedAliases.append(alias.address);
+
+        for (std::size_t i = 0; i < alias.targets.size(); ++i) {
+            const SwString canonical = swMailDetail::canonicalAddress(alias.targets[i]);
+            if (canonical.isEmpty()) {
+                continue;
+            }
+            const SwDbStatus status = resolveRecipientLocked_(canonical,
+                                                              rootRecipient,
+                                                              depth + 1,
+                                                              visitedAliases,
+                                                              outLocalTargets,
+                                                              outForwardTargets);
+            if (!status.ok()) {
+                return status;
+            }
+        }
+        return SwDbStatus::success();
+    }
+
     SwDbStatus getMessageUnlocked_(const SwString& accountAddress,
                                    const SwString& mailboxName,
                                    unsigned long long uid,
@@ -906,119 +1040,121 @@ private:
 
     static SwJsonObject accountToJson_(const SwMailAccount& account) {
         SwJsonObject object;
-        object["address"] = account.address.toStdString();
-        object["domain"] = account.domain.toStdString();
-        object["localPart"] = account.localPart.toStdString();
-        object["passwordSalt"] = account.passwordSalt.toStdString();
-        object["passwordHash"] = account.passwordHash.toStdString();
+        object["address"] = account.address;
+        object["domain"] = account.domain;
+        object["localPart"] = account.localPart;
+        object["passwordSalt"] = account.passwordSalt;
+        object["passwordHash"] = account.passwordHash;
         object["active"] = account.active;
         object["canReceive"] = account.canReceive;
         object["canSend"] = account.canSend;
         object["suspended"] = account.suspended;
         object["quotaBytes"] = static_cast<long long>(account.quotaBytes);
         object["usedBytes"] = static_cast<long long>(account.usedBytes);
-        object["createdAt"] = account.createdAt.toStdString();
-        object["updatedAt"] = account.updatedAt.toStdString();
+        object["createdAt"] = account.createdAt;
+        object["updatedAt"] = account.updatedAt;
         return object;
     }
 
     static SwMailAccount accountFromJson_(const SwJsonObject& object) {
         SwMailAccount account;
-        account.address = object.value("address").toString().c_str();
-        account.domain = object.value("domain").toString().c_str();
-        account.localPart = object.value("localPart").toString().c_str();
-        account.passwordSalt = object.value("passwordSalt").toString().c_str();
-        account.passwordHash = object.value("passwordHash").toString().c_str();
+        account.address = object.value("address").toString();
+        account.domain = object.value("domain").toString();
+        account.localPart = object.value("localPart").toString();
+        account.passwordSalt = object.value("passwordSalt").toString();
+        account.passwordHash = object.value("passwordHash").toString();
         account.active = object.value("active").toBool(true);
         account.canReceive = object.value("canReceive").toBool(true);
         account.canSend = object.value("canSend").toBool(true);
         account.suspended = object.value("suspended").toBool(false);
         account.quotaBytes = static_cast<unsigned long long>(object.value("quotaBytes").toInteger(0));
         account.usedBytes = static_cast<unsigned long long>(object.value("usedBytes").toInteger(0));
-        account.createdAt = object.value("createdAt").toString().c_str();
-        account.updatedAt = object.value("updatedAt").toString().c_str();
+        account.createdAt = object.value("createdAt").toString();
+        account.updatedAt = object.value("updatedAt").toString();
         return account;
     }
 
     static SwJsonObject aliasToJson_(const SwMailAlias& alias) {
         SwJsonObject object;
-        object["address"] = alias.address.toStdString();
-        object["domain"] = alias.domain.toStdString();
-        object["localPart"] = alias.localPart.toStdString();
+        object["address"] = alias.address;
+        object["domain"] = alias.domain;
+        object["localPart"] = alias.localPart;
         object["targets"] = swMailDetail::toJsonArray(alias.targets);
         object["active"] = alias.active;
-        object["createdAt"] = alias.createdAt.toStdString();
-        object["updatedAt"] = alias.updatedAt.toStdString();
+        object["createdAt"] = alias.createdAt;
+        object["updatedAt"] = alias.updatedAt;
         return object;
     }
 
     static SwMailAlias aliasFromJson_(const SwJsonObject& object) {
         SwMailAlias alias;
-        alias.address = object.value("address").toString().c_str();
-        alias.domain = object.value("domain").toString().c_str();
-        alias.localPart = object.value("localPart").toString().c_str();
+        alias.address = object.value("address").toString();
+        alias.domain = object.value("domain").toString();
+        alias.localPart = object.value("localPart").toString();
         alias.targets = swMailDetail::fromJsonStringArray(object.value("targets"));
         alias.active = object.value("active").toBool(true);
-        alias.createdAt = object.value("createdAt").toString().c_str();
-        alias.updatedAt = object.value("updatedAt").toString().c_str();
+        alias.createdAt = object.value("createdAt").toString();
+        alias.updatedAt = object.value("updatedAt").toString();
         return alias;
     }
 
     static SwJsonObject mailboxToJson_(const SwMailMailbox& mailbox) {
         SwJsonObject object;
-        object["accountAddress"] = mailbox.accountAddress.toStdString();
-        object["name"] = mailbox.name.toStdString();
+        object["accountAddress"] = mailbox.accountAddress;
+        object["name"] = mailbox.name;
         object["uidNext"] = static_cast<long long>(mailbox.uidNext);
         object["totalCount"] = static_cast<long long>(mailbox.totalCount);
         object["unseenCount"] = static_cast<long long>(mailbox.unseenCount);
-        object["createdAt"] = mailbox.createdAt.toStdString();
-        object["updatedAt"] = mailbox.updatedAt.toStdString();
+        object["createdAt"] = mailbox.createdAt;
+        object["updatedAt"] = mailbox.updatedAt;
         return object;
     }
 
     static SwMailMailbox mailboxFromJson_(const SwJsonObject& object) {
         SwMailMailbox mailbox;
-        mailbox.accountAddress = object.value("accountAddress").toString().c_str();
-        mailbox.name = object.value("name").toString().c_str();
+        mailbox.accountAddress = object.value("accountAddress").toString();
+        mailbox.name = object.value("name").toString();
         mailbox.uidNext = static_cast<unsigned long long>(object.value("uidNext").toInteger(1));
         mailbox.totalCount = static_cast<unsigned long long>(object.value("totalCount").toInteger(0));
         mailbox.unseenCount = static_cast<unsigned long long>(object.value("unseenCount").toInteger(0));
-        mailbox.createdAt = object.value("createdAt").toString().c_str();
-        mailbox.updatedAt = object.value("updatedAt").toString().c_str();
+        mailbox.createdAt = object.value("createdAt").toString();
+        mailbox.updatedAt = object.value("updatedAt").toString();
         return mailbox;
     }
 
     static SwJsonObject messageToJson_(const SwMailMessageEntry& entry) {
         SwJsonObject object;
-        object["accountAddress"] = entry.accountAddress.toStdString();
-        object["mailboxName"] = entry.mailboxName.toStdString();
+        object["accountAddress"] = entry.accountAddress;
+        object["mailboxName"] = entry.mailboxName;
         object["uid"] = static_cast<long long>(entry.uid);
         object["flags"] = swMailDetail::toJsonArray(entry.flags);
-        object["internalDate"] = entry.internalDate.toStdString();
-        object["subject"] = entry.subject.toStdString();
-        object["from"] = entry.from.toStdString();
+        object["internalDate"] = entry.internalDate;
+        object["subject"] = entry.subject;
+        object["from"] = entry.from;
         object["to"] = swMailDetail::toJsonArray(entry.to);
         object["cc"] = swMailDetail::toJsonArray(entry.cc);
         object["bcc"] = swMailDetail::toJsonArray(entry.bcc);
-        object["messageId"] = entry.messageId.toStdString();
+        object["messageId"] = entry.messageId;
+        object["authResults"] = entry.authResults;
         object["sizeBytes"] = static_cast<long long>(entry.sizeBytes);
-        object["raw"] = entry.rawMessage.toBase64().toStdString();
+        object["raw"] = SwString(entry.rawMessage.toBase64());
         return object;
     }
 
     static SwMailMessageEntry messageFromJson_(const SwJsonObject& object) {
         SwMailMessageEntry entry;
-        entry.accountAddress = object.value("accountAddress").toString().c_str();
-        entry.mailboxName = object.value("mailboxName").toString().c_str();
+        entry.accountAddress = object.value("accountAddress").toString();
+        entry.mailboxName = object.value("mailboxName").toString();
         entry.uid = static_cast<unsigned long long>(object.value("uid").toInteger(0));
         entry.flags = swMailDetail::fromJsonStringArray(object.value("flags"));
-        entry.internalDate = object.value("internalDate").toString().c_str();
-        entry.subject = object.value("subject").toString().c_str();
-        entry.from = object.value("from").toString().c_str();
+        entry.internalDate = object.value("internalDate").toString();
+        entry.subject = object.value("subject").toString();
+        entry.from = object.value("from").toString();
         entry.to = swMailDetail::fromJsonStringArray(object.value("to"));
         entry.cc = swMailDetail::fromJsonStringArray(object.value("cc"));
         entry.bcc = swMailDetail::fromJsonStringArray(object.value("bcc"));
-        entry.messageId = object.value("messageId").toString().c_str();
+        entry.messageId = object.value("messageId").toString();
+        entry.authResults = object.value("authResults").toString();  // legacy → vide (compat)
         entry.sizeBytes = static_cast<unsigned long long>(object.value("sizeBytes").toInteger(0));
         entry.rawMessage = SwByteArray::fromBase64(SwByteArray(object.value("raw").toString()));
         return entry;
@@ -1026,26 +1162,26 @@ private:
 
     static SwJsonObject queueItemToJson_(const SwMailQueueItem& item) {
         SwJsonObject object;
-        object["id"] = item.id.toStdString();
-        object["mailFrom"] = item.envelope.mailFrom.toStdString();
+        object["id"] = item.id;
+        object["mailFrom"] = item.envelope.mailFrom;
         object["rcptTo"] = swMailDetail::toJsonArray(item.envelope.rcptTo);
-        object["raw"] = item.rawMessage.toBase64().toStdString();
+        object["raw"] = SwString(item.rawMessage.toBase64());
         object["attemptCount"] = item.attemptCount;
         object["createdAtMs"] = item.createdAtMs;
         object["updatedAtMs"] = item.updatedAtMs;
         object["nextAttemptAtMs"] = item.nextAttemptAtMs;
         object["expireAtMs"] = item.expireAtMs;
-        object["lastError"] = item.lastError.toStdString();
-        object["dkimDomain"] = item.dkimDomain.toStdString();
-        object["dkimSelector"] = item.dkimSelector.toStdString();
+        object["lastError"] = item.lastError;
+        object["dkimDomain"] = item.dkimDomain;
+        object["dkimSelector"] = item.dkimSelector;
         object["signedMessage"] = item.signedMessage;
         return object;
     }
 
     static SwMailQueueItem queueItemFromJson_(const SwJsonObject& object) {
         SwMailQueueItem item;
-        item.id = object.value("id").toString().c_str();
-        item.envelope.mailFrom = object.value("mailFrom").toString().c_str();
+        item.id = object.value("id").toString();
+        item.envelope.mailFrom = object.value("mailFrom").toString();
         item.envelope.rcptTo = swMailDetail::fromJsonStringArray(object.value("rcptTo"));
         item.rawMessage = SwByteArray::fromBase64(SwByteArray(object.value("raw").toString()));
         item.attemptCount = object.value("attemptCount").toInt(0);
@@ -1053,32 +1189,32 @@ private:
         item.updatedAtMs = static_cast<long long>(object.value("updatedAtMs").toInteger(0));
         item.nextAttemptAtMs = static_cast<long long>(object.value("nextAttemptAtMs").toInteger(0));
         item.expireAtMs = static_cast<long long>(object.value("expireAtMs").toInteger(0));
-        item.lastError = object.value("lastError").toString().c_str();
-        item.dkimDomain = object.value("dkimDomain").toString().c_str();
-        item.dkimSelector = object.value("dkimSelector").toString().c_str();
+        item.lastError = object.value("lastError").toString();
+        item.dkimDomain = object.value("dkimDomain").toString();
+        item.dkimSelector = object.value("dkimSelector").toString();
         item.signedMessage = object.value("signedMessage").toBool(false);
         return item;
     }
 
     static SwJsonObject dkimToJson_(const SwMailDkimRecord& record) {
         SwJsonObject object;
-        object["domain"] = record.domain.toStdString();
-        object["selector"] = record.selector.toStdString();
-        object["privateKeyPem"] = record.privateKeyPem.toStdString();
-        object["publicKeyTxt"] = record.publicKeyTxt.toStdString();
-        object["createdAt"] = record.createdAt.toStdString();
-        object["updatedAt"] = record.updatedAt.toStdString();
+        object["domain"] = record.domain;
+        object["selector"] = record.selector;
+        object["privateKeyPem"] = record.privateKeyPem;
+        object["publicKeyTxt"] = record.publicKeyTxt;
+        object["createdAt"] = record.createdAt;
+        object["updatedAt"] = record.updatedAt;
         return object;
     }
 
     static SwMailDkimRecord dkimFromJson_(const SwJsonObject& object) {
         SwMailDkimRecord record;
-        record.domain = object.value("domain").toString().c_str();
-        record.selector = object.value("selector").toString().c_str();
-        record.privateKeyPem = object.value("privateKeyPem").toString().c_str();
-        record.publicKeyTxt = object.value("publicKeyTxt").toString().c_str();
-        record.createdAt = object.value("createdAt").toString().c_str();
-        record.updatedAt = object.value("updatedAt").toString().c_str();
+        record.domain = object.value("domain").toString();
+        record.selector = object.value("selector").toString();
+        record.privateKeyPem = object.value("privateKeyPem").toString();
+        record.publicKeyTxt = object.value("publicKeyTxt").toString();
+        record.createdAt = object.value("createdAt").toString();
+        record.updatedAt = object.value("updatedAt").toString();
         return record;
     }
 
@@ -1131,5 +1267,58 @@ private:
         return secondary;
     }
 };
+
+inline SwDbStatus SwMailStore::resolveRecipients(const SwList<SwString>& recipients,
+                                                 SwList<SwString>* outLocalTargets,
+                                                 SwList<SwMailResolvedForward>* outForwardTargets) {
+    SwMutexLocker locker(&m_mutex);
+    SW_MAIL_RETURN_IF_NOT_OPEN_();
+    if (!outLocalTargets || !outForwardTargets) {
+        return SwDbStatus(SwDbStatus::InvalidArgument, "Missing output targets");
+    }
+    outLocalTargets->clear();
+    outForwardTargets->clear();
+    const SwList<SwString> normalizedRecipients = swMailDetail::normalizeRecipients(recipients);
+    for (std::size_t i = 0; i < normalizedRecipients.size(); ++i) {
+        SwList<SwString> visitedAliases;
+        const SwDbStatus status = resolveRecipientLocked_(normalizedRecipients[i],
+                                                          normalizedRecipients[i],
+                                                          0,
+                                                          visitedAliases,
+                                                          outLocalTargets,
+                                                          outForwardTargets);
+        if (!status.ok()) {
+            return status;
+        }
+    }
+    *outLocalTargets = swMailDetail::normalizeRecipients(*outLocalTargets);
+
+    SwList<SwMailResolvedForward> dedupedForwards;
+    for (std::size_t i = 0; i < outForwardTargets->size(); ++i) {
+        const SwMailResolvedForward& candidate = (*outForwardTargets)[i];
+        bool exists = false;
+        for (std::size_t j = 0; j < dedupedForwards.size(); ++j) {
+            if (dedupedForwards[j].aliasAddress == candidate.aliasAddress &&
+                dedupedForwards[j].target == candidate.target) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            dedupedForwards.append(candidate);
+        }
+    }
+    *outForwardTargets = dedupedForwards;
+    return SwDbStatus::success();
+}
+
+inline SwDbStatus SwMailStore::resolveLocalRecipients(const SwList<SwString>& recipients,
+                                                      SwList<SwString>* outTargets) {
+    if (!outTargets) {
+        return SwDbStatus(SwDbStatus::InvalidArgument, "Missing output targets");
+    }
+    SwList<SwMailResolvedForward> forwards;
+    return resolveRecipients(recipients, outTargets, &forwards);
+}
 
 #undef SW_MAIL_RETURN_IF_NOT_OPEN_

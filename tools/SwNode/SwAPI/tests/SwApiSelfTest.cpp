@@ -155,7 +155,7 @@ static void testJsonRoundtrip() {
     std::cout << "[suite] SwApiJson roundtrip" << std::endl;
 
     SwJsonObject obj;
-    obj["name"] = SwJsonValue(std::string("test"));
+    obj["name"] = SwJsonValue(SwString("test"));
     obj["value"] = SwJsonValue(42);
 
     SwString compact = SwApiJson::toJson(obj, false);
@@ -257,7 +257,7 @@ static void testJsonPrettyVsCompact() {
     std::cout << "[suite] SwApiJson pretty vs compact" << std::endl;
 
     SwJsonObject obj;
-    obj["key"] = SwJsonValue(std::string("val"));
+    obj["key"] = SwJsonValue(SwString("val"));
 
     SwString pretty = SwApiJson::toJson(obj, true);
     SwString compact = SwApiJson::toJson(obj, false);

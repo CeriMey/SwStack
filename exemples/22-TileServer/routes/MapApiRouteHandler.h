@@ -35,8 +35,8 @@ private:
         SwList<MapEntry> entries = MapDatabase::instance()->all();
         for (size_t i = 0; i < entries.size(); ++i) {
             SwJsonObject obj;
-            obj["name"] = SwJsonValue(entries[i].name.toStdString());
-            obj["url"] = SwJsonValue(entries[i].url.toStdString());
+            obj["name"] = SwJsonValue(entries[i].name);
+            obj["url"] = SwJsonValue(entries[i].url);
             arr.append(obj);
         }
         SwJsonDocument doc(arr);

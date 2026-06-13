@@ -118,6 +118,26 @@ namespace ipc {
 
 namespace detail {
 
+class ProcessHooksSpinGuard_ {
+public:
+    explicit ProcessHooksSpinGuard_(std::atomic_flag& flag)
+        : flag_(flag) {
+        while (flag_.test_and_set(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+    }
+
+    ~ProcessHooksSpinGuard_() {
+        flag_.clear(std::memory_order_release);
+    }
+
+    ProcessHooksSpinGuard_(const ProcessHooksSpinGuard_&) = delete;
+    ProcessHooksSpinGuard_& operator=(const ProcessHooksSpinGuard_&) = delete;
+
+private:
+    std::atomic_flag& flag_;
+};
+
 #ifndef _WIN32
 inline void ensureSharedMemoryPermissions_(int fd) {
     if (fd >= 0) {
@@ -597,20 +617,20 @@ public:
             for (uint32_t i = 0; i < n; ++i) {
                 const AppEntry& e = L->apps[i];
                 SwJsonObject o;
-                o["domain"] = SwJsonValue(std::string(e.domain));
-                o["domainHash"] = SwJsonValue(hex64(e.domainHash).toStdString());
-                o["lastSeenMs"] = SwJsonValue(static_cast<double>(e.lastSeenMs));
-                o["clientCount"] = SwJsonValue(static_cast<int>(e.pidCount));
-                o["signalsRegistryName"] = SwJsonValue(std::string(e.signalsRegistryName));
+                o["domain"] = SwString(e.domain);
+                o["domainHash"] = hex64(e.domainHash);
+                o["lastSeenMs"] = static_cast<double>(e.lastSeenMs);
+                o["clientCount"] = static_cast<int>(e.pidCount);
+                o["signalsRegistryName"] = SwString(e.signalsRegistryName);
                 SwJsonArray pids;
                 for (uint32_t k = 0; k < e.pidCount && k < 16; ++k) {
                     SwJsonObject p;
-                    p["pid"] = SwJsonValue(static_cast<int>(e.pids[k]));
-                    p["lastSeenMs"] = SwJsonValue(static_cast<double>(e.pidLastSeenMs[k]));
-                    pids.append(SwJsonValue(p));
+                    p["pid"] = static_cast<int>(e.pids[k]);
+                    p["lastSeenMs"] = static_cast<double>(e.pidLastSeenMs[k]);
+                    pids.append(p);
                 }
-                o["pids"] = SwJsonValue(pids);
-                arr.append(SwJsonValue(std::make_shared<SwJsonObject>(o)));
+                o["pids"] = pids;
+                arr.append(o);
             }
             unlock_(map);
         } catch (...) {
@@ -695,11 +715,11 @@ private:
         // NOTE: This cache can be touched from std::atexit handlers (ProcessHooks::onExit_).
         // If it were a normal function-local static, it could be destroyed before the atexit
         // handler depending on initialization order, leading to UB at shutdown. Keep it leaky.
-        static std::mutex* cachedMtx = new std::mutex();
+        static std::atomic_flag cachedLock = ATOMIC_FLAG_INIT;
         static std::shared_ptr<Mapping>* cached = new std::shared_ptr<Mapping>();
 
         {
-            std::lock_guard<std::mutex> lk(*cachedMtx);
+            ProcessHooksSpinGuard_ lk(cachedLock);
             if (*cached) return *cached;
         }
 
@@ -744,7 +764,7 @@ private:
         ::ReleaseMutex(map->hMtx_);
 
         {
-            std::lock_guard<std::mutex> lk(*cachedMtx);
+            ProcessHooksSpinGuard_ lk(cachedLock);
             *cached = map;
         }
         return map;
@@ -782,7 +802,7 @@ private:
         std::shared_ptr<Mapping> map(new Mapping(L));
         map->mem_ = mem;
         {
-            std::lock_guard<std::mutex> lk(*cachedMtx);
+            ProcessHooksSpinGuard_ lk(cachedLock);
             *cached = map;
         }
         return map;
@@ -972,7 +992,7 @@ private:
         static void trackDomain(const SwString& domain) {
             ensureInstalled_();
             const std::string d = domain.toStdString();
-            std::lock_guard<std::mutex> lk(mtx_());
+            ProcessHooksSpinGuard_ lk(lock_());
             domains_().insert(d);
         }
 
@@ -984,7 +1004,7 @@ private:
         static void ensureHeartbeat(const SwString& domain) {
             ensureInstalled_();
             const std::string key = domain.toStdString();
-            std::lock_guard<std::mutex> lk(mtx_());
+            ProcessHooksSpinGuard_ lk(lock_());
             if (heartbeats_().count(key)) return;
 
             const SwString domCopy = domain;
@@ -995,9 +1015,9 @@ private:
         }
 
     private:
-        static std::mutex& mtx_() {
-            static std::mutex* m = new std::mutex();
-            return *m;
+        static std::atomic_flag& lock_() {
+            static std::atomic_flag flag = ATOMIC_FLAG_INIT;
+            return flag;
         }
 
         static std::set<std::string>& domains_() {
@@ -1014,7 +1034,7 @@ private:
         static void cleanup_(bool bestEffort) {
             std::vector<std::string> doms;
             {
-                std::lock_guard<std::mutex> lk(mtx_());
+                ProcessHooksSpinGuard_ lk(lock_());
                 for (const auto& d : domains_()) doms.push_back(d);
             }
 
@@ -1025,7 +1045,7 @@ private:
 
             // stop heartbeats (best-effort)
             {
-                std::lock_guard<std::mutex> lk(mtx_());
+                ProcessHooksSpinGuard_ lk(lock_());
                 for (auto& kv : heartbeats_()) {
                     SwEventLoop::uninstallRuntime(kv.second);
                 }
@@ -1164,21 +1184,26 @@ public:
             for (uint32_t i = 0; i < n; ++i) {
                 const RegistryEntry& e = L->entries[i];
                 SwJsonObject o;
-                o["hash"] = SwJsonValue(hex64(e.hash).toStdString());
-                o["typeId"] = SwJsonValue(hex64(e.typeId).toStdString());
-                o["pid"] = SwJsonValue(static_cast<int>(e.pid));
-                o["lastSeenMs"] = SwJsonValue(static_cast<double>(e.lastSeenMs));
-                o["shmName"] = SwJsonValue(std::string(e.shmName));
-                o["domain"] = SwJsonValue(std::string(e.domain));
-                o["object"] = SwJsonValue(std::string(e.object));
-                o["signal"] = SwJsonValue(std::string(e.signal));
-                o["typeName"] = SwJsonValue(std::string(e.typeName));
-                arr.append(SwJsonValue(std::make_shared<SwJsonObject>(o)));
+                o["hash"] = hex64(e.hash);
+                o["typeId"] = hex64(e.typeId);
+                o["pid"] = static_cast<int>(e.pid);
+                o["lastSeenMs"] = static_cast<double>(e.lastSeenMs);
+                o["shmName"] = SwString(e.shmName);
+                o["domain"] = SwString(e.domain);
+                o["object"] = SwString(e.object);
+                o["signal"] = SwString(e.signal);
+                o["typeName"] = SwString(e.typeName);
+                arr.append(o);
             }
             unlock_(map);
         } catch (...) {
         }
         return arr;
+    }
+
+    static SwJsonArray snapshotFresh(const SwString& domain) {
+        dropCachedMapping_(domain);
+        return snapshot(domain);
     }
 
 private:
@@ -1241,13 +1266,26 @@ private:
         Layout* L_{nullptr};
     };
 
-    static std::shared_ptr<Mapping> openOrCreate_(const SwString& domain) {
-        static std::mutex gMtx;
-        static std::map<std::string, std::shared_ptr<Mapping>> cache;
+    static std::atomic_flag& mappingCacheLock_() {
+        static std::atomic_flag gLock = ATOMIC_FLAG_INIT;
+        return gLock;
+    }
 
+    static std::map<std::string, std::shared_ptr<Mapping>>& mappingCache_() {
+        static std::map<std::string, std::shared_ptr<Mapping>> cache;
+        return cache;
+    }
+
+    static void dropCachedMapping_(const SwString& domain) {
+        ProcessHooksSpinGuard_ lk(mappingCacheLock_());
+        mappingCache_().erase(domain.toStdString());
+    }
+
+    static std::shared_ptr<Mapping> openOrCreate_(const SwString& domain) {
         const std::string key = domain.toStdString();
         {
-            std::lock_guard<std::mutex> lk(gMtx);
+            ProcessHooksSpinGuard_ lk(mappingCacheLock_());
+            auto& cache = mappingCache_();
             auto it = cache.find(key);
             if (it != cache.end() && it->second) return it->second;
         }
@@ -1287,8 +1325,8 @@ private:
         if (map->hMtx_) ::ReleaseMutex(map->hMtx_);
 
         {
-            std::lock_guard<std::mutex> lk(gMtx);
-            cache[key] = map;
+            ProcessHooksSpinGuard_ lk(mappingCacheLock_());
+            mappingCache_()[key] = map;
         }
         return map;
 #else
@@ -1325,8 +1363,8 @@ private:
         std::shared_ptr<Mapping> map(new Mapping(L));
         map->mem_ = mem;
         {
-            std::lock_guard<std::mutex> lk(gMtx);
-            cache[key] = map;
+            ProcessHooksSpinGuard_ lk(mappingCacheLock_());
+            mappingCache_()[key] = map;
         }
         return map;
 #endif
@@ -1430,7 +1468,7 @@ private:
          */
         static void ensureHeartbeat(const SwString& domain) {
             const std::string key = domain.toStdString();
-            std::lock_guard<std::mutex> lk(mtx_());
+            ProcessHooksSpinGuard_ lk(lock_());
             if (heartbeats_().count(key)) return;
 
             const SwString domCopy = domain;
@@ -1441,15 +1479,14 @@ private:
         }
 
     private:
-        static std::mutex& mtx_() {
-            static std::mutex* m = new std::mutex();
-            return *m;
+        static std::atomic_flag& lock_() {
+            static std::atomic_flag flag = ATOMIC_FLAG_INIT;
+            return flag;
         }
 
         static std::map<std::string, SwEventLoop::RuntimeHandle>& heartbeats_() {
-            static std::map<std::string, SwEventLoop::RuntimeHandle>* m =
-                new std::map<std::string, SwEventLoop::RuntimeHandle>();
-            return *m;
+            static std::map<std::string, SwEventLoop::RuntimeHandle> m;
+            return m;
         }
     };
 };
@@ -1608,22 +1645,22 @@ public:
             for (uint32_t i = 0; i < n; ++i) {
                 const SubscriberEntry& e = L->entries[i];
                 SwJsonObject o;
-                o["hash"] = SwJsonValue(hex64(e.hash).toStdString());
-                o["subPid"] = SwJsonValue(static_cast<int>(e.subPid));
-                o["refCount"] = SwJsonValue(static_cast<int>(e.refCount));
-                o["lastSeenMs"] = SwJsonValue(static_cast<double>(e.lastSeenMs));
-                o["domain"] = SwJsonValue(std::string(e.domain));
-                o["object"] = SwJsonValue(std::string(e.object));
-                o["signal"] = SwJsonValue(std::string(e.signal));
+                o["hash"] = hex64(e.hash);
+                o["subPid"] = static_cast<int>(e.subPid);
+                o["refCount"] = static_cast<int>(e.refCount);
+                o["lastSeenMs"] = static_cast<double>(e.lastSeenMs);
+                o["domain"] = SwString(e.domain);
+                o["object"] = SwString(e.object);
+                o["signal"] = SwString(e.signal);
                 {
                     const SwString subObj = unpackCstrAfterNul_(e.signal, sizeof(e.signal));
                     if (!subObj.isEmpty()) {
                         const std::string dom = std::string(e.domain);
-                        o["subObject"] = SwJsonValue(subObj.toStdString());
-                        o["subTarget"] = SwJsonValue((dom.empty() ? domain.toStdString() : dom) + "/" + subObj.toStdString());
+                        o["subObject"] = subObj;
+                        o["subTarget"] = (dom.empty() ? domain : SwString(dom)) + "/" + subObj;
                     }
                 }
-                arr.append(SwJsonValue(std::make_shared<SwJsonObject>(o)));
+                arr.append(o);
             }
             unlock_(map);
         } catch (...) {
@@ -1771,12 +1808,12 @@ private:
     };
 
     static std::shared_ptr<Mapping> openOrCreate_(const SwString& domain) {
-        static std::mutex gMtx;
+        static std::atomic_flag gLock = ATOMIC_FLAG_INIT;
         static std::map<std::string, std::shared_ptr<Mapping>> cache;
 
         const std::string key = domain.toStdString();
         {
-            std::lock_guard<std::mutex> lk(gMtx);
+            ProcessHooksSpinGuard_ lk(gLock);
             auto it = cache.find(key);
             if (it != cache.end() && it->second) return it->second;
         }
@@ -1816,7 +1853,7 @@ private:
         if (map->hMtx_) ::ReleaseMutex(map->hMtx_);
 
         {
-            std::lock_guard<std::mutex> lk(gMtx);
+            ProcessHooksSpinGuard_ lk(gLock);
             cache[key] = map;
         }
         return map;
@@ -1854,7 +1891,7 @@ private:
         std::shared_ptr<Mapping> map(new Mapping(L));
         map->mem_ = mem;
         {
-            std::lock_guard<std::mutex> lk(gMtx);
+            ProcessHooksSpinGuard_ lk(gLock);
             cache[key] = map;
         }
         return map;
@@ -1955,7 +1992,7 @@ private:
          */
         static void ensureHeartbeat(const SwString& domain) {
             const std::string key = domain.toStdString();
-            std::lock_guard<std::mutex> lk(mtx_());
+            ProcessHooksSpinGuard_ lk(lock_());
             if (heartbeats_().count(key)) return;
 
             const SwString domCopy = domain;
@@ -1966,15 +2003,14 @@ private:
         }
 
     private:
-        static std::mutex& mtx_() {
-            static std::mutex* m = new std::mutex();
-            return *m;
+        static std::atomic_flag& lock_() {
+            static std::atomic_flag flag = ATOMIC_FLAG_INIT;
+            return flag;
         }
 
         static std::map<std::string, SwEventLoop::RuntimeHandle>& heartbeats_() {
-            static std::map<std::string, SwEventLoop::RuntimeHandle>* m =
-                new std::map<std::string, SwEventLoop::RuntimeHandle>();
-            return *m;
+            static std::map<std::string, SwEventLoop::RuntimeHandle> m;
+            return m;
         }
     };
 };
@@ -2452,7 +2488,7 @@ public:
         std::shared_ptr<Task> t(new Task(std::move(fn)));
         size_t id = 0;
         {
-            std::lock_guard<std::mutex> lk(mtx_);
+            ProcessHooksSpinGuard_ lk(lock_);
             id = nextId_++;
             tasks_[id] = t;
         }
@@ -2468,7 +2504,7 @@ public:
         std::shared_ptr<Task> t;
         bool shouldDetach = false;
         {
-            std::lock_guard<std::mutex> lk(mtx_);
+            ProcessHooksSpinGuard_ lk(lock_);
             auto it = tasks_.find(id);
             if (it == tasks_.end()) return;
             t = it->second;
@@ -2491,8 +2527,8 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     static LoopPoller& instance() {
-        static LoopPoller p;
-        return p;
+        static LoopPoller* p = new LoopPoller();
+        return *p;
     }
 
 private:
@@ -2509,8 +2545,8 @@ private:
          * @details The returned value reflects the state currently stored by the instance.
          */
         static IpcWakeup& instance() {
-            static IpcWakeup n;
-            return n;
+            static IpcWakeup* n = new IpcWakeup();
+            return *n;
         }
 
         /**
@@ -2518,7 +2554,7 @@ private:
          */
         void ensureAttached() {
             if (attached_.load(std::memory_order_acquire)) return;
-            std::lock_guard<std::mutex> lk(mtx_);
+            ProcessHooksSpinGuard_ lk(lock_);
             if (attached_.load(std::memory_order_relaxed)) return;
             attachLocked_();
         }
@@ -2528,7 +2564,7 @@ private:
          */
         void detach() {
             if (!attached_.load(std::memory_order_acquire)) return;
-            std::lock_guard<std::mutex> lk(mtx_);
+            ProcessHooksSpinGuard_ lk(lock_);
             if (!attached_.load(std::memory_order_relaxed)) return;
 
             SwCoreApplication* app = SwCoreApplication::instance(false);
@@ -2669,7 +2705,7 @@ private:
             }
         }
 
-        std::mutex mtx_;
+        std::atomic_flag lock_ = ATOMIC_FLAG_INIT;
         std::atomic_bool attached_{false};
         SwIoDispatcher::Token watchToken_{0};
 
@@ -2693,7 +2729,7 @@ private:
     void tick_() {
         std::vector<std::shared_ptr<Task>> snapshot;
         {
-            std::lock_guard<std::mutex> lk(mtx_);
+            ProcessHooksSpinGuard_ lk(lock_);
             snapshot.reserve(tasks_.size());
             for (auto& kv : tasks_) snapshot.push_back(kv.second);
         }
@@ -2705,7 +2741,7 @@ private:
         }
     }
 
-    std::mutex mtx_;
+    std::atomic_flag lock_ = ATOMIC_FLAG_INIT;
     size_t nextId_{1};
     std::map<size_t, std::shared_ptr<Task>> tasks_;
 };
@@ -2802,6 +2838,14 @@ inline SwJsonArray shmAppsSnapshot() {
 // Segment name: "sw_ipc_registry_<domain>".
 inline SwJsonArray shmRegistrySnapshot(const SwString& domain) {
     return detail::RegistryTable<>::snapshot(domain);
+}
+
+inline SwJsonArray shmRegistrySnapshotFresh(const SwString& domain) {
+    return detail::RegistryTable<>::snapshotFresh(domain);
+}
+
+inline SwString shmRegistrySegmentName(const SwString& domain) {
+    return detail::signalsRegistryNameForDomain_(domain);
 }
 
 // Best-effort snapshot of a domain subscribers registry (who is connected to what).
@@ -5328,14 +5372,14 @@ inline void notifyRegistryChangedBestEffort_(const SwString& domain) {
                   sig(reg, registryEventsSignalName_()) {}
         };
 
-        static std::mutex* mtx = new std::mutex();
+        static std::atomic_flag lock = ATOMIC_FLAG_INIT;
         static std::map<std::string, std::shared_ptr<Notifier>>* byDomain =
             new std::map<std::string, std::shared_ptr<Notifier>>();
 
         const std::string key = domain.toStdString();
         std::shared_ptr<Notifier> n;
         {
-            std::lock_guard<std::mutex> lk(*mtx);
+            ProcessHooksSpinGuard_ lk(lock);
             auto it = byDomain->find(key);
             if (it == byDomain->end()) {
                 n = std::make_shared<Notifier>(domain);

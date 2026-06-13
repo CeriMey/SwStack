@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <cstdlib>
 #include <map>
 #include <memory>
@@ -121,21 +122,33 @@ public:
         size_t bytesSent = 0U;
         for (size_t clientIndex = 0; clientIndex < m_clients.size(); ++clientIndex) {
             const std::shared_ptr<ClientSession>& client = m_clients[clientIndex];
-            if (!client || !client->playing || !client->rtpSocket ||
-                client->destinationAddress.empty() || client->clientRtpPort == 0U) {
+            if (!client || !client->playing) {
                 continue;
             }
             ++eligibleClients;
             bool sentAll = true;
             for (size_t i = 0; i < datagrams.size(); ++i) {
                 const SwByteArray& datagram = datagrams[i];
-                const int64_t sent = client->rtpSocket->writeDatagram(datagram.constData(),
-                                                                      static_cast<int64_t>(datagram.size()),
-                                                                      SwString(client->destinationAddress),
-                                                                      client->clientRtpPort);
-                if (sent != static_cast<int64_t>(datagram.size())) {
-                    sentAll = false;
-                    break;
+                if (client->tcpInterleaved) {
+                    if (!sendInterleavedFrame_(client, datagram, client->interleavedRtpChannel)) {
+                        sentAll = false;
+                        break;
+                    }
+                } else {
+                    if (!client->rtpSocket ||
+                        client->destinationAddress.empty() ||
+                        client->clientRtpPort == 0U) {
+                        sentAll = false;
+                        break;
+                    }
+                    const int64_t sent = client->rtpSocket->writeDatagram(datagram.constData(),
+                                                                          static_cast<int64_t>(datagram.size()),
+                                                                          SwString(client->destinationAddress),
+                                                                          client->clientRtpPort);
+                    if (sent != static_cast<int64_t>(datagram.size())) {
+                        sentAll = false;
+                        break;
+                    }
                 }
                 ++datagramsSent;
                 bytesSent += datagram.size();
@@ -189,6 +202,9 @@ private:
         uint16_t serverRtcpPort{0};
         std::shared_ptr<SwUdpSocket> rtpSocket{};
         std::shared_ptr<SwUdpSocket> rtcpSocket{};
+        bool tcpInterleaved{false};
+        uint8_t interleavedRtpChannel{0};
+        uint8_t interleavedRtcpChannel{1};
         bool setup{false};
         bool playing{false};
         bool closing{false};
@@ -306,6 +322,37 @@ private:
         return toLower_(transport).find("multicast") != std::string::npos;
     }
 
+    static bool transportRequestsTcp_(const std::string& transport) {
+        const std::string lower = toLower_(transport);
+        return lower.find("rtp/avp/tcp") != std::string::npos ||
+               lower.find("interleaved=") != std::string::npos;
+    }
+
+    static bool parseInterleavedPair_(const std::string& transport,
+                                      uint8_t& rtpChannel,
+                                      uint8_t& rtcpChannel) {
+        rtpChannel = 0;
+        rtcpChannel = 1;
+        const std::string lower = toLower_(transport);
+        std::size_t pos = lower.find("interleaved=");
+        if (pos == std::string::npos) {
+            return true;
+        }
+        pos += std::string("interleaved=").size();
+        const int parsedRtp = std::atoi(lower.c_str() + pos);
+        int parsedRtcp = parsedRtp + 1;
+        const std::size_t dash = lower.find('-', pos);
+        if (dash != std::string::npos) {
+            parsedRtcp = std::atoi(lower.c_str() + dash + 1U);
+        }
+        if (parsedRtp < 0 || parsedRtp > 255 || parsedRtcp < 0 || parsedRtcp > 255) {
+            return false;
+        }
+        rtpChannel = static_cast<uint8_t>(parsedRtp);
+        rtcpChannel = static_cast<uint8_t>(parsedRtcp);
+        return true;
+    }
+
     SwString controlBindAddress_() const {
         if (!config().endpoint.bindAddress.isEmpty()) {
             return config().endpoint.bindAddress;
@@ -370,7 +417,7 @@ private:
             return;
         }
         while (true) {
-            const SwString chunk = session->control->read();
+            const SwString chunk(session->control->read().toStdString());
             if (chunk.isEmpty()) {
                 break;
             }
@@ -494,10 +541,15 @@ private:
         const std::string transport = headerValue_(request, "transport");
         uint16_t clientRtp = 0;
         uint16_t clientRtcp = 0;
-        const bool multicast = transportRequestsMulticast_(transport) ||
-                               config().endpoint.deliveryMode == SwMediaTransportDeliveryMode::Multicast;
+        uint8_t interleavedRtpChannel = 0;
+        uint8_t interleavedRtcpChannel = 1;
+        const bool tcpInterleaved = transportRequestsTcp_(transport);
+        const bool multicast = !tcpInterleaved &&
+                               (transportRequestsMulticast_(transport) ||
+                                config().endpoint.deliveryMode == SwMediaTransportDeliveryMode::Multicast);
         if (transport.empty() ||
-            (!multicast && !parsePortPair_(transport, "client_port=", clientRtp, clientRtcp)) ||
+            (tcpInterleaved && !parseInterleavedPair_(transport, interleavedRtpChannel, interleavedRtcpChannel)) ||
+            (!tcpInterleaved && !multicast && !parsePortPair_(transport, "client_port=", clientRtp, clientRtcp)) ||
             (multicast && config().endpoint.deliveryMode != SwMediaTransportDeliveryMode::Multicast)) {
             sendResponse_(session, 461, "Unsupported Transport", request.cseq, {});
             return;
@@ -507,7 +559,7 @@ private:
         if (destination.empty()) {
             destination = multicast ? config().endpoint.host.toStdString() : session->clientAddress;
         }
-        if (destination.empty() || (multicast && isWildcardAddress_(destination))) {
+        if (!tcpInterleaved && (destination.empty() || (multicast && isWildcardAddress_(destination)))) {
             sendResponse_(session, 400, "Bad Request", request.cseq, {});
             return;
         }
@@ -519,10 +571,13 @@ private:
         bool opened = false;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
-            opened = openSessionRtpSockets_(session);
+            opened = tcpInterleaved || openSessionRtpSockets_(session);
             if (opened) {
-                session->clientRtpPort = multicast ? session->serverRtpPort : clientRtp;
-                session->clientRtcpPort = multicast ? session->serverRtcpPort : clientRtcp;
+                session->tcpInterleaved = tcpInterleaved;
+                session->interleavedRtpChannel = interleavedRtpChannel;
+                session->interleavedRtcpChannel = interleavedRtcpChannel;
+                session->clientRtpPort = tcpInterleaved ? 0 : (multicast ? session->serverRtpPort : clientRtp);
+                session->clientRtcpPort = tcpInterleaved ? 0 : (multicast ? session->serverRtcpPort : clientRtcp);
                 session->destinationAddress = destination;
                 session->setup = true;
                 if (session->sessionId.empty()) {
@@ -542,7 +597,13 @@ private:
         }
 
         std::ostringstream transportHeader;
-        if (multicast) {
+        if (tcpInterleaved) {
+            transportHeader << "Transport: RTP/AVP/TCP;unicast;interleaved="
+                            << static_cast<int>(interleavedRtpChannel)
+                            << "-"
+                            << static_cast<int>(interleavedRtcpChannel)
+                            << ";ssrc=" << std::hex << ssrc << std::dec;
+        } else if (multicast) {
             transportHeader << "Transport: RTP/AVP;multicast;destination="
                             << destination
                             << ";port=" << serverRtpPort << "-" << serverRtcpPort
@@ -714,6 +775,22 @@ private:
         response << "\r\n";
         response << body;
         session->control->write(SwString(response.str()));
+    }
+
+    static bool sendInterleavedFrame_(const std::shared_ptr<ClientSession>& session,
+                                      const SwByteArray& datagram,
+                                      uint8_t channel) {
+        if (!session || !session->control || datagram.isEmpty() || datagram.size() > 0xFFFFU) {
+            return false;
+        }
+        SwByteArray frame;
+        frame.reserve(datagram.size() + 4U);
+        frame.append(static_cast<char>('$'));
+        frame.append(static_cast<char>(channel));
+        frame.append(static_cast<char>((datagram.size() >> 8U) & 0xFFU));
+        frame.append(static_cast<char>(datagram.size() & 0xFFU));
+        frame.append(datagram);
+        return session->control->write(frame);
     }
 
     void removeClient_(const std::shared_ptr<ClientSession>& session) {

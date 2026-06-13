@@ -47,14 +47,21 @@
  */
 
 
+#ifndef SW_JSON_VALUE_NO_AUTO_INLINE
+#define SW_JSON_VALUE_NO_AUTO_INLINE
+#define SW_JSON_VALUE_NO_AUTO_INLINE_LOCAL
+#endif
 #include "SwJsonValue.h"
-#include "SwJsonArray.h"
+#ifdef SW_JSON_VALUE_NO_AUTO_INLINE_LOCAL
+#undef SW_JSON_VALUE_NO_AUTO_INLINE
+#undef SW_JSON_VALUE_NO_AUTO_INLINE_LOCAL
+#endif
+
 #include "SwString.h"
 #include "SwList.h"
 
 #include <map>
 #include <memory>
-#include <string>
 #include <iterator>
 /**
  * @class SwJsonObject
@@ -62,7 +69,7 @@
  */
 class SwJsonObject {
 public:
-    using Container = std::map<std::string, SwJsonValue>;
+    using Container = std::map<SwString, SwJsonValue>;
 
     class ConstIterator;
     class Iterator {
@@ -132,7 +139,7 @@ public:
          * @param first Value passed to the method.
          * @return The requested key.
          */
-        SwString key() const { return SwString(it_->first); }
+        SwString key() const { return it_->first; }
         /**
          * @brief Returns the current value.
          * @return The current value.
@@ -322,7 +329,7 @@ public:
      * @return The requested operator [].
      */
     inline SwJsonValue& operator[](const char* key) {
-        return data_[ key ? std::string(key) : std::string() ];
+        return data_[key ? SwString(key) : SwString()];
     }
     /**
      * @brief Performs the `operator[]` operation.
@@ -330,28 +337,8 @@ public:
      * @return The requested operator [].
      */
     inline const SwJsonValue& operator[](const char* key) const {
-        const std::string k = key ? std::string(key) : std::string();
+        const SwString k = key ? SwString(key) : SwString();
         auto it = data_.find(k);
-        static const SwJsonValue nullValue;
-        return (it != data_.end()) ? it->second : nullValue;
-    }
-
-    // std::string
-    /**
-     * @brief Performs the `operator[]` operation.
-     * @param key Value passed to the method.
-     * @return The requested operator [].
-     */
-    inline SwJsonValue& operator[](const std::string& key) {
-        return data_[key];
-    }
-    /**
-     * @brief Performs the `operator[]` operation.
-     * @param key Value passed to the method.
-     * @return The requested operator [].
-     */
-    inline const SwJsonValue& operator[](const std::string& key) const {
-        auto it = data_.find(key);
         static const SwJsonValue nullValue;
         return (it != data_.end()) ? it->second : nullValue;
     }
@@ -363,7 +350,7 @@ public:
      * @return The requested operator [].
      */
     inline SwJsonValue& operator[](const SwString& key) {
-        return data_[ key.toStdString() ];
+        return data_[key];
     }
     /**
      * @brief Performs the `operator[]` operation.
@@ -371,7 +358,7 @@ public:
      * @return The requested operator [].
      */
     inline const SwJsonValue& operator[](const SwString& key) const {
-        auto it = data_.find(key.toStdString());
+        auto it = data_.find(key);
         static const SwJsonValue nullValue;
         return (it != data_.end()) ? it->second : nullValue;
     }
@@ -382,7 +369,7 @@ public:
      * @param key The key to check.
      * @return true if the key exists, false otherwise.
      */
-    bool contains(const std::string& key) const {
+    bool contains(const SwString& key) const {
         return data_.find(key) != data_.end();
     }
     /**
@@ -391,24 +378,15 @@ public:
      * @return `true` when the object reports contains; otherwise `false`.
      */
     bool contains(const char* key) const {
-        return contains(key ? std::string(key) : std::string());
+        return contains(key ? SwString(key) : SwString());
     }
-    /**
-     * @brief Performs the `contains` operation.
-     * @param key Value passed to the method.
-     * @return `true` when the object reports contains; otherwise `false`.
-     */
-    bool contains(const SwString& key) const {
-        return contains(key.toStdString());
-    }
-
     /**
      * @brief Inserts or updates a key-value pair in the JSON object.
      *
      * @param key The key to insert or update.
      * @param value The value to associate with the key.
      */
-    Iterator insert(const std::string& key, const SwJsonValue& value) {
+    Iterator insert(const SwString& key, const SwJsonValue& value) {
         data_[key] = value;
         return Iterator(data_.find(key));
     }
@@ -419,25 +397,15 @@ public:
      * @return The requested insert.
      */
     Iterator insert(const char* key, const SwJsonValue& value) {
-        return insert(key ? std::string(key) : std::string(), value);
+        return insert(key ? SwString(key) : SwString(), value);
     }
-    /**
-     * @brief Performs the `insert` operation.
-     * @param key Value passed to the method.
-     * @param value Value passed to the method.
-     * @return The requested insert.
-     */
-    Iterator insert(const SwString& key, const SwJsonValue& value) {
-        return insert(key.toStdString(), value);
-    }
-
     /**
      * @brief Removes a key-value pair from the JSON object.
      *
      * @param key The key to remove.
      * @return true if the key was successfully removed, false otherwise.
      */
-    void remove(const std::string& key) {
+    void remove(const SwString& key) {
         data_.erase(key);
     }
     /**
@@ -445,14 +413,18 @@ public:
      * @param key Value passed to the method.
      */
     void remove(const char* key) {
-        data_.erase(key ? std::string(key) : std::string());
+        remove(key ? SwString(key) : SwString());
     }
-    /**
-     * @brief Removes the specified remove.
-     * @param key Value passed to the method.
-     */
-    void remove(const SwString& key) {
-        data_.erase(key.toStdString());
+    SwJsonValue take(const SwString& key) {
+        auto it = data_.find(key);
+        if (it == data_.end()) return SwJsonValue();
+        SwJsonValue value = it->second;
+        data_.erase(it);
+        return value;
+    }
+
+    SwJsonValue take(const char* key) {
+        return take(key ? SwString(key) : SwString());
     }
 
     /**
@@ -479,7 +451,7 @@ public:
      * @param defaultValue Value passed to the method.
      * @return The requested value.
      */
-    SwJsonValue value(const std::string& key, const SwJsonValue& defaultValue = SwJsonValue()) const {
+    SwJsonValue value(const SwString& key, const SwJsonValue& defaultValue = SwJsonValue()) const {
         auto it = data_.find(key);
         return (it != data_.end()) ? it->second : defaultValue;
     }
@@ -490,18 +462,8 @@ public:
      * @return The requested value.
      */
     SwJsonValue value(const char* key, const SwJsonValue& defaultValue = SwJsonValue()) const {
-        return value(key ? std::string(key) : std::string(), defaultValue);
+        return value(key ? SwString(key) : SwString(), defaultValue);
     }
-    /**
-     * @brief Performs the `value` operation.
-     * @param key Value passed to the method.
-     * @param defaultValue Value passed to the method.
-     * @return The requested value.
-     */
-    SwJsonValue value(const SwString& key, const SwJsonValue& defaultValue = SwJsonValue()) const {
-        return value(key.toStdString(), defaultValue);
-    }
-
     /**
      * @brief Retrieves a list of all keys in the JSON object.
      *
@@ -510,7 +472,7 @@ public:
     SwList<SwString> keys() const {
         SwList<SwString> keyList;
         for (const auto& pair : data_) {
-            keyList.append(SwString(pair.first));
+            keyList.append(pair.first);
         }
         return keyList;
     }
@@ -579,6 +541,16 @@ public:
      */
     ConstIterator cend() const { return ConstIterator(data_.cend()); }
 
+    Iterator find(const SwString& key) { return Iterator(data_.find(key)); }
+    Iterator find(const char* key) { return find(key ? SwString(key) : SwString()); }
+    ConstIterator find(const SwString& key) const { return ConstIterator(data_.find(key)); }
+    ConstIterator find(const char* key) const { return find(key ? SwString(key) : SwString()); }
+
+    ConstIterator constFind(const SwString& key) const { return find(key); }
+    ConstIterator constFind(const char* key) const { return find(key); }
+
+    Iterator erase(Iterator it) { return Iterator(data_.erase(it.base())); }
+
     /**
      * @brief Converts the JSON object to a JSON-formatted string.
      *
@@ -586,37 +558,7 @@ public:
      * @param indentLevel The current level of indentation for nested objects.
      * @return A JSON-formatted string representation of the object.
      */
-    std::string toJsonString(bool compact = true, int indentLevel = 0) const {
-        std::ostringstream os;
-        std::string indent(indentLevel * 2, ' '); // Indentation basée sur le niveau actuel
-        std::string childIndent((indentLevel + 1) * 2, ' '); // Indentation pour les enfants
-
-        os << "{";
-
-        bool first = true;
-        for (const auto& pair : data_) {
-            if (!first) os << (compact ? "," : ",\n"); // Ajouter une virgule entre les éléments
-            first = false;
-
-            if (!compact) os << "\n" << childIndent; // Indenter pour chaque clé
-
-            // Ajouter la clé
-            os << "\"" << pair.first << "\": ";
-
-            // Ajouter la valeur
-            if (pair.second.isObject()) {
-                os << pair.second.toObject().toJsonString(compact, indentLevel + 1);
-            } else if (pair.second.isArray()) {
-                os << pair.second.toArray().toJsonString(compact, indentLevel + 1);
-            } else {
-                os << pair.second.toJsonString();
-            }
-        }
-
-        if (!compact && !data_.empty()) os << "\n" << indent;
-        os << "}";
-        return os.str();
-    }
+    SwString toJsonString(bool compact = true, int indentLevel = 0) const;
 
     /**
      * @brief Retrieves the underlying data as a map of key-value pairs.
@@ -628,19 +570,14 @@ public:
         return data_;
     }
 
+    const Container& dataRef() const
+    {
+        return data_;
+    }
+
 private:
     Container data_; ///< Stores key-value pairs in the JSON object.
 };
 
-// Deferred inline implementations of SwJsonValue::toObject() and toArray()
-// placed here because both SwJsonObject and SwJsonArray must be fully defined first.
-
-inline SwJsonObject SwJsonValue::toObject() const {
-    if (type_ == Type::Object && objectValue_) return *objectValue_;
-    return SwJsonObject();
-}
-
-inline SwJsonArray SwJsonValue::toArray() const {
-    if (type_ == Type::Array && arrayValue_) return *arrayValue_;
-    return SwJsonArray();
-}
+#include "SwJsonArray.h"
+#include "SwJsonInline.h"

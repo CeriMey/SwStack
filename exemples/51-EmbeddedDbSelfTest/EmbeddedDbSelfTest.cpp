@@ -72,14 +72,14 @@ static int runChildAndWait(SwCoreApplication& app,
 
     SwObject::connect(&process, SIGNAL(readyReadStdOut), std::function<void()>([&]() {
         if (stdoutOut) {
-            *stdoutOut += process.read();
+            *stdoutOut += SwString(process.read().toStdString());
         } else {
             (void)process.read();
         }
     }));
     SwObject::connect(&process, SIGNAL(readyReadStdErr), std::function<void()>([&]() {
         if (stderrOut) {
-            *stderrOut += process.readStdErr();
+            *stderrOut += SwString(process.readStdErr().toStdString());
         } else {
             (void)process.readStdErr();
         }

@@ -320,7 +320,7 @@ private:
             return SwJsonValue(static_cast<double>(value.toDouble()));
         }
         if (type == typeid(SwString).name()) {
-            return SwJsonValue(value.get<SwString>().toStdString());
+            return SwJsonValue(value.get<SwString>());
         }
         if (type == typeid(std::string).name()) {
             return SwJsonValue(value.get<std::string>());
@@ -335,7 +335,7 @@ private:
             return value.convert<SwJsonValue>().get<SwJsonValue>();
         }
         if (value.canConvert<SwString>()) {
-            return SwJsonValue(value.convert<SwString>().get<SwString>().toStdString());
+            return SwJsonValue(value.convert<SwString>().get<SwString>());
         }
         if (value.canConvert<std::string>()) {
             return SwJsonValue(value.convert<std::string>().get<std::string>());

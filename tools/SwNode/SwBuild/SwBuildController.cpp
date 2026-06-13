@@ -299,7 +299,7 @@ bool SwBuildController::startProcess_(const SwString& label,
 void SwBuildController::handleProcessStdOut_() {
     if (!process_ || !logFile_) return;
     for (;;) {
-        const SwString out = process_->read();
+        const SwString out(process_->read().toStdString());
         if (out.isEmpty()) break;
         (void)logFile_->write(out);
         if (options_.verbose()) {
@@ -312,7 +312,7 @@ void SwBuildController::handleProcessStdOut_() {
 void SwBuildController::handleProcessStdErr_() {
     if (!process_ || !logFile_) return;
     for (;;) {
-        const SwString err = process_->readStdErr();
+        const SwString err(process_->readStdErr().toStdString());
         if (err.isEmpty()) break;
         (void)logFile_->write(err);
         if (options_.verbose()) {

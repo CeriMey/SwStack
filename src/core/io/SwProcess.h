@@ -215,15 +215,29 @@ public:
         return processRunning_.load(std::memory_order_acquire);
     }
 
-    SwString read(int64_t maxSize = 0) override {
+    uint64_t processId() const {
+#if defined(_WIN32)
+        if (!hProcess_) return 0;
+        return static_cast<uint64_t>(::GetProcessId(hProcess_));
+#else
+        if (childPid_ <= 0) return 0;
+        return static_cast<uint64_t>(childPid_);
+#endif
+    }
+
+    SwByteArray read(int64_t maxSize = 0) override {
         return takeBuffer_(stdoutBuffer_, stdoutMutex_, maxSize);
     }
 
-    SwString readStdErr(int64_t maxSize = 0) {
+    SwByteArray readStdErr(int64_t maxSize = 0) {
         return takeBuffer_(stderrBuffer_, stderrMutex_, maxSize);
     }
 
     bool write(const SwString& data) override {
+        return write(SwByteArray(data.data(), data.size()));
+    }
+
+    bool write(const SwByteArray& data) override {
         return writeStdIn_(data);
     }
 
@@ -508,10 +522,10 @@ private:
         scheduleReadySignal_(stream, generation, weakGuard);
     }
 
-    SwString takeBuffer_(SwByteArray& buffer, std::mutex& mutex, int64_t maxSize) {
+    SwByteArray takeBuffer_(SwByteArray& buffer, std::mutex& mutex, int64_t maxSize) {
         std::lock_guard<std::mutex> lock(mutex);
         if (buffer.isEmpty()) {
-            return SwString();
+            return SwByteArray();
         }
 
         size_t bytesToTake = buffer.size();
@@ -519,7 +533,7 @@ private:
             bytesToTake = static_cast<size_t>(maxSize);
         }
 
-        SwString out(buffer.constData(), bytesToTake);
+        SwByteArray out(buffer.constData(), bytesToTake);
         if (bytesToTake == buffer.size()) {
             buffer.clear();
         } else {
@@ -528,7 +542,7 @@ private:
         return out;
     }
 
-    bool writeStdIn_(const SwString& data) {
+    bool writeStdIn_(const SwByteArray& data) {
         if (data.isEmpty()) {
             return true;
         }
@@ -540,9 +554,8 @@ private:
             return false;
         }
 
-        const std::string utf8 = data.toStdString();
-        const char* ptr = utf8.data();
-        size_t remaining = utf8.size();
+        const char* ptr = data.constData();
+        size_t remaining = data.size();
         while (remaining > 0) {
             const DWORD chunk = static_cast<DWORD>((std::min)(remaining, static_cast<size_t>(0x7fffffff)));
             DWORD written = 0;
@@ -565,9 +578,8 @@ private:
             return false;
         }
 
-        const std::string utf8 = data.toStdString();
-        const char* ptr = utf8.data();
-        size_t remaining = utf8.size();
+        const char* ptr = data.constData();
+        size_t remaining = data.size();
         while (remaining > 0) {
             const ssize_t written = ::write(stdinPipe_[1], ptr, remaining);
             if (written > 0) {
@@ -859,7 +871,10 @@ private:
         const pid_t pid = ::fork();
         if (pid == 0) {
             if (!workingDirectory.isEmpty()) {
-                (void)::chdir(workingDirectory.toStdString().c_str());
+                const std::string childWorkingDirectory = workingDirectory.toStdString();
+                if (::chdir(childWorkingDirectory.c_str()) != 0) {
+                    _exit(127);
+                }
             }
 
             if (hasProcessFlag_(creationFlags, ProcessFlags::Detached)) {

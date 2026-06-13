@@ -193,7 +193,7 @@ private slots:
     void onClientReadyRead_() {
         if (!m_client) return;
         while (true) {
-            SwString chunk = m_client->read();
+            SwString chunk(m_client->read().toStdString());
             if (chunk.isEmpty()) {
                 break;
             }

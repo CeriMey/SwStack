@@ -257,16 +257,16 @@ public:
      * @param maxSize Value passed to the method.
      * @return The resulting read.
      */
-    SwString read(int64_t maxSize = 0) override {
+    SwByteArray read(int64_t maxSize = 0) override {
         std::lock_guard<std::mutex> lock(m_bufferMutex);
         if (m_buffer.empty()) {
-            return SwString();
+            return SwByteArray();
         }
         size_t count = m_buffer.size();
         if (maxSize > 0 && static_cast<size_t>(maxSize) < count) {
             count = static_cast<size_t>(maxSize);
         }
-        SwString result(std::string(m_buffer.begin(), m_buffer.begin() + count));
+        SwByteArray result(m_buffer.data(), count);
         m_buffer.erase(m_buffer.begin(), m_buffer.begin() + count);
         return result;
     }
@@ -277,17 +277,23 @@ public:
      * @return `true` on success; otherwise `false`.
      */
     bool write(const SwString& data) override {
+        return write(SwByteArray(data.data(), data.size()));
+    }
+
+    bool write(const SwByteArray& data) override {
         if (!isOpen()) {
             return false;
         }
-        auto payload = data.toStdString();
+        if (data.isEmpty()) {
+            return true;
+        }
 #if defined(_WIN32)
         DWORD written = 0;
-        BOOL ok = WriteFile(m_handle, payload.data(), static_cast<DWORD>(payload.size()), &written, nullptr);
-        return ok && written == payload.size();
+        BOOL ok = WriteFile(m_handle, data.constData(), static_cast<DWORD>(data.size()), &written, nullptr);
+        return ok && written == data.size();
 #else
-        ssize_t sent = ::write(m_fd, payload.data(), payload.size());
-        return sent == static_cast<ssize_t>(payload.size());
+        ssize_t sent = ::write(m_fd, data.constData(), data.size());
+        return sent == static_cast<ssize_t>(data.size());
 #endif
     }
 

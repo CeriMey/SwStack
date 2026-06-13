@@ -62,6 +62,7 @@ public:
     typedef std::ptrdiff_t difference_type;
     typedef Hash hasher;
     typedef KeyEqual key_equal;
+    typedef std::unordered_map<Key, T, Hash, KeyEqual> storage_type;
     typedef typename std::unordered_map<Key, T, Hash, KeyEqual>::iterator iterator;
     typedef typename std::unordered_map<Key, T, Hash, KeyEqual>::const_iterator const_iterator;
 
@@ -572,7 +573,7 @@ public:
     /**
      * @brief Performs the `swap` operation.
      */
-    void swap(SwHash& other) noexcept(noexcept(m_hash.swap(other.m_hash))) {
+    void swap(SwHash& other) noexcept(noexcept(std::declval<storage_type&>().swap(std::declval<storage_type&>()))) {
         m_hash.swap(other.m_hash);
     }
 
@@ -585,7 +586,7 @@ public:
     }
 
 private:
-    std::unordered_map<Key, T, Hash, KeyEqual> m_hash;
+    storage_type m_hash;
 };
 
 template<typename Key, typename T, typename Hash, typename KeyEqual>

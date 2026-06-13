@@ -137,8 +137,8 @@ public:
             row["maxSequence"] = static_cast<long long>(meta.maxSequence);
             row["recordCount"] = static_cast<long long>(meta.recordCount);
             row["blobFileId"] = static_cast<long long>(meta.blobFileId);
-            row["fileName"] = meta.fileName.toStdString();
-            row["indexName"] = meta.indexName.toStdString();
+            row["fileName"] = meta.fileName;
+            row["indexName"] = meta.indexName;
             tables.append(row);
         }
         root["tables"] = tables;
@@ -163,7 +163,7 @@ public:
 
     SwDbStatus persistOptions() {
         SwJsonObject root;
-        root["dbPath"] = db_.dbPath_.toStdString();
+        root["dbPath"] = db_.dbPath_;
         root["readOnly"] = db_.options_.readOnly;
         root["lazyWrite"] = db_.options_.lazyWrite;
         root["commitWindowMs"] = static_cast<long long>(db_.options_.commitWindowMs);

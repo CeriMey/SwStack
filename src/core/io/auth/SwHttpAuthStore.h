@@ -744,99 +744,99 @@ private:
 
     static SwJsonObject accountToJson_(const SwHttpAuthAccount& account) {
         SwJsonObject object;
-        object["accountId"] = account.accountId.toStdString();
-        object["subjectId"] = account.subjectId.toStdString();
-        object["email"] = account.email.toStdString();
-        object["passwordHash"] = account.passwordHash.toStdString();
-        object["emailVerifiedAt"] = account.emailVerifiedAt.toStdString();
+        object["accountId"] = account.accountId;
+        object["subjectId"] = account.subjectId;
+        object["email"] = account.email;
+        object["passwordHash"] = account.passwordHash;
+        object["emailVerifiedAt"] = account.emailVerifiedAt;
         object["passwordResetRequired"] = account.passwordResetRequired;
         object["suspended"] = account.suspended;
         object["mfaTotpEnabled"] = account.mfaTotpEnabled;
-        object["mfaTotpSecret"] = account.mfaTotpSecret.toStdString();
-        object["mfaTotpEnabledAt"] = account.mfaTotpEnabledAt.toStdString();
-        object["createdAt"] = account.createdAt.toStdString();
-        object["updatedAt"] = account.updatedAt.toStdString();
+        object["mfaTotpSecret"] = account.mfaTotpSecret;
+        object["mfaTotpEnabledAt"] = account.mfaTotpEnabledAt;
+        object["createdAt"] = account.createdAt;
+        object["updatedAt"] = account.updatedAt;
         return object;
     }
 
     static SwHttpAuthAccount accountFromJson_(const SwJsonObject& object) {
         SwHttpAuthAccount account;
-        account.accountId = object.value("accountId").toString().c_str();
-        account.subjectId = object.value("subjectId").toString().c_str();
-        account.email = object.value("email").toString().c_str();
-        account.passwordHash = object.value("passwordHash").toString().c_str();
-        account.emailVerifiedAt = object.value("emailVerifiedAt").toString().c_str();
+        account.accountId = object.value("accountId").toString();
+        account.subjectId = object.value("subjectId").toString();
+        account.email = object.value("email").toString();
+        account.passwordHash = object.value("passwordHash").toString();
+        account.emailVerifiedAt = object.value("emailVerifiedAt").toString();
         account.passwordResetRequired = object.value("passwordResetRequired").toBool(false);
         account.suspended = object.value("suspended").toBool(false);
         account.mfaTotpEnabled = object.value("mfaTotpEnabled").toBool(false);
-        account.mfaTotpSecret = object.value("mfaTotpSecret").toString().c_str();
-        account.mfaTotpEnabledAt = object.value("mfaTotpEnabledAt").toString().c_str();
+        account.mfaTotpSecret = object.value("mfaTotpSecret").toString();
+        account.mfaTotpEnabledAt = object.value("mfaTotpEnabledAt").toString();
         if (account.mfaTotpSecret.trimmed().isEmpty()) {
             account.mfaTotpEnabled = false;
             account.mfaTotpEnabledAt.clear();
         }
-        account.createdAt = object.value("createdAt").toString().c_str();
-        account.updatedAt = object.value("updatedAt").toString().c_str();
+        account.createdAt = object.value("createdAt").toString();
+        account.updatedAt = object.value("updatedAt").toString();
         return account;
     }
 
     static SwJsonObject sessionToJson_(const SwHttpAuthSession& session) {
         SwJsonObject object;
-        object["sessionId"] = session.sessionId.toStdString();
-        object["accountId"] = session.accountId.toStdString();
-        object["tokenHash"] = session.tokenHash.toStdString();
+        object["sessionId"] = session.sessionId;
+        object["accountId"] = session.accountId;
+        object["tokenHash"] = session.tokenHash;
         object["expiresAtMs"] = session.expiresAtMs;
-        object["userAgent"] = session.userAgent.toStdString();
+        object["userAgent"] = session.userAgent;
         object["viaTls"] = session.viaTls;
-        object["createdAt"] = session.createdAt.toStdString();
-        object["updatedAt"] = session.updatedAt.toStdString();
+        object["createdAt"] = session.createdAt;
+        object["updatedAt"] = session.updatedAt;
         return object;
     }
 
     static SwHttpAuthSession sessionFromJson_(const SwJsonObject& object) {
         SwHttpAuthSession session;
-        session.sessionId = object.value("sessionId").toString().c_str();
-        session.accountId = object.value("accountId").toString().c_str();
-        session.tokenHash = object.value("tokenHash").toString().c_str();
+        session.sessionId = object.value("sessionId").toString();
+        session.accountId = object.value("accountId").toString();
+        session.tokenHash = object.value("tokenHash").toString();
         session.expiresAtMs = static_cast<long long>(object.value("expiresAtMs").toInteger(0));
-        session.userAgent = object.value("userAgent").toString().c_str();
+        session.userAgent = object.value("userAgent").toString();
         session.viaTls = object.value("viaTls").toBool(false);
-        session.createdAt = object.value("createdAt").toString().c_str();
-        session.updatedAt = object.value("updatedAt").toString().c_str();
+        session.createdAt = object.value("createdAt").toString();
+        session.updatedAt = object.value("updatedAt").toString();
         return session;
     }
 
     static SwJsonObject challengeToJson_(const SwHttpAuthChallenge& challenge) {
         SwJsonObject object;
-        object["challengeId"] = challenge.challengeId.toStdString();
-        object["purpose"] = challenge.purpose.toStdString();
-        object["accountId"] = challenge.accountId.toStdString();
-        object["code"] = challenge.code.toStdString();
-        object["tokenHash"] = challenge.tokenHash.toStdString();
+        object["challengeId"] = challenge.challengeId;
+        object["purpose"] = challenge.purpose;
+        object["accountId"] = challenge.accountId;
+        object["code"] = challenge.code;
+        object["tokenHash"] = challenge.tokenHash;
         if (!challenge.payload.isNull()) {
             object["payload"] = challenge.payload;
         }
         object["expiresAtMs"] = challenge.expiresAtMs;
-        object["consumedAt"] = challenge.consumedAt.toStdString();
-        object["createdAt"] = challenge.createdAt.toStdString();
-        object["updatedAt"] = challenge.updatedAt.toStdString();
+        object["consumedAt"] = challenge.consumedAt;
+        object["createdAt"] = challenge.createdAt;
+        object["updatedAt"] = challenge.updatedAt;
         return object;
     }
 
     static SwHttpAuthChallenge challengeFromJson_(const SwJsonObject& object) {
         SwHttpAuthChallenge challenge;
-        challenge.challengeId = object.value("challengeId").toString().c_str();
-        challenge.purpose = object.value("purpose").toString().c_str();
-        challenge.accountId = object.value("accountId").toString().c_str();
-        challenge.code = object.value("code").toString().c_str();
-        challenge.tokenHash = object.value("tokenHash").toString().c_str();
+        challenge.challengeId = object.value("challengeId").toString();
+        challenge.purpose = object.value("purpose").toString();
+        challenge.accountId = object.value("accountId").toString();
+        challenge.code = object.value("code").toString();
+        challenge.tokenHash = object.value("tokenHash").toString();
         if (object.contains("payload")) {
             challenge.payload = object.value("payload");
         }
         challenge.expiresAtMs = static_cast<long long>(object.value("expiresAtMs").toInteger(0));
-        challenge.consumedAt = object.value("consumedAt").toString().c_str();
-        challenge.createdAt = object.value("createdAt").toString().c_str();
-        challenge.updatedAt = object.value("updatedAt").toString().c_str();
+        challenge.consumedAt = object.value("consumedAt").toString();
+        challenge.createdAt = object.value("createdAt").toString();
+        challenge.updatedAt = object.value("updatedAt").toString();
         return challenge;
     }
 

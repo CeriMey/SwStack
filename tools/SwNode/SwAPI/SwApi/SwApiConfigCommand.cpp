@@ -300,8 +300,8 @@ int SwApiConfigCommand::cmdSendAll_() {
     if (jsonOut) {
         SwJsonObject o;
         o["ok"] = SwJsonValue(ok);
-        o["target"] = SwJsonValue(target.toString().toStdString());
-        o["configSignal"] = SwJsonValue(cfgSig.toStdString());
+        o["target"] = SwJsonValue(target.toString());
+        o["configSignal"] = SwJsonValue(cfgSig);
         o["timeoutMs"] = SwJsonValue(timeoutMs);
         std::cout << SwApiJson::toJson(o, pretty).toStdString() << "\n";
     } else if (!ok) {
@@ -336,10 +336,10 @@ int SwApiConfigCommand::cmdSet_() {
     if (jsonOut) {
         SwJsonObject o;
         o["ok"] = SwJsonValue(ok);
-        o["target"] = SwJsonValue(target.toString().toStdString());
-        o["path"] = SwJsonValue(path.toStdString());
-        o["value"] = SwJsonValue(value.toStdString());
-        if (!err.isEmpty()) o["error"] = SwJsonValue(err.toStdString());
+        o["target"] = SwJsonValue(target.toString());
+        o["path"] = SwJsonValue(path);
+        o["value"] = SwJsonValue(value);
+        if (!err.isEmpty()) o["error"] = SwJsonValue(err);
         std::cout << SwApiJson::toJson(o, cli().hasFlag("pretty")).toStdString() << "\n";
     } else if (!ok) {
         std::cerr << "swapi config set: " << err.toStdString() << "\n";

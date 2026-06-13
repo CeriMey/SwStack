@@ -130,8 +130,8 @@ inline SwJsonObject extractParams_(const SwJsonObject& cfg) {
             k == "params" || k == "options" || k == "config_root") {
             continue;
         }
-        if (!out.contains(k.toStdString())) {
-            out[k.toStdString()] = it->second;
+        if (!out.contains(k)) {
+            out[k] = it->second;
         }
     }
 
@@ -181,12 +181,15 @@ inline bool argToBool_(const SwCoreApplication& app, const SwString& key, bool d
     return app.getArgument(key, def ? "1" : "0").toInt() != 0;
 }
 
+inline void noBootstrap_(int, char**) {}
+
 } // namespace detail
 } // namespace node
 } // namespace sw
 
-#define SW_NODE_MAIN_WITH_DEFAULTS(NodeType, DefaultNsLiteral, DefaultNameLiteral)                             \
+#define SW_NODE_MAIN_WITH_DEFAULTS_AND_BOOTSTRAP(NodeType, DefaultNsLiteral, DefaultNameLiteral, BootstrapFn)  \
     int main(int argc, char** argv) {                                                                         \
+        BootstrapFn(argc, argv);                                                                              \
         SwCoreApplication app(argc, argv);                                                                     \
                                                                                                                \
         SwString sys = app.getArgument("sys", "demo");                                                         \
@@ -242,7 +245,13 @@ inline bool argToBool_(const SwCoreApplication& app, const SwString& key, bool d
         return app.exec();                                                                                     \
     }
 
+#define SW_NODE_MAIN_WITH_DEFAULTS(NodeType, DefaultNsLiteral, DefaultNameLiteral) \
+    SW_NODE_MAIN_WITH_DEFAULTS_AND_BOOTSTRAP(NodeType, DefaultNsLiteral, DefaultNameLiteral, sw::node::detail::noBootstrap_)
+
 #define SW_NODE_MAIN(NodeType) SW_NODE_MAIN_WITH_DEFAULTS(NodeType, "ns", #NodeType)
+
+#define SW_REMOTE_OBJECT_NODE_WITH_DEFAULTS_AND_BOOTSTRAP(NodeType, DefaultNsLiteral, DefaultNameLiteral, BootstrapFn) \
+    SW_NODE_MAIN_WITH_DEFAULTS_AND_BOOTSTRAP(NodeType, DefaultNsLiteral, DefaultNameLiteral, BootstrapFn)
 
 #define SW_REMOTE_OBJECT_NODE_WITH_DEFAULTS(NodeType, DefaultNsLiteral, DefaultNameLiteral) \
     SW_NODE_MAIN_WITH_DEFAULTS(NodeType, DefaultNsLiteral, DefaultNameLiteral)

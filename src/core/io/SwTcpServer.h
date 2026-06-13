@@ -97,6 +97,28 @@ public:
         return m_listenAddress;
     }
 
+    void setReceiveBufferSize(int bytes) {
+        if (bytes <= 0) {
+            return;
+        }
+        m_receiveBufferSize = bytes;
+    }
+
+    void setSendBufferSize(int bytes) {
+        if (bytes <= 0) {
+            return;
+        }
+        m_sendBufferSize = bytes;
+    }
+
+    int requestedReceiveBufferSize() const {
+        return m_receiveBufferSize;
+    }
+
+    int requestedSendBufferSize() const {
+        return m_sendBufferSize;
+    }
+
     bool listen(uint16_t port) {
         return listen(SwString(), port);
     }
@@ -218,6 +240,8 @@ private:
     int m_listenFamily = AF_UNSPEC;
     bool m_dualStackEnabled = false;
     uint16_t m_listenPort = 0;
+    int m_receiveBufferSize = 0;
+    int m_sendBufferSize = 0;
     SwString m_listenAddress;
     SwString m_requestedListenAddress;
 
@@ -563,6 +587,8 @@ private:
             return;
         }
 
+        client->setReceiveBufferSize(m_receiveBufferSize);
+        client->setSendBufferSize(m_sendBufferSize);
         client->adoptSocket(socketHandle, shouldEmitConnectedOnAdopt_(client));
         if (!finalizeAcceptedSocket_(client)) {
             client->close();

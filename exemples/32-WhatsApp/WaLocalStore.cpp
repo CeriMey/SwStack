@@ -68,7 +68,7 @@ static SwJsonValue fromColor_(const SwColor& c) {
 static SwJsonValue fromStringList_(const SwList<SwString>& list) {
     SwJsonArray arr;
     for (int i = 0; i < list.size(); ++i) {
-        arr.append(SwJsonValue(list[i].toStdString()));
+        arr.append(SwJsonValue(list[i]));
     }
     return SwJsonValue(arr);
 }
@@ -195,9 +195,9 @@ bool WaLocalStore::save() const {
     // User profile (login state + identity).
     SwJsonObject user;
     user["loggedIn"] = SwJsonValue(m_user.loggedIn);
-    user["displayName"] = SwJsonValue(m_user.displayName.toStdString());
-    user["phone"] = SwJsonValue(m_user.phone.toStdString());
-    user["initial"] = SwJsonValue(m_user.initial.toStdString());
+    user["displayName"] = SwJsonValue(m_user.displayName);
+    user["phone"] = SwJsonValue(m_user.phone);
+    user["initial"] = SwJsonValue(m_user.initial);
     user["avatarColor"] = fromColor_(m_user.avatarColor);
     root["user"] = SwJsonValue(user);
 
@@ -206,11 +206,11 @@ bool WaLocalStore::save() const {
     for (int i = 0; i < m_contacts.size(); ++i) {
         const Contact& c = m_contacts[i];
         SwJsonObject co;
-        co["id"] = SwJsonValue(c.id.toStdString());
-        co["displayName"] = SwJsonValue(c.displayName.toStdString());
-        co["phone"] = SwJsonValue(c.phone.toStdString());
-        co["status"] = SwJsonValue(c.status.toStdString());
-        co["initial"] = SwJsonValue(c.initial.toStdString());
+        co["id"] = SwJsonValue(c.id);
+        co["displayName"] = SwJsonValue(c.displayName);
+        co["phone"] = SwJsonValue(c.phone);
+        co["status"] = SwJsonValue(c.status);
+        co["initial"] = SwJsonValue(c.initial);
         co["avatarColor"] = fromColor_(c.avatarColor);
         contacts.append(SwJsonValue(co));
     }
@@ -222,11 +222,11 @@ bool WaLocalStore::save() const {
         const Conversation& c = m_conversations[i];
 
         SwJsonObject co;
-        co["id"] = SwJsonValue(c.id.toStdString());
-        co["type"] = SwJsonValue(c.type.toStdString());
-        co["title"] = SwJsonValue(c.title.toStdString());
-        co["status"] = SwJsonValue(c.status.toStdString());
-        co["avatarInitial"] = SwJsonValue(c.avatarInitial.toStdString());
+        co["id"] = SwJsonValue(c.id);
+        co["type"] = SwJsonValue(c.type);
+        co["title"] = SwJsonValue(c.title);
+        co["status"] = SwJsonValue(c.status);
+        co["avatarInitial"] = SwJsonValue(c.avatarInitial);
         co["avatarColor"] = fromColor_(c.avatarColor);
         co["participantIds"] = fromStringList_(c.participantIds);
         co["favorite"] = SwJsonValue(c.favorite);
@@ -236,15 +236,15 @@ bool WaLocalStore::save() const {
         for (int j = 0; j < c.messages.size(); ++j) {
             const Message& m = c.messages[j];
             SwJsonObject mo;
-            mo["messageId"] = SwJsonValue(m.messageId.toStdString());
-            mo["fromUserId"] = SwJsonValue(m.fromUserId.toStdString());
-            mo["status"] = SwJsonValue(m.status.toStdString());
-            mo["text"] = SwJsonValue(m.text.toStdString());
-            mo["role"] = SwJsonValue(m.role.toStdString());
-            mo["kind"] = SwJsonValue(m.kind.toStdString());
-            mo["payload"] = SwJsonValue(m.payload.toStdString());
-            mo["meta"] = SwJsonValue(m.meta.toStdString());
-            mo["reaction"] = SwJsonValue(m.reaction.toStdString());
+            mo["messageId"] = SwJsonValue(m.messageId);
+            mo["fromUserId"] = SwJsonValue(m.fromUserId);
+            mo["status"] = SwJsonValue(m.status);
+            mo["text"] = SwJsonValue(m.text);
+            mo["role"] = SwJsonValue(m.role);
+            mo["kind"] = SwJsonValue(m.kind);
+            mo["payload"] = SwJsonValue(m.payload);
+            mo["meta"] = SwJsonValue(m.meta);
+            mo["reaction"] = SwJsonValue(m.reaction);
             msgs.append(SwJsonValue(mo));
         }
         co["messages"] = SwJsonValue(msgs);
@@ -255,7 +255,7 @@ bool WaLocalStore::save() const {
 
     // UI state.
     SwJsonObject ui;
-    ui["selectedConversationId"] = SwJsonValue(m_ui.selectedConversationId.toStdString());
+    ui["selectedConversationId"] = SwJsonValue(m_ui.selectedConversationId);
 
     SwJsonObject drafts;
     for (auto it = m_ui.draftsByConversationId.begin(); it != m_ui.draftsByConversationId.end(); ++it) {
@@ -263,7 +263,7 @@ bool WaLocalStore::save() const {
         if (key.isEmpty()) {
             continue;
         }
-        drafts[key] = SwJsonValue(it.value().toStdString());
+        drafts[key] = SwJsonValue(it.value());
     }
     ui["drafts"] = SwJsonValue(drafts);
     root["ui"] = SwJsonValue(ui);

@@ -437,7 +437,7 @@ static SwJsonArray devicesForDomain(const SwString& domain) {
         if (!v.isObject()) continue;
         const SwJsonObject o(v.toObject());
 
-        const std::string object = SwString(o["object"].toString()).toStdString();
+        const std::string object = o["object"].toString().toStdString();
         if (object.empty()) continue;
 
         DeviceAgg& a = agg[object];
@@ -450,7 +450,7 @@ static SwJsonArray devicesForDomain(const SwString& domain) {
             a.pids.insert(pid);
         }
 
-        const std::string sig = SwString(o["signal"].toString()).toStdString();
+        const std::string sig = o["signal"].toString().toStdString();
         if (sig.size() > 10 && sig.rfind("__config__|", 0) == 0) {
             const std::string cfgId = sig.substr(std::strlen("__config__|"));
             if (!cfgId.empty() && !a.configIdsSet.count(cfgId)) {
@@ -476,11 +476,11 @@ static SwJsonArray devicesForDomain(const SwString& domain) {
         if (objName.empty()) continue;
 
         SwJsonObject d;
-        d["domain"] = SwJsonValue(domain.toStdString());
+        d["domain"] = SwJsonValue(domain);
         d["nameSpace"] = SwJsonValue(nsPart);
         d["objectName"] = SwJsonValue(objName);
         d["object"] = SwJsonValue(objectFqn);
-        d["target"] = SwJsonValue((domain + "/" + SwString(objectFqn)).toStdString());
+        d["target"] = SwJsonValue((domain + "/" + SwString(objectFqn)));
         d["lastSeenMs"] = SwJsonValue(static_cast<double>(it->second.lastSeenMs));
 
         const std::string cfg0 = it->second.configIds.empty() ? std::string() : it->second.configIds.front();
@@ -558,7 +558,7 @@ static SwJsonArray nodesForDomain_(const SwString& domain, bool includeStale, co
         if (!v.isObject()) continue;
         const SwJsonObject o(v.toObject());
 
-        const std::string object = SwString(o["object"].toString()).toStdString();
+        const std::string object = o["object"].toString().toStdString();
         if (object.empty()) continue;
 
         const uint32_t pid = static_cast<uint32_t>(o["pid"].toInt());
@@ -571,7 +571,7 @@ static SwJsonArray nodesForDomain_(const SwString& domain, bool includeStale, co
         if (t > a.lastSeenMs) a.lastSeenMs = t;
         if (pid != 0) a.pids.insert(pid);
 
-        const std::string sig = SwString(o["signal"].toString()).toStdString();
+        const std::string sig = o["signal"].toString().toStdString();
         if (sig.size() > 10 && sig.rfind("__config__|", 0) == 0) {
             const std::string cfgId = sig.substr(std::strlen("__config__|"));
             if (!cfgId.empty() && !a.configIdsSet.count(cfgId)) {
@@ -598,8 +598,8 @@ static SwJsonArray nodesForDomain_(const SwString& domain, bool includeStale, co
         if (!matchesNamespacePrefix_(SwString(nsPart), nsPrefix)) continue;
 
         SwJsonObject d;
-        d["target"] = SwJsonValue((domain + "/" + SwString(objectFqn)).toStdString());
-        d["domain"] = SwJsonValue(domain.toStdString());
+        d["target"] = SwJsonValue((domain + "/" + SwString(objectFqn)));
+        d["domain"] = SwJsonValue(domain);
         d["nameSpace"] = SwJsonValue(nsPart);
         d["objectName"] = SwJsonValue(objName);
         d["object"] = SwJsonValue(objectFqn);
@@ -673,7 +673,7 @@ static bool nodeInfoForTarget_(const SwString& domain, const SwString& object, b
         const int pid = o["pid"].toInt();
         if (pid > 0) pids.insert(static_cast<uint32_t>(pid));
 
-        const std::string sig = SwString(o["signal"].toString()).toStdString();
+        const std::string sig = o["signal"].toString().toStdString();
         if (sig.size() > 10 && sig.rfind("__config__|", 0) == 0) {
             const std::string cfgId = sig.substr(std::strlen("__config__|"));
             if (!cfgId.empty() && !cfgSet.count(cfgId)) {
@@ -693,9 +693,9 @@ static bool nodeInfoForTarget_(const SwString& domain, const SwString& object, b
         objName = (slash + 1 < objectFqn.size()) ? objectFqn.substr(slash + 1) : std::string();
     }
 
-    out["target"] = SwJsonValue((domain + "/" + object).toStdString());
-    out["domain"] = SwJsonValue(domain.toStdString());
-    out["object"] = SwJsonValue(object.toStdString());
+    out["target"] = SwJsonValue((domain + "/" + object));
+    out["domain"] = SwJsonValue(domain);
+    out["object"] = SwJsonValue(object);
     out["nameSpace"] = SwJsonValue(nsPart);
     out["objectName"] = SwJsonValue(objName);
     out["lastSeenMs"] = SwJsonValue(static_cast<double>(lastSeen));
@@ -804,7 +804,7 @@ static bool findSignalInRegistryForTarget(const SwString& domain,
         out.signal = signalName;
         out.shmName = SwString(o["shmName"].toString());
         out.typeName = SwString(o["typeName"].toString());
-        out.typeId = parseHexU64(SwString(o["typeId"].toString()).toStdString());
+        out.typeId = parseHexU64(o["typeId"].toString().toStdString());
         return true;
     }
     return false;
@@ -1034,7 +1034,7 @@ static bool encodeJsonArg(sw::ipc::detail::Encoder& enc, const std::string& type
         if (v.isBool()) { out = v.toBool(); return true; }
         if (v.isInt()) { out = (v.toInt() != 0); return true; }
         if (v.isString()) {
-            const std::string s = SwString(v.toString()).toStdString();
+            const std::string s = v.toString().toStdString();
             out = (s == "1" || s == "true" || s == "TRUE" || s == "True");
             return true;
         }
@@ -1043,7 +1043,7 @@ static bool encodeJsonArg(sw::ipc::detail::Encoder& enc, const std::string& type
     auto asInt = [](const SwJsonValue& v, int& out) -> bool {
         if (v.isInt()) { out = v.toInt(); return true; }
         if (v.isDouble()) { out = static_cast<int>(v.toDouble()); return true; }
-        if (v.isString()) { out = std::atoi(SwString(v.toString()).toStdString().c_str()); return true; }
+        if (v.isString()) { out = std::atoi(v.toString().toStdString().c_str()); return true; }
         if (v.isBool()) { out = v.toBool() ? 1 : 0; return true; }
         return false;
     };
@@ -1051,7 +1051,7 @@ static bool encodeJsonArg(sw::ipc::detail::Encoder& enc, const std::string& type
         if (v.isInt()) { out = static_cast<uint32_t>(v.toInt()); return true; }
         if (v.isDouble()) { out = static_cast<uint32_t>(v.toDouble()); return true; }
         if (v.isString()) {
-            const std::string s = SwString(v.toString()).toStdString();
+            const std::string s = v.toString().toStdString();
             out = static_cast<uint32_t>(std::strtoul(s.c_str(), NULL, 10));
             return true;
         }
@@ -1062,7 +1062,7 @@ static bool encodeJsonArg(sw::ipc::detail::Encoder& enc, const std::string& type
         if (v.isInt()) { out = static_cast<uint64_t>(v.toInt()); return true; }
         if (v.isDouble()) { out = static_cast<uint64_t>(v.toDouble()); return true; }
         if (v.isString()) {
-            const std::string s = SwString(v.toString()).toStdString();
+            const std::string s = v.toString().toStdString();
             out = static_cast<uint64_t>(std::strtoull(s.c_str(), NULL, 10));
             return true;
         }
@@ -1072,7 +1072,7 @@ static bool encodeJsonArg(sw::ipc::detail::Encoder& enc, const std::string& type
     auto asDouble = [](const SwJsonValue& v, double& out) -> bool {
         if (v.isDouble()) { out = v.toDouble(); return true; }
         if (v.isInt()) { out = static_cast<double>(v.toInt()); return true; }
-        if (v.isString()) { out = std::atof(SwString(v.toString()).toStdString().c_str()); return true; }
+        if (v.isString()) { out = std::atof(v.toString().toStdString().c_str()); return true; }
         if (v.isBool()) { out = v.toBool() ? 1.0 : 0.0; return true; }
         return false;
     };
@@ -1084,7 +1084,7 @@ static bool encodeJsonArg(sw::ipc::detail::Encoder& enc, const std::string& type
         return false;
     };
     auto asBytes = [](const SwJsonValue& v, SwByteArray& out) -> bool {
-        if (v.isString()) { out = SwByteArray(SwString(v.toString()).toStdString()); return true; }
+        if (v.isString()) { out = SwByteArray(v.toString().toStdString()); return true; }
         return false;
     };
 
@@ -1168,7 +1168,7 @@ static bool decodeJsonValueByType(sw::ipc::detail::Decoder& dec, const std::stri
     if (isBytesType(type)) {
         SwByteArray x;
         if (!sw::ipc::detail::Codec<SwByteArray>::read(dec, x)) { err = "rpc: decode failed (SwByteArray)"; return false; }
-        out = SwJsonValue(SwString(std::string(x.constData(), x.size())));
+        out = SwJsonValue(SwString(x.constData(), x.size()));
         return true;
     }
 
@@ -1348,8 +1348,8 @@ void SwBridgeHttpServer::registerRoutes_() {
             if (!v.isObject()) continue;
             SwJsonObject o(v.toObject());
 
-            const SwString sig = SwString(o["signal"].toString()).toStdString();
-            const std::string typeName = SwString(o["typeName"].toString()).toStdString();
+            const SwString sig = o["signal"].toString();
+            const std::string typeName = o["typeName"].toString().toStdString();
             const std::vector<std::string> args = parseArgTypesFromTypeName(typeName);
 
             SwJsonObject item;
@@ -1437,9 +1437,9 @@ void SwBridgeHttpServer::registerRoutes_() {
         }
 
         SwJsonObject out;
-        out["target"] = SwJsonValue(target.toStdString());
-        out["signal"] = SwJsonValue(name.toStdString());
-        out["typeName"] = SwJsonValue(info.typeName.toStdString());
+        out["target"] = SwJsonValue(target);
+        out["signal"] = SwJsonValue(name);
+        out["typeName"] = SwJsonValue(info.typeName);
         out["seq"] = SwJsonValue(std::to_string(seq));
         out["changed"] = SwJsonValue(seq > since);
 
@@ -1482,11 +1482,11 @@ void SwBridgeHttpServer::registerRoutes_() {
             if (!v.isObject()) continue;
             const SwJsonObject o(v.toObject());
 
-            const std::string sig = SwString(o["signal"].toString()).toStdString();
+            const std::string sig = o["signal"].toString().toStdString();
             if (sig.rfind("__rpc__|", 0) != 0) continue;
 
             const std::string method = sig.substr(std::strlen("__rpc__|"));
-            const std::string typeName = SwString(o["typeName"].toString()).toStdString();
+            const std::string typeName = o["typeName"].toString().toStdString();
             std::vector<std::string> args = parseArgTypesFromTypeName(typeName);
             if (args.size() >= 3) args.erase(args.begin(), args.begin() + 3);
 
@@ -1649,10 +1649,10 @@ void SwBridgeHttpServer::registerRoutes_() {
             for (std::map<std::string, Group>::const_iterator it = groups.begin(); it != groups.end(); ++it) {
                 const Group& g = it->second;
                 SwJsonObject x;
-                x["domain"] = SwJsonValue(g.domain.toStdString());
-                x["object"] = SwJsonValue(g.object.toStdString());
-                x["signal"] = SwJsonValue(g.signal.toStdString());
-                x["pubTarget"] = SwJsonValue(g.pubTarget.toStdString());
+                x["domain"] = SwJsonValue(g.domain);
+                x["object"] = SwJsonValue(g.object);
+                x["signal"] = SwJsonValue(g.signal);
+                x["pubTarget"] = SwJsonValue(g.pubTarget);
                 SwJsonArray subArr;
                 for (std::set<std::string>::const_iterator sit = g.subTargets.begin(); sit != g.subTargets.end(); ++sit) {
                     subArr.append(SwJsonValue(*sit));
@@ -1741,8 +1741,8 @@ void SwBridgeHttpServer::registerRoutes_() {
         }
 
         SwJsonObject out;
-        out["target"] = SwJsonValue(target.toStdString());
-        out["configSignal"] = SwJsonValue(cfgSig.toStdString());
+        out["target"] = SwJsonValue(target);
+        out["configSignal"] = SwJsonValue(cfgSig);
         out["pubId"] = SwJsonValue(std::to_string(pubId));
 
         if (!path.isEmpty()) {
@@ -1966,7 +1966,7 @@ void SwBridgeHttpServer::registerRoutes_() {
                 if (!v.isObject()) continue;
                 SwJsonObject e(v.toObject());
                 if (SwString(e["signal"].toString()) == sigName) {
-                    typeName = SwString(e["typeName"].toString()).toStdString();
+                    typeName = e["typeName"].toString().toStdString();
                     break;
                 }
             }
@@ -1988,27 +1988,27 @@ void SwBridgeHttpServer::registerRoutes_() {
         auto asBool = [](const SwJsonValue& v, bool& out) -> bool {
             if (v.isBool()) { out = v.toBool(); return true; }
             if (v.isInt()) { out = (v.toInt() != 0); return true; }
-            if (v.isString()) { const std::string s = SwString(v.toString()).toStdString(); out = (s == "1" || s == "true" || s == "TRUE" || s == "True"); return true; }
+            if (v.isString()) { const std::string s = v.toString().toStdString(); out = (s == "1" || s == "true" || s == "TRUE" || s == "True"); return true; }
             return false;
         };
         auto asInt = [](const SwJsonValue& v, int& out) -> bool {
             if (v.isInt()) { out = v.toInt(); return true; }
             if (v.isDouble()) { out = static_cast<int>(v.toDouble()); return true; }
-            if (v.isString()) { out = std::atoi(SwString(v.toString()).toStdString().c_str()); return true; }
+            if (v.isString()) { out = std::atoi(v.toString().toStdString().c_str()); return true; }
             if (v.isBool()) { out = v.toBool() ? 1 : 0; return true; }
             return false;
         };
         auto asU64 = [](const SwJsonValue& v, uint64_t& out) -> bool {
             if (v.isInt()) { out = static_cast<uint64_t>(v.toInt()); return true; }
             if (v.isDouble()) { out = static_cast<uint64_t>(v.toDouble()); return true; }
-            if (v.isString()) { out = static_cast<uint64_t>(std::strtoull(SwString(v.toString()).toStdString().c_str(), NULL, 10)); return true; }
+            if (v.isString()) { out = static_cast<uint64_t>(std::strtoull(v.toString().toStdString().c_str(), NULL, 10)); return true; }
             if (v.isBool()) { out = v.toBool() ? 1ull : 0ull; return true; }
             return false;
         };
         auto asDouble = [](const SwJsonValue& v, double& out) -> bool {
             if (v.isDouble()) { out = v.toDouble(); return true; }
             if (v.isInt()) { out = static_cast<double>(v.toInt()); return true; }
-            if (v.isString()) { out = std::atof(SwString(v.toString()).toStdString().c_str()); return true; }
+            if (v.isString()) { out = std::atof(v.toString().toStdString().c_str()); return true; }
             if (v.isBool()) { out = v.toBool() ? 1.0 : 0.0; return true; }
             return false;
         };
@@ -2020,7 +2020,7 @@ void SwBridgeHttpServer::registerRoutes_() {
             return false;
         };
         auto asBytes = [](const SwJsonValue& v, SwByteArray& out) -> bool {
-            if (v.isString()) { out = SwByteArray(SwString(v.toString()).toStdString()); return true; }
+            if (v.isString()) { out = SwByteArray(v.toString().toStdString()); return true; }
             return false;
         };
 
@@ -2401,7 +2401,7 @@ void SwBridgeHttpServer::onWsClientData_(SwTcpSocket* client) {
 
     // Read available data
     while (true) {
-        const SwString chunk = client->read();
+        const SwString chunk(client->read().toStdString());
         if (chunk.isEmpty()) break;
         st.buffer.append(chunk.data(), chunk.size());
     }

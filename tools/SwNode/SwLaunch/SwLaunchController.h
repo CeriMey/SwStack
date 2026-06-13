@@ -678,7 +678,7 @@ private:
         });
         SwObject::connect(socket, &SwIODevice::readyRead, this, [socket]() {
             while (true) {
-                const SwString ignored = socket->read();
+                const SwByteArray ignored = socket->read();
                 if (ignored.isEmpty()) break;
             }
         });

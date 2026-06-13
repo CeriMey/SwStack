@@ -111,13 +111,13 @@ class SwComponentContainer : public SwRemoteObject {
             if (!info.instance) continue;
 
             SwJsonObject o;
-            o["type"] = SwJsonValue(info.type.toStdString());
-            o["plugin"] = SwJsonValue(info.pluginPath.toStdString());
-            o["sys"] = SwJsonValue(sysName().toStdString());
-            o["ns"] = SwJsonValue(info.instance->nameSpace().toStdString());
-            o["name"] = SwJsonValue(info.instance->objectName().toStdString());
-            o["objectFqn"] = SwJsonValue(objectFqn.toStdString());
-            o["target"] = SwJsonValue(buildObjectFqn(sysName(), objectFqn).toStdString());
+            o["type"] = SwJsonValue(info.type);
+            o["plugin"] = SwJsonValue(info.pluginPath);
+            o["sys"] = SwJsonValue(sysName());
+            o["ns"] = SwJsonValue(info.instance->nameSpace());
+            o["name"] = SwJsonValue(info.instance->objectName());
+            o["objectFqn"] = SwJsonValue(objectFqn);
+            o["target"] = SwJsonValue(buildObjectFqn(sysName(), objectFqn));
             out.append(SwJsonValue(o));
         }
         return out;
@@ -151,9 +151,9 @@ class SwComponentContainer : public SwRemoteObject {
     SwString rpcStatus_() {
         SwJsonObject o;
         o["ok"] = SwJsonValue(true);
-        o["sys"] = SwJsonValue(sysName().toStdString());
-        o["container"] = SwJsonValue(buildObjectFqn(nameSpace(), objectName()).toStdString());
-        o["threading"] = SwJsonValue(threadingMode_.toStdString());
+        o["sys"] = SwJsonValue(sysName());
+        o["container"] = SwJsonValue(buildObjectFqn(nameSpace(), objectName()));
+        o["threading"] = SwJsonValue(threadingMode_);
         o["plugins"] = SwJsonValue(getArrayOrEmpty_(rpcListPlugins_()));
         o["pluginsInfo"] = SwJsonValue(getArrayOrEmpty_(rpcListPluginsInfo_()));
         o["components"] = SwJsonValue(listComponentsJson());
@@ -299,7 +299,7 @@ class SwComponentContainer : public SwRemoteObject {
         const bool ok = loadPlugin_(path, &err);
         SwJsonObject res;
         res["ok"] = SwJsonValue(ok);
-        if (!ok) res["err"] = SwJsonValue(err.toStdString());
+        if (!ok) res["err"] = SwJsonValue(err);
         return jsonObjectToString_(res);
     }
 
@@ -332,7 +332,7 @@ class SwComponentContainer : public SwRemoteObject {
             if (pit != pluginTypes_.end()) {
                 const SwStringList& lst = pit->second;
                 for (size_t i = 0; i < lst.size(); ++i) {
-                    types.append(SwJsonValue(lst[i].toStdString()));
+                    types.append(SwJsonValue(lst[i]));
                 }
             }
             o["components"] = SwJsonValue(types);
@@ -354,7 +354,7 @@ class SwComponentContainer : public SwRemoteObject {
         if (!parseJsonObject_(paramsJson, params, &parseErr)) {
             SwJsonObject res;
             res["ok"] = SwJsonValue(false);
-            res["err"] = SwJsonValue((SwString("invalid paramsJson: ") + parseErr).toStdString());
+            res["err"] = SwJsonValue((SwString("invalid paramsJson: ") + parseErr));
             return jsonObjectToString_(res);
         }
 
@@ -366,9 +366,9 @@ class SwComponentContainer : public SwRemoteObject {
         res["ok"] = SwJsonValue(inst != nullptr);
         if (inst) {
             const SwString objectFqn = buildObjectFqn(inst->nameSpace(), inst->objectName());
-            res["target"] = SwJsonValue(buildObjectFqn(sysName(), objectFqn).toStdString());
+            res["target"] = SwJsonValue(buildObjectFqn(sysName(), objectFqn));
         } else {
-            res["err"] = SwJsonValue(err.toStdString());
+            res["err"] = SwJsonValue(err);
         }
         return jsonObjectToString_(res);
     }
@@ -378,7 +378,7 @@ class SwComponentContainer : public SwRemoteObject {
         const bool ok = unloadComponent_(targetObject, &err);
         SwJsonObject res;
         res["ok"] = SwJsonValue(ok);
-        if (!ok) res["err"] = SwJsonValue(err.toStdString());
+        if (!ok) res["err"] = SwJsonValue(err);
         return jsonObjectToString_(res);
     }
 
@@ -396,9 +396,9 @@ class SwComponentContainer : public SwRemoteObject {
         SwJsonObject res;
         res["ok"] = SwJsonValue(inst != nullptr);
         if (inst) {
-            res["target"] = SwJsonValue(buildObjectFqn(sysName(), buildObjectFqn(inst->nameSpace(), inst->objectName())).toStdString());
+            res["target"] = SwJsonValue(buildObjectFqn(sysName(), buildObjectFqn(inst->nameSpace(), inst->objectName())));
         } else {
-            res["err"] = SwJsonValue(err.toStdString());
+            res["err"] = SwJsonValue(err);
         }
         return jsonObjectToString_(res);
     }
@@ -426,18 +426,18 @@ class SwComponentContainer : public SwRemoteObject {
             SwString e;
             const bool ok = unloadComponent_(obj, &e);
             if (ok) {
-                stopped.append(SwJsonValue(obj.toStdString()));
+                stopped.append(SwJsonValue(obj));
             } else {
                 SwJsonObject f;
-                f["object"] = SwJsonValue(obj.toStdString());
-                f["err"] = SwJsonValue(e.toStdString());
+                f["object"] = SwJsonValue(obj);
+                f["err"] = SwJsonValue(e);
                 failed.append(SwJsonValue(f));
             }
         }
 
         SwJsonObject res;
         res["ok"] = SwJsonValue(failed.size() == 0);
-        res["plugin"] = SwJsonValue(pluginKey.toStdString());
+        res["plugin"] = SwJsonValue(pluginKey);
         res["stopped"] = SwJsonValue(stopped);
         if (failed.size() != 0) res["failed"] = SwJsonValue(failed);
         return jsonObjectToString_(res);
@@ -466,18 +466,18 @@ class SwComponentContainer : public SwRemoteObject {
             SwString e;
             SwRemoteObject* inst = restartComponent_(obj, &e);
             if (inst) {
-                restarted.append(SwJsonValue(obj.toStdString()));
+                restarted.append(SwJsonValue(obj));
             } else {
                 SwJsonObject f;
-                f["object"] = SwJsonValue(obj.toStdString());
-                f["err"] = SwJsonValue(e.toStdString());
+                f["object"] = SwJsonValue(obj);
+                f["err"] = SwJsonValue(e);
                 failed.append(SwJsonValue(f));
             }
         }
 
         SwJsonObject res;
         res["ok"] = SwJsonValue(failed.size() == 0);
-        res["plugin"] = SwJsonValue(pluginKey.toStdString());
+        res["plugin"] = SwJsonValue(pluginKey);
         res["restarted"] = SwJsonValue(restarted);
         if (failed.size() != 0) res["failed"] = SwJsonValue(failed);
         return jsonObjectToString_(res);

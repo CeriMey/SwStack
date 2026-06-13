@@ -66,7 +66,7 @@ int SwApiNodesCommand::cmdList_() {
         const SwJsonValue v = nodes[i];
         if (!v.isObject()) continue;
         const SwJsonObject o(v.toObject());
-        std::cout << SwString(o["target"].toString()).toStdString() << "\n";
+        std::cout << o["target"].toString().toStdString() << "\n";
     }
     return 0;
 }
@@ -100,7 +100,7 @@ int SwApiNodesCommand::cmdInfo_() {
     }
 
     std::cout
-        << "target: " << SwString(info["target"].toString()).toStdString() << "\n"
+        << "target: " << info["target"].toString().toStdString() << "\n"
         << "alive: " << (info["alive"].toBool() ? "true" : "false") << "\n"
         << "lastSeenMs: " << static_cast<uint64_t>(info["lastSeenMs"].toDouble()) << "\n"
         << "signals: " << info["signalCount"].toInt() << "\n"
@@ -131,7 +131,7 @@ int SwApiNodesCommand::cmdSaveAsFactory_() {
     if (json) {
         SwJsonObject o;
         o["ok"] = SwJsonValue(ok);
-        o["target"] = SwJsonValue(target.toString().toStdString());
+        o["target"] = SwJsonValue(target.toString());
         std::cout << SwApiJson::toJson(o, cli().hasFlag("pretty")).toStdString() << "\n";
     } else {
         std::cout << (ok ? "ok" : "failed") << "\n";
@@ -162,7 +162,7 @@ int SwApiNodesCommand::cmdResetFactory_() {
     if (json) {
         SwJsonObject o;
         o["ok"] = SwJsonValue(ok);
-        o["target"] = SwJsonValue(target.toString().toStdString());
+        o["target"] = SwJsonValue(target.toString());
         std::cout << SwApiJson::toJson(o, cli().hasFlag("pretty")).toStdString() << "\n";
     } else {
         std::cout << (ok ? "ok" : "failed") << "\n";

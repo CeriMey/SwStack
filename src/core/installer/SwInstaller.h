@@ -319,20 +319,20 @@ struct SwInstallerPlanAction {
 
     SwJsonObject toJson() const {
         SwJsonObject obj;
-        obj["kind"] = kindToString(kind).toStdString();
-        obj["title"] = title.toStdString();
-        obj["payloadId"] = payloadId.toStdString();
-        obj["payloadRelativePath"] = payloadRelativePath.toStdString();
-        obj["sourcePath"] = sourcePath.toStdString();
-        obj["targetPath"] = targetPath.toStdString();
-        obj["arguments"] = arguments.toStdString();
-        obj["workingDirectory"] = workingDirectory.toStdString();
-        obj["linkPath"] = linkPath.toStdString();
-        obj["description"] = description.toStdString();
-        obj["iconPath"] = iconPath.toStdString();
+        obj["kind"] = kindToString(kind);
+        obj["title"] = title;
+        obj["payloadId"] = payloadId;
+        obj["payloadRelativePath"] = payloadRelativePath;
+        obj["sourcePath"] = sourcePath;
+        obj["targetPath"] = targetPath;
+        obj["arguments"] = arguments;
+        obj["workingDirectory"] = workingDirectory;
+        obj["linkPath"] = linkPath;
+        obj["description"] = description;
+        obj["iconPath"] = iconPath;
         obj["iconIndex"] = iconIndex;
-        obj["registryKeyPath"] = registryKeyPath.toStdString();
-        obj["checksumSha256"] = checksumSha256.toStdString();
+        obj["registryKeyPath"] = registryKeyPath;
+        obj["checksumSha256"] = checksumSha256;
         obj["overwrite"] = overwrite;
         obj["preserveIfModified"] = preserveIfModified;
         obj["createNoWindow"] = createNoWindow;
@@ -423,7 +423,7 @@ struct SwInstallerExecutionResult {
     SwString toJson() const {
         SwJsonObject obj;
         obj["ok"] = ok;
-        obj["message"] = message.toStdString();
+        obj["message"] = message;
         obj["stateObject"] = stateObject;
         return SwJsonDocument(obj).toJson(SwJsonDocument::JsonFormat::Pretty);
     }
@@ -551,22 +551,22 @@ private:
 
 inline SwJsonObject SwInstallerPlan::toJsonObject() const {
     SwJsonObject obj;
-    obj["kind"] = kindToString(kind).toStdString();
-    obj["productId"] = productId.toStdString();
-    obj["displayName"] = displayName.toStdString();
-    obj["publisher"] = publisher.toStdString();
-    obj["version"] = version.toStdString();
-    obj["installRoot"] = installRoot.toStdString();
-    obj["stateRoot"] = stateRoot.toStdString();
-    obj["stateFilePath"] = stateFilePath.toStdString();
-    obj["setupSelfPath"] = setupSelfPath.toStdString();
-    obj["cachedSetupPath"] = cachedSetupPath.toStdString();
-    obj["uninstallRegistryKeyPath"] = uninstallRegistryKeyPath.toStdString();
+    obj["kind"] = kindToString(kind);
+    obj["productId"] = productId;
+    obj["displayName"] = displayName;
+    obj["publisher"] = publisher;
+    obj["version"] = version;
+    obj["installRoot"] = installRoot;
+    obj["stateRoot"] = stateRoot;
+    obj["stateFilePath"] = stateFilePath;
+    obj["setupSelfPath"] = setupSelfPath;
+    obj["cachedSetupPath"] = cachedSetupPath;
+    obj["uninstallRegistryKeyPath"] = uninstallRegistryKeyPath;
     obj["silent"] = silent;
 
     SwJsonArray componentsArr;
     for (size_t i = 0; i < selectedComponentIds.size(); ++i) {
-        componentsArr.append(selectedComponentIds[i].toStdString());
+        componentsArr.append(selectedComponentIds[i]);
     }
     obj["selectedComponentIds"] = componentsArr;
 
@@ -579,11 +579,11 @@ inline SwJsonObject SwInstallerPlan::toJsonObject() const {
     SwJsonArray launchesArr;
     for (size_t i = 0; i < finalLaunches.size(); ++i) {
         SwJsonObject launchObj;
-        launchObj["displayName"] = finalLaunches[i].displayName.toStdString();
-        launchObj["targetRelativePath"] = finalLaunches[i].targetRelativePath.toStdString();
-        launchObj["arguments"] = finalLaunches[i].arguments.toStdString();
+        launchObj["displayName"] = finalLaunches[i].displayName;
+        launchObj["targetRelativePath"] = finalLaunches[i].targetRelativePath;
+        launchObj["arguments"] = finalLaunches[i].arguments;
         launchObj["workingDirectoryRelativePath"] =
-            finalLaunches[i].workingDirectoryRelativePath.toStdString();
+            finalLaunches[i].workingDirectoryRelativePath;
         launchesArr.append(launchObj);
     }
     obj["finalLaunches"] = launchesArr;
@@ -977,22 +977,22 @@ inline void SwInstallerEngine::appendUninstallActions_(const SwJsonObject& state
 
 inline SwJsonObject SwInstallerEngine::initialStateObject_(const SwInstallerPlan& plan) const {
     SwJsonObject state;
-    state["productId"] = product_.productId.toStdString();
-    state["displayName"] = product_.effectiveDisplayName().toStdString();
-    state["publisher"] = product_.publisher.toStdString();
-    state["version"] = product_.version.toStdString();
-    state["installRoot"] = plan.installRoot.toStdString();
-    state["stateRoot"] = plan.stateRoot.toStdString();
-    state["stateFilePath"] = plan.stateFilePath.toStdString();
-    state["cachedSetupPath"] = plan.cachedSetupPath.toStdString();
-    state["mainExecutable"] = product_.mainExecutableRelativePath.toStdString();
+    state["productId"] = product_.productId;
+    state["displayName"] = product_.effectiveDisplayName();
+    state["publisher"] = product_.publisher;
+    state["version"] = product_.version;
+    state["installRoot"] = plan.installRoot;
+    state["stateRoot"] = plan.stateRoot;
+    state["stateFilePath"] = plan.stateFilePath;
+    state["cachedSetupPath"] = plan.cachedSetupPath;
+    state["mainExecutable"] = product_.mainExecutableRelativePath;
     state["ownedFiles"] = SwJsonArray();
     state["ownedDirectories"] = SwJsonArray();
     state["shortcuts"] = SwJsonArray();
     state["registryKeys"] = SwJsonArray();
     SwJsonArray selected;
     for (size_t i = 0; i < plan.selectedComponentIds.size(); ++i) {
-        selected.append(plan.selectedComponentIds[i].toStdString());
+        selected.append(plan.selectedComponentIds[i]);
     }
     state["selectedComponents"] = selected;
     return state;
@@ -1056,8 +1056,8 @@ inline void SwInstallerEngine::appendOwnedFile_(SwJsonObject& state,
     }
     SwJsonArray arr = state["ownedFiles"].toArray();
     SwJsonObject item;
-    item["path"] = path.toStdString();
-    item["checksumSha256"] = checksum.toStdString();
+    item["path"] = path;
+    item["checksumSha256"] = checksum;
     item["preserveIfModified"] = preserveIfModified;
     arr.append(item);
     state["ownedFiles"] = arr;
@@ -1092,7 +1092,7 @@ inline void SwInstallerEngine::appendUniqueStringArray_(SwJsonObject& state,
             }
         }
     }
-    arr.append(value.toStdString());
+    arr.append(value);
     state[key] = arr;
 }
 

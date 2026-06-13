@@ -464,15 +464,15 @@ private:
         SwString stdoutText;
         SwString stderrText;
         SwObject::connect(&versionProcess, SIGNAL(readyReadStdOut), std::function<void()>([&versionProcess, &stdoutText]() {
-            stdoutText += versionProcess.read();
+            stdoutText += SwString(versionProcess.read().toStdString());
         }));
         SwObject::connect(&versionProcess, SIGNAL(readyReadStdErr), std::function<void()>([&versionProcess, &stderrText]() {
-            stderrText += versionProcess.readStdErr();
+            stderrText += SwString(versionProcess.readStdErr().toStdString());
         }));
         SwObject::connect(&versionProcess, SIGNAL(processTerminated), std::function<void(int)>(
             [&versionProcess, &versionProcessExited, &versionExitCode, &stdoutText, &stderrText](int exitCode) {
-                stdoutText += versionProcess.read();
-                stderrText += versionProcess.readStdErr();
+                stdoutText += SwString(versionProcess.read().toStdString());
+                stderrText += SwString(versionProcess.readStdErr().toStdString());
                 versionProcessExited = true;
                 versionExitCode = exitCode;
                 if (versionProcess.isOpen()) {
@@ -497,8 +497,8 @@ private:
             return false;
         }
 
-        stdoutText += versionProcess.read();
-        stderrText += versionProcess.readStdErr();
+        stdoutText += SwString(versionProcess.read().toStdString());
+        stderrText += SwString(versionProcess.readStdErr().toStdString());
         stdoutText = stdoutText.trimmed();
         stderrText = stderrText.trimmed();
 
@@ -623,11 +623,11 @@ private:
 
     void drainLogStream_() {
         while (true) {
-            const SwString chunk = logStreamProcess_.read();
+            const SwString chunk(logStreamProcess_.read().toStdString());
             if (chunk.isEmpty()) break;
             logStreamRawBuffer_ += chunk;
         }
-        const SwString stderrChunk = logStreamProcess_.readStdErr();
+        const SwString stderrChunk(logStreamProcess_.readStdErr().toStdString());
         if (!stderrChunk.isEmpty()) {
             logStreamStdErr_ += stderrChunk;
         }
@@ -1115,12 +1115,12 @@ private:
     }
 
     void drainLauncherOutput_() {
-        const SwString stdoutChunk = launchProcess_.read();
+        const SwString stdoutChunk(launchProcess_.read().toStdString());
         if (!stdoutChunk.isEmpty()) {
             launchStdOut_ += stdoutChunk;
         }
 
-        const SwString stderrChunk = launchProcess_.readStdErr();
+        const SwString stderrChunk(launchProcess_.readStdErr().toStdString());
         if (!stderrChunk.isEmpty()) {
             launchStdErr_ += stderrChunk;
         }

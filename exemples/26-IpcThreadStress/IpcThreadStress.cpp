@@ -478,13 +478,13 @@ static int benchMain(SwCoreApplication& app, const SwString& program) {
             const std::string pid = std::to_string(i);
 
             SwObject::connect(raw, SIGNAL(readyReadStdOut), std::function<void()>([raw, pid]() {
-                SwString out = raw->read();
+                SwString out(raw->read().toStdString());
                 const std::string s = out.toStdString();
                 if (!s.empty()) std::cout << "[client " << pid << " stdout] " << s;
             }));
 
             SwObject::connect(raw, SIGNAL(readyReadStdErr), std::function<void()>([raw, pid]() {
-                SwString out = raw->readStdErr();
+                SwString out(raw->readStdErr().toStdString());
                 const std::string s = out.toStdString();
                 if (!s.empty()) std::cerr << "[client " << pid << " stderr] " << s;
             }));

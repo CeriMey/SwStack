@@ -154,11 +154,11 @@ public:
      *
      * @param maxSize The maximum number of bytes to read. Defaults to `0`, which indicates no limit.
      *
-     * @return A `SwString` containing the data read from the socket.
+     * @return A `SwByteArray` containing the data read from the socket.
      *
      * @note This is a pure virtual method and must be implemented in derived classes.
      */
-    virtual SwString read(int64_t maxSize = 0) override = 0;
+    virtual SwByteArray read(int64_t maxSize = 0) override = 0;
 
     /**
      * @brief Writes data to the socket.
@@ -170,6 +170,10 @@ public:
      * @note This is a pure virtual method and must be implemented in derived classes.
      */
     virtual bool write(const SwString& data) override = 0;
+
+    bool write(const SwByteArray& data) override {
+        return write(SwString(data.constData(), data.size()));
+    }
 
     /**
      * @brief Checks if the socket is currently open.

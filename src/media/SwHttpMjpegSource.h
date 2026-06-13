@@ -226,7 +226,7 @@ private:
             return;
         }
         for (;;) {
-            SwString chunk = m_socket->read(8192);
+            SwString chunk(m_socket->read(8192).toStdString());
             if (chunk.isEmpty()) {
                 break;
             }

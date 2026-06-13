@@ -359,7 +359,7 @@ static SwJsonObject proxyConfigToJsonObject_(const ProxyControlConfig& config) {
     SwJsonObject root;
 
     SwJsonObject global;
-    global["workerProcesses"] = config.global.workerProcesses.toStdString();
+    global["workerProcesses"] = config.global.workerProcesses;
     global["httpPort"] = config.global.httpPort;
     global["httpsPort"] = config.global.httpsPort;
     global["enableHttp2"] = config.global.enableHttp2;
@@ -372,9 +372,9 @@ static SwJsonObject proxyConfigToJsonObject_(const ProxyControlConfig& config) {
     for (std::size_t i = 0; i < config.upstreams.size(); ++i) {
         const ProxyUpstreamConfig& item = config.upstreams[i];
         SwJsonObject upstream;
-        upstream["id"] = item.id.toStdString();
-        upstream["protocol"] = item.protocol.toStdString();
-        upstream["host"] = item.host.toStdString();
+        upstream["id"] = item.id;
+        upstream["protocol"] = item.protocol;
+        upstream["host"] = item.host;
         upstream["port"] = item.port;
         upstream["connectTimeoutMs"] = item.connectTimeoutMs;
         upstream["readTimeoutMs"] = item.readTimeoutMs;
@@ -387,22 +387,22 @@ static SwJsonObject proxyConfigToJsonObject_(const ProxyControlConfig& config) {
     for (std::size_t i = 0; i < config.subdomains.size(); ++i) {
         const ProxySubdomainConfig& item = config.subdomains[i];
         SwJsonObject route;
-        route["host"] = item.host.toStdString();
-        route["upstreamId"] = item.upstreamId.toStdString();
-        route["pathPrefix"] = item.pathPrefix.toStdString();
+        route["host"] = item.host;
+        route["upstreamId"] = item.upstreamId;
+        route["pathPrefix"] = item.pathPrefix;
         route["tls"] = item.tls;
         route["websocket"] = item.websocket;
         route["forceHttps"] = item.forceHttps;
         route["stripPrefix"] = item.stripPrefix;
         route["rateLimitRpm"] = item.rateLimitRpm;
-        route["accessPolicy"] = item.accessPolicy.toStdString();
+        route["accessPolicy"] = item.accessPolicy;
 
         SwJsonArray headers;
         for (std::size_t h = 0; h < item.headers.size(); ++h) {
             const ProxyHeaderConfig& header = item.headers[h];
             SwJsonObject headerObject;
-            headerObject["key"] = header.key.toStdString();
-            headerObject["value"] = header.value.toStdString();
+            headerObject["key"] = header.key;
+            headerObject["value"] = header.value;
             headers.append(headerObject);
         }
         route["headers"] = headers;
@@ -1257,7 +1257,7 @@ private slots:
 
         bool gotData = false;
         while (true) {
-            SwString chunk = m_socket->read();
+            SwString chunk(m_socket->read().toStdString());
             if (chunk.isEmpty()) {
                 break;
             }
@@ -1452,7 +1452,7 @@ private slots:
 
         if (!m_upstreamHandshakeDone) {
             while (true) {
-                SwString chunk = m_upstreamSocket->read();
+                SwString chunk(m_upstreamSocket->read().toStdString());
                 if (chunk.isEmpty()) {
                     break;
                 }
@@ -1611,7 +1611,7 @@ private:
 
         bool progressed = false;
         while (true) {
-            SwString chunk = src->read();
+            SwString chunk(src->read().toStdString());
             if (chunk.isEmpty()) {
                 break;
             }
@@ -2561,7 +2561,7 @@ R"HTML(
             const SwString verbose = context.queryValue("verbose", "0");
 
             SwJsonObject payload;
-            payload["id"] = userId.toStdString();
+            payload["id"] = userId;
             payload["verbose"] = (verbose == "1");
             payload["hint"] = "Use POST /api/v1/echo or POST /api/v1/upload";
             context.json(SwJsonDocument(payload), 200);
@@ -2580,8 +2580,8 @@ R"HTML(
 
             SwJsonObject payload;
             payload["ok"] = true;
-            payload["healthUrl"] = healthUrl.toStdString();
-            payload["userUrl"] = userUrl.toStdString();
+            payload["healthUrl"] = healthUrl;
+            payload["userUrl"] = userUrl;
             payload["metricsRouteRegistered"] = appRef->hasRouteName("api.admin.metrics");
             context.json(SwJsonDocument(payload), 200);
         }, routesRoute);
@@ -2691,8 +2691,8 @@ R"HTML(
             payload["ok"] = true;
             payload["files"] = storedCount;
             payload["bytes"] = totalBytes;
-            payload["meta"] = meta.toStdString();
-            payload["stored"] = storedNames.toStdString();
+            payload["meta"] = meta;
+            payload["stored"] = storedNames;
             payload["downloadPrefix"] = "/uploads/";
             context.json(SwJsonDocument(payload), 200);
         }, uploadRoute);
@@ -2736,9 +2736,9 @@ R"HTML(
         const SwString runtimePlan = buildProxyRuntimePlan_(snapshot);
         SwJsonObject payload;
         payload["ok"] = true;
-        payload["updatedAt"] = updatedAt.toStdString();
+        payload["updatedAt"] = updatedAt;
         payload["config"] = proxyConfigToJsonObject_(snapshot);
-        payload["runtimePlan"] = runtimePlan.toStdString();
+        payload["runtimePlan"] = runtimePlan;
         context.json(SwJsonDocument(payload), 200);
     }, proxyConfigGetRoute);
 
@@ -2793,9 +2793,9 @@ R"HTML(
 
         SwJsonObject payload;
         payload["ok"] = true;
-        payload["updatedAt"] = updatedAt.toStdString();
+        payload["updatedAt"] = updatedAt;
         payload["config"] = proxyConfigToJsonObject_(incomingConfig);
-        payload["runtimePlan"] = runtimePlan.toStdString();
+        payload["runtimePlan"] = runtimePlan;
         context.json(SwJsonDocument(payload), 200);
     }, proxyConfigPostRoute);
 
@@ -2824,9 +2824,9 @@ R"HTML(
 
         SwJsonObject payload;
         payload["ok"] = true;
-        payload["updatedAt"] = updatedAt.toStdString();
+        payload["updatedAt"] = updatedAt;
         payload["config"] = proxyConfigToJsonObject_(defaults);
-        payload["runtimePlan"] = runtimePlan.toStdString();
+        payload["runtimePlan"] = runtimePlan;
         context.json(SwJsonDocument(payload), 200);
     }, proxyResetRoute);
 
@@ -2874,9 +2874,9 @@ R"HTML(
             SwJsonObject payload;
             payload["ok"] = false;
             payload["error"] = "proxy-route-not-found";
-            payload["reason"] = selectionReason.toStdString();
-            payload["host"] = requestHost.toStdString();
-            payload["path"] = requestPath.toStdString();
+            payload["reason"] = selectionReason;
+            payload["host"] = requestHost;
+            payload["path"] = requestPath;
             done(proxyBuildJsonResponse_(request, 404, payload));
             return;
         }
@@ -2946,7 +2946,7 @@ R"HTML(
         SwJsonObject payload;
         payload["ok"] = false;
         payload["error"] = "not-found";
-        payload["path"] = context.path().toStdString();
+        payload["path"] = context.path();
         context.json(SwJsonDocument(payload), 404);
     });
 

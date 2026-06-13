@@ -32,13 +32,13 @@ int main(int argc, char** argv) {
     SwProcess process;
 
     SwObject::connect(&process, SIGNAL(readyReadStdOut), std::function<void()>([&]() {
-        SwString output = process.read();
+        SwString output(process.read().toStdString());
         std::cout << "OUTPUT: " << output <<  std::endl;
     }));
 
     // Connecte les signaux pour stderr
     SwObject::connect(&process, SIGNAL(readyReadStdErr), std::function<void()>([&]() {
-        SwString error = process.readStdErr();
+        SwString error(process.readStdErr().toStdString());
         std::cerr << "ERROR: " << error <<  std::endl;
 
     }));

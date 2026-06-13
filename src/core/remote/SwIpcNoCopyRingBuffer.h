@@ -1516,7 +1516,7 @@ SwStringList NoCopyRingBuffer<MetaT, MaxConsumers>::streamsInRegistry(const SwSt
         const SwJsonObject o(v.toObject());
         if (SwString(o["object"].toString()) != object) continue;
 
-        const std::string sig = SwString(o["signal"].toString()).toStdString();
+        const std::string sig = o["signal"].toString().toStdString();
         if (sig.rfind(kPrefix, 0) != 0) continue;
         const std::string n = sig.substr(kPrefix.size());
         if (!n.empty()) names.push_back(n);

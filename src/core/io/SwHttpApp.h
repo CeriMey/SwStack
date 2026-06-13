@@ -1044,7 +1044,7 @@ public:
         const SwString basePrefix = resolvePath_(service->config().routePrefix);
         auto makeMessage = [](const SwString& key, const SwString& value) {
             SwJsonObject object;
-            object[key.toStdString()] = value.toStdString();
+            object[key] = value;
             return SwJsonValue(object);
         };
         auto makeOk = []() {
@@ -1102,7 +1102,7 @@ public:
             service->applyIdentityToContext(ctx, identity);
 
             SwJsonObject object;
-            object["token"] = rawToken.toStdString();
+            object["token"] = rawToken;
             object["tokenType"] = "Bearer";
             object["expiresAtMs"] = static_cast<long long>(identity.session.expiresAtMs);
             object["auth"] = makeAuth(identity.account);
@@ -1127,8 +1127,8 @@ public:
                 SwHttpAuthAccount account;
                 SwJsonValue subject;
                 bool pending = false;
-                const SwDbStatus status = service->registerAccount(body.value("email").toString().c_str(),
-                                                                   body.value("password").toString().c_str(),
+                const SwDbStatus status = service->registerAccount(body.value("email").toString(),
+                                                                   body.value("password").toString(),
                                                                    body.value("payload"),
                                                                    &account,
                                                                    &subject,
@@ -1158,35 +1158,33 @@ public:
                     return;
                 }
                 SwString rawToken;
-                SwString resetToken;
                 SwHttpAuthIdentity identity;
                 SwHttpAuthMfaLoginChallenge mfaChallenge;
-                const SwDbStatus status = service->login(document.object().value("email").toString().c_str(),
-                                                         document.object().value("password").toString().c_str(),
+                const SwDbStatus status = service->login(document.object().value("email").toString(),
+                                                         document.object().value("password").toString(),
                                                          ctx.headerValue("user-agent"),
                                                          ctx.isTls(),
                                                          &rawToken,
                                                          &identity,
-                                                         &resetToken,
+                                                         nullptr,
                                                          &error,
                                                          &mfaChallenge);
                 if (!status.ok()) {
                     if (!mfaChallenge.challengeToken.isEmpty()) {
                         SwJsonObject object;
                         object["mfaRequired"] = true;
-                        object["mfaToken"] = mfaChallenge.challengeToken.toStdString();
-                        object["email"] = mfaChallenge.email.toStdString();
+                        object["mfaToken"] = mfaChallenge.challengeToken;
+                        object["email"] = mfaChallenge.email;
                         object["expiresAtMs"] = static_cast<long long>(mfaChallenge.expiresAtMs);
                         ctx.json(SwJsonValue(object));
                         return;
                     }
-                    if (!resetToken.isEmpty()) {
+                    if (status.code() == SwDbStatus::Busy &&
+                        (error == "Password reset required" || status.message() == "Password reset required")) {
                         SwJsonObject object;
                         object["error"] =
-                            (error.isEmpty() ? SwString("Password reset required") : error).toStdString();
+                            (error.isEmpty() ? SwString("Password reset required") : error);
                         object["passwordResetRequired"] = true;
-                        object["resetToken"] = resetToken.toStdString();
-                        object["email"] = document.object().value("email").toString();
                         ctx.json(SwJsonValue(object), 403);
                         return;
                     }
@@ -1210,8 +1208,8 @@ public:
 
                 SwString rawToken;
                 SwHttpAuthIdentity identity;
-                const SwDbStatus status = service->verifyTotpLogin(document.object().value("mfaToken").toString().c_str(),
-                                                                   document.object().value("code").toString().c_str(),
+                const SwDbStatus status = service->verifyTotpLogin(document.object().value("mfaToken").toString(),
+                                                                   document.object().value("code").toString(),
                                                                    ctx.headerValue("user-agent"),
                                                                    ctx.isTls(),
                                                                    &rawToken,
@@ -1236,7 +1234,7 @@ public:
                 }
                 SwJsonObject object;
                 object["enabled"] = identity.account.mfaTotpEnabled;
-                object["enabledAt"] = identity.account.mfaTotpEnabledAt.toStdString();
+                object["enabledAt"] = identity.account.mfaTotpEnabledAt;
                 object["auth"] = makeAuth(identity.account);
                 ctx.json(SwJsonValue(object));
             });
@@ -1255,7 +1253,7 @@ public:
                 SwHttpAuthMfaTotpSetup setup;
                 const SwDbStatus status =
                     service->beginTotpSetup(requestToken(ctx),
-                                            document.object().value("currentPassword").toString().c_str(),
+                                            document.object().value("currentPassword").toString(),
                                             &setup,
                                             &error);
                 if (!status.ok()) {
@@ -1266,11 +1264,11 @@ public:
                 }
 
                 SwJsonObject object;
-                object["setupToken"] = setup.setupToken.toStdString();
-                object["secret"] = setup.secret.toStdString();
-                object["otpauthUri"] = setup.otpauthUri.toStdString();
-                object["issuer"] = setup.issuer.toStdString();
-                object["label"] = setup.label.toStdString();
+                object["setupToken"] = setup.setupToken;
+                object["secret"] = setup.secret;
+                object["otpauthUri"] = setup.otpauthUri;
+                object["issuer"] = setup.issuer;
+                object["label"] = setup.label;
                 object["digits"] = setup.digits;
                 object["periodSeconds"] = setup.periodSeconds;
                 object["expiresAtMs"] = static_cast<long long>(setup.expiresAtMs);
@@ -1291,8 +1289,8 @@ public:
                 SwHttpAuthIdentity identity;
                 const SwDbStatus status =
                     service->confirmTotpSetup(requestToken(ctx),
-                                              document.object().value("setupToken").toString().c_str(),
-                                              document.object().value("code").toString().c_str(),
+                                              document.object().value("setupToken").toString(),
+                                              document.object().value("code").toString(),
                                               &identity,
                                               &error);
                 if (!status.ok()) {
@@ -1303,7 +1301,7 @@ public:
 
                 SwJsonObject object;
                 object["enabled"] = true;
-                object["enabledAt"] = identity.account.mfaTotpEnabledAt.toStdString();
+                object["enabledAt"] = identity.account.mfaTotpEnabledAt;
                 object["auth"] = makeAuth(identity.account);
                 ctx.json(SwJsonValue(object));
             });
@@ -1322,7 +1320,7 @@ public:
                 SwHttpAuthIdentity identity;
                 const SwDbStatus status =
                     service->disableTotp(requestToken(ctx),
-                                         document.object().value("currentPassword").toString().c_str(),
+                                         document.object().value("currentPassword").toString(),
                                          &identity,
                                          &error);
                 if (!status.ok()) {
@@ -1372,7 +1370,7 @@ public:
                 SwJsonDocument document;
                 SwString error;
                 if (ctx.parseJsonBody(document, error) && document.isObject()) {
-                    (void)service->requestEmailVerification(document.object().value("email").toString().c_str(), &error);
+                    (void)service->requestEmailVerification(document.object().value("email").toString(), &error);
                 }
                 ctx.json(makeOk());
             });
@@ -1389,8 +1387,8 @@ public:
                 }
                 SwHttpAuthAccount account;
                 SwJsonValue subject;
-                const SwDbStatus status = service->verifyEmail(document.object().value("code").toString().c_str(),
-                                                               document.object().value("token").toString().c_str(),
+                const SwDbStatus status = service->verifyEmail(document.object().value("code").toString(),
+                                                               document.object().value("token").toString(),
                                                                &account,
                                                                &subject,
                                                                &error);
@@ -1447,8 +1445,8 @@ public:
                 const SwJsonObject object = document.object();
                 const SwDbStatus status =
                     service->requestEmailChange(rawToken,
-                                                object.value("currentPassword").toString().c_str(),
-                                                object.value("newEmail").toString().c_str(),
+                                                object.value("currentPassword").toString(),
+                                                object.value("newEmail").toString(),
                                                 &error);
                 if (!status.ok()) {
                     const int httpStatus = status.code() == SwDbStatus::NotFound ? 401 : 400;
@@ -1477,8 +1475,8 @@ public:
                 SwHttpAuthIdentity updatedIdentity;
                 const SwDbStatus status =
                     service->confirmEmailChange(rawToken,
-                                                object.value("code").toString().c_str(),
-                                                object.value("token").toString().c_str(),
+                                                object.value("code").toString(),
+                                                object.value("token").toString(),
                                                 &updatedIdentity,
                                                 &error);
                 if (!status.ok()) {
@@ -1503,7 +1501,7 @@ public:
                 SwJsonDocument document;
                 SwString error;
                 if (ctx.parseJsonBody(document, error) && document.isObject()) {
-                    (void)service->requestPasswordReset(document.object().value("email").toString().c_str(), &error);
+                    (void)service->requestPasswordReset(document.object().value("email").toString(), &error);
                 }
                 ctx.json(makeOk());
             });
@@ -1512,24 +1510,14 @@ public:
                 if (!requireStarted(ctx)) {
                     return;
                 }
-                SwHttpAuthChallenge challenge;
-                SwDbStatus status = service->store().getChallengeByToken(ctx.queryValue("token"), &challenge);
-                if (!status.ok() || challenge.purpose != "reset_password") {
+                if (ctx.queryValue("token").trimmed().isEmpty()) {
                     ctx.json(makeMessage("error", "Invalid reset token"), 400);
-                    return;
-                }
-                if (!challenge.consumedAt.trimmed().isEmpty()) {
-                    ctx.json(makeMessage("error", "Challenge already consumed"), 400);
-                    return;
-                }
-                if (challenge.expiresAtMs > 0 &&
-                    challenge.expiresAtMs <= swHttpAuthDetail::currentEpochMs()) {
-                    ctx.json(makeMessage("error", "Challenge expired"), 400);
                     return;
                 }
                 SwJsonObject object;
                 object["ok"] = true;
                 object["purpose"] = "reset_password";
+                object["codeRequired"] = true;
                 ctx.json(SwJsonValue(object));
             });
 
@@ -1550,7 +1538,7 @@ public:
                 }
                 const SwDbStatus status =
                     service->requestPasswordChange(rawToken,
-                                                   document.object().value("currentPassword").toString().c_str(),
+                                                   document.object().value("currentPassword").toString(),
                                                    &error);
                 if (!status.ok()) {
                     const int httpStatus = status.code() == SwDbStatus::NotFound ? 401 : 400;
@@ -1571,12 +1559,10 @@ public:
                     return;
                 }
                 const SwJsonObject object = document.object();
-                const SwString code =
-                    object.contains("code") ? SwString(object.value("code").toString().c_str()) : SwString();
-                const SwString token =
-                    object.contains("token") ? SwString(object.value("token").toString().c_str()) : SwString();
+                const SwString code = object.value("code").toString();
+                const SwString token = object.value("token").toString();
                 const SwString newPassword = object.contains("newPassword")
-                                                 ? SwString(object.value("newPassword").toString().c_str())
+                                                 ? SwString(object.value("newPassword").toString())
                                                  : SwString();
                 const SwDbStatus status = service->resetPassword(code,
                                                                  token,
@@ -1608,8 +1594,8 @@ public:
                 SwHttpAuthIdentity updatedIdentity;
                 const SwDbStatus status =
                     service->changePassword(rawToken,
-                                            document.object().value("currentPassword").toString().c_str(),
-                                            document.object().value("newPassword").toString().c_str(),
+                                            document.object().value("currentPassword").toString(),
+                                            document.object().value("newPassword").toString(),
                                             &updatedIdentity,
                                             &error);
                 if (!status.ok()) {
@@ -1660,12 +1646,12 @@ public:
         };
         auto makeJsonMessage = [](const SwString& key, const SwString& value) {
             SwJsonObject object;
-            object[key.toStdString()] = value.toStdString();
+            object[key] = value;
             return SwJsonValue(object);
         };
         auto makeJsonBool = [](const SwString& key, bool value) {
             SwJsonObject object;
-            object[key.toStdString()] = value;
+            object[key] = value;
             return SwJsonValue(object);
         };
 
@@ -1675,17 +1661,17 @@ public:
                     return;
                 }
                 SwJsonObject object;
-                object["domain"] = service->config().domain.toStdString();
-                object["mailHost"] = service->config().mailHost.toStdString();
+                object["domain"] = service->config().domain;
+                object["mailHost"] = service->config().mailHost;
                 object["smtpPort"] = static_cast<long long>(service->config().smtpPort);
                 object["submissionPort"] = static_cast<long long>(service->config().submissionPort);
                 object["imapsPort"] = static_cast<long long>(service->config().imapsPort);
                 object["tlsReady"] = service->hasTlsCredentials();
                 object["started"] = service->isStarted();
-                object["adminRoutePrefix"] = service->config().adminRoutePrefix.toStdString();
+                object["adminRoutePrefix"] = service->config().adminRoutePrefix;
                 SwJsonObject relayObject;
                 relayObject["enabled"] = !service->config().outboundRelay.host.trimmed().isEmpty();
-                relayObject["host"] = service->config().outboundRelay.host.toStdString();
+                relayObject["host"] = service->config().outboundRelay.host;
                 relayObject["port"] = static_cast<long long>(service->config().outboundRelay.port);
                 relayObject["implicitTls"] = service->config().outboundRelay.implicitTls;
                 relayObject["startTls"] = service->config().outboundRelay.startTls;
@@ -1703,13 +1689,13 @@ public:
                 const SwList<SwMailAccount> accounts = service->listAccounts();
                 for (std::size_t i = 0; i < accounts.size(); ++i) {
                     SwJsonObject object;
-                    object["address"] = accounts[i].address.toStdString();
+                    object["address"] = accounts[i].address;
                     object["active"] = accounts[i].active;
                     object["suspended"] = accounts[i].suspended;
                     object["quotaBytes"] = static_cast<long long>(accounts[i].quotaBytes);
                     object["usedBytes"] = static_cast<long long>(accounts[i].usedBytes);
-                    object["createdAt"] = accounts[i].createdAt.toStdString();
-                    object["updatedAt"] = accounts[i].updatedAt.toStdString();
+                    object["createdAt"] = accounts[i].createdAt;
+                    object["updatedAt"] = accounts[i].updatedAt;
                     array.append(object);
                 }
                 ctx.json(SwJsonDocument(array));
@@ -1726,8 +1712,8 @@ public:
                     return;
                 }
                 const SwJsonObject body = document.object();
-                const SwString address = body.value("address").toString().c_str();
-                const SwString password = body.value("password").toString().c_str();
+                const SwString address = body.value("address").toString();
+                const SwString password = body.value("password").toString();
                 SwMailAccount created;
                 const SwDbStatus status = service->createAccount(address, password, &created);
                 if (!status.ok()) {
@@ -1735,8 +1721,8 @@ public:
                     return;
                 }
                 SwJsonObject object;
-                object["address"] = created.address.toStdString();
-                object["createdAt"] = created.createdAt.toStdString();
+                object["address"] = created.address;
+                object["createdAt"] = created.createdAt;
                 ctx.json(SwJsonValue(object), 201);
             });
 
@@ -1750,7 +1736,7 @@ public:
                     ctx.json(makeJsonMessage("error", "Invalid JSON body"), 400);
                     return;
                 }
-                const SwString password = document.object().value("password").toString().c_str();
+                const SwString password = document.object().value("password").toString();
                 const SwDbStatus status = service->setAccountPassword(ctx.pathValue("address"), password);
                 if (!status.ok()) {
                     ctx.json(makeJsonMessage("error", status.message()), 400);
@@ -1786,7 +1772,7 @@ public:
                 const SwList<SwMailAlias> aliases = service->listAliases();
                 for (std::size_t i = 0; i < aliases.size(); ++i) {
                     SwJsonObject object;
-                    object["address"] = aliases[i].address.toStdString();
+                    object["address"] = aliases[i].address;
                     object["targets"] = swMailDetail::toJsonArray(aliases[i].targets);
                     object["active"] = aliases[i].active;
                     array.append(object);
@@ -1805,7 +1791,7 @@ public:
                     return;
                 }
                 SwMailAlias alias;
-                alias.address = document.object().value("address").toString().c_str();
+                alias.address = document.object().value("address").toString();
                 alias.active = document.object().value("active").toBool(true);
                 alias.targets = swMailDetail::fromJsonStringArray(document.object().value("targets"));
                 SwString localPart;
@@ -1814,11 +1800,31 @@ public:
                     ctx.json(makeJsonMessage("error", "Invalid alias address"), 400);
                     return;
                 }
+                for (std::size_t i = 0; i < alias.targets.size(); ++i) {
+                    SwString targetLocal;
+                    SwString targetDomain;
+                    if (!swMailDetail::splitAddress(alias.targets[i], targetLocal, targetDomain)) {
+                        ctx.json(makeJsonMessage("error", "Invalid alias target: " + alias.targets[i]), 400);
+                        return;
+                    }
+                }
                 alias.domain = domain;
                 alias.localPart = localPart;
                 const SwDbStatus status = service->upsertAlias(alias);
                 if (!status.ok()) {
                     ctx.json(makeJsonMessage("error", status.message()), 400);
+                    return;
+                }
+                ctx.json(makeJsonBool("ok", true));
+            });
+
+            mail.del("/aliases/:address", [service, requireGuard, makeJsonMessage, makeJsonBool](SwHttpContext& ctx) {
+                if (!requireGuard(ctx)) {
+                    return;
+                }
+                const SwDbStatus status = service->deleteAlias(ctx.pathValue("address"));
+                if (!status.ok()) {
+                    ctx.json(makeJsonMessage("error", status.message()), 404);
                     return;
                 }
                 ctx.json(makeJsonBool("ok", true));
@@ -1832,7 +1838,7 @@ public:
                 const SwList<SwMailMailbox> mailboxes = service->listMailboxes(ctx.pathValue("address"));
                 for (std::size_t i = 0; i < mailboxes.size(); ++i) {
                     SwJsonObject object;
-                    object["name"] = mailboxes[i].name.toStdString();
+                    object["name"] = mailboxes[i].name;
                     object["uidNext"] = static_cast<long long>(mailboxes[i].uidNext);
                     object["totalCount"] = static_cast<long long>(mailboxes[i].totalCount);
                     object["unseenCount"] = static_cast<long long>(mailboxes[i].unseenCount);
@@ -1851,12 +1857,12 @@ public:
                 for (std::size_t i = 0; i < messages.size(); ++i) {
                     SwJsonObject object;
                     object["uid"] = static_cast<long long>(messages[i].uid);
-                    object["subject"] = messages[i].subject.toStdString();
-                    object["from"] = messages[i].from.toStdString();
+                    object["subject"] = messages[i].subject;
+                    object["from"] = messages[i].from;
                     object["to"] = swMailDetail::toJsonArray(messages[i].to);
                     object["flags"] = swMailDetail::toJsonArray(messages[i].flags);
                     object["sizeBytes"] = static_cast<long long>(messages[i].sizeBytes);
-                    object["internalDate"] = messages[i].internalDate.toStdString();
+                    object["internalDate"] = messages[i].internalDate;
                     array.append(object);
                 }
                 ctx.json(SwJsonDocument(array));
@@ -1876,11 +1882,11 @@ public:
                 }
                 SwJsonObject object;
                 object["uid"] = static_cast<long long>(message.uid);
-                object["subject"] = message.subject.toStdString();
-                object["from"] = message.from.toStdString();
+                object["subject"] = message.subject;
+                object["from"] = message.from;
                 object["to"] = swMailDetail::toJsonArray(message.to);
                 object["flags"] = swMailDetail::toJsonArray(message.flags);
-                object["raw"] = message.rawMessage.toBase64().toStdString();
+                object["raw"] = SwString(message.rawMessage.toBase64());
                 ctx.json(SwJsonValue(object));
             });
 
@@ -1892,13 +1898,13 @@ public:
                 const SwList<SwMailQueueItem> items = service->listQueueItems();
                 for (std::size_t i = 0; i < items.size(); ++i) {
                     SwJsonObject object;
-                    object["id"] = items[i].id.toStdString();
-                    object["mailFrom"] = items[i].envelope.mailFrom.toStdString();
+                    object["id"] = items[i].id;
+                    object["mailFrom"] = items[i].envelope.mailFrom;
                     object["rcptTo"] = swMailDetail::toJsonArray(items[i].envelope.rcptTo);
                     object["attemptCount"] = items[i].attemptCount;
                     object["nextAttemptAtMs"] = items[i].nextAttemptAtMs;
                     object["expireAtMs"] = items[i].expireAtMs;
-                    object["lastError"] = items[i].lastError.toStdString();
+                    object["lastError"] = items[i].lastError;
                     array.append(object);
                 }
                 ctx.json(SwJsonDocument(array));
@@ -1945,9 +1951,9 @@ public:
                 const SwList<SwMailDkimRecord> records = service->listDkimRecords();
                 for (std::size_t i = 0; i < records.size(); ++i) {
                     SwJsonObject object;
-                    object["domain"] = records[i].domain.toStdString();
-                    object["selector"] = records[i].selector.toStdString();
-                    object["publicKeyTxt"] = records[i].publicKeyTxt.toStdString();
+                    object["domain"] = records[i].domain;
+                    object["selector"] = records[i].selector;
+                    object["publicKeyTxt"] = records[i].publicKeyTxt;
                     array.append(object);
                 }
                 ctx.json(SwJsonDocument(array));
@@ -1969,6 +1975,13 @@ public:
                 object["outboundDeferred"] = static_cast<long long>(metrics.outboundDeferred);
                 object["outboundFailed"] = static_cast<long long>(metrics.outboundFailed);
                 object["authFailures"] = static_cast<long long>(metrics.authFailures);
+                object["forwardedMessages"] = static_cast<long long>(metrics.forwardedMessages);
+                object["forwardLoopsDropped"] = static_cast<long long>(metrics.forwardLoopsDropped);
+                object["srsBouncesRouted"] = static_cast<long long>(metrics.srsBouncesRouted);
+                object["inboundSpfFail"] = static_cast<long long>(metrics.inboundSpfFail);
+                object["inboundDkimPass"] = static_cast<long long>(metrics.inboundDkimPass);
+                object["inboundDmarcPass"] = static_cast<long long>(metrics.inboundDmarcPass);
+                object["inboundDmarcReject"] = static_cast<long long>(metrics.inboundDmarcReject);
                 ctx.json(SwJsonValue(object));
             });
         });

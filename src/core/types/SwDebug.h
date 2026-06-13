@@ -22,6 +22,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cctype>
 #include <cerrno>
 #include <chrono>
@@ -34,15 +35,12 @@
 #include <sstream>
 #include <string>
 #include <functional>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
 #if defined(_WIN32)
-// Ensure <windows.h> (if included later) does not pull winsock.h.
-#ifndef _WINSOCKAPI_
-#define _WINSOCKAPI_
-#endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <direct.h>
@@ -75,10 +73,24 @@ struct SwDebugContext {
 class SwDebugMessage; // forward declaration
 
 class SwDebug {
+    struct SpinMutex_ {
+        std::atomic_flag flag = ATOMIC_FLAG_INIT;
+
+        void lock() {
+            while (flag.test_and_set(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+        }
+
+        void unlock() {
+            flag.clear(std::memory_order_release);
+        }
+    };
+
 public:
     static SwDebug& instance() {
-        static SwDebug _instance;
-        return _instance;
+        static SwDebug* _instance = new SwDebug();
+        return *_instance;
     }
 
     template<typename T>
@@ -166,7 +178,7 @@ public:
         std::vector<std::function<void(const std::string&)>> lineListeners;
         std::string line;
         {
-            std::lock_guard<std::mutex> lock(m_mutex);
+            std::lock_guard<SpinMutex_> lock(m_mutex);
 
             const std::string cleanedMsg = stripLeadingDecorations_(msg);
             const std::string timePrefix = formatLocalTimePrefix_(); // HHMMSS.UUUUUU
@@ -275,8 +287,8 @@ private:
     SwDebug(const SwDebug&) = delete;
     SwDebug& operator=(const SwDebug&) = delete;
 
-    std::mutex m_mutex;
-    std::mutex m_rulesMutex;
+    SpinMutex_ m_mutex;
+    SpinMutex_ m_rulesMutex;
 
     struct CategoryRule {
         std::string pattern;
@@ -382,7 +394,7 @@ private:
             return 0;
         }
 
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::lock_guard<SpinMutex_> lock(m_mutex);
         LineListenerEntry entry;
         entry.id = m_nextLineListenerId++;
         entry.callback = listener;
@@ -395,7 +407,7 @@ private:
             return;
         }
 
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::lock_guard<SpinMutex_> lock(m_mutex);
         for (std::vector<LineListenerEntry>::iterator it = m_lineListeners.begin(); it != m_lineListeners.end(); ++it) {
             if (it->id == listenerId) {
                 m_lineListeners.erase(it);
@@ -479,7 +491,7 @@ private:
     }
 
     void clearLoggingRules_() {
-        std::lock_guard<std::mutex> lock(m_rulesMutex);
+        std::lock_guard<SpinMutex_> lock(m_rulesMutex);
         m_categoryRules.clear();
     }
 
@@ -496,7 +508,7 @@ private:
         rule.pattern = std::move(pattern);
         rule.mask = mask;
         rule.enabled = enabled;
-        std::lock_guard<std::mutex> lock(m_rulesMutex);
+        std::lock_guard<SpinMutex_> lock(m_rulesMutex);
         m_categoryRules.push_back(std::move(rule));
     }
 
@@ -557,7 +569,7 @@ private:
             }
         }
 
-        std::lock_guard<std::mutex> lock(m_rulesMutex);
+        std::lock_guard<SpinMutex_> lock(m_rulesMutex);
         m_categoryRules.swap(parsed);
     }
 
@@ -574,7 +586,7 @@ private:
                        : (level == SwDebugLevel::Warning) ? m_defaultCategoryWarningEnabled
                                                           : m_defaultCategoryErrorEnabled;
 
-        std::lock_guard<std::mutex> lock(m_rulesMutex);
+        std::lock_guard<SpinMutex_> lock(m_rulesMutex);
         for (size_t i = 0; i < m_categoryRules.size(); ++i) {
             const CategoryRule& rule = m_categoryRules[i];
             if ((rule.mask & bit) == 0) {
