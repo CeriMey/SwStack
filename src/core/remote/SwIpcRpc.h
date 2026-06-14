@@ -90,11 +90,12 @@ inline uint32_t normalizeRpcQueueCapacity(uint32_t requested) {
     if (requested <= 50u) return 50u;
     if (requested <= 100u) return 100u;
     if (requested <= 200u) return 200u;
-    return 500u;
+    if (requested <= 500u) return 500u;
+    return 1000u;
 }
 
 inline std::atomic<uint32_t>& rpcQueueCapacityStorage_() {
-    static std::atomic<uint32_t> cap(100u);
+    static std::atomic<uint32_t> cap(1000u);
     return cap;
 }
 
@@ -202,50 +203,7 @@ public:
             return Ret();
         }
 
-        SwCoreApplication* app = SwCoreApplication::instance(false);
-        if (app) {
-            int timeoutTimerId = -1;
-            if (timeoutMs > 0) {
-                timeoutTimerId = app->addTimer([&waiter]() { waiter.loop.quit(); },
-                                               timeoutMs * 1000,
-                                               /*singleShot=*/true);
-            }
-            waiter.loop.exec(0);
-            if (timeoutTimerId != -1) {
-                app->removeTimer(timeoutTimerId);
-            }
-        } else {
-            // Threadless mode (no SwCoreApplication): wait on the response queue wake event and dispatch.
-            const auto t0 = std::chrono::steady_clock::now();
-            const auto deadline = (timeoutMs > 0) ? (t0 + std::chrono::milliseconds(timeoutMs)) : t0;
-
-            sw::ipc::detail::LoopPoller::instance().dispatch();
-
-            while (!waiter.done) {
-                if (timeoutMs > 0 && std::chrono::steady_clock::now() >= deadline) break;
-
-#if defined(_WIN32)
-                HANDLE h = respWakeEvent_ ? respWakeEvent_() : NULL;
-                DWORD waitMs = INFINITE;
-                if (timeoutMs > 0) {
-                    const auto now = std::chrono::steady_clock::now();
-                    const auto rem = (deadline > now) ? std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)
-                                                             .count()
-                                                     : 0;
-                    waitMs = (rem > 0) ? static_cast<DWORD>(rem) : 0;
-                }
-                if (h) {
-                    (void)::WaitForSingleObject(h, waitMs);
-                } else {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                }
-#else
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-#endif
-
-                sw::ipc::detail::LoopPoller::instance().dispatch();
-            }
-        }
+        waitForResponse_(waiter, timeoutMs);
 
         // If still pending, it timed out (or app quit).
         if (erasePending_(callId)) {
@@ -395,7 +353,8 @@ private:
             case 100u: initQueuesCap_<100>(); break;
             case 200u: initQueuesCap_<200>(); break;
             case 500u: initQueuesCap_<500>(); break;
-            default:   initQueuesCap_<100>(); break;
+            case 1000u: initQueuesCap_<1000>(); break;
+            default:   initQueuesCap_<1000>(); break;
         }
     }
 
@@ -427,6 +386,43 @@ private:
             p.waiter->wake(ok, err, value);
         } else if (p.onOk) {
             if (ok) p.onOk(value);
+        }
+    }
+
+    void waitForResponse_(Waiter& waiter, int timeoutMs) {
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto deadline = (timeoutMs > 0) ? (t0 + std::chrono::milliseconds(timeoutMs)) : t0;
+        SwCoreApplication* app = SwCoreApplication::instance(false);
+
+        sw::ipc::detail::LoopPoller::instance().dispatch();
+
+        while (!waiter.done) {
+            if (timeoutMs > 0 && std::chrono::steady_clock::now() >= deadline) break;
+
+            if (app) {
+                (void)app->processEvent(false);
+            }
+
+#if defined(_WIN32)
+            HANDLE h = respWakeEvent_ ? respWakeEvent_() : NULL;
+            DWORD waitMs = 1;
+            if (timeoutMs > 0) {
+                const auto now = std::chrono::steady_clock::now();
+                const auto rem = (deadline > now)
+                    ? std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count()
+                    : 0;
+                waitMs = (rem > 0) ? static_cast<DWORD>(rem > 1 ? 1 : rem) : 0;
+            }
+            if (h) {
+                (void)::WaitForSingleObject(h, waitMs);
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+#else
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+#endif
+
+            sw::ipc::detail::LoopPoller::instance().dispatch();
         }
     }
 
@@ -548,50 +544,7 @@ public:
             return false;
         }
 
-        SwCoreApplication* app = SwCoreApplication::instance(false);
-        if (app) {
-            int timeoutTimerId = -1;
-            if (timeoutMs > 0) {
-                timeoutTimerId = app->addTimer([&waiter]() { waiter.loop.quit(); },
-                                               timeoutMs * 1000,
-                                               /*singleShot=*/true);
-            }
-            waiter.loop.exec(0);
-            if (timeoutTimerId != -1) {
-                app->removeTimer(timeoutTimerId);
-            }
-        } else {
-            // Threadless mode (no SwCoreApplication): wait on the response queue wake event and dispatch.
-            const auto t0 = std::chrono::steady_clock::now();
-            const auto deadline = (timeoutMs > 0) ? (t0 + std::chrono::milliseconds(timeoutMs)) : t0;
-
-            sw::ipc::detail::LoopPoller::instance().dispatch();
-
-            while (!waiter.done) {
-                if (timeoutMs > 0 && std::chrono::steady_clock::now() >= deadline) break;
-
-#if defined(_WIN32)
-                HANDLE h = respWakeEvent_ ? respWakeEvent_() : NULL;
-                DWORD waitMs = INFINITE;
-                if (timeoutMs > 0) {
-                    const auto now = std::chrono::steady_clock::now();
-                    const auto rem = (deadline > now) ? std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)
-                                                             .count()
-                                                     : 0;
-                    waitMs = (rem > 0) ? static_cast<DWORD>(rem) : 0;
-                }
-                if (h) {
-                    (void)::WaitForSingleObject(h, waitMs);
-                } else {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                }
-#else
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-#endif
-
-                sw::ipc::detail::LoopPoller::instance().dispatch();
-            }
-        }
+        waitForResponse_(waiter, timeoutMs);
 
         if (erasePending_(callId)) {
             setLastError_("rpc: timeout");
@@ -732,7 +685,8 @@ private:
             case 100u: initQueuesCap_<100>(); break;
             case 200u: initQueuesCap_<200>(); break;
             case 500u: initQueuesCap_<500>(); break;
-            default:   initQueuesCap_<100>(); break;
+            case 1000u: initQueuesCap_<1000>(); break;
+            default:   initQueuesCap_<1000>(); break;
         }
     }
 
@@ -764,6 +718,43 @@ private:
             p.waiter->wake(ok, err);
         } else if (p.onDone) {
             p.onDone(ok);
+        }
+    }
+
+    void waitForResponse_(Waiter& waiter, int timeoutMs) {
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto deadline = (timeoutMs > 0) ? (t0 + std::chrono::milliseconds(timeoutMs)) : t0;
+        SwCoreApplication* app = SwCoreApplication::instance(false);
+
+        sw::ipc::detail::LoopPoller::instance().dispatch();
+
+        while (!waiter.done) {
+            if (timeoutMs > 0 && std::chrono::steady_clock::now() >= deadline) break;
+
+            if (app) {
+                (void)app->processEvent(false);
+            }
+
+#if defined(_WIN32)
+            HANDLE h = respWakeEvent_ ? respWakeEvent_() : NULL;
+            DWORD waitMs = 1;
+            if (timeoutMs > 0) {
+                const auto now = std::chrono::steady_clock::now();
+                const auto rem = (deadline > now)
+                    ? std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count()
+                    : 0;
+                waitMs = (rem > 0) ? static_cast<DWORD>(rem > 1 ? 1 : rem) : 0;
+            }
+            if (h) {
+                (void)::WaitForSingleObject(h, waitMs);
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+#else
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+#endif
+
+            sw::ipc::detail::LoopPoller::instance().dispatch();
         }
     }
 

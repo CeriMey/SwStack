@@ -77,8 +77,21 @@ inline RpcRequestSpec rpcRequestSpec(const SwString& methodName) {
     return spec;
 }
 
+inline std::string stripRpcCapacityTag_(const std::string& method) {
+    const size_t sep = method.find('|');
+    if (sep == std::string::npos || sep == 0) return method;
+
+    for (size_t i = 0; i < sep; ++i) {
+        const unsigned char c = static_cast<unsigned char>(method[i]);
+        if (!std::isdigit(c)) return method;
+    }
+
+    return method.substr(sep + 1);
+}
+
 // Best-effort discovery: return all "<domain>/<object>" that expose every required RPC request queue.
-// Matching is done against the per-domain registry entries ("__rpc__|<method>") and optionally the typeId.
+// Matching is done against per-domain registry entries ("__rpc__|<method>" or
+// "__rpc__|<capacity>|<method>") and optionally the typeId.
 inline SwStringList discoverRpcTargets(const SwString& domain,
                                        const SwList<RpcRequestSpec>& required,
                                        bool requireTypeMatch = true) {
@@ -107,7 +120,7 @@ inline SwStringList discoverRpcTargets(const SwString& domain,
         if (signal.size() < kRpcPrefix.size()) continue;
         if (signal.compare(0, kRpcPrefix.size(), kRpcPrefix) != 0) continue;
 
-        const std::string method = signal.substr(kRpcPrefix.size());
+        const std::string method = stripRpcCapacityTag_(signal.substr(kRpcPrefix.size()));
         if (!expectedTypeIdHexByMethod.empty() && expectedTypeIdHexByMethod.find(method) == expectedTypeIdHexByMethod.end()) {
             continue;
         }

@@ -51,6 +51,9 @@
 #include "SwJsonArray.h"
 #include "SwJsonObject.h"
 #include "SwJsonValue.h"
+#include "SwList.h"
+#include "SwMap.h"
+#include "SwMutex.h"
 #include "SwString.h"
 
 #include <array>
@@ -2128,6 +2131,16 @@ struct Decoder {
 
 template <typename T, typename Enable = void>
 struct Codec {
+    // Le Codec generique serialise T par memcpy brut (writePOD/readPOD). Cela n'est valide
+    // QUE si T est trivially-copyable : un type a heap (SwList/SwMap/SwAny, ou une struct
+    // contenant std::string/std::vector/pointeurs) verrait son pointeur copie tel quel dans
+    // la SHM puis relu dans un autre process => pointeur dangling / UB / corruption.
+    // On refuse donc a la COMPILATION tout type non trivialement copiable sans Codec dedie.
+    static_assert(std::is_trivially_copyable<T>::value,
+        "Codec<T> generique: T n'est pas trivially_copyable. Un memcpy brut vers la memoire "
+        "partagee serait de l'UB (pointeurs/heap copies entre process). Fournissez une "
+        "specialisation Codec<T> (cf. SwString/SwByteArray) ou n'envoyez pas ce type sur l'IPC.");
+
     /**
      * @brief Performs the `write` operation on the associated resource.
      * @param enc Value passed to the method.
@@ -3948,6 +3961,26 @@ private:
 #endif
 };
 
+// Delivery semantics for a late-joining subscriber (one that connects after messages
+// have already been published).
+//   Replay     : on connect with fireInitial, replay the backlog still present in the ring
+//                (up to `capacity` messages). This is the queue/stream semantics used by RPC.
+//   LatestOnly : on connect with fireInitial, deliver ONLY the single most recent message
+//                (the last known value), never the older backlog. This is the "latch" /
+//                last-value-on-connect semantics wanted for state/config-like channels.
+//
+// NOTE (anti-pattern a eviter) : ne PAS mélanger un abonné LatestOnly/latch (typiquement une
+// queue de capacite 1, cf. SW_IPC_LATCH) et un abonné Replay sur LA MEME queue. Le producteur
+// est borne par le curseur le plus en retard (minReadSeqLocked_) : un Replay lent sur une queue
+// de capacite 1 bloquerait toute nouvelle publication (famine producteur). Un LatestOnly ne peut
+// PAS, lui, faire droper les messages d'un Replay concurrent (avancer un curseur ne fait que
+// liberer des slots) — l'invariant de livraison du Replay reste donc correct. Chaque canal
+// SwIpcSignal possede sa propre queue dediee, donc ce cas ne se produit pas via les macros.
+enum class DeliveryMode {
+    Replay = 0,
+    LatestOnly = 1,
+};
+
 template <class... Args>
 class RingQueueDynamic {
 public:
@@ -4230,7 +4263,8 @@ public:
      * @param timeoutMs Timeout expressed in milliseconds.
      * @return The requested connect.
      */
-    Subscription connect(Fn cb, bool fireInitial = true, int timeoutMs = 0) {
+    Subscription connect(Fn cb, bool fireInitial = true, int timeoutMs = 0,
+                         DeliveryMode mode = DeliveryMode::Replay) {
         typedef typename std::decay<Fn>::type Callback;
         Callback cbCopy(std::move(cb));
 
@@ -4240,6 +4274,7 @@ public:
             std::shared_ptr<DynamicMapping> map;
             Callback cb;
             bool fireInitial;
+            DeliveryMode mode;
             std::atomic_bool inCallback;
             uint32_t subPid;
             SwString subscriberObject;
@@ -4253,6 +4288,7 @@ public:
              * @param m Value passed to the method.
              * @param c Value passed to the method.
              * @param fi Value passed to the method.
+             * @param dm Value passed to the method.
              * @param pid Value passed to the method.
              * @param _WIN32 Value passed to the method.
              * @param NULL Value passed to the method.
@@ -4262,11 +4298,13 @@ public:
             State(const std::shared_ptr<DynamicMapping>& m,
                   Callback c,
                   bool fi,
+                  DeliveryMode dm,
                   uint32_t pid,
                   const SwString& subObj)
                 : map(m),
                   cb(std::move(c)),
                   fireInitial(fi),
+                  mode(dm),
                   inCallback(false),
                   subPid(pid),
                   subscriberObject(subObj)
@@ -4295,7 +4333,7 @@ public:
         const uint32_t subPid = detail::currentPid();
         const SwString subObjCopy = detail::currentSubscriberObject_();
 
-        std::shared_ptr<State> st(new State(map_, cbCopy, fireInitial, subPid, subObjCopy));
+        std::shared_ptr<State> st(new State(map_, cbCopy, fireInitial, mode, subPid, subObjCopy));
 
 #ifdef _WIN32
         const std::string mtxName = (shmName_ + "_mtx").toStdString();
@@ -4338,7 +4376,7 @@ public:
             const uint32_t cap = L->capacity;
             const uint32_t maxPayloadBytes = L->maxPayload;
             SubscriberCursor* cursor =
-                findOrCreateCursorLocked_(L, st->subPid, st->subscriberObject, st->fireInitial);
+                findOrCreateCursorLocked_(L, st->subPid, st->subscriberObject, st->fireInitial, st->mode);
             if (!cursor) {
 #ifdef _WIN32
                     ::ReleaseMutex(st->mtx);
@@ -4352,7 +4390,11 @@ public:
             const uint64_t seqNow = L->seq;
 
             if (cursor->readSeq < seqNow) {
-                const uint64_t start = cursor->readSeq + 1ull;
+                // In LatestOnly mode, collapse any backlog: only the most recent message
+                // (seqNow) is ever delivered, regardless of how far behind the cursor is.
+                const uint64_t start = (st->mode == DeliveryMode::LatestOnly)
+                                           ? seqNow
+                                           : (cursor->readSeq + 1ull);
                 for (uint64_t seq = start; seq <= seqNow; ++seq) {
                     DynamicSlot* slot = st->map->slotAt(static_cast<size_t>(seq % cap));
                     const uint32_t sz = slot->size;
@@ -4577,7 +4619,8 @@ private:
     static SubscriberCursor* findOrCreateCursorLocked_(Header* L,
                                                        uint32_t subPid,
                                                        const SwString& subscriberObject,
-                                                       bool fireInitial) {
+                                                       bool fireInitial,
+                                                       DeliveryMode mode) {
         if (!L) return nullptr;
         const std::string key = normalizedSubscriberObjectKey_(subscriberObject);
 
@@ -4616,8 +4659,15 @@ private:
 
         const uint64_t seqNow = L->seq;
         if (fireInitial) {
-            const uint64_t cap = static_cast<uint64_t>(L->capacity);
-            freeSlot->readSeq = (seqNow > cap) ? (seqNow - cap) : 0ull;
+            if (mode == DeliveryMode::LatestOnly) {
+                // Deliver only the single most recent message (last known value).
+                // seqNow == 0 means nothing was ever published -> deliver nothing.
+                freeSlot->readSeq = (seqNow > 0ull) ? (seqNow - 1ull) : 0ull;
+            } else {
+                // Replay the backlog still present in the ring (bounded by capacity).
+                const uint64_t cap = static_cast<uint64_t>(L->capacity);
+                freeSlot->readSeq = (seqNow > cap) ? (seqNow - cap) : 0ull;
+            }
         } else {
             freeSlot->readSeq = seqNow;
         }
@@ -5400,6 +5450,290 @@ inline void notifyRegistryChangedBestEffort_(const SwString& domain) {
 
 // Convenience macro (requires a member named `ipcRegistry_` in the class).
 #define SW_REGISTER_SHM_SIGNAL(name, ...) ::sw::ipc::SignalProxy<__VA_ARGS__> name{ipcRegistry_, SwString(#name)}
+
+// =================================================================================================
+//  SwIpcSignal — couche "signal/slot a la Qt" par-dessus l'IPC partage.
+//
+//  But : declarer un canal IPC aussi simplement qu'un signal Qt natif, en cachant completement
+//  la SHM / le ring / le registry, avec :
+//    - dimensionnement AUTOMATIQUE de la place reservee par message a partir des TYPES du signal
+//      (IpcWireBound), avec override explicite maxBytes pour les types a taille variable
+//      (SwString, SwByteArray, SwList, SwMap) ;
+//    - choix de la semantique de livraison (DeliveryMode::Replay / LatestOnly) en un parametre ;
+//    - lifetime sur (la Subscription se desabonne dans son destructeur).
+//
+//  Contrainte : C++11 strict (pas de if constexpr / variable templates / fold expressions).
+// =================================================================================================
+
+namespace size {
+
+// --- IpcIsBounded<T> : le type a-t-il une taille serialisee MAXIMALE connue a la compilation ? ---
+// Par defaut tout est borne (les POD le sont : ils s'ecrivent en sizeof(T) octets bruts).
+// On specialise a false pour les types a payload variable.
+template <typename T>
+struct IpcIsBounded { static const bool value = true; };
+
+template <> struct IpcIsBounded<SwString>    { static const bool value = false; };
+template <> struct IpcIsBounded<SwByteArray> { static const bool value = false; };
+// Conteneurs a taille variable : specialisations partielles (forward-declaration suffit,
+// la definition complete des templates n'est pas requise pour specialiser un trait).
+template <typename U>             struct IpcIsBounded< ::SwList<U> >   { static const bool value = false; };
+template <typename K, typename V> struct IpcIsBounded< ::SwMap<K, V> > { static const bool value = false; };
+
+// --- IpcWireSize<T> : borne serialisee d'UN type (n'a de sens que si IpcIsBounded<T>::value). ---
+// POD : sizeof(T) (writePOD ecrit l'objet brut, sans tag ni longueur).
+template <typename T>
+struct IpcWireSize { static const size_t value = sizeof(T); };
+
+template <> struct IpcWireSize<SwString>    { static const size_t value = 0; };
+template <> struct IpcWireSize<SwByteArray> { static const size_t value = 0; };
+template <typename U>             struct IpcWireSize< ::SwList<U> >   { static const size_t value = 0; };
+template <typename K, typename V> struct IpcWireSize< ::SwMap<K, V> > { static const size_t value = 0; };
+
+// --- AllBounded<Args...> : ET logique recursif (pas de fold expression en C++11). ---
+template <typename... Args> struct AllBounded;
+template <> struct AllBounded<> { static const bool value = true; };
+template <typename T, typename... Rest>
+struct AllBounded<T, Rest...> {
+    static const bool value = IpcIsBounded<T>::value && AllBounded<Rest...>::value;
+};
+
+// --- SumWireSize<Args...> : somme recursive des bornes. ---
+template <typename... Args> struct SumWireSize;
+template <> struct SumWireSize<> { static const size_t value = 0; };
+template <typename T, typename... Rest>
+struct SumWireSize<T, Rest...> {
+    static const size_t value = IpcWireSize<T>::value + SumWireSize<Rest...>::value;
+};
+
+// --- IpcWireBound<Args...> : facade publique. ---
+//   ::bounded -> tous les types sont-ils bornes ?
+//   ::value   -> somme des bornes (valide seulement si bounded == true)
+//   ::capacityBytes -> taille a reserver par message (avec un petit coussin de securite)
+template <typename... Args>
+struct IpcWireBound {
+    static const bool   bounded = AllBounded<Args...>::value;
+    static const size_t value   = SumWireSize<Args...>::value;
+    static const size_t kOverhead = 16; // marge d'alignement / robustesse, pas du wire reel
+    static const size_t capacityBytes = value + kOverhead;
+};
+
+} // namespace size
+
+// Petit utilitaire : maxBytes auto (depuis les types) sinon override explicite.
+template <class... Args>
+struct IpcAutoMaxBytes_ {
+    static uint32_t resolve(uint32_t override_) {
+        if (override_ != 0u) return override_;
+        // En mode auto, on ne doit arriver ici que si tous les types sont bornes
+        // (garanti par le static_assert au site macro SW_IPC_SIGNAL / SW_IPC_LATCH).
+        return static_cast<uint32_t>(size::IpcWireBound<Args...>::capacityBytes);
+    }
+};
+
+// SwIpcSignal : facade typee au-dessus de RingQueueDynamic (le seul transport a maxPayload
+// dynamique, donc dimensionnable). Le mode latch (etat) = capacity 1 + LatestOnly.
+template <class... Args>
+class SwIpcSignal {
+public:
+    typedef typename RingQueueDynamic<Args...>::Subscription Subscription;
+
+    SwIpcSignal(Registry& reg,
+                const SwString& signalName,
+                uint32_t capacity         = 16u,
+                uint32_t maxBytesOverride = 0u,
+                DeliveryMode defaultMode  = DeliveryMode::Replay)
+        : ring_(reg, signalName, capacity, IpcAutoMaxBytes_<Args...>::resolve(maxBytesOverride)),
+          defaultMode_(defaultMode) {
+        // Garde-fou : un type a taille variable (SwString/SwByteArray/...) instancie SANS
+        // maxBytesOverride donne un sizing auto reduit au seul coussin (kOverhead) -> tout
+        // message non trivial serait droppe SILENCIEUSEMENT a l'emission. Les macros
+        // SW_IPC_SIGNAL/SW_IPC_LATCH attrapent ce cas a la compilation (static_assert) ; ce
+        // throw protege l'instanciation directe de la classe qui contourne les macros.
+        if (maxBytesOverride == 0u && !size::IpcWireBound<Args...>::bounded) {
+            throw std::runtime_error(
+                std::string("SwIpcSignal('") + signalName.toStdString() +
+                "'): un type a taille variable (SwString/SwByteArray/SwList/SwMap) exige "
+                "maxBytesOverride > 0 (utilisez SW_IPC_SIGNAL_SIZED / SW_IPC_LATCH_SIZED).");
+        }
+    }
+
+    SwIpcSignal(const SwIpcSignal&) = delete;
+    SwIpcSignal& operator=(const SwIpcSignal&) = delete;
+
+    // Emission "a la Qt". NOTE: `emit` est une macro vide du framework (SwObject.h),
+    // donc on n'expose PAS de methode nommee `emit`. On ecrit `emit sig(a, b);` (la macro
+    // disparait et appelle operator()), ou `sig.publish(a, b);` explicitement.
+    // Zero copie au-dela du memcpy wire. Retourne false si le message depasse maxBytes
+    // ou si le ring est plein.
+    bool publish(const Args&... args) { return ring_.push(args...); }
+    bool operator()(const Args&... args) { return ring_.push(args...); }
+
+    // Abonnement type : Fn doit etre appelable avec (decay<Args>...).
+    // mode defaut = celui fixe a la declaration (Replay pour un signal, LatestOnly pour un latch).
+    template <typename Fn>
+    Subscription connect(Fn cb) {
+        return ring_.connect(std::move(cb), /*fireInitial=*/true, /*timeoutMs=*/0, defaultMode_);
+    }
+    template <typename Fn>
+    Subscription connect(Fn cb, DeliveryMode mode, bool fireInitial = true, int timeoutMs = 0) {
+        return ring_.connect(std::move(cb), fireInitial, timeoutMs, mode);
+    }
+
+    uint32_t maxBytes() const { return ring_.maxPayload(); }
+    uint32_t capacity() const { return ring_.capacity(); }
+    DeliveryMode defaultMode() const { return defaultMode_; }
+
+    RingQueueDynamic<Args...>& raw() { return ring_; }
+
+private:
+    RingQueueDynamic<Args...> ring_;
+    DeliveryMode defaultMode_;
+};
+
+// =================================================================================================
+//  SwIpcProperty — property distante "a la Qt" (equivalent Q_PROPERTY partage entre process).
+//
+//  Modele : ETAT RUNTIME VOLATILE (pas de disque) porte par un latch SHM ; ECRITURE
+//  BIDIRECTIONNELLE (n'importe quel process ecrit, last-writer-wins) ; un late-joiner recoit
+//  la valeur courante au connect (LatestOnly). Le payload embarque le publisherId de l'auteur
+//  pour FILTRER L'ECHO (un writer ignore sa propre publication, sinon boucle infinie).
+//
+//  La classe est volontairement decouplee de SwRemoteObject/ThreadHandle : la macro
+//  SW_IPC_PROPERTY (cote SwRemoteObject.h) fournit le publisherId, le flag alive, et une
+//  NotifyFn qui se charge elle-meme du re-post sur le thread d'affinite + de l'emit local.
+//
+//  IMPORTANT : on ne PUBLIE JAMAIS la valeur par defaut. La SHM ne contient une valeur que
+//  si quelqu'un a fait un set() explicite ; sinon chaque instance garde son default local.
+//  Cela rend l'ordre de demarrage des process sans effet sur l'etat partage.
+// =================================================================================================
+template <class T>
+class SwIpcProperty {
+public:
+    typedef std::function<void(const T&)> NotifyFn;
+
+    // reg              : registry de l'objet proprietaire (isole la SHM par domain|object).
+    // name             : nom logique de la property (canal SHM = hash(domain|object|name)).
+    // defaultValue     : valeur locale initiale (NON publiee).
+    // ownerPublisherId : id unique de l'instance proprietaire (filtrage d'echo).
+    // ownerAlive       : flag de vie de l'owner (garde lifetime des callbacks).
+    // notify           : appele a chaque changement effectif (set local OU reception distante) ;
+    //                    typiquement "emit nameChanged(v)" avec re-post sur le thread d'affinite.
+    // maxBytes         : 0 => sizing auto (POD) ; >0 requis pour un type variable (SwString...).
+    SwIpcProperty(Registry& reg,
+                  const SwString& name,
+                  const T& defaultValue,
+                  uint64_t ownerPublisherId,
+                  std::shared_ptr<std::atomic_bool> ownerAlive,
+                  NotifyFn notify,
+                  uint32_t maxBytes = 0u)
+        : name_(name),
+          // capacity > 1 : un latch peut avoir plusieurs lecteurs (owner + proxies) ET
+          // plusieurs ecrivains (bidirectionnel). Avec un seul slot, un slot fraichement
+          // ecrit peut etre invalide pour un second lecteur avant qu'il l'ait vu. Une petite
+          // profondeur evite ces courses ; LatestOnly garantit qu'on ne livre que le dernier.
+          latch_(reg, name, /*capacity*/ 16u, maxBytes, DeliveryMode::LatestOnly),
+          cached_(defaultValue),
+          self_(ownerPublisherId),
+          alive_(std::move(ownerAlive)),
+          notify_(std::move(notify)) {
+        std::shared_ptr<std::atomic_bool> alive = alive_;
+        SwIpcProperty<T>* selfPtr = this;
+        // IMPORTANT : chaque property a son PROPRE curseur d'abonnement. Deux instances dans
+        // le meme process avec le meme objectName (owner + proxy local) partageraient sinon le
+        // meme curseur (identifie par (pid, subscriberObject)) : quand l'une draine, l'autre ne
+        // recevrait plus rien. On rend le subscriberObject unique via le publisherId d'instance.
+        const SwString uniqueSub = reg.object() + SwString("#prop#") + detail::hex64(self_);
+        detail::ScopedSubscriberObject subScope(uniqueSub);
+        // fireInitial=true + LatestOnly : si la SHM porte deja une valeur (set d'un autre
+        // process), on la recoit ici et cached_ se synchronise ; sinon cached_ reste le default.
+        sub_ = latch_.connect(
+            [selfPtr, alive](uint64_t pubId, T value) {
+                if (!alive || !alive->load(std::memory_order_relaxed)) return;
+                selfPtr->onLatch_(pubId, value);
+            },
+            DeliveryMode::LatestOnly, /*fireInitial=*/true, /*timeoutMs=*/0);
+    }
+
+    SwIpcProperty(const SwIpcProperty&) = delete;
+    SwIpcProperty& operator=(const SwIpcProperty&) = delete;
+
+    ~SwIpcProperty() { sub_.stop(); } // arrete le poller AVANT de detruire cache/mutex.
+
+    // Lecture synchrone de la derniere valeur connue (cache local).
+    T get() const {
+        SwMutexLocker lk(mutex_);
+        return cached_;
+    }
+
+    // Ecriture : met a jour le cache, publie (self_, v) sur le latch, notifie localement.
+    void set(const T& v) {
+        {
+            SwMutexLocker lk(mutex_);
+            if (cached_ == v) return; // pas de churn si inchange
+            cached_ = v;
+        }
+        latch_.publish(self_, v);  // last-writer-wins ; les autres convergent via LatestOnly
+        if (notify_) notify_(v);   // emit local immediat (la NotifyFn gere le thread d'affinite)
+    }
+
+    const SwString& name() const { return name_; }
+    uint32_t maxBytes() const { return latch_.maxBytes(); }
+
+private:
+    void onLatch_(uint64_t pubId, const T& value) {
+        if (!alive_ || !alive_->load(std::memory_order_relaxed)) return;
+        if (pubId == self_) return; // ma propre publication -> ignorer (anti-echo)
+        {
+            SwMutexLocker lk(mutex_);
+            if (cached_ == value) return; // deja a jour -> pas de double notify
+            cached_ = value;
+        }
+        if (notify_) notify_(value);
+    }
+
+    SwString name_;
+    SwIpcSignal<uint64_t, T> latch_;
+    mutable SwMutex mutex_;
+    T cached_;
+    uint64_t self_;
+    std::shared_ptr<std::atomic_bool> alive_;
+    NotifyFn notify_;
+    typename SwIpcSignal<uint64_t, T>::Subscription sub_;
+};
+
+// --- Macros de confort (requierent un membre `ipcRegistry_` dans la classe). ---
+
+// static_assert clair : un type non borne sans maxBytes => erreur a la compilation.
+// IMPORTANT (C++11) : l'assert vit au SITE de la macro SW_IPC_SIGNAL, jamais dans le corps
+// partage de SwIpcSignal (sans if constexpr, il casserait SW_IPC_SIGNAL_SIZED).
+#define SW_IPC_STATIC_ASSERT_BOUNDED_(name, ...)                                                   \
+    static_assert(::sw::ipc::size::IpcWireBound<__VA_ARGS__>::bounded,                             \
+        "SW_IPC_SIGNAL(" #name "): un des types n'a pas de taille bornee "                         \
+        "(SwString/SwByteArray/SwList/SwMap). Utilisez "                                           \
+        "SW_IPC_SIGNAL_SIZED(" #name ", maxBytes, ...) pour reserver la place.")
+
+// Signal IPC dimensionne AUTOMATIQUEMENT depuis les types (POD uniquement).
+#define SW_IPC_SIGNAL(name, ...)                                                                   \
+    ::sw::ipc::SwIpcSignal<__VA_ARGS__> name{ipcRegistry_, SwString(#name), 16u, 0u,               \
+        ::sw::ipc::DeliveryMode::Replay};                                                          \
+    SW_IPC_STATIC_ASSERT_BOUNDED_(name, __VA_ARGS__)
+
+// Signal IPC avec taille explicite par message (obligatoire des qu'un type est variable).
+#define SW_IPC_SIGNAL_SIZED(name, maxBytes, ...)                                                   \
+    ::sw::ipc::SwIpcSignal<__VA_ARGS__> name{ipcRegistry_, SwString(#name), 16u,                   \
+        static_cast<uint32_t>(maxBytes), ::sw::ipc::DeliveryMode::Replay}
+
+// Latch / etat : un seul slot, livraison LatestOnly au connect (dernière valeur connue).
+#define SW_IPC_LATCH(name, ...)                                                                    \
+    ::sw::ipc::SwIpcSignal<__VA_ARGS__> name{ipcRegistry_, SwString(#name), 1u, 0u,                \
+        ::sw::ipc::DeliveryMode::LatestOnly};                                                      \
+    SW_IPC_STATIC_ASSERT_BOUNDED_(name, __VA_ARGS__)
+
+// Latch / etat avec taille explicite (pour un latch portant un SwString/SwByteArray).
+#define SW_IPC_LATCH_SIZED(name, maxBytes, ...)                                                    \
+    ::sw::ipc::SwIpcSignal<__VA_ARGS__> name{ipcRegistry_, SwString(#name), 1u,                    \
+        static_cast<uint32_t>(maxBytes), ::sw::ipc::DeliveryMode::LatestOnly}
 
 } // namespace ipc
 } // namespace sw

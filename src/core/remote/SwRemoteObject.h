@@ -1684,6 +1684,11 @@ protected:
     // IPC registry for derived-class signals.
     sw::ipc::Registry ipcRegistry_;
 
+    // Accessors used by the SW_IPC_PROPERTY layer (expanded in derived classes), which needs
+    // this object's publisher id (echo filtering) and liveness flag (callback lifetime guard).
+    uint64_t ipcPublisherId() const { return publisherId_; }
+    const std::shared_ptr<std::atomic_bool>& ipcAlive() const { return alive_; }
+
  private:
     struct IIpcSubscription;
 
@@ -2010,7 +2015,8 @@ protected:
             case 100u: rpcRespondValueCap_<100, Ret>(methodName, callId, clientPid, ok, err, value); break;
             case 200u: rpcRespondValueCap_<200, Ret>(methodName, callId, clientPid, ok, err, value); break;
             case 500u: rpcRespondValueCap_<500, Ret>(methodName, callId, clientPid, ok, err, value); break;
-            default:   rpcRespondValueCap_<100, Ret>(methodName, callId, clientPid, ok, err, value); break;
+            case 1000u: rpcRespondValueCap_<1000, Ret>(methodName, callId, clientPid, ok, err, value); break;
+            default:   rpcRespondValueCap_<1000, Ret>(methodName, callId, clientPid, ok, err, value); break;
         }
     }
 
@@ -2056,7 +2062,8 @@ protected:
             case 100u: rpcRespondVoidCap_<100, Ret>(methodName, callId, clientPid, ok, err); break;
             case 200u: rpcRespondVoidCap_<200, Ret>(methodName, callId, clientPid, ok, err); break;
             case 500u: rpcRespondVoidCap_<500, Ret>(methodName, callId, clientPid, ok, err); break;
-            default:   rpcRespondVoidCap_<100, Ret>(methodName, callId, clientPid, ok, err); break;
+            case 1000u: rpcRespondVoidCap_<1000, Ret>(methodName, callId, clientPid, ok, err); break;
+            default:   rpcRespondVoidCap_<1000, Ret>(methodName, callId, clientPid, ok, err); break;
         }
     }
 
@@ -2151,7 +2158,8 @@ protected:
             case 100u: return ipcExposeRpcNoCtxCap_<100, Ret, A...>(methodName, handler, fireInitial);
             case 200u: return ipcExposeRpcNoCtxCap_<200, Ret, A...>(methodName, handler, fireInitial);
             case 500u: return ipcExposeRpcNoCtxCap_<500, Ret, A...>(methodName, handler, fireInitial);
-            default:   return ipcExposeRpcNoCtxCap_<100, Ret, A...>(methodName, handler, fireInitial);
+            case 1000u: return ipcExposeRpcNoCtxCap_<1000, Ret, A...>(methodName, handler, fireInitial);
+            default:   return ipcExposeRpcNoCtxCap_<1000, Ret, A...>(methodName, handler, fireInitial);
         }
     }
 
@@ -2192,7 +2200,8 @@ protected:
             case 100u: return ipcExposeRpcWithCtxCap_<100, Ret, A...>(methodName, handler, fireInitial);
             case 200u: return ipcExposeRpcWithCtxCap_<200, Ret, A...>(methodName, handler, fireInitial);
             case 500u: return ipcExposeRpcWithCtxCap_<500, Ret, A...>(methodName, handler, fireInitial);
-            default:   return ipcExposeRpcWithCtxCap_<100, Ret, A...>(methodName, handler, fireInitial);
+            case 1000u: return ipcExposeRpcWithCtxCap_<1000, Ret, A...>(methodName, handler, fireInitial);
+            default:   return ipcExposeRpcWithCtxCap_<1000, Ret, A...>(methodName, handler, fireInitial);
         }
     }
 
@@ -2543,3 +2552,59 @@ protected:
 #define ipcExposeRpcStr_4(methodName, obj, method, fireInitial) \
     this->ipcExposeRpcT(SwString(methodName), obj, method, fireInitial)
 #define ipcExposeRpcStr(...) SW_CFG_OVERLOAD(ipcExposeRpcStr_, __VA_ARGS__)
+
+// -------------------------------------------------------------------------
+// SW_IPC_PROPERTY — property distante "a la Qt" (etat runtime partage entre process).
+//
+//   SW_IPC_PROPERTY(int, speed, 0)
+//     -> getter   : int speed() const
+//     -> setter   : void set_speed(const int& v)   (le preprocesseur ne peut pas capitaliser)
+//     -> signal   : void speedChanged(const int&)  (signal local Qt, connectable normalement)
+//
+//   Pour un type a taille variable (SwString/SwByteArray/...), maxBytes est OBLIGATOIRE :
+//   SW_IPC_PROPERTY_SIZED(SwString, label, SwString("idle"), 256)
+//
+//   Ecriture BIDIRECTIONNELLE (n'importe quel process), last-writer-wins. Un late-joiner
+//   recoit la valeur courante au connect. La valeur par defaut n'est jamais publiee.
+// -------------------------------------------------------------------------
+
+// Corps commun : signal local + accesseurs + membre property avec NotifyFn (re-post sur le
+// thread d'affinite de l'objet, comme ipcRegisterConfigT, puis emit du signal local).
+#define SW_IPC_PROPERTY_IMPL_(type, name, defaultVal, maxBytes)                                     \
+public:                                                                                            \
+    DECLARE_SIGNAL(name##Changed, const type&)                                                     \
+    type name() const { return name##_property_.get(); }                                           \
+    void set_##name(const type& v) { name##_property_.set(v); }                                    \
+private:                                                                                           \
+    ::sw::ipc::SwIpcProperty<type> name##_property_{                                               \
+        this->ipcRegistry_, SwString(#name), (defaultVal),                                         \
+        this->ipcPublisherId(), this->ipcAlive(),                                                  \
+        [this](const type& __sw_pv) {                                                              \
+            std::shared_ptr<std::atomic_bool> __sw_alive = this->ipcAlive();                       \
+            ThreadHandle* __sw_tt = this->threadHandle();                                          \
+            ThreadHandle* __sw_ct = ThreadHandle::currentThread();                                 \
+            type __sw_v = __sw_pv;                                                                 \
+            auto __sw_task = [this, __sw_alive, __sw_v]() {                                         \
+                if (!__sw_alive || !__sw_alive->load(std::memory_order_relaxed)) return;           \
+                this->name##Changed(__sw_v);                                                       \
+            };                                                                                     \
+            if (!__sw_tt || __sw_tt == __sw_ct) __sw_task();                                       \
+            else __sw_tt->postTask(std::move(__sw_task));                                          \
+        },                                                                                         \
+        static_cast<uint32_t>(maxBytes)};                                                          \
+public:
+
+// POD : sizing auto (maxBytes=0). static_assert clair si le type n'est pas borne.
+#define SW_IPC_PROPERTY(type, name, defaultVal)                                                    \
+    SW_IPC_PROPERTY_STATIC_ASSERT_BOUNDED_(name, type)                                             \
+    SW_IPC_PROPERTY_IMPL_(type, name, defaultVal, 0u)
+
+// Type a taille variable : maxBytes explicite obligatoire.
+#define SW_IPC_PROPERTY_SIZED(type, name, defaultVal, maxBytes)                                     \
+    SW_IPC_PROPERTY_IMPL_(type, name, defaultVal, maxBytes)
+
+#define SW_IPC_PROPERTY_STATIC_ASSERT_BOUNDED_(name, type)                                          \
+    static_assert(::sw::ipc::size::IpcWireBound<type>::bounded,                                     \
+        "SW_IPC_PROPERTY(" #name "): le type n'a pas de taille bornee "                             \
+        "(SwString/SwByteArray/SwList/SwMap). Utilisez "                                            \
+        "SW_IPC_PROPERTY_SIZED(" #type ", " #name ", default, maxBytes).");

@@ -94,6 +94,17 @@ public:
         m_platformIntegration->initialize(this);
     }
 
+    SwGuiApplication(int argc, char* argv[])
+        : SwCoreApplication(argc, argv) {
+        instance(false) = this;
+        setRuntimeApplicationKind("gui", true);
+        m_platformIntegration = SwCreateDefaultPlatformIntegration();
+        if (!m_platformIntegration) {
+            throw std::runtime_error("No platform integration available");
+        }
+        m_platformIntegration->initialize(this);
+    }
+
     /**
      * @brief Destroys the `SwGuiApplication` instance.
      *

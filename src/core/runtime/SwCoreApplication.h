@@ -1842,9 +1842,21 @@ protected:
             }
         }
 
-        if (handles.empty()) return;
+        auto closeTimeoutTimer = [&]() {
+            if (timeoutTimer) {
+                ::CancelWaitableTimer(timeoutTimer);
+                ::CloseHandle(timeoutTimer);
+                timeoutTimer = NULL;
+            }
+        };
+
+        if (handles.empty()) {
+            closeTimeoutTimer();
+            return;
+        }
         if (handles.size() > MAXIMUM_WAIT_OBJECTS) {
             if (timeoutUs > 0) std::this_thread::sleep_for(std::chrono::microseconds(timeoutUs));
+            closeTimeoutTimer();
             return;
         }
 
@@ -1855,6 +1867,7 @@ protected:
                                                     QS_ALLINPUT);
         // WAIT_OBJECT_0 + handles.size() means: messages are pending; let the GUI pump them.
         (void)r;
+        closeTimeoutTimer();
         return;
     }
 #endif
