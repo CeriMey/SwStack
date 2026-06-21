@@ -106,7 +106,8 @@ struct SwMediaOpenOptions {
     static SwMediaOpenOptions fromUrl(const SwString& rawUrl) {
         SwMediaOpenOptions options;
         options.mediaUrl = SwMediaUrl::parse(rawUrl);
-        options.transportExplicit = hasAnyQueryValue_(options.mediaUrl, {"transport"});
+        options.transportExplicit =
+            hasAnyQueryValue_(options.mediaUrl, {"transport", "rtsp_transport", "rtsp-transport"});
         options.udpFormatExplicit = hasAnyQueryValue_(options.mediaUrl, {"format"});
         options.codecExplicit = hasAnyQueryValue_(options.mediaUrl, {"codec"});
         options.payloadTypeExplicit =
@@ -137,7 +138,9 @@ struct SwMediaOpenOptions {
                                                  "rtp_jitter_packets",
                                                  "rtp-jitter-packets"});
         options.transport = transportFromString(firstQueryValue_(options.mediaUrl,
-                                                                 {"transport"}));
+                                                                 {"transport",
+                                                                  "rtsp_transport",
+                                                                  "rtsp-transport"}));
         options.udpFormat = udpFormatFromString(firstQueryValue_(options.mediaUrl,
                                                                  {"format"}));
         options.codec = codecFromString(firstQueryValue_(options.mediaUrl,
@@ -414,6 +417,8 @@ private:
     static bool isLocalOptionKey_(const SwString& rawKey) {
         const SwString key = rawKey.trimmed().toLower();
         return key == "transport" ||
+               key == "rtsp_transport" ||
+               key == "rtsp-transport" ||
                key == "format" ||
                key == "codec" ||
                key == "pt" ||

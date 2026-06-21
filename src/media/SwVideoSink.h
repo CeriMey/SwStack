@@ -54,6 +54,7 @@ public:
             return;
         }
         m_decoder = decoder;
+        m_decoder->setOutputTarget(m_outputTarget);
         if (m_pipeline) {
             m_pipeline->setDecoder(decoder);
             installPipelineFrameCallback_();
@@ -110,6 +111,18 @@ public:
             m_pipeline->setAsyncDecode(enabled);
         }
     }
+
+    void setVideoOutputTarget(const SwVideoOutputTarget& target) {
+        m_outputTarget = target;
+        if (m_decoder) {
+            m_decoder->setOutputTarget(target);
+        }
+        if (m_pipeline) {
+            m_pipeline->setOutputTarget(target);
+        }
+    }
+
+    SwVideoOutputTarget videoOutputTarget() const { return m_outputTarget; }
 
     void setRuntimeDecoderRerouteEnabled(bool enabled) {
         if (m_pipeline) {
@@ -320,6 +333,7 @@ private:
     std::shared_ptr<SwVideoPipeline> m_pipeline;
     std::shared_ptr<SwVideoSource> m_source;
     std::shared_ptr<SwVideoDecoder> m_decoder;
+    SwVideoOutputTarget m_outputTarget{};
     mutable std::mutex m_frameMutex;
     SwVideoFrame m_currentFrame{};
     std::chrono::steady_clock::time_point m_firstFrameTime{};

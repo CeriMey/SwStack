@@ -8,6 +8,8 @@
 
 #if defined(_WIN32)
 #include "media/SwMediaFoundationVideoDecoder.h"
+#elif defined(__ANDROID__)
+#include "media/SwAndroidMediaCodecVideoDecoder.h"
 #elif defined(__linux__)
 #include "media/SwLinuxVideoDecoder.h"
 #endif

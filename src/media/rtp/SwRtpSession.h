@@ -256,6 +256,7 @@ private:
         m_remoteSsrc = 0;
         m_sentStartupPli = false;
         m_probeSequence = 0;
+        m_startTime = std::chrono::steady_clock::now();
         m_lastRtpTime = {};
         m_lastPliTime = {};
         m_lastReceiverReportTime = {};
@@ -690,12 +691,17 @@ private:
     }
 
     void checkTimeout_() {
-        if (!m_running.load() || m_lastRtpTime.time_since_epoch().count() == 0) {
+        if (!m_running.load()) {
+            return;
+        }
+        const auto referenceTime =
+            m_lastRtpTime.time_since_epoch().count() != 0 ? m_lastRtpTime : m_startTime;
+        if (referenceTime.time_since_epoch().count() == 0) {
             return;
         }
         const auto now = std::chrono::steady_clock::now();
         const auto elapsed = static_cast<int>(
-            std::chrono::duration_cast<std::chrono::seconds>(now - m_lastRtpTime).count());
+            std::chrono::duration_cast<std::chrono::seconds>(now - referenceTime).count());
         if (elapsed <= 3) {
             m_lastLoggedTimeoutSec = -1;
             return;
@@ -861,6 +867,7 @@ private:
     uint32_t m_localSsrc{0};
     bool m_sentStartupPli{false};
     uint16_t m_probeSequence{0};
+    std::chrono::steady_clock::time_point m_startTime{};
     std::chrono::steady_clock::time_point m_lastRtpTime{};
     std::chrono::steady_clock::time_point m_lastPliTime{};
     std::chrono::steady_clock::time_point m_lastReceiverReportTime{};

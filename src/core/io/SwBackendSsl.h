@@ -58,6 +58,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
 
 #if defined(_WIN32)
@@ -67,6 +68,7 @@
 #pragma comment(lib, "crypt32.lib")
 #endif
 #else
+#include <dirent.h>
 #include <dlfcn.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -665,17 +667,68 @@ private:
             loaded = loadVerifyLocation_(file, std::string(), std::string("system-ca-file:") + file, trustSummary) || loaded;
         }
 
-        static const std::array<const char*, 4> kSystemCaDirs = {
+        static const std::array<const char*, 6> kSystemCaDirs = {
             "/etc/ssl/certs",
             "/etc/pki/tls/certs",
             "/etc/ca-certificates/extracted/cadir",
-            "/etc/openssl/certs"
+            "/etc/openssl/certs",
+            "/system/etc/security/cacerts",
+            "/apex/com.android.conscrypt/cacerts"
         };
         for (const char* dir : kSystemCaDirs) {
             loaded = loadVerifyLocation_(std::string(), dir, std::string("system-ca-dir:") + dir, trustSummary) || loaded;
         }
 
+#if defined(__ANDROID__)
+        loaded = loadCertificateFilesFromDirectory_("/system/etc/security/cacerts",
+                                                    "android-system-ca-files",
+                                                    trustSummary) || loaded;
+        loaded = loadCertificateFilesFromDirectory_("/apex/com.android.conscrypt/cacerts",
+                                                    "android-conscrypt-ca-files",
+                                                    trustSummary) || loaded;
+#endif
+
         return loaded;
+    }
+
+    bool loadCertificateFilesFromDirectory_(const std::string& dirPath,
+                                            const std::string& label,
+                                            std::string& trustSummary) {
+        if (dirPath.empty() || !pathIsDirectory_(dirPath) || !m_loader->SSL_CTX_load_verify_locations) {
+            return false;
+        }
+
+        DIR* dir = ::opendir(dirPath.c_str());
+        if (!dir) {
+            return false;
+        }
+
+        int loadedCount = 0;
+        while (dirent* entry = ::readdir(dir)) {
+            const std::string name(entry->d_name);
+            if (name.empty() || name == "." || name == "..") {
+                continue;
+            }
+
+            const std::string filePath = joinPath_(dirPath, name);
+            if (!pathIsFile_(filePath)) {
+                continue;
+            }
+
+            if (m_loader->SSL_CTX_load_verify_locations(m_ctx, filePath.c_str(), nullptr) == 1) {
+                ++loadedCount;
+            } else if (m_loader->ERR_clear_error) {
+                m_loader->ERR_clear_error();
+            }
+        }
+        ::closedir(dir);
+
+        if (loadedCount <= 0) {
+            return false;
+        }
+
+        appendTrustSummary_(trustSummary, label + ":" + std::to_string(loadedCount));
+        return true;
     }
 #endif
 

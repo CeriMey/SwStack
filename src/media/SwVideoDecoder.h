@@ -59,6 +59,39 @@
 #include <vector>
 #include <algorithm>
 
+class SwVideoOutputTarget {
+public:
+    enum class Kind {
+        None,
+        AndroidNativeWindow
+    };
+
+    SwVideoOutputTarget() = default;
+
+    static SwVideoOutputTarget fromNativeHandle(Kind kind,
+                                                void* handle,
+                                                std::shared_ptr<void> owner = std::shared_ptr<void>()) {
+        SwVideoOutputTarget target;
+        target.m_kind = kind;
+        target.m_handle = handle;
+        target.m_owner = std::move(owner);
+        return target;
+    }
+
+    Kind kind() const { return m_kind; }
+    void* handle() const { return m_handle; }
+    std::shared_ptr<void> owner() const { return m_owner; }
+
+    bool isValid() const {
+        return m_kind != Kind::None && m_handle != nullptr;
+    }
+
+private:
+    Kind m_kind{Kind::None};
+    void* m_handle{nullptr};
+    std::shared_ptr<void> m_owner{};
+};
+
 // X11 defines `None` as a macro, which breaks scoped enums such as RuntimeHealthEventKind::None.
 #ifdef None
 #undef None
@@ -113,6 +146,7 @@ public:
      */
     virtual bool feed(const SwVideoPacket& packet) = 0;
     virtual RuntimeHealthEvent takeRuntimeHealthEvent() { return RuntimeHealthEvent(); }
+    virtual void setOutputTarget(const SwVideoOutputTarget& target) { (void)target; }
     /**
      * @brief Returns the current flush.
      * @return The current flush.

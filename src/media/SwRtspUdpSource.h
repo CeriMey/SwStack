@@ -1003,6 +1003,8 @@ private:
             if (m_keepAliveTimer && !m_keepAliveTimer->isActive()) {
                 m_keepAliveTimer->start();
             }
+            emitStatus(SwVideoSource::StreamState::Recovering,
+                       "RTSP PLAY accepted; waiting for RTP...");
             swCDebug(kSwLogCategory_SwRtspUdpSource) << "[SwRtspUdpSource] Streaming started (PT=" << m_payloadType
                       << ", client_port=" << m_clientRtpPort << ", server_port=" << m_serverRtpPort << ")";
             return;
@@ -1982,6 +1984,8 @@ private:
     void triggerTcpFallback(const char* reason) {
         if (m_openOptions.transportExplicit &&
             m_openOptions.transport == SwMediaOpenOptions::TransportPreference::Udp) {
+            emitStatus(SwVideoSource::StreamState::Recovering,
+                       "No RTP received over UDP; TCP fallback disabled.");
             swCWarning(kSwLogCategory_SwRtspUdpSource)
                 << "[SwRtspUdpSource] UDP stalled but TCP fallback is disabled by explicit transport=udp";
             return;
@@ -2420,7 +2424,11 @@ private:
         if (m_remoteSsrc == 0 && packet.ssrc != 0) {
             m_remoteSsrc = packet.ssrc;
         }
-        ++m_rtpPackets;
+        const uint64_t receivedPackets = ++m_rtpPackets;
+        if (receivedPackets == 1) {
+            emitStatus(SwVideoSource::StreamState::Recovering,
+                       "RTP received; waiting for video frame...");
+        }
         m_lastRtpTime = std::chrono::steady_clock::now();
         const uint8_t* payload = reinterpret_cast<const uint8_t*>(packet.payload.constData());
         const size_t payloadLen = packet.payload.size();

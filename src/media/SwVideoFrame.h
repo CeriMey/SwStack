@@ -88,6 +88,9 @@ class SwVideoFrame {
 public:
     enum class StorageKind {
         Cpu,
+#if defined(__ANDROID__)
+        NativeAndroidSurface,
+#endif
 #if defined(__linux__)
         NativeVaapiPrime,
 #endif
@@ -179,6 +182,12 @@ public:
         Microsoft::WRL::ComPtr<IDXGISurface> surface;
         DXGI_FORMAT dxgiFormat{DXGI_FORMAT_UNKNOWN};
         UINT subresourceIndex{0};
+    };
+#endif
+
+#if defined(__ANDROID__)
+    struct NativeAndroidSurfaceStorage {
+        std::shared_ptr<void> owner;
     };
 #endif
 
@@ -289,6 +298,22 @@ public:
         frame.m_info = info;
         frame.m_storageKind = StorageKind::NativeD3D11;
         frame.m_nativeD3D11 = std::move(storage);
+        return frame;
+    }
+#endif
+
+#if defined(__ANDROID__)
+    static SwVideoFrame wrapNativeAndroidSurfacePresented(const SwVideoFormatInfo& info,
+                                                          std::shared_ptr<void> owner = std::shared_ptr<void>()) {
+        SwVideoFrame frame;
+        if (!info.isValid()) {
+            return frame;
+        }
+        auto storage = std::make_shared<NativeAndroidSurfaceStorage>();
+        storage->owner = std::move(owner);
+        frame.m_info = info;
+        frame.m_storageKind = StorageKind::NativeAndroidSurface;
+        frame.m_nativeAndroidSurface = std::move(storage);
         return frame;
     }
 #endif
@@ -466,6 +491,9 @@ public:
      */
     void clear() {
         m_buffer.reset();
+#if defined(__ANDROID__)
+        m_nativeAndroidSurface.reset();
+#endif
 #if defined(__linux__)
         m_nativeVaapiPrime.reset();
 #endif
@@ -521,6 +549,13 @@ public:
     }
 #endif
 
+#if defined(__ANDROID__)
+    bool isNativeAndroidSurface() const {
+        return m_storageKind == StorageKind::NativeAndroidSurface &&
+               m_nativeAndroidSurface != nullptr;
+    }
+#endif
+
 #if defined(_WIN32)
     bool isNativeD3D11() const {
         return m_storageKind == StorageKind::NativeD3D11 && m_nativeD3D11 && m_nativeD3D11->texture;
@@ -549,6 +584,11 @@ public:
 
 private:
     bool hasNativeStorage() const {
+#if defined(__ANDROID__)
+        if (m_nativeAndroidSurface) {
+            return true;
+        }
+#endif
 #if defined(__linux__)
         if (m_nativeVaapiPrime && m_nativeVaapiPrime->numObjects > 0 && m_nativeVaapiPrime->numLayers > 0) {
             return true;
@@ -572,6 +612,9 @@ private:
         m_bytes = static_cast<uint8_t*>(m_buffer.get());
         m_bufferSize = bytes;
         m_storageKind = StorageKind::Cpu;
+#if defined(__ANDROID__)
+        m_nativeAndroidSurface.reset();
+#endif
 #if defined(__linux__)
         m_nativeVaapiPrime.reset();
 #endif
@@ -583,6 +626,9 @@ private:
     SwVideoFormatInfo m_info{};
     StorageKind m_storageKind{StorageKind::Cpu};
     std::shared_ptr<void> m_buffer;
+#if defined(__ANDROID__)
+    std::shared_ptr<NativeAndroidSurfaceStorage> m_nativeAndroidSurface;
+#endif
 #if defined(__linux__)
     std::shared_ptr<NativeVaapiPrimeStorage> m_nativeVaapiPrime;
 #endif

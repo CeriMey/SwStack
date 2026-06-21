@@ -104,6 +104,14 @@ public:
      */
     static SwList<SwString> writableLocations(StandardLocation type) {
         SwList<SwString> results;
+        SwString overrideRoot = writableLocationRootOverride();
+        if (!overrideRoot.isEmpty()) {
+            SwString path = writableOverridePath(type, overrideRoot);
+            ensureDirectory(path);
+            appendUnique(results, normalizeForPlatform(path));
+            return results;
+        }
+
         if (isTestModeEnabled()) {
             SwString path = joinPath(testRootPath(), displayName(type));
             ensureDirectory(path);
@@ -197,6 +205,26 @@ public:
      */
     static bool isTestModeEnabled() {
         return testModeEnabledFlag();
+    }
+
+    /**
+     * @brief Overrides writable standard locations with an application-owned root directory.
+     *
+     * This is intended for embedded runtimes such as Android where the host application already
+     * provides a private writable directory and process environment variables are not reliable.
+     */
+    static void setWritableLocationRootOverride(const SwString& root) {
+        writableLocationRootOverrideStorage() = normalizeForPlatform(root);
+        if (!writableLocationRootOverrideStorage().isEmpty()) {
+            ensureDirectory(writableLocationRootOverrideStorage());
+        }
+    }
+
+    /**
+     * @brief Returns the current writable location root override.
+     */
+    static SwString writableLocationRootOverride() {
+        return writableLocationRootOverrideStorage();
     }
 
     /**
@@ -418,6 +446,31 @@ private:
         return root;
     }
 
+    static SwString& writableLocationRootOverrideStorage() {
+        static SwString root;
+        return root;
+    }
+
+    static SwString writableOverridePath(StandardLocation type, const SwString& root) {
+        switch (type) {
+        case TempLocation:
+        case RuntimeLocation:
+            return joinPath(root, "tmp");
+        case GenericDataLocation:
+        case AppDataLocation:
+            return joinPath(root, "data");
+        case GenericConfigLocation:
+        case AppConfigLocation:
+            return joinPath(root, "config");
+        case AppLocalDataLocation:
+            return joinPath(root, "local-data");
+        case CacheLocation:
+            return joinPath(root, "cache");
+        default:
+            return root;
+        }
+    }
+
     static SwString testRootPath() {
         SwString& root = testRootStorage();
         if (!root.isEmpty()) {
@@ -533,6 +586,13 @@ private:
                 ++startIndex;
             }
             if (startIndex < parts.size() && parts[startIndex] == drive) {
+                ++startIndex;
+            }
+        }
+#else
+        if (working.startsWith("/")) {
+            current = SwString("/");
+            while (startIndex < parts.size() && parts[startIndex].isEmpty()) {
                 ++startIndex;
             }
         }

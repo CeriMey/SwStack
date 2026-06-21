@@ -74,8 +74,8 @@ static constexpr const char* kSwLogCategory_SwCrypto = "sw.core.types.swcrypto";
 //==============================//
 //            Linux             //
 //==============================//
-#if !defined(_WIN32) && !defined(__ANDROID__)
-  // OpenSSL pour Linux
+#if !defined(_WIN32)
+  // OpenSSL for Unix-like targets, including Android builds that package libcrypto.
   #include <openssl/evp.h>
   #include <openssl/hmac.h>
   #include <openssl/err.h>

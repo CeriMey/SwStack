@@ -263,6 +263,9 @@ public:
         if (m_decoder && m_frameCallback) {
             m_decoder->setFrameCallback(makeDecoderFrameCallbackLocked_());
         }
+        if (m_decoder) {
+            m_decoder->setOutputTarget(m_outputTarget);
+        }
     }
 
     /**
@@ -290,6 +293,9 @@ public:
         m_lastDecodedFrameTickMs.store(0);
         if (m_decoder && m_frameCallback) {
             m_decoder->setFrameCallback(makeDecoderFrameCallbackLocked_());
+        }
+        if (m_decoder) {
+            m_decoder->setOutputTarget(m_outputTarget);
         }
     }
 
@@ -394,6 +400,24 @@ public:
     void useDecoderFactory(bool enabled) {
         SwMutexLocker lock(m_mutex);
         m_autoDecoderEnabled = enabled;
+    }
+
+    void setOutputTarget(const SwVideoOutputTarget& target) {
+        std::shared_ptr<SwVideoDecoder> decoder;
+        {
+            SwMutexLocker lock(m_mutex);
+            m_outputTarget = target;
+            decoder = m_decoder;
+            clearResolvedDecoderSelectionsLocked_();
+            clearDecoderRecoveryRequestLocked_();
+        }
+        if (decoder) {
+            decoder->setOutputTarget(target);
+            decoder->flush();
+        }
+        m_waitingForDecoderSync.store(decoder != nullptr);
+        m_loggedWaitingForDecoderSync.store(false);
+        m_loggedFirstPacketToDecoder.store(false);
     }
 
     /**
@@ -1172,6 +1196,7 @@ private:
                     if (m_frameCallback) {
                         decoder->setFrameCallback(makeDecoderFrameCallbackLocked_());
                     }
+                    decoder->setOutputTarget(m_outputTarget);
                     m_decoder = decoder;
                     m_decoderCodec = packet.codec();
                     m_activeDecoderId = acquiredPreferredDecoder ? preferredDecoderId
@@ -1301,6 +1326,7 @@ private:
     mutable SwMutex m_mutex;
     std::shared_ptr<SwVideoSource> m_source;
     std::shared_ptr<SwVideoDecoder> m_decoder;
+    SwVideoOutputTarget m_outputTarget{};
     SwVideoPacket::Codec m_decoderCodec{SwVideoPacket::Codec::Unknown};
     SwString m_activeDecoderId{};
     SwString m_decoderRecoveryReason{};

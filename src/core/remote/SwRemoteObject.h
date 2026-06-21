@@ -83,6 +83,35 @@
    */
 class SwRemoteObject : public SwObject {
     SW_OBJECT(SwRemoteObject, SwObject)
+ private:
+#ifdef __ANDROID__
+    template <typename... Args>
+    class AndroidNoopSignal {
+     public:
+        struct Subscription {
+            void stop() {}
+        };
+
+        AndroidNoopSignal(sw::ipc::Registry&, const SwString&) {}
+
+        bool publish(const Args&...) { return false; }
+
+        template <typename Fn>
+        Subscription connect(Fn, bool = true) {
+            return Subscription();
+        }
+
+        template <typename Fn>
+        Subscription connect(Fn, bool, int) {
+            return Subscription();
+        }
+    };
+
+    using ConfigIpcSignal = AndroidNoopSignal<uint64_t, SwString>;
+#else
+    using ConfigIpcSignal = sw::ipc::Signal<uint64_t, SwString>;
+#endif
+
  public:
     enum class ConfigSavePolicy {
         SaveToDisk,
@@ -127,8 +156,10 @@ class SwRemoteObject : public SwObject {
 #ifndef __ANDROID__
  	        enableSharedMemoryConfig(true);
 #endif
+#ifndef __ANDROID__
             (void)ipcExposeRpcT(SwString("system/saveAsFactory"), this, &SwRemoteObject::saveAsFactory);
             (void)ipcExposeRpcT(SwString("system/resetFactory"), this, &SwRemoteObject::resetFactory);
+#endif
  	        // Publish an initial snapshot so external tools (ex: SwBridge) can read it via IPC.
  	        {
  	            SwMutexLocker lk(mutex_);
@@ -545,7 +576,7 @@ class SwRemoteObject : public SwObject {
 		                            Fn onChange) {
 	        std::function<void(const T&)> cb(onChange);
 
-	        std::shared_ptr<sw::ipc::Signal<uint64_t, SwString>> configSignal;
+	        std::shared_ptr<ConfigIpcSignal> configSignal;
 	        {
 	            SwMutexLocker lk(mutex_);
 	            const T initial = configValueFromDocs_<T>(mergedDoc_, configName, defaultValue);
@@ -2221,11 +2252,10 @@ protected:
         return new IpcConnection(context, std::move(holder));
     }
 
-    std::shared_ptr<sw::ipc::Signal<uint64_t, SwString>> ensureConfigSignal_(const SwString& signalName) {
+    std::shared_ptr<ConfigIpcSignal> ensureConfigSignal_(const SwString& signalName) {
         auto it = configSignals_.find(signalName);
         if (it != configSignals_.end() && it->second) return it->second;
-        std::shared_ptr<sw::ipc::Signal<uint64_t, SwString>> sig(
-            new sw::ipc::Signal<uint64_t, SwString>(ipcRegistry_, signalName));
+        std::shared_ptr<ConfigIpcSignal> sig(new ConfigIpcSignal(ipcRegistry_, signalName));
         configSignals_[signalName] = sig;
         return sig;
     }
@@ -2471,13 +2501,13 @@ protected:
     bool shmConfigEnabled_{false};
     uint64_t publisherId_{0};
 
-    sw::ipc::Signal<uint64_t, SwString> shmConfig_;
-    sw::ipc::Signal<uint64_t, SwString>::Subscription shmConfigSub_;
+    ConfigIpcSignal shmConfig_;
+    ConfigIpcSignal::Subscription shmConfigSub_;
 
     std::shared_ptr<std::atomic_bool> alive_;
 
     SwMap<SwString, RegisteredConfigEntry> registeredConfigs_; // key=fullName
-    SwMap<SwString, std::shared_ptr<sw::ipc::Signal<uint64_t, SwString>>> configSignals_; // key=sigName
+    SwMap<SwString, std::shared_ptr<ConfigIpcSignal>> configSignals_; // key=sigName
 
     size_t nextIpcToken_{1};
     SwMap<size_t, std::shared_ptr<IIpcSubscription>> ipcSubscriptions_;

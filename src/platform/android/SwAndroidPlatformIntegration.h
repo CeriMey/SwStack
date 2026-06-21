@@ -234,6 +234,50 @@ inline void queueKeyEvent(QueuedEventType type,
     queueEvent(event);
 }
 
+inline bool queueTouchAction(int actionMasked, int x, int y, int metaState) {
+    const bool ctrl = ctrlFromMeta(metaState);
+    const bool shift = shiftFromMeta(metaState);
+    const bool alt = altFromMeta(metaState);
+
+    switch (actionMasked) {
+    case AMOTION_EVENT_ACTION_DOWN:
+    case AMOTION_EVENT_ACTION_POINTER_DOWN:
+        queueTouchEvent(QueuedEventType::TouchDown, x, y, ctrl, shift, alt);
+        requestFrame();
+        return true;
+    case AMOTION_EVENT_ACTION_MOVE:
+        queueTouchEvent(QueuedEventType::TouchMove, x, y, ctrl, shift, alt);
+        requestFrame();
+        return true;
+    case AMOTION_EVENT_ACTION_UP:
+    case AMOTION_EVENT_ACTION_POINTER_UP:
+    case AMOTION_EVENT_ACTION_CANCEL:
+        queueTouchEvent(QueuedEventType::TouchUp, x, y, ctrl, shift, alt);
+        requestFrame();
+        return true;
+    default:
+        return false;
+    }
+}
+
+inline bool queueKeyAction(int action, int keyCode, int metaState) {
+    const bool ctrl = ctrlFromMeta(metaState);
+    const bool shift = shiftFromMeta(metaState);
+    const bool alt = altFromMeta(metaState);
+
+    if (action == AKEY_EVENT_ACTION_DOWN) {
+        queueKeyEvent(QueuedEventType::KeyDown, keyCode, ctrl, shift, alt);
+        requestFrame();
+        return true;
+    }
+    if (action == AKEY_EVENT_ACTION_UP) {
+        queueKeyEvent(QueuedEventType::KeyUp, keyCode, ctrl, shift, alt);
+        requestFrame();
+        return true;
+    }
+    return false;
+}
+
 #if SW_ANDROID_HAS_NATIVE_APP_GLUE
 
 inline int32_t handleInputEvent(android_app*, AInputEvent* event) {
@@ -1158,6 +1202,26 @@ public:
 
     static void bindAndroidApp(android_app* app) {
         swandroid::bindApp(app);
+    }
+
+    // Java/Kotlin Activity hosts do not use android_native_app_glue. These helpers let the
+    // app pass an externally owned Surface/ANativeWindow and input events into the same backend.
+    static void setExternalNativeWindow(ANativeWindow* window) {
+        swandroid::updateSharedSurface(window);
+        swandroid::requestFrame();
+    }
+
+    static void clearExternalNativeWindow() {
+        swandroid::clearSharedSurface();
+        swandroid::requestFrame();
+    }
+
+    static bool dispatchExternalTouchAction(int actionMasked, int x, int y, int metaState = 0) {
+        return swandroid::queueTouchAction(actionMasked, x, y, metaState);
+    }
+
+    static bool dispatchExternalKeyAction(int action, int keyCode, int metaState = 0) {
+        return swandroid::queueKeyAction(action, keyCode, metaState);
     }
 
     void initialize(SwGuiApplication* app) override {
