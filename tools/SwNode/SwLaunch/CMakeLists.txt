@@ -30,6 +30,7 @@ configure_file(
 add_executable(SwLaunch
     SwLaunch.cpp
     SwLaunchCrash.cpp
+    SwLaunchRemoteControl.cpp
     SwLaunchTraceConfig.cpp
 )
 

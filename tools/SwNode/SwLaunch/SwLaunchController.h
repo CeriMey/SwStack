@@ -348,6 +348,14 @@ public:
         }
     }
 
+    bool requestShutdown() {
+        if (shutdownRequested_) {
+            return true;
+        }
+        requestGlobalShutdown_("remote-control", 0);
+        return true;
+    }
+
 private:
     using SwLaunchContextHandler = std::function<void(SwHttpContext&)>;
 
@@ -1295,7 +1303,11 @@ private:
         SwTimer::singleShot(0, [this, triggerId, exitCode]() {
             swWarning() << "[launcher] clean exit requested global shutdown id=" << triggerId
                         << " exitCode=" << exitCode;
-            stopAll();
+            SwString err;
+            const SwList<SwString> keys = activeUnits_.keys();
+            if (!discardUnits_(keys, err) && !err.isEmpty()) {
+                swWarning() << "[launcher] shutdown forced with errors:" << err;
+            }
             app_.quit();
         });
     }

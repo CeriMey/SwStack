@@ -8,6 +8,7 @@
 #include "SwHttpServer.h"
 #include "SwJsonDocument.h"
 #include "SwLaunchDeploySupport.h"
+#include "SwLaunchRemoteControl.h"
 #include "SwLaunchTraceConfig.h"
 #include "SwLaunchVersion.h"
 #include "SwProcess.h"
@@ -1839,6 +1840,12 @@ int main(int argc, char** argv) {
                                               static_cast<uint16_t>(controlPort),
                                               controlToken,
                                               &manager);
+    auto* remoteControl = new SwLaunchRemoteControl(sys,
+                                                    sys,
+                                                    "SwLaunch",
+                                                    [controller]() { return controller->requestShutdown(); },
+                                                    &manager);
+    (void)remoteControl;
 
     if (!controller->start(err)) {
         swError() << err;

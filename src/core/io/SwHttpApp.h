@@ -1055,6 +1055,13 @@ public:
         auto makeAuth = [](const SwHttpAuthAccount& account) {
             return SwJsonValue(swHttpAuthServiceDetail::accountToJson_(account));
         };
+        auto makeRecoveryCodeStatus = [](const SwHttpAuthRecoveryCodeStatus& status) {
+            SwJsonObject object;
+            object["totalCodes"] = status.totalCodes;
+            object["remainingCodes"] = status.remainingCodes;
+            object["generatedAt"] = status.generatedAt;
+            return object;
+        };
         auto secureCookie = [service](SwHttpContext& ctx) {
             return ctx.isTls() || service->config().publicBaseUrl.toLower().startsWith("https://");
         };
@@ -1334,6 +1341,81 @@ public:
                 object["enabledAt"] = "";
                 object["auth"] = makeAuth(identity.account);
                 ctx.json(SwJsonValue(object));
+            });
+
+            auth.get("/mfa/recovery-codes", [service, requireStarted, makeMessage, makeRecoveryCodeStatus, requestToken](SwHttpContext& ctx) {
+                if (!requireStarted(ctx)) {
+                    return;
+                }
+
+                SwString error;
+                SwHttpAuthRecoveryCodeStatus recoveryStatus;
+                const SwDbStatus status = service->getRecoveryCodeStatus(requestToken(ctx),
+                                                                         &recoveryStatus,
+                                                                         &error);
+                if (!status.ok()) {
+                    const int httpStatus = status.code() == SwDbStatus::NotFound ? 401 : 400;
+                    ctx.json(makeMessage("error", error.isEmpty() ? status.message() : error), httpStatus);
+                    return;
+                }
+                ctx.json(SwJsonValue(makeRecoveryCodeStatus(recoveryStatus)));
+            });
+
+            auth.post("/mfa/recovery-codes", [service, requireStarted, makeMessage, makeRecoveryCodeStatus, requestToken](SwHttpContext& ctx) {
+                if (!requireStarted(ctx)) {
+                    return;
+                }
+                SwJsonDocument document;
+                SwString error;
+                if (!ctx.parseJsonBody(document, error) || !document.isObject()) {
+                    ctx.json(makeMessage("error", "Invalid JSON body"), 400);
+                    return;
+                }
+
+                SwHttpAuthRecoveryCodeGeneration generation;
+                const SwDbStatus status =
+                    service->generateRecoveryCodes(requestToken(ctx),
+                                                   document.object().value("currentPassword").toString(),
+                                                   &generation,
+                                                   &error);
+                if (!status.ok()) {
+                    const int httpStatus = status.code() == SwDbStatus::NotFound ? 401 : 400;
+                    ctx.json(makeMessage("error", error.isEmpty() ? status.message() : error), httpStatus);
+                    return;
+                }
+
+                SwJsonArray codes;
+                for (std::size_t i = 0; i < generation.codes.size(); ++i) {
+                    codes.append(generation.codes[i]);
+                }
+                SwJsonObject object = makeRecoveryCodeStatus(generation.status);
+                object["codes"] = codes;
+                ctx.json(SwJsonValue(object));
+            });
+
+            auth.del("/mfa/recovery-codes", [service, requireStarted, makeMessage, makeRecoveryCodeStatus, requestToken](SwHttpContext& ctx) {
+                if (!requireStarted(ctx)) {
+                    return;
+                }
+                SwJsonDocument document;
+                SwString error;
+                if (!ctx.parseJsonBody(document, error) || !document.isObject()) {
+                    ctx.json(makeMessage("error", "Invalid JSON body"), 400);
+                    return;
+                }
+
+                SwHttpAuthRecoveryCodeStatus recoveryStatus;
+                const SwDbStatus status =
+                    service->clearRecoveryCodes(requestToken(ctx),
+                                                document.object().value("currentPassword").toString(),
+                                                &recoveryStatus,
+                                                &error);
+                if (!status.ok()) {
+                    const int httpStatus = status.code() == SwDbStatus::NotFound ? 401 : 400;
+                    ctx.json(makeMessage("error", error.isEmpty() ? status.message() : error), httpStatus);
+                    return;
+                }
+                ctx.json(SwJsonValue(makeRecoveryCodeStatus(recoveryStatus)));
             });
 
             auth.post("/logout", [service, requireStarted, makeOk, clearCookie, requestToken](SwHttpContext& ctx) {

@@ -115,6 +115,7 @@ public:
             closeEvent(&ev);
             return ev.isAccepted();
         };
+        callbacks.activationHandler = [this](bool active) { activationChangeEvent(active); };
 
         SwPlatformWindowOptions options;
         options.role = SwPlatformWindowRole::MainWindow;

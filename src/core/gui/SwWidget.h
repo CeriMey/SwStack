@@ -1754,6 +1754,16 @@ protected:
     }
 
     /**
+     * @brief Called when the top-level window gains (true) or loses (false) activation.
+     *
+     * Only delivered to window-owning widgets (SwMainWindow). Popup-style windows override
+     * this and hide themselves on the deactivation edge.
+     */
+    virtual void activationChangeEvent(bool active) {
+        SW_UNUSED(active);
+    }
+
+    /**
      * @brief Handles the mouse press event for the SwWidget.
      *
      * Root-level mouse dispatch is handled by `dispatchMouseEventFromRoot_()`. The base widget does

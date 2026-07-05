@@ -330,7 +330,6 @@ private:
                                 m_trustedCaFile.toStdString())) {
             return failSsl_(-2146893048, "[SwSslSocket] OpenSSL client init failed: " + m_sslBackend->lastError());
         }
-
         setState(ConnectingState);
         swSocketTrafficSetOpenState(socketTrafficState_, true);
         refreshTrafficMonitorEndpoints_();
@@ -395,6 +394,9 @@ private:
             }
 
             if (m_activeOperation == TlsOperation::Read) {
+                if (!m_writeBuffer.isEmpty()) {
+                    return TlsOperation::Write;
+                }
                 if (m_waitingFor == WaitCondition::None) {
                     return TlsOperation::Read;
                 }
@@ -403,9 +405,6 @@ private:
                 }
                 if (m_waitingFor == WaitCondition::Writable && m_socketWritableReady) {
                     return TlsOperation::Read;
-                }
-                if (!m_writeBuffer.isEmpty()) {
-                    return TlsOperation::Write;
                 }
                 return TlsOperation::None;
             }
@@ -439,11 +438,11 @@ private:
         if (m_tlsPhase == TlsPhase::Handshake) {
             return TlsOperation::Handshake;
         }
-        if (m_socketReadableReady) {
-            return TlsOperation::Read;
-        }
         if (!m_writeBuffer.isEmpty()) {
             return TlsOperation::Write;
+        }
+        if (m_socketReadableReady) {
+            return TlsOperation::Read;
         }
         if (m_remoteClosed) {
             return TlsOperation::Read;

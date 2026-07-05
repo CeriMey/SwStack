@@ -533,6 +533,8 @@ public:
             update();
         } else if (SwWidgetPlatformAdapter::isCapsLockKey(keyCode)) {
             capsLockActive = !capsLockActive;
+        } else if (SwWidgetPlatformAdapter::isReturnKey(keyCode)) {
+            emit returnPressed();
         } else {
             if (selectionStart != selectionEnd) {
                 deleteSelection();
@@ -667,8 +669,9 @@ public:
         SwWidget::mouseReleaseEvent(event);
     }
 
-
-
+signals:
+    /** Emitted when Return/Enter is pressed while the line edit has focus. */
+    DECLARE_SIGNAL_VOID(returnPressed);
 
 private:
     size_t cursorPos;          // Position du curseur

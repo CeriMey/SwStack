@@ -367,6 +367,8 @@ struct SwWin32WindowCallbacks {
     std::function<SwPlatformSize()> minimumClientSizeHandler;
     /** @brief Called on WM_CLOSE. Return true to allow close, false to prevent it. */
     std::function<bool()> closeHandler;
+    /** @brief Called on WM_ACTIVATE with true (activated) or false (deactivated). */
+    std::function<void(bool)> activationHandler;
 };
 
 class SwWin32PlatformWindow;
@@ -1057,6 +1059,12 @@ public:
             }
             return 0;
         }
+        case WM_ACTIVATE: {
+            if (callbacks.activationHandler) {
+                callbacks.activationHandler(LOWORD(wParam) != WA_INACTIVE);
+            }
+            return DefWindowProcW(hwnd, uMsg, wParam, lParam);
+        }
         case WM_CLOSE: {
             if (callbacks.closeHandler) {
                 bool allowClose = callbacks.closeHandler();
@@ -1718,6 +1726,7 @@ private:
         nativeCallbacks.deleteHandler = callbacks.deleteHandler;
         nativeCallbacks.minimumClientSizeHandler = callbacks.minimumClientSizeHandler;
         nativeCallbacks.closeHandler = callbacks.closeHandler;
+        nativeCallbacks.activationHandler = callbacks.activationHandler;
         nativeCallbacks.mousePressHandler = [handler = callbacks.mousePressHandler](int x,
                                                                                     int y,
                                                                                     SwMouseButton button,

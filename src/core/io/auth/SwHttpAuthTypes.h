@@ -152,14 +152,19 @@ using SwHttpAuthDeliverMailHook =
     std::function<bool(const SwHttpAuthOutgoingMail&, SwString&)>;
 using SwHttpAuthLifecycleHook =
     std::function<void(const SwHttpAuthAccount&, const SwJsonValue&)>;
+using SwHttpAuthSessionLifecycleHook =
+    std::function<void(const SwHttpAuthAccount&, const SwHttpAuthSession&, const SwJsonValue&)>;
 
 struct SwHttpAuthHooks {
     SwHttpAuthRegisterSubjectHook registerSubject;
     SwHttpAuthLoadSubjectHook loadSubject;
     SwHttpAuthDeliverMailHook deliverMail;
+    SwHttpAuthSessionLifecycleHook onSessionCreated;
     SwHttpAuthLifecycleHook onEmailVerified;
     SwHttpAuthLifecycleHook onEmailChanged;
     SwHttpAuthLifecycleHook onPasswordChanged;
+    SwHttpAuthLifecycleHook onMfaTotpEnabled;
+    SwHttpAuthLifecycleHook onMfaTotpDisabled;
 };
 
 namespace swHttpAuthDetail {

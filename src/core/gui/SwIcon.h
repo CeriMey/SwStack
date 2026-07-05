@@ -103,7 +103,9 @@ public:
 
     // -- Query --
 
-    bool isNull() const { return m_entries.empty() && m_filePath.isEmpty() && !m_exeIcon; }
+    bool isNull() const {
+        return m_entries.empty() && m_filePath.isEmpty() && m_resourceName.isEmpty() && !m_exeIcon;
+    }
 
     /** @brief Number of available resolutions. */
     int availableSizeCount() const { return static_cast<int>(m_entries.size()); }
@@ -170,6 +172,17 @@ public:
             if (h) return h;
         }
 
+        // Icon resource embedded in the running executable (RC "name ICON file.ico")
+        if (!m_resourceName.isEmpty()) {
+            const int cx = (size > 0) ? size : GetSystemMetrics(SM_CXSMICON);
+            const int cy = (size > 0) ? size : GetSystemMetrics(SM_CYSMICON);
+            const std::string narrow = m_resourceName.toStdString();
+            const std::wstring wname(narrow.begin(), narrow.end());
+            HICON h = (HICON)LoadImageW(GetModuleHandleW(nullptr), wname.c_str(),
+                                        IMAGE_ICON, cx, cy, 0);
+            if (h) return h;
+        }
+
         // If loaded from .ico file, use LoadImage for best quality
         if (!m_filePath.isEmpty()) {
             int cx = (size > 0) ? size : GetSystemMetrics(SM_CXSMICON);
@@ -201,6 +214,23 @@ public:
 #endif
     }
 
+    /**
+     * @brief Icon from a named ICON resource of the running executable
+     *        (RC script entry: `MY_ICON ICON "file.ico"` → fromApplicationResource("MY_ICON")).
+     *
+     * Resolved lazily by toHICON() at the requested size; on non-Windows platforms the
+     * returned icon is null.
+     */
+    static SwIcon fromApplicationResource(const SwString& resourceName) {
+        SwIcon icon;
+#ifdef _WIN32
+        icon.m_resourceName = resourceName;
+#else
+        (void)resourceName;
+#endif
+        return icon;
+    }
+
 private:
     struct Entry {
         SwImage image;
@@ -209,6 +239,7 @@ private:
 
     std::vector<Entry> m_entries;
     SwString m_filePath;
+    SwString m_resourceName;
     bool m_exeIcon = false;
 
     // -- ICO format parser --

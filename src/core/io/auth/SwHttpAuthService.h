@@ -5,6 +5,7 @@
 #include "SwMutex.h"
 #include "SwObject.h"
 #include "SwString.h"
+#include "auth/SwHttpAuthRecoveryCodeStore.h"
 #include "auth/SwHttpAuthStore.h"
 #include "auth/SwHttpAuthTemplateRenderer.h"
 #include "http/SwHttpContext.h"
@@ -80,6 +81,17 @@ public:
                            const SwString& currentPassword,
                            SwHttpAuthIdentity* outIdentity = nullptr,
                            SwString* outError = nullptr);
+    SwDbStatus getRecoveryCodeStatus(const SwString& rawToken,
+                                     SwHttpAuthRecoveryCodeStatus* outStatus,
+                                     SwString* outError = nullptr);
+    SwDbStatus generateRecoveryCodes(const SwString& rawToken,
+                                     const SwString& currentPassword,
+                                     SwHttpAuthRecoveryCodeGeneration* outGeneration,
+                                     SwString* outError = nullptr);
+    SwDbStatus clearRecoveryCodes(const SwString& rawToken,
+                                  const SwString& currentPassword,
+                                  SwHttpAuthRecoveryCodeStatus* outStatus = nullptr,
+                                  SwString* outError = nullptr);
     SwDbStatus logout(const SwString& rawToken);
     SwDbStatus requestEmailVerification(const SwString& email, SwString* outError = nullptr);
     SwDbStatus verifyEmail(const SwString& code,
@@ -143,6 +155,7 @@ private:
     SwHttpAuthConfig m_config;
     SwHttpAuthHooks m_hooks;
     SwHttpAuthStore m_store;
+    SwHttpAuthRecoveryCodeStore m_recoveryCodes;
     SwMailService* m_mailService = nullptr;
     mutable SwMutex m_mutex;
     SwMap<SwString, ThrottleState_> m_throttle;
@@ -194,6 +207,7 @@ inline void SwHttpAuthService::setConfig(const SwHttpAuthConfig& config) {
     }
     m_config = normalized;
     m_store.setConfig(m_config);
+    m_recoveryCodes.setConfig(m_config);
 }
 
 inline const SwHttpAuthConfig& SwHttpAuthService::config() const {
@@ -242,10 +256,19 @@ inline bool SwHttpAuthService::start(SwString* outError) {
     }
 
     m_store.setConfig(m_config);
+    m_recoveryCodes.setConfig(m_config);
     const SwDbStatus status = m_store.open();
     if (!status.ok()) {
         if (outError) {
             *outError = status.message();
+        }
+        return false;
+    }
+    const SwDbStatus recoveryStatus = m_recoveryCodes.open();
+    if (!recoveryStatus.ok()) {
+        m_store.close();
+        if (outError) {
+            *outError = recoveryStatus.message();
         }
         return false;
     }
@@ -262,6 +285,7 @@ inline void SwHttpAuthService::stop() {
         m_throttle.clear();
     }
     m_store.close();
+    m_recoveryCodes.close();
 }
 
 inline bool SwHttpAuthService::isStarted() const {
@@ -573,6 +597,9 @@ inline SwDbStatus SwHttpAuthService::login(const SwString& email,
         SwString subjectError;
         (void)loadSubjectView(account.subjectId, &identity.subject, &subjectError);
     }
+    if (m_hooks.onSessionCreated) {
+        m_hooks.onSessionCreated(account, session, identity.subject);
+    }
     if (outIdentity) {
         *outIdentity = identity;
     }
@@ -641,7 +668,8 @@ inline SwDbStatus SwHttpAuthService::verifyTotpLogin(const SwString& challengeTo
         }
         return SwDbStatus(SwDbStatus::Busy, "Too many MFA attempts");
     }
-    if (!swHttpAuthDetail::verifyTotpCode(account.mfaTotpSecret, code)) {
+    if (!swHttpAuthDetail::verifyTotpCode(account.mfaTotpSecret, code) &&
+        !m_recoveryCodes.consumeCode(account.accountId, code).ok()) {
         if (outError) {
             *outError = "Invalid MFA code";
         }
@@ -671,6 +699,9 @@ inline SwDbStatus SwHttpAuthService::verifyTotpLogin(const SwString& challengeTo
     if (!account.subjectId.trimmed().isEmpty()) {
         SwString subjectError;
         (void)loadSubjectView(account.subjectId, &identity.subject, &subjectError);
+    }
+    if (m_hooks.onSessionCreated) {
+        m_hooks.onSessionCreated(account, session, identity.subject);
     }
     if (outIdentity) {
         *outIdentity = identity;
@@ -855,6 +886,9 @@ inline SwDbStatus SwHttpAuthService::confirmTotpSetup(const SwString& rawToken,
         SwString subjectError;
         (void)loadSubjectView(refreshedAccount.subjectId, &identity.subject, &subjectError);
     }
+    if (m_hooks.onMfaTotpEnabled) {
+        m_hooks.onMfaTotpEnabled(refreshedAccount, identity.subject);
+    }
     if (outIdentity) {
         *outIdentity = identity;
     }
@@ -897,6 +931,13 @@ inline SwDbStatus SwHttpAuthService::disableTotp(const SwString& rawToken,
         }
         return status;
     }
+    status = m_recoveryCodes.removeCodesForAccount(identity.account.accountId);
+    if (!status.ok()) {
+        if (outError) {
+            *outError = status.message();
+        }
+        return status;
+    }
 
     SwHttpAuthAccount refreshedAccount;
     status = m_store.getAccountById(identity.account.accountId, &refreshedAccount);
@@ -912,8 +953,137 @@ inline SwDbStatus SwHttpAuthService::disableTotp(const SwString& rawToken,
         SwString subjectError;
         (void)loadSubjectView(refreshedAccount.subjectId, &identity.subject, &subjectError);
     }
+    if (m_hooks.onMfaTotpDisabled) {
+        m_hooks.onMfaTotpDisabled(refreshedAccount, identity.subject);
+    }
     if (outIdentity) {
         *outIdentity = identity;
+    }
+    return SwDbStatus::success();
+}
+
+inline SwDbStatus SwHttpAuthService::getRecoveryCodeStatus(const SwString& rawToken,
+                                                           SwHttpAuthRecoveryCodeStatus* outStatus,
+                                                           SwString* outError) {
+    if (outError) {
+        outError->clear();
+    }
+    if (outStatus) {
+        *outStatus = SwHttpAuthRecoveryCodeStatus();
+    }
+    if (!isStarted()) {
+        return SwDbStatus(SwDbStatus::NotOpen, "Auth service not started");
+    }
+    if (!outStatus) {
+        return SwDbStatus(SwDbStatus::InvalidArgument, "Missing recovery code status output");
+    }
+
+    SwHttpAuthIdentity identity;
+    SwString resolveError;
+    if (!resolveIdentityFromToken(rawToken, &identity, &resolveError)) {
+        if (outError) {
+            *outError = resolveError.isEmpty() ? SwString("Authentication required") : resolveError;
+        }
+        return SwDbStatus(SwDbStatus::NotFound, "Authentication required");
+    }
+    if (!identity.account.mfaTotpEnabled || identity.account.mfaTotpSecret.trimmed().isEmpty()) {
+        return SwDbStatus::success();
+    }
+
+    const SwDbStatus status = m_recoveryCodes.statusForAccount(identity.account.accountId, outStatus);
+    if (!status.ok() && outError) {
+        *outError = status.message();
+    }
+    return status;
+}
+
+inline SwDbStatus SwHttpAuthService::generateRecoveryCodes(const SwString& rawToken,
+                                                           const SwString& currentPassword,
+                                                           SwHttpAuthRecoveryCodeGeneration* outGeneration,
+                                                           SwString* outError) {
+    if (outError) {
+        outError->clear();
+    }
+    if (outGeneration) {
+        *outGeneration = SwHttpAuthRecoveryCodeGeneration();
+    }
+    if (!isStarted()) {
+        return SwDbStatus(SwDbStatus::NotOpen, "Auth service not started");
+    }
+    if (!outGeneration) {
+        return SwDbStatus(SwDbStatus::InvalidArgument, "Missing recovery code output");
+    }
+
+    SwHttpAuthIdentity identity;
+    SwString resolveError;
+    if (!resolveIdentityFromToken(rawToken, &identity, &resolveError)) {
+        if (outError) {
+            *outError = resolveError.isEmpty() ? SwString("Authentication required") : resolveError;
+        }
+        return SwDbStatus(SwDbStatus::NotFound, "Authentication required");
+    }
+    if (!identity.account.mfaTotpEnabled || identity.account.mfaTotpSecret.trimmed().isEmpty()) {
+        if (outError) {
+            *outError = "MFA not enabled";
+        }
+        return SwDbStatus(SwDbStatus::InvalidArgument, "MFA not enabled");
+    }
+    if (!m_store.verifyPassword(identity.account, currentPassword)) {
+        if (outError) {
+            *outError = "Invalid credentials";
+        }
+        return SwDbStatus(SwDbStatus::NotFound, "Invalid credentials");
+    }
+
+    const SwDbStatus status = m_recoveryCodes.replaceCodes(identity.account.accountId, 10, outGeneration);
+    if (!status.ok() && outError) {
+        *outError = status.message();
+    }
+    return status;
+}
+
+inline SwDbStatus SwHttpAuthService::clearRecoveryCodes(const SwString& rawToken,
+                                                        const SwString& currentPassword,
+                                                        SwHttpAuthRecoveryCodeStatus* outStatus,
+                                                        SwString* outError) {
+    if (outError) {
+        outError->clear();
+    }
+    if (outStatus) {
+        *outStatus = SwHttpAuthRecoveryCodeStatus();
+    }
+    if (!isStarted()) {
+        return SwDbStatus(SwDbStatus::NotOpen, "Auth service not started");
+    }
+
+    SwHttpAuthIdentity identity;
+    SwString resolveError;
+    if (!resolveIdentityFromToken(rawToken, &identity, &resolveError)) {
+        if (outError) {
+            *outError = resolveError.isEmpty() ? SwString("Authentication required") : resolveError;
+        }
+        return SwDbStatus(SwDbStatus::NotFound, "Authentication required");
+    }
+    if (!m_store.verifyPassword(identity.account, currentPassword)) {
+        if (outError) {
+            *outError = "Invalid credentials";
+        }
+        return SwDbStatus(SwDbStatus::NotFound, "Invalid credentials");
+    }
+
+    SwDbStatus status = m_recoveryCodes.removeCodesForAccount(identity.account.accountId);
+    if (!status.ok()) {
+        if (outError) {
+            *outError = status.message();
+        }
+        return status;
+    }
+    if (outStatus) {
+        status = m_recoveryCodes.statusForAccount(identity.account.accountId, outStatus);
+        if (!status.ok() && outError) {
+            *outError = status.message();
+        }
+        return status;
     }
     return SwDbStatus::success();
 }

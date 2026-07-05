@@ -296,6 +296,13 @@ struct SwWindowCallbacks {
     std::function<SwPlatformSize()> minimumClientSizeHandler;
     /** @brief Called on close request. Return true to allow, false to prevent. */
     std::function<bool()> closeHandler;
+    /**
+     * @brief Called when the window gains (true) or loses (false) activation.
+     *
+     * Popup-style windows use the deactivation edge to dismiss themselves when the user
+     * clicks anywhere else (equivalent of Qt's WindowDeactivate event).
+     */
+    std::function<void(bool)> activationHandler;
 };
 
 class SwPlatformImage {

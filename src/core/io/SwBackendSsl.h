@@ -59,6 +59,7 @@
 #include <cctype>
 #include <cerrno>
 #include <cstdio>
+#include <cstdint>
 #include <cstring>
 
 #if defined(_WIN32)
@@ -341,9 +342,13 @@ public:
             return false;
         }
 
-        // Enable partial writes for non-blocking sockets.
+        // Enable partial writes for non-blocking sockets and tolerate peers that close
+        // TLS without close_notify; HTTP framing still validates response completeness.
         if (m_loader->SSL_CTX_ctrl) {
             m_loader->SSL_CTX_ctrl(m_ctx, 33 /*SSL_CTRL_MODE*/, 0x01 | 0x02, nullptr);
+        }
+        if (m_loader->SSL_CTX_set_options) {
+            m_loader->SSL_CTX_set_options(m_ctx, kSslOpIgnoreUnexpectedEof);
         }
 
         m_ssl = m_loader->SSL_new(m_ctx);
@@ -977,6 +982,7 @@ private:
         using FnCTXSetVerify = void (*)(void*, int, int (*)(int, void*));
         using FnCTXSetDefaultVerifyPaths = int (*)(void*);
         using FnCTXLoadVerifyLocations = int (*)(void*, const char*, const char*);
+        using FnCTXSetOptions = uint64_t (*)(void*, uint64_t);
         using FnNew = void* (*)(void*);
         using FnFree = void (*)(void*);
         using FnSetFd = int (*)(void*, int);
@@ -1014,6 +1020,7 @@ private:
         FnCTXSetVerify SSL_CTX_set_verify = nullptr;
         FnCTXSetDefaultVerifyPaths SSL_CTX_set_default_verify_paths = nullptr;
         FnCTXLoadVerifyLocations SSL_CTX_load_verify_locations = nullptr;
+        FnCTXSetOptions SSL_CTX_set_options = nullptr;
         FnNew SSL_new = nullptr;
         FnFree SSL_free = nullptr;
         FnSetFd SSL_set_fd = nullptr;
@@ -1088,6 +1095,7 @@ private:
             SSL_CTX_set_verify = (FnCTXSetVerify)sym(ssl, "SSL_CTX_set_verify");
             SSL_CTX_set_default_verify_paths = (FnCTXSetDefaultVerifyPaths)sym(ssl, "SSL_CTX_set_default_verify_paths");
             SSL_CTX_load_verify_locations = (FnCTXLoadVerifyLocations)sym(ssl, "SSL_CTX_load_verify_locations");
+            SSL_CTX_set_options = (FnCTXSetOptions)sym(ssl, "SSL_CTX_set_options");
             SSL_new = (FnNew)sym(ssl, "SSL_new");
             SSL_free = (FnFree)sym(ssl, "SSL_free");
             SSL_set_fd = (FnSetFd)sym(ssl, "SSL_set_fd");
@@ -1288,6 +1296,7 @@ private:
     static constexpr int kSslCtrlSetTlsextServernameArg = 54;
     static constexpr int kTlsExtNameTypeHostName = 0;
     static constexpr int kSslTlsextErrOk = 0;
+    static constexpr uint64_t kSslOpIgnoreUnexpectedEof = static_cast<uint64_t>(1) << 7;
 
 #if defined(_WIN32)
     bool loadWindowsSystemStores_(std::string& trustSummary) {

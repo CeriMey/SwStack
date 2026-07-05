@@ -440,6 +440,25 @@ public:
         return sendDatagram(data, static_cast<size_t>(size), target);
     }
 
+    /**
+     * @brief Pre-resolves a host:port into a ResolvedAddress the caller can cache.
+     * @param host Destination host (DNS name or numeric literal).
+     * @param port Destination port.
+     * @param out Receives the resolved address on success.
+     * @return `true` on success; otherwise `false`.
+     *
+     * @details Pairs with `writeDatagram(data, size, const ResolvedAddress&)` to keep
+     * name resolution off the per-datagram path: resolve a destination once (ideally
+     * off the event-loop thread, since DNS may block) and send to the cached result
+     * many times. A numeric literal resolves without touching the network. Unlike
+     * QUdpSocket — which resolves inside every writeDatagram — this makes the
+     * resolve-once/send-many pattern first-class, which a non-connected socket
+     * talking to a fixed peer (e.g. a mesh relay) needs to avoid per-send getaddrinfo.
+     */
+    bool resolveHostAddress(const SwString& host, uint16_t port, ResolvedAddress& out) const {
+        return resolveRemoteAddress_(host, port, out);
+    }
+
     int64_t writeDatagram(const char* data, int64_t size, const ResolvedAddress& target) {
         if (!data || size <= 0 || target.length == 0 || target.family == AF_UNSPEC) {
             return -1;

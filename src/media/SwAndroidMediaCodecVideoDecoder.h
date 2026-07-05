@@ -24,6 +24,10 @@ static constexpr const char* kSwLogCategory_SwAndroidMediaCodecVideoDecoder =
 #include <android/native_window.h>
 #include <media/NdkMediaCodec.h>
 #include <media/NdkMediaFormat.h>
+#include <media/NdkImageReader.h>
+#include <media/NdkImage.h>
+
+#include <vector>
 
 class SwAndroidMediaCodecVideoDecoder : public SwVideoDecoder {
 public:
@@ -146,15 +150,25 @@ private:
                 << "[" << m_name << "] unsupported codec=" << static_cast<int>(m_codec);
             return false;
         }
-        if (!m_outputTarget.isValid() ||
-            m_outputTarget.kind() != SwVideoOutputTarget::Kind::AndroidNativeWindow) {
-            swCWarning(kSwLogCategory_SwAndroidMediaCodecVideoDecoder)
-                << "[" << m_name << "] Android output surface is not configured";
-            return false;
-        }
+        // Two output modes:
+        //  * Surface mode  — an AndroidNativeWindow target is set: MediaCodec composites
+        //    directly onto that Surface (zero-copy, but cannot live inside the SwGui tree).
+        //  * CPU mode (in-tree video) — no surface target: MediaCodec renders into an
+        //    AImageReader; we pull YUV_420_888 AImages, convert to BGRA and emit CPU frames
+        //    that SwVideoWidget paints via SwAndroidPainter::drawBgra32 (so the video is a
+        //    real widget with the HUD/overlays composited on top).
+        const bool hasSurface =
+            m_outputTarget.isValid() &&
+            m_outputTarget.kind() == SwVideoOutputTarget::Kind::AndroidNativeWindow;
+        m_cpuMode = !hasSurface;
 
-        ANativeWindow* window = static_cast<ANativeWindow*>(m_outputTarget.handle());
-        if (!window) {
+        ANativeWindow* window = nullptr;
+        if (hasSurface) {
+            window = static_cast<ANativeWindow*>(m_outputTarget.handle());
+            if (!window) {
+                return false;
+            }
+        } else if (!ensureImageReader_(&window) || !window) {
             return false;
         }
 
@@ -217,7 +231,11 @@ private:
                                                 static_cast<size_t>(outputIndex),
                                                 render);
                 if (render) {
-                    emitPresentedFrame_(info.presentationTimeUs);
+                    if (m_cpuMode) {
+                        acquireCpuFrames_(info.presentationTimeUs);
+                    } else {
+                        emitPresentedFrame_(info.presentationTimeUs);
+                    }
                 }
                 timeoutUs = 0;
                 continue;
@@ -264,6 +282,116 @@ private:
         emitFrame(frame);
     }
 
+    // ---- CPU (in-tree) output path -----------------------------------------
+    bool ensureImageReader_(ANativeWindow** outWindow) {
+        if (m_imageReader && m_readerWindow) {
+            *outWindow = m_readerWindow;
+            return true;
+        }
+        const int32_t w = std::max(1, m_configuredWidth);
+        const int32_t h = std::max(1, m_configuredHeight);
+        media_status_t rs =
+            AImageReader_new(w, h, AIMAGE_FORMAT_YUV_420_888, 4, &m_imageReader);
+        if (rs != AMEDIA_OK || !m_imageReader) {
+            swCWarning(kSwLogCategory_SwAndroidMediaCodecVideoDecoder)
+                << "[" << m_name << "] AImageReader_new failed status=" << static_cast<int>(rs);
+            return false;
+        }
+        rs = AImageReader_getWindow(m_imageReader, &m_readerWindow);
+        if (rs != AMEDIA_OK || !m_readerWindow) {
+            swCWarning(kSwLogCategory_SwAndroidMediaCodecVideoDecoder)
+                << "[" << m_name << "] AImageReader_getWindow failed status=" << static_cast<int>(rs);
+            return false;
+        }
+        *outWindow = m_readerWindow;
+        return true;
+    }
+
+    void acquireCpuFrames_(int64_t timestampUs) {
+        if (!m_imageReader) {
+            return;
+        }
+        AImage* image = nullptr;
+        while (AImageReader_acquireLatestImage(m_imageReader, &image) == AMEDIA_OK && image) {
+            emitCpuFrame_(image, timestampUs);
+            AImage_delete(image);
+            image = nullptr;
+        }
+    }
+
+    void emitCpuFrame_(AImage* image, int64_t timestampUs) {
+        int32_t width = 0;
+        int32_t height = 0;
+        AImage_getWidth(image, &width);
+        AImage_getHeight(image, &height);
+        if (width <= 0 || height <= 0) {
+            return;
+        }
+
+        uint8_t* yData = nullptr; int yLen = 0; int32_t yRow = 0, yPix = 0;
+        uint8_t* uData = nullptr; int uLen = 0; int32_t uRow = 0, uPix = 0;
+        uint8_t* vData = nullptr; int vLen = 0; int32_t vRow = 0, vPix = 0;
+        if (AImage_getPlaneData(image, 0, &yData, &yLen) != AMEDIA_OK ||
+            AImage_getPlaneData(image, 1, &uData, &uLen) != AMEDIA_OK ||
+            AImage_getPlaneData(image, 2, &vData, &vLen) != AMEDIA_OK ||
+            !yData || !uData || !vData) {
+            return;
+        }
+        AImage_getPlaneRowStride(image, 0, &yRow);
+        AImage_getPlanePixelStride(image, 0, &yPix);
+        AImage_getPlaneRowStride(image, 1, &uRow);
+        AImage_getPlanePixelStride(image, 1, &uPix);
+        AImage_getPlaneRowStride(image, 2, &vRow);
+        AImage_getPlanePixelStride(image, 2, &vPix);
+        if (yPix <= 0) yPix = 1;
+        if (uPix <= 0) uPix = 1;
+        if (vPix <= 0) vPix = 1;
+
+        m_bgra.resize(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4u);
+        yuv420ToBgra_(width, height,
+                      yData, yRow, yPix,
+                      uData, uRow, uPix,
+                      vData, vRow, vPix,
+                      m_bgra.data());
+
+        SwVideoFrame frame = SwVideoFrame::fromCopy(width, height,
+                                                    SwVideoPixelFormat::BGRA32,
+                                                    m_bgra.data(), m_bgra.size());
+        frame.setTimestamp(timestampUs);
+        emitFrame(frame);
+    }
+
+    static uint8_t clamp8_(int v) {
+        return static_cast<uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v));
+    }
+
+    // YUV_420_888 -> BGRA32, BT.601 full-range-ish, fixed-point. Pixel strides handle both
+    // semi-planar (NV12/NV21) and planar (I420) chroma layouts uniformly.
+    static void yuv420ToBgra_(int w, int h,
+                              const uint8_t* y, int yRow, int yPix,
+                              const uint8_t* u, int uRow, int uPix,
+                              const uint8_t* v, int vRow, int vPix,
+                              uint8_t* out) {
+        for (int j = 0; j < h; ++j) {
+            const uint8_t* yr = y + static_cast<std::size_t>(j) * yRow;
+            const uint8_t* ur = u + static_cast<std::size_t>(j >> 1) * uRow;
+            const uint8_t* vr = v + static_cast<std::size_t>(j >> 1) * vRow;
+            uint8_t* orow = out + static_cast<std::size_t>(j) * w * 4;
+            for (int i = 0; i < w; ++i) {
+                const int Y = yr[i * yPix];
+                const int U = ur[(i >> 1) * uPix] - 128;
+                const int V = vr[(i >> 1) * vPix] - 128;
+                const int r = Y + ((91881 * V) >> 16);
+                const int g = Y - ((22554 * U + 46802 * V) >> 16);
+                const int b = Y + ((116130 * U) >> 16);
+                orow[i * 4 + 0] = clamp8_(b);
+                orow[i * 4 + 1] = clamp8_(g);
+                orow[i * 4 + 2] = clamp8_(r);
+                orow[i * 4 + 3] = 255;
+            }
+        }
+    }
+
     void shutdownCodec_() {
         if (m_codecHandle) {
             if (m_started) {
@@ -271,6 +399,12 @@ private:
             }
             AMediaCodec_delete(m_codecHandle);
             m_codecHandle = nullptr;
+        }
+        if (m_imageReader) {
+            // The reader owns m_readerWindow; deleting the reader invalidates it.
+            AImageReader_delete(m_imageReader);
+            m_imageReader = nullptr;
+            m_readerWindow = nullptr;
         }
         m_started = false;
     }
@@ -280,6 +414,10 @@ private:
     SwVideoOutputTarget m_outputTarget{};
     AMediaCodec* m_codecHandle{nullptr};
     bool m_started{false};
+    bool m_cpuMode{false};
+    AImageReader* m_imageReader{nullptr};
+    ANativeWindow* m_readerWindow{nullptr};
+    std::vector<uint8_t> m_bgra;
     int m_configuredWidth{1920};
     int m_configuredHeight{1080};
     int m_outputWidth{1920};

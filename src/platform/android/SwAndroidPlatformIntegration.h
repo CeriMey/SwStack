@@ -900,6 +900,49 @@ public:
         }
     }
 
+    // Blit a raw 32-bit frame (memory layout 0xAARRGGBB == little-endian BGRA, same as
+    // SwImage) into the backing buffer with nearest-neighbour scaling + clipping. This is
+    // what enables in-tree video on Android: SwVideoWidget's SwNativeVideoUploadRenderer
+    // calls drawBgra32() with a decoded CPU frame, so the video can be composited inside
+    // the SwGui widget tree (HUD/overlays on top) instead of a separate Android Surface.
+    bool drawBgra32(const SwRect& targetRect,
+                    const std::uint8_t* pixels,
+                    int width,
+                    int height,
+                    int stride) override {
+        if (!pixels || width <= 0 || height <= 0 || stride <= 0 || m_buffer.empty()) {
+            return false;
+        }
+        if (targetRect.width <= 0 || targetRect.height <= 0) {
+            return false;
+        }
+
+        const SwRect clip = currentClip_();
+        for (int y = 0; y < targetRect.height; ++y) {
+            const int dstY = targetRect.y + y;
+            if (dstY < clip.y || dstY >= clip.y + clip.height) {
+                continue;
+            }
+            const int srcY = (y * height) / std::max(1, targetRect.height);
+            const std::uint8_t* srcRow = pixels + static_cast<std::size_t>(srcY) * stride;
+            for (int x = 0; x < targetRect.width; ++x) {
+                const int dstX = targetRect.x + x;
+                if (dstX < clip.x || dstX >= clip.x + clip.width) {
+                    continue;
+                }
+                const int srcX = (x * width) / std::max(1, targetRect.width);
+                const std::uint8_t* px = srcRow + static_cast<std::size_t>(srcX) * 4;
+                // px = {B, G, R, A} -> 0xAARRGGBB
+                const std::uint32_t argb = (static_cast<std::uint32_t>(px[3]) << 24) |
+                                           (static_cast<std::uint32_t>(px[2]) << 16) |
+                                           (static_cast<std::uint32_t>(px[1]) << 8) |
+                                           static_cast<std::uint32_t>(px[0]);
+                blendPixel_(dstX, dstY, argb);
+            }
+        }
+        return true;
+    }
+
     void drawText(const SwRect& rect,
                   const SwString& text,
                   DrawTextFormats alignment,

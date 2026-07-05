@@ -19,6 +19,7 @@
 #include "SwString.h"
 #include "SwList.h"
 #include "SwIcon.h"
+#include "Sw.h"
 #include <functional>
 #include <string>
 
@@ -138,6 +139,8 @@ public:
 
     bool isVisible() const { return m_visible; }
 
+    SwPoint lastActivationScreenPoint() const { return m_lastActivationPoint; }
+
     void showMessage(const SwString& title,
                      const SwString& message,
                      MessageIcon icon = MessageIcon::Information,
@@ -183,6 +186,7 @@ private:
     SwIcon m_icon;
     SwList<Action> m_actions;
     bool m_visible = false;
+    SwPoint m_lastActivationPoint{0, 0};
 
 #ifndef _WIN32
     void updateIcon_() {}
@@ -191,6 +195,7 @@ private:
 
 #ifdef _WIN32
     HWND m_hwnd = nullptr;
+    ULONGLONG m_lastActivationEmitMs = 0;
 
     HICON loadIcon_() {
         if (!m_icon.isNull()) {
@@ -269,6 +274,11 @@ private:
     }
 
     void showContextMenu_() {
+        rememberActivationPoint_();
+        if (m_actions.isEmpty()) {
+            emit activated();
+            return;
+        }
         HMENU menu = CreatePopupMenu();
         if (!menu) {
             return;
@@ -282,8 +292,10 @@ private:
                 AppendMenuW(menu, MF_STRING, static_cast<UINT_PTR>(1000 + i), text.c_str());
             }
         }
-        POINT pt;
-        GetCursorPos(&pt);
+        POINT pt = {};
+        if (GetCursorPos(&pt)) {
+            m_lastActivationPoint = SwPoint{pt.x, pt.y};
+        }
         SetForegroundWindow(m_hwnd);
         UINT cmd = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD, pt.x, pt.y, 0, m_hwnd, nullptr);
         DestroyMenu(menu);
@@ -294,6 +306,23 @@ private:
                 m_actions[idx].callback();
             }
         }
+    }
+
+    void rememberActivationPoint_() {
+        POINT pt = {};
+        if (GetCursorPos(&pt)) {
+            m_lastActivationPoint = SwPoint{pt.x, pt.y};
+        }
+    }
+
+    void emitActivatedFromTrayEvent_() {
+        rememberActivationPoint_();
+        const ULONGLONG now = GetTickCount64();
+        if (m_lastActivationEmitMs != 0 && now - m_lastActivationEmitMs < 150) {
+            return;
+        }
+        m_lastActivationEmitMs = now;
+        emit activated();
     }
 
     static const wchar_t* trayWindowClassName_() {
@@ -344,6 +373,7 @@ private:
         const UINT eventLowWord = LOWORD(raw);
         switch (eventLowWord) {
         case WM_CONTEXTMENU:
+        case WM_LBUTTONDOWN:
         case WM_LBUTTONUP:
         case WM_LBUTTONDBLCLK:
         case WM_RBUTTONUP:
@@ -371,16 +401,20 @@ private:
             const UINT trayEvent = trayEvent_(lParam);
             SW_UNUSED(wParam);
             if (trayEvent == WM_LBUTTONDBLCLK) {
+                self->rememberActivationPoint_();
                 emit self->doubleClicked();
                 return 0;
             }
-            if (trayEvent == WM_LBUTTONUP || trayEvent == NIN_SELECT) {
-                emit self->activated();
+            if (trayEvent == WM_LBUTTONDOWN ||
+                trayEvent == WM_LBUTTONUP ||
+                trayEvent == NIN_SELECT) {
+                self->emitActivatedFromTrayEvent_();
                 return 0;
             }
             if (trayEvent == WM_CONTEXTMENU ||
                 trayEvent == WM_RBUTTONUP ||
                 trayEvent == NIN_KEYSELECT) {
+                self->rememberActivationPoint_();
                 self->showContextMenu_();
                 return 0;
             }

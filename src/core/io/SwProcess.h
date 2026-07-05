@@ -808,16 +808,17 @@ private:
                                     &pi) != FALSE;
         };
 
+        bool childUsesInheritedJob = false;
         if (!tryCreateProcess(nativeCreationFlags)) {
             DWORD error = ::GetLastError();
             const bool canRetryWithoutBreakaway =
-                detachedProcess &&
                 currentProcessInJob &&
                 (nativeCreationFlags & CREATE_BREAKAWAY_FROM_JOB) != 0 &&
                 error == ERROR_ACCESS_DENIED;
             if (canRetryWithoutBreakaway) {
                 const DWORD retryFlags = nativeCreationFlags & ~CREATE_BREAKAWAY_FROM_JOB;
                 if (tryCreateProcess(retryFlags)) {
+                    childUsesInheritedJob = true;
                     error = ERROR_SUCCESS;
                 } else {
                     error = ::GetLastError();
@@ -831,7 +832,8 @@ private:
 
         hProcess_ = pi.hProcess;
         hThread_ = pi.hThread;
-        const bool attachedToLauncher = assignProcessLifetimeToLauncher_(creationFlags);
+        const bool attachedToLauncher =
+            childUsesInheritedJob ? true : assignProcessLifetimeToLauncher_(creationFlags);
         if (!detachedProcess && !attachedToLauncher) {
             ::TerminateProcess(hProcess_, 1u);
             swCError(kSwLogCategory_SwProcess) << "Attached child could not be bound to launcher lifetime";
