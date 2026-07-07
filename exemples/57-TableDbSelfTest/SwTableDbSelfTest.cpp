@@ -113,7 +113,7 @@ SwTableSchema makePeopleSchema_() {
 
 SwJsonObject makeProfile_(const std::string& tier, bool flagged) {
     SwJsonObject profile;
-    profile["tier"] = tier;
+    profile["tier"] = SwString(tier);
     profile["flagged"] = flagged;
     return profile;
 }
@@ -123,23 +123,23 @@ SwJsonObject makePerson_(const std::string& email,
                          const SwJsonValue& score,
                          const SwJsonValue& active,
                          const std::string& joinedAt,
-                         const SwJsonObject& profile) {
+                          const SwJsonObject& profile) {
     SwJsonObject row;
-    row["email"] = email;
+    row["email"] = SwString(email);
     row["age"] = age;
     row["score"] = score;
     row["active"] = active;
-    row["joinedAt"] = joinedAt;
+    row["joinedAt"] = SwString(joinedAt);
     row["profile"] = profile;
     return row;
 }
 
 SwJsonObject makeInventoryRow_(const std::string& code,
                                const SwJsonValue& quantity,
-                               const SwJsonValue& legacyValue,
-                               const SwJsonValue& optionalNote = SwJsonValue()) {
+                                const SwJsonValue& legacyValue,
+                                const SwJsonValue& optionalNote = SwJsonValue()) {
     SwJsonObject row;
-    row["code"] = code;
+    row["code"] = SwString(code);
     row["quantity"] = quantity;
     row["legacyValue"] = legacyValue;
     if (!optionalNote.isNull()) {
@@ -245,7 +245,7 @@ void runTypedCrudAndQueryTests_(TestRunner_& runner) {
         makePerson_("alice@example.com", "41", "98.5", "true", "2026-04-04T10:00:00Z", makeProfile_("gold", true)),
         &createdAlice);
     runner.expect(insertAliceStatus.ok(), "Insert typed row with coercion", insertAliceStatus.message().toStdString());
-    runner.expect(createdAlice.contains("rowId") && !createdAlice.value("rowId").toString().empty(),
+    runner.expect(createdAlice.contains("rowId") && !createdAlice.value("rowId").toString().isEmpty(),
                   "Created row gets server rowId");
     runner.expect(createdAlice.value("age").isInt() && createdAlice.value("age").toInteger() == 41,
                   "Integer column coerces from string");

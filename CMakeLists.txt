@@ -68,6 +68,17 @@ target_compile_definitions(SwMiniz PUBLIC MINIZ_NO_STDIO MINIZ_NO_ARCHIVE_APIS)
 set_target_properties(SwMiniz PROPERTIES POSITION_INDEPENDENT_CODE ON)
 link_libraries(SwMiniz)
 
+add_library(SwQuicCore INTERFACE)
+target_include_directories(SwQuicCore INTERFACE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/io
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/types
+)
+if(WIN32)
+    target_link_libraries(SwQuicCore INTERFACE bcrypt crypt32)
+endif()
+
 add_subdirectory(tools/SwInstallerPack)
 
 # SwizioNodes (ported node editor core)
@@ -170,6 +181,18 @@ sw_add_example_subdirectory(exemples/66-MediaTransportEndToEndSelfTest ON)
   sw_add_example_subdirectory(exemples/67-SdpMediaOptionsSelfTest OFF)
   sw_add_example_subdirectory(exemples/69-ObsbotOnvifRtspGateway OFF)
   sw_add_example_subdirectory(exemples/70-SwJsonSelfTest OFF)
+  sw_add_example_subdirectory(exemples/71-QuicPacketCodecSelfTest OFF)
+  sw_add_example_subdirectory(exemples/72-QuicCloudflareProbe OFF)
+  sw_add_example_subdirectory(exemples/73-QuicHttp3FoundationsSelfTest OFF)
+  sw_add_example_subdirectory(exemples/74-QuicHandshakeSelfTest OFF)
+  sw_add_example_subdirectory(exemples/75-QuicHandshakeProbe OFF)
+  sw_add_example_subdirectory(exemples/76-Http3ServerSelfTest OFF)
+  sw_add_example_subdirectory(exemples/77-QuicHandshakeLoopbackSelfTest OFF)
+  sw_add_example_subdirectory(exemples/78-Http3ServerOverUdpSelfTest OFF)
+  sw_add_example_subdirectory(exemples/79-Http3ClientServerSelfTest OFF)
+  sw_add_example_subdirectory(exemples/80-QuicZeroRttSelfTest OFF)
+  sw_add_example_subdirectory(exemples/81-QuicZeroRttLiveSelfTest OFF)
+  sw_add_example_subdirectory(exemples/82-Http3ZeroRttClientServerSelfTest OFF)
   sw_add_example_subdirectory(sandbox/SwMainWindowApplication OFF)
 endif()
 

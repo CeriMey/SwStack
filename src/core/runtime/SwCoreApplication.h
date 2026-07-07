@@ -214,6 +214,19 @@ public:
     }
 
 private:
+    void deferAfterRejectedDispatch(int backoffUs = 10000) {
+        if (backoffUs < 1000) {
+            backoffUs = 1000;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (interval > backoffUs) {
+            lastExecutionTime = now - std::chrono::microseconds(interval - backoffUs);
+        } else {
+            lastExecutionTime = now + std::chrono::microseconds(backoffUs - interval);
+        }
+    }
+
     std::function<void()> callback; ///< The function to execute when the timer fires.
     int interval; ///< Interval in microseconds between timer executions.
     bool singleShot; ///< Indicates if the timer is single-shot (`true`) or recurring (`false`).
@@ -1024,8 +1037,7 @@ private:
         bool rejectedByBackpressure = false;
         const bool accepted = fiberPool_.enqueueTask(std::move(dispatchedEvent), lane, &rejectedByBackpressure);
         if (!accepted && rejectedByBackpressure) {
-            swCWarning(kSwLogCategory_SwCoreApplication)
-                << "SwFiberPool saturated; rejecting posted event on lane=" << static_cast<int>(lane);
+            logFiberPoolBackpressure_(lane);
             return false;
         }
         if (!accepted) {
@@ -1694,6 +1706,36 @@ private:
     bool runFiberPoolWork_() {
         (void)profilerSessionsForCurrentThread_();
         return fiberPool_.runNextWorkItem();
+    }
+
+    void logFiberPoolBackpressure_(SwFiberLane lane) {
+        using namespace std::chrono;
+        const long long nowMs =
+            duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+        long long lastMs = lastFiberPoolBackpressureLogMs_.load(std::memory_order_relaxed);
+        if (nowMs - lastMs < 1000) {
+            suppressedFiberPoolBackpressureLogs_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+
+        if (!lastFiberPoolBackpressureLogMs_.compare_exchange_strong(lastMs,
+                                                                     nowMs,
+                                                                     std::memory_order_acq_rel,
+                                                                     std::memory_order_relaxed)) {
+            suppressedFiberPoolBackpressureLogs_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+
+        const long long suppressed =
+            suppressedFiberPoolBackpressureLogs_.exchange(0, std::memory_order_acq_rel);
+        if (suppressed > 0) {
+            swCWarning(kSwLogCategory_SwCoreApplication)
+                << "SwFiberPool saturated; rejecting posted event on lane=" << static_cast<int>(lane)
+                << " (suppressed " << suppressed << " similar warnings)";
+        } else {
+            swCWarning(kSwLogCategory_SwCoreApplication)
+                << "SwFiberPool saturated; rejecting posted event on lane=" << static_cast<int>(lane);
+        }
     }
 
     static bool routeYieldWakeAcrossInstances_(int id, SwFiberLane lane) {
@@ -2537,6 +2579,7 @@ protected:
                 };
                 if (!postEventOnLaneImpl_(std::move(timerEvent), timerLane, false)) {
                     RegistryLock_ lock(eventQueueMutex);
+                    toDelete->deferAfterRejectedDispatch();
                     toDelete->dispatchPending = false;
                     timers.insert(rt.timerId, toDelete);
                 }
@@ -2557,6 +2600,7 @@ protected:
                 };
                 if (!postEventOnLaneImpl_(std::move(timerEvent), timerLane, false)) {
                     RegistryLock_ lock(eventQueueMutex);
+                    t->deferAfterRejectedDispatch();
                     t->dispatchPending = false;
                 }
             }
@@ -2625,6 +2669,8 @@ protected:
     std::atomic<bool> fireWatchDog{ false };
     std::atomic<int64_t> fiberStartTimeNs_{0};
     SwFiberPool fiberPool_;
+    std::atomic<long long> lastFiberPoolBackpressureLogMs_{0};
+    std::atomic<long long> suppressedFiberPoolBackpressureLogs_{0};
 
     /**
      * @brief Returns the current function<void.

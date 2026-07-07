@@ -23,3 +23,8 @@ exemples/43-TunWebSocketVpn/
 .env
 .env.*
 *.obj
+
+# Local test/probe artifacts
+.tmp-codex/
+*.log
+*.h264

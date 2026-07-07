@@ -91,13 +91,13 @@ protected:
         int cursor = 0;
         int scanStart = 0;
 
-        setCurrentBlockState(NormalState);
+        setCurrentBlockState(CppNormalBlockState);
 
-        if (previousBlockState() == BlockCommentState) {
+        if (previousBlockState() == CppBlockCommentState) {
             const int commentEnd = findBlockCommentEnd_(text, 0);
             if (commentEnd < 0) {
                 setFormat(0, textLength, m_theme.commentFormat);
-                setCurrentBlockState(BlockCommentState);
+                setCurrentBlockState(CppBlockCommentState);
                 return;
             }
             setFormat(0, commentEnd, m_theme.commentFormat);
@@ -132,7 +132,7 @@ protected:
                 const int commentEnd = findBlockCommentEnd_(text, cursor);
                 if (commentEnd < 0) {
                     setFormat(cursor, textLength - cursor, m_theme.commentFormat);
-                    setCurrentBlockState(BlockCommentState);
+                    setCurrentBlockState(CppBlockCommentState);
                     return;
                 }
                 setFormat(cursor, commentEnd - cursor, m_theme.commentFormat);
@@ -238,8 +238,8 @@ protected:
 
 private:
     enum BlockState {
-        NormalState = 0,
-        BlockCommentState = 1
+        CppNormalBlockState = 0,
+        CppBlockCommentState = 1
     };
 
     static bool isIdentifierStart_(char ch) {

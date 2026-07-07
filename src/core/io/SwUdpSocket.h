@@ -112,7 +112,12 @@ public:
         DefaultForPlatform = 0x0,
         ShareAddress = 0x1,
         DontShareAddress = 0x2,
-        ReuseAddressHint = 0x4
+        ReuseAddressHint = 0x4,
+        // Wildcard "::" binds default to dual-stack (IPV6_V6ONLY=0), which
+        // maps IPv4 senders to ::ffff:a.b.c.d strings. Ipv6Only keeps the
+        // socket pure IPv6 so it can coexist with a separate IPv4 socket on
+        // the same port (two-socket magicsock pattern).
+        Ipv6Only = 0x8
     };
     using BindMode = uint32_t;
 
@@ -206,6 +211,9 @@ public:
         if (!resolveBindAddress_(localAddress, port, addr, dualStack)) {
             setSocketError(SocketError::HostNotFoundError, SwString("Invalid bind address"));
             return false;
+        }
+        if ((mode & Ipv6Only) && addr.family == AF_INET6) {
+            dualStack = false;
         }
         if (!ensureSocketForFamily_(addr.family, dualStack)) {
             setSocketError(SocketError::SocketAccessError, SwString("Socket creation failed"));

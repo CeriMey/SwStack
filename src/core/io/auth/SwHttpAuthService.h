@@ -136,6 +136,12 @@ private:
     static bool validateMailTemplate_(const SwHttpAuthMailTemplate& mailTemplate);
     bool hasInternalMailDelivery_() const;
     bool throttleAllows_(const SwString& key);
+    // Lockout-on-failure throttle (login): peek without incrementing, then
+    // register a failure or clear the counter on success — so a legitimate
+    // user signing in repeatedly is never locked out, only repeated failures.
+    bool throttlePeekBlocked_(const SwString& key);
+    void throttleRegisterFailure_(const SwString& key);
+    void throttleClear_(const SwString& key);
     SwDbStatus lookupChallenge_(const SwString& purpose,
                                 const SwString& code,
                                 const SwString& token,
@@ -499,9 +505,21 @@ inline SwDbStatus SwHttpAuthService::login(const SwString& email,
         return SwDbStatus(SwDbStatus::NotOpen, "Auth service not started");
     }
 
+    // Brute-force lockout keyed on the submitted email (before any store
+    // lookup, so a non-existent account is throttled identically — no
+    // enumeration signal).
+    const SwString throttleKey = "login:" + email.trimmed().toLower();
+    if (throttlePeekBlocked_(throttleKey)) {
+        if (outError) {
+            *outError = "Too many attempts. Try again later.";
+        }
+        return SwDbStatus(SwDbStatus::Busy, "Too many attempts");
+    }
+
     SwHttpAuthAccount account;
     SwDbStatus status = m_store.getAccountByEmail(email, &account);
     if (!status.ok()) {
+        throttleRegisterFailure_(throttleKey);
         if (outError) {
             *outError = "Invalid credentials";
         }
@@ -526,6 +544,7 @@ inline SwDbStatus SwHttpAuthService::login(const SwString& email,
         return SwDbStatus(SwDbStatus::Busy, "Password reset required");
     }
     if (!m_store.verifyPassword(account, password)) {
+        throttleRegisterFailure_(throttleKey);
         if (outError) {
             *outError = "Invalid credentials";
         }
@@ -549,6 +568,9 @@ inline SwDbStatus SwHttpAuthService::login(const SwString& email,
         }
         return SwDbStatus(SwDbStatus::Busy, "Email not verified");
     }
+    // Password verified: clear the brute-force counter. Any remaining step
+    // (MFA) has its own throttle keyed on the account id.
+    throttleClear_(throttleKey);
     if (account.mfaTotpEnabled && !account.mfaTotpSecret.trimmed().isEmpty()) {
         SwString mfaToken;
         SwHttpAuthChallenge challenge;
@@ -1723,6 +1745,38 @@ inline bool SwHttpAuthService::throttleAllows_(const SwString& key) {
     ++state.failures;
     m_throttle[key] = state;
     return true;
+}
+
+inline bool SwHttpAuthService::throttlePeekBlocked_(const SwString& key) {
+    const long long now = swHttpAuthDetail::currentEpochMs();
+    const long long windowMs = 10ll * 60ll * 1000ll;
+    const int maxAttempts = 5;
+
+    SwMutexLocker locker(&m_mutex);
+    ThrottleState_ state = m_throttle.value(key, ThrottleState_());
+    if (state.windowStartMs <= 0 || now - state.windowStartMs >= windowMs) {
+        return false;
+    }
+    return state.failures >= maxAttempts;
+}
+
+inline void SwHttpAuthService::throttleRegisterFailure_(const SwString& key) {
+    const long long now = swHttpAuthDetail::currentEpochMs();
+    const long long windowMs = 10ll * 60ll * 1000ll;
+
+    SwMutexLocker locker(&m_mutex);
+    ThrottleState_ state = m_throttle.value(key, ThrottleState_());
+    if (state.windowStartMs <= 0 || now - state.windowStartMs >= windowMs) {
+        state.windowStartMs = now;
+        state.failures = 0;
+    }
+    ++state.failures;
+    m_throttle[key] = state;
+}
+
+inline void SwHttpAuthService::throttleClear_(const SwString& key) {
+    SwMutexLocker locker(&m_mutex);
+    m_throttle.remove(key);
 }
 
 inline SwDbStatus SwHttpAuthService::lookupChallenge_(const SwString& purpose,
