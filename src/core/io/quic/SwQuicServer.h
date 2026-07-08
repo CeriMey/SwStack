@@ -12,6 +12,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -170,6 +171,33 @@ public:
         return m_connections.size();
     }
 
+    // ---- mode agnostique de la socket (driver externe) --------------------
+    //
+    // Permet de piloter les connexions QUIC sans que ce serveur possède la socket :
+    // l'appelant reçoit les datagrammes ailleurs (p. ex. une socket unique multiplexée
+    // qui démultiplexe d'autres protocoles) et les injecte ici ; les datagrammes sortants
+    // sont émis via le send-sink au lieu de m_socket. Sans sink ni listen(), rien n'est
+    // câblé : c'est un ajout générique, aucune sémantique applicative.
+
+    using SendSink = std::function<bool(const SwByteArray& packet,
+                                        const SwString& host,
+                                        uint16_t port,
+                                        SwString* error)>;
+
+    // Installe le canal d'émission externe. S'il est défini, writeDatagram_ l'utilise
+    // au lieu de la socket propre du serveur.
+    void setSendSink(SendSink sink) { m_sendSink = std::move(sink); }
+    bool hasSendSink() const { return static_cast<bool>(m_sendSink); }
+
+    // Injecte un datagramme reçu hors de ce serveur (déjà classé « QUIC » par l'appelant).
+    // Route par DCID puis pilote la connexion exactement comme le chemin poll()/socket.
+    bool injectDatagram(const SwByteArray& datagram,
+                        const SwString& sender,
+                        uint16_t senderPort,
+                        SwString* error = nullptr) {
+        return processDatagram_(datagram, sender, senderPort, error);
+    }
+
 signals:
     DECLARE_SIGNAL(connectionUpdated, SwQuicConnection*)
     DECLARE_SIGNAL(packetRejected, const SwString&, uint16_t, const SwString&)
@@ -313,6 +341,12 @@ private:
                         const SwString& host,
                         uint16_t port,
                         SwString* error) {
+        // Un send-sink installé (setSendSink) prend la main sur l'émission : le datagramme
+        // sortant part par ce canal externe au lieu de notre socket. Utile quand la socket UDP
+        // est possédée et multiplexée par l'appelant (plusieurs protocoles sur un même port).
+        if (m_sendSink) {
+            return m_sendSink(packet, host, port, error);
+        }
         const int64_t sent = m_socket.writeDatagram(packet.constData(),
                                                     static_cast<int64_t>(packet.size()),
                                                     host,
@@ -332,6 +366,7 @@ private:
     }
 
     SwUdpSocket m_socket;
+    SendSink m_sendSink; // si défini : émission via ce canal externe au lieu de m_socket
     std::map<std::string, Entry_> m_connections;
     std::map<std::string, std::string> m_connectionIdIndex;
     std::size_t m_localConnectionIdLength;

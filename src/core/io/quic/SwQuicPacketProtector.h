@@ -2,6 +2,7 @@
 #define SWQUICPACKETPROTECTOR_H
 
 #include "SwByteArray.h"
+#include "SwMap.h"
 #include "SwString.h"
 #include "quic/SwQuicInitialSecrets.h"
 #include "quic/SwQuicPacketCodec.h"
@@ -16,6 +17,8 @@
 
 #if defined(_WIN32)
 #include "SwCrypto.h"
+#else
+#include <openssl/evp.h>
 #endif
 
 class SwQuicPacketProtector {
@@ -733,6 +736,71 @@ private:
         }
         return true;
     }
+
+    // --- Cache thread-local des handles CNG : provider AES ouvert une fois par mode,
+    //     clé importée une fois par jeu d'octets, réutilisés à chaque paquet.
+    //     Les octets produits sont identiques -> optimisation invisible sur le fil (conforme RFC 9001). ---
+    struct CngKey_ { BCRYPT_KEY_HANDLE handle = nullptr; std::vector<unsigned char> object; };
+    struct CngCache_ {
+        BCRYPT_ALG_HANDLE gcmAlg = nullptr;
+        BCRYPT_ALG_HANDLE ecbAlg = nullptr;
+        SwMap<SwByteArray, CngKey_> gcmKeys; // clé = octets de la clé AES
+        SwMap<SwByteArray, CngKey_> ecbKeys;
+        ~CngCache_() {
+            for (SwMap<SwByteArray, CngKey_>::iterator it = gcmKeys.begin(); it != gcmKeys.end(); ++it) {
+                if (it.value().handle) BCryptDestroyKey(it.value().handle);
+            }
+            for (SwMap<SwByteArray, CngKey_>::iterator it = ecbKeys.begin(); it != ecbKeys.end(); ++it) {
+                if (it.value().handle) BCryptDestroyKey(it.value().handle);
+            }
+            if (gcmAlg) BCryptCloseAlgorithmProvider(gcmAlg, 0);
+            if (ecbAlg) BCryptCloseAlgorithmProvider(ecbAlg, 0);
+        }
+    };
+    static CngCache_& cngCache_() { static thread_local CngCache_ c; return c; }
+    static std::size_t maxCachedKeys_() { return 8192; }
+
+    static BCRYPT_KEY_HANDLE cachedGcmKey_(const SwByteArray& key, SwString* error) {
+        CngCache_& c = cngCache_();
+        if (!c.gcmAlg && !openAes_(c.gcmAlg, BCRYPT_CHAIN_MODE_GCM, error)) return nullptr;
+        SwMap<SwByteArray, CngKey_>::iterator it = c.gcmKeys.find(key);
+        if (it != c.gcmKeys.end()) return it.value().handle;
+        if (c.gcmKeys.size() >= maxCachedKeys_()) {
+            for (SwMap<SwByteArray, CngKey_>::iterator i = c.gcmKeys.begin(); i != c.gcmKeys.end(); ++i) {
+                if (i.value().handle) BCryptDestroyKey(i.value().handle);
+            }
+            c.gcmKeys.clear();
+        }
+        CngKey_& slot = c.gcmKeys[key]; // operator[] insère ; référence stable (map ordonnée)
+        if (!generateAesKey_(c.gcmAlg, key, slot.handle, slot.object, error)) { c.gcmKeys.remove(key); return nullptr; }
+        return slot.handle;
+    }
+    static BCRYPT_KEY_HANDLE cachedEcbKey_(const SwByteArray& key, SwString* error) {
+        CngCache_& c = cngCache_();
+        if (!c.ecbAlg && !openAes_(c.ecbAlg, BCRYPT_CHAIN_MODE_ECB, error)) return nullptr;
+        SwMap<SwByteArray, CngKey_>::iterator it = c.ecbKeys.find(key);
+        if (it != c.ecbKeys.end()) return it.value().handle;
+        if (c.ecbKeys.size() >= maxCachedKeys_()) {
+            for (SwMap<SwByteArray, CngKey_>::iterator i = c.ecbKeys.begin(); i != c.ecbKeys.end(); ++i) {
+                if (i.value().handle) BCryptDestroyKey(i.value().handle);
+            }
+            c.ecbKeys.clear();
+        }
+        CngKey_& slot = c.ecbKeys[key];
+        if (!generateAesKey_(c.ecbAlg, key, slot.handle, slot.object, error)) { c.ecbKeys.remove(key); return nullptr; }
+        return slot.handle;
+    }
+#else
+    // --- Contextes EVP réutilisés par thread (perf, invisible sur le fil) : évite un
+    //     EVP_CIPHER_CTX_new()/free() par paquet. Le schedule de clé est ré-initialisé par appel. ---
+    struct EvpCtxHolder_ {
+        EVP_CIPHER_CTX* ctx = nullptr;
+        EVP_CIPHER_CTX* get() { if (!ctx) ctx = EVP_CIPHER_CTX_new(); return ctx; }
+        ~EvpCtxHolder_() { if (ctx) EVP_CIPHER_CTX_free(ctx); }
+    };
+    static EVP_CIPHER_CTX* evpGcmEncCtx_() { static thread_local EvpCtxHolder_ h; return h.get(); }
+    static EVP_CIPHER_CTX* evpGcmDecCtx_() { static thread_local EvpCtxHolder_ h; return h.get(); }
+    static EVP_CIPHER_CTX* evpEcbCtx_()    { static thread_local EvpCtxHolder_ h; return h.get(); }
 #endif
 
     static bool aes128GcmEncrypt_(const SwByteArray& key,
@@ -742,14 +810,8 @@ private:
                                   SwByteArray& outCiphertextAndTag,
                                   SwString* error) {
 #if defined(_WIN32)
-        BCRYPT_ALG_HANDLE algorithm = nullptr;
-        BCRYPT_KEY_HANDLE aesKey = nullptr;
-        std::vector<unsigned char> keyObject;
-        if (!openAes_(algorithm, BCRYPT_CHAIN_MODE_GCM, error) ||
-            !generateAesKey_(algorithm, key, aesKey, keyObject, error)) {
-            if (algorithm) {
-                BCryptCloseAlgorithmProvider(algorithm, 0);
-            }
+        BCRYPT_KEY_HANDLE aesKey = cachedGcmKey_(key, error); // handle mis en cache (thread-local)
+        if (!aesKey) {
             return false;
         }
 
@@ -775,9 +837,6 @@ private:
                                               static_cast<ULONG>(ciphertext.size()),
                                               &outputSize,
                                               0);
-        BCryptDestroyKey(aesKey);
-        BCryptCloseAlgorithmProvider(algorithm, 0);
-
         if (status != 0 || outputSize != plaintext.size()) {
             setError_(error, "BCryptEncrypt(AES-GCM) failed");
             return false;
@@ -787,13 +846,45 @@ private:
         outCiphertextAndTag.append(tag);
         return true;
 #else
-        (void)key;
-        (void)nonce;
-        (void)aad;
-        (void)plaintext;
-        (void)outCiphertextAndTag;
-        setError_(error, "AES-GCM QUIC protection is not implemented on this platform yet");
-        return false;
+        EVP_CIPHER_CTX* ctx = evpGcmEncCtx_();
+        if (!ctx) { setError_(error, "EVP_CIPHER_CTX_new failed"); return false; }
+        int outLen = 0;
+        if (EVP_EncryptInit_ex(ctx, EVP_aes_128_gcm(), nullptr, nullptr, nullptr) != 1 ||
+            EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, static_cast<int>(nonce.size()), nullptr) != 1 ||
+            EVP_EncryptInit_ex(ctx, nullptr, nullptr,
+                               reinterpret_cast<const unsigned char*>(key.constData()),
+                               reinterpret_cast<const unsigned char*>(nonce.constData())) != 1) {
+            setError_(error, "EVP_EncryptInit(AES-128-GCM) failed");
+            return false;
+        }
+        if (aad.size() > 0 &&
+            EVP_EncryptUpdate(ctx, nullptr, &outLen,
+                              reinterpret_cast<const unsigned char*>(aad.constData()),
+                              static_cast<int>(aad.size())) != 1) {
+            setError_(error, "EVP_EncryptUpdate(AAD) failed");
+            return false;
+        }
+        SwByteArray ciphertext(plaintext.size(), '\0');
+        if (EVP_EncryptUpdate(ctx, reinterpret_cast<unsigned char*>(ciphertext.data()), &outLen,
+                              reinterpret_cast<const unsigned char*>(plaintext.constData()),
+                              static_cast<int>(plaintext.size())) != 1) {
+            setError_(error, "EVP_EncryptUpdate(AES-128-GCM) failed");
+            return false;
+        }
+        int finalLen = 0;
+        if (EVP_EncryptFinal_ex(ctx, reinterpret_cast<unsigned char*>(ciphertext.data()) + outLen, &finalLen) != 1) {
+            setError_(error, "EVP_EncryptFinal(AES-128-GCM) failed");
+            return false;
+        }
+        SwByteArray tag(kTagLength, '\0');
+        if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, static_cast<int>(kTagLength),
+                                reinterpret_cast<unsigned char*>(tag.data())) != 1) {
+            setError_(error, "EVP_CTRL_GCM_GET_TAG failed");
+            return false;
+        }
+        outCiphertextAndTag = ciphertext;
+        outCiphertextAndTag.append(tag);
+        return true;
 #endif
     }
 
@@ -809,14 +900,8 @@ private:
             return false;
         }
 
-        BCRYPT_ALG_HANDLE algorithm = nullptr;
-        BCRYPT_KEY_HANDLE aesKey = nullptr;
-        std::vector<unsigned char> keyObject;
-        if (!openAes_(algorithm, BCRYPT_CHAIN_MODE_GCM, error) ||
-            !generateAesKey_(algorithm, key, aesKey, keyObject, error)) {
-            if (algorithm) {
-                BCryptCloseAlgorithmProvider(algorithm, 0);
-            }
+        BCRYPT_KEY_HANDLE aesKey = cachedGcmKey_(key, error); // handle mis en cache (thread-local)
+        if (!aesKey) {
             return false;
         }
 
@@ -845,9 +930,6 @@ private:
                                               static_cast<ULONG>(plaintext.size()),
                                               &outputSize,
                                               0);
-        BCryptDestroyKey(aesKey);
-        BCryptCloseAlgorithmProvider(algorithm, 0);
-
         if (status != 0 || outputSize != plaintext.size()) {
             setError_(error, "BCryptDecrypt(AES-GCM) failed");
             return false;
@@ -856,13 +938,49 @@ private:
         outPlaintext = plaintext;
         return true;
 #else
-        (void)key;
-        (void)nonce;
-        (void)aad;
-        (void)ciphertextAndTag;
-        (void)outPlaintext;
-        setError_(error, "AES-GCM QUIC unprotection is not implemented on this platform yet");
-        return false;
+        if (ciphertextAndTag.size() < kTagLength) {
+            setError_(error, "AES-GCM ciphertext is shorter than its tag");
+            return false;
+        }
+        const std::size_t ciphertextSize = ciphertextAndTag.size() - kTagLength;
+        EVP_CIPHER_CTX* ctx = evpGcmDecCtx_();
+        if (!ctx) { setError_(error, "EVP_CIPHER_CTX_new failed"); return false; }
+        int outLen = 0;
+        if (EVP_DecryptInit_ex(ctx, EVP_aes_128_gcm(), nullptr, nullptr, nullptr) != 1 ||
+            EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, static_cast<int>(nonce.size()), nullptr) != 1 ||
+            EVP_DecryptInit_ex(ctx, nullptr, nullptr,
+                               reinterpret_cast<const unsigned char*>(key.constData()),
+                               reinterpret_cast<const unsigned char*>(nonce.constData())) != 1) {
+            setError_(error, "EVP_DecryptInit(AES-128-GCM) failed");
+            return false;
+        }
+        if (aad.size() > 0 &&
+            EVP_DecryptUpdate(ctx, nullptr, &outLen,
+                              reinterpret_cast<const unsigned char*>(aad.constData()),
+                              static_cast<int>(aad.size())) != 1) {
+            setError_(error, "EVP_DecryptUpdate(AAD) failed");
+            return false;
+        }
+        SwByteArray plaintext(ciphertextSize, '\0');
+        if (EVP_DecryptUpdate(ctx, reinterpret_cast<unsigned char*>(plaintext.data()), &outLen,
+                              reinterpret_cast<const unsigned char*>(ciphertextAndTag.constData()),
+                              static_cast<int>(ciphertextSize)) != 1) {
+            setError_(error, "EVP_DecryptUpdate(AES-128-GCM) failed");
+            return false;
+        }
+        // Étiquette d'authentification attendue (les 16 derniers octets).
+        if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, static_cast<int>(kTagLength),
+                                const_cast<char*>(ciphertextAndTag.constData()) + ciphertextSize) != 1) {
+            setError_(error, "EVP_CTRL_GCM_SET_TAG failed");
+            return false;
+        }
+        int finalLen = 0;
+        if (EVP_DecryptFinal_ex(ctx, reinterpret_cast<unsigned char*>(plaintext.data()) + outLen, &finalLen) != 1) {
+            setError_(error, "AES-128-GCM authentication failed"); // tag invalide (RFC 9001)
+            return false;
+        }
+        outPlaintext = plaintext;
+        return true;
 #endif
     }
 
@@ -876,14 +994,8 @@ private:
             return false;
         }
 
-        BCRYPT_ALG_HANDLE algorithm = nullptr;
-        BCRYPT_KEY_HANDLE aesKey = nullptr;
-        std::vector<unsigned char> keyObject;
-        if (!openAes_(algorithm, BCRYPT_CHAIN_MODE_ECB, error) ||
-            !generateAesKey_(algorithm, key, aesKey, keyObject, error)) {
-            if (algorithm) {
-                BCryptCloseAlgorithmProvider(algorithm, 0);
-            }
+        BCRYPT_KEY_HANDLE aesKey = cachedEcbKey_(key, error); // handle mis en cache (thread-local)
+        if (!aesKey) {
             return false;
         }
 
@@ -899,20 +1011,28 @@ private:
                                               static_cast<ULONG>(outBlock.size()),
                                               &outputSize,
                                               0);
-        BCryptDestroyKey(aesKey);
-        BCryptCloseAlgorithmProvider(algorithm, 0);
-
         if (status != 0 || outputSize != 16) {
             setError_(error, "BCryptEncrypt(AES-ECB) failed");
             return false;
         }
         return true;
 #else
-        (void)key;
-        (void)block;
-        (void)outBlock;
-        setError_(error, "AES-ECB QUIC header protection is not implemented on this platform yet");
-        return false;
+        EVP_CIPHER_CTX* ctx = evpEcbCtx_();
+        if (!ctx) { setError_(error, "EVP_CIPHER_CTX_new failed"); return false; }
+        if (EVP_EncryptInit_ex(ctx, EVP_aes_128_ecb(), nullptr,
+                               reinterpret_cast<const unsigned char*>(key.constData()), nullptr) != 1) {
+            setError_(error, "EVP_EncryptInit(AES-128-ECB) failed");
+            return false;
+        }
+        EVP_CIPHER_CTX_set_padding(ctx, 0); // un seul bloc de 16 o, aucun padding (masque de header protection)
+        outBlock = SwByteArray(16, '\0');
+        int outLen = 0;
+        if (EVP_EncryptUpdate(ctx, reinterpret_cast<unsigned char*>(outBlock.data()), &outLen,
+                              reinterpret_cast<const unsigned char*>(block.constData()), 16) != 1 || outLen != 16) {
+            setError_(error, "EVP_EncryptUpdate(AES-128-ECB) failed");
+            return false;
+        }
+        return true;
 #endif
     }
 

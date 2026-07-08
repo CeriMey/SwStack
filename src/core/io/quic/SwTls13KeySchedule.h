@@ -176,6 +176,54 @@ public:
     }
 
     /**
+     * @brief exporter_master_secret = Derive-Secret(Master-Secret, "exp master",
+     *        Transcript-Hash(ClientHello..server Finished)). RFC 8446 section 7.5.
+     * @param masterSecretIn The 32-byte Master-Secret.
+     * @param transcriptCHtoServerFinished32 Transcript-Hash up to and including server Finished.
+     * @param out Receives the 32-byte exporter_master_secret.
+     * @param err Optional error out-param.
+     * @return true on success; false otherwise.
+     */
+    static bool exporterMasterSecret(const SwByteArray& masterSecretIn,
+                                     const SwByteArray& transcriptCHtoServerFinished32,
+                                     SwByteArray& out,
+                                     SwString* err = nullptr) {
+        return deriveSecret(masterSecretIn, SwString("exp master"), transcriptCHtoServerFinished32, out, err);
+    }
+
+    /**
+     * @brief TLS-Exporter(label, context, length) per RFC 8446 section 7.5:
+     *          secret = Derive-Secret(exporter_master_secret, label, "")
+     *          out    = HKDF-Expand-Label(secret, "exporter", Transcript-Hash(context), length)
+     *
+     * Note: the second step uses a NON-empty context (Transcript-Hash(context)), so it goes
+     * through expandLabelCtx_ rather than the empty-context SwQuicInitialSecrets::hkdfExpandLabel.
+     *
+     * @param exporterMasterSecretIn 32-byte exporter_master_secret (see exporterMasterSecret()).
+     * @param label ASCII exporter label WITHOUT the "tls13 " prefix (application-defined,
+     *              e.g. an "EXPORTER-<purpose>" string per RFC 8446 section 7.5).
+     * @param context Caller-supplied context value (may be empty); hashed with SHA-256.
+     * @param length Desired number of exported bytes.
+     * @param out Receives the exported keying material.
+     * @param err Optional error out-param.
+     * @return true on success; false otherwise.
+     */
+    static bool exportKeyingMaterial(const SwByteArray& exporterMasterSecretIn,
+                                     const SwString& label,
+                                     const SwByteArray& context,
+                                     std::size_t length,
+                                     SwByteArray& out,
+                                     SwString* err = nullptr) {
+        const SwByteArray emptyHash = transcriptHash(SwByteArray(size_t(0), '\0'));
+        SwByteArray secret;
+        if (!deriveSecret(exporterMasterSecretIn, label, emptyHash, secret, err)) {
+            return false;
+        }
+        const SwByteArray contextHash = transcriptHash(context);
+        return expandLabelCtx_(secret, SwString("exporter"), contextHash, length, out, err);
+    }
+
+    /**
      * @brief finished_key = HKDF-Expand-Label(traffic_secret, "finished", "", 32).
      *
      * The context is empty here, so this delegates verbatim to the validated shared helper.
