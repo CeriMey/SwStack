@@ -15,6 +15,10 @@
 #include <windows.h>
 #include <bcrypt.h>
 #include <wincrypt.h>
+#else
+#include <openssl/evp.h>
+#include <openssl/x509.h>
+#include <openssl/rsa.h>
 #endif
 
 // Server authentication for the QUIC TLS 1.3 handshake (RFC 8446 sections
@@ -242,12 +246,63 @@ public:
         clearError_(error);
         return true;
 #else
-        (void)leafCertificateDer;
-        (void)signatureScheme;
-        (void)signature;
-        (void)transcriptHash;
-        setError_(error, "CertificateVerify verification is only implemented on Windows");
-        return false;
+        // Contenu signé RFC 8446 §4.4.3 : 64 espaces ‖ "TLS 1.3, server CertificateVerify" ‖ 0x00 ‖ hash.
+        SwByteArray content;
+        for (int i = 0; i < 64; ++i) content.append(static_cast<char>(0x20));
+        content.append("TLS 1.3, server CertificateVerify");
+        content.append(static_cast<char>(0));
+        content.append(transcriptHash);
+
+        const EVP_MD* md = nullptr;
+        bool isPss = false;
+        switch (signatureScheme) {
+        case 0x0403: md = EVP_sha256(); break;                 // ecdsa_secp256r1_sha256
+        case 0x0503: md = EVP_sha384(); break;                 // ecdsa_secp384r1_sha384
+        case 0x0804: md = EVP_sha256(); isPss = true; break;   // rsa_pss_rsae_sha256
+        case 0x0805: md = EVP_sha384(); isPss = true; break;
+        case 0x0806: md = EVP_sha512(); isPss = true; break;
+        default:
+            setError_(error, "Unsupported TLS 1.3 signature scheme in CertificateVerify");
+            return false;
+        }
+
+        const unsigned char* p = reinterpret_cast<const unsigned char*>(leafCertificateDer.constData());
+        X509* cert = d2i_X509(nullptr, &p, static_cast<long>(leafCertificateDer.size()));
+        if (!cert) {
+            setError_(error, "Server leaf certificate is not valid DER");
+            return false;
+        }
+        EVP_PKEY* pub = X509_get_pubkey(cert);
+        X509_free(cert);
+        if (!pub) {
+            setError_(error, "Cannot extract server public key from certificate");
+            return false;
+        }
+
+        EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+        EVP_PKEY_CTX* pctx = nullptr;
+        bool ok = ctx && EVP_DigestVerifyInit(ctx, &pctx, md, nullptr, pub) > 0;
+        if (ok && isPss) {
+            ok = EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PSS_PADDING) > 0
+              && EVP_PKEY_CTX_set_rsa_pss_saltlen(pctx, RSA_PSS_SALTLEN_DIGEST) > 0;
+        }
+        if (ok) {
+            // ECDSA : la signature est l'ECDSA-Sig-Value DER, consommée directement par EVP_DigestVerify.
+            const int rc = EVP_DigestVerify(ctx,
+                reinterpret_cast<const unsigned char*>(signature.constData()),
+                static_cast<std::size_t>(signature.size()),
+                reinterpret_cast<const unsigned char*>(content.constData()),
+                static_cast<std::size_t>(content.size()));
+            ok = (rc == 1);
+        }
+        if (ctx) EVP_MD_CTX_free(ctx);
+        EVP_PKEY_free(pub);
+        if (!ok) {
+            setError_(error, "CertificateVerify signature check failed");
+            return false;
+        }
+        clearError_(error);
+        return true;
 #endif
     }
 

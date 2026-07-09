@@ -16,6 +16,11 @@
 #endif
 #include <windows.h>
 #include <bcrypt.h>
+#else
+#include <openssl/evp.h>
+#include <openssl/ec.h>
+#include <openssl/obj_mac.h>
+#include <openssl/crypto.h>
 #endif
 
 // Server-side TLS 1.3 credential for the QUIC handshake: the certificate chain
@@ -49,7 +54,10 @@ public:
     static bool createSelfSigned(const SwString& hostName,
                                  SwQuicServerCredential& outCredential,
                                  SwString* error = nullptr) {
-#if defined(_WIN32)
+        // Identique sur les deux plateformes : seul KeyState_ (génération/export/signature) diffère
+        // par plateforme (BCrypt sur Windows, OpenSSL EVP ailleurs). L'encodage DER du certificat est
+        // partagé (buildCertificate_). Le pair vérifie la CertificateVerify (preuve de possession) et
+        // — pour VIGIL — la clé via le seam RPK, pas la chaîne X.509.
         std::shared_ptr<KeyState_> keyState(new KeyState_());
         if (!keyState->generate(error)) {
             return false;
@@ -79,12 +87,6 @@ public:
 
         clearError_(error);
         return true;
-#else
-        (void)hostName;
-        (void)outCredential;
-        setError_(error, "Self-signed credential generation is only implemented on Windows");
-        return false;
-#endif
     }
 
 private:
@@ -265,6 +267,60 @@ private:
             return true;
         }
     };
+#else
+    // OpenSSL (Linux/Android) : clé EC P-256 via EVP, signature ECDSA-SHA256 (sortie DER native).
+    struct KeyState_ {
+        EVP_PKEY* key;
+        KeyState_() : key(nullptr) {}
+        ~KeyState_() { if (key) { EVP_PKEY_free(key); } }
+
+        bool generate(SwString* error) {
+            EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, nullptr);
+            if (!ctx) { setError_(error, "EVP_PKEY_CTX_new_id(EC) failed"); return false; }
+            const bool ok = EVP_PKEY_keygen_init(ctx) > 0
+                         && EVP_PKEY_CTX_set_ec_paramgen_curve_nid(ctx, NID_X9_62_prime256v1) > 0
+                         && EVP_PKEY_keygen(ctx, &key) > 0;
+            EVP_PKEY_CTX_free(ctx);
+            if (!ok) { setError_(error, "EC P-256 keygen (OpenSSL) failed"); return false; }
+            return true;
+        }
+
+        bool exportPublicPoint(SwByteArray& outX, SwByteArray& outY, SwString* error) {
+            // Point public non compressé : 0x04 ‖ X(32) ‖ Y(32) = 65 octets (OpenSSL 3.0+).
+            unsigned char* buf = nullptr;
+            const std::size_t len = EVP_PKEY_get1_encoded_public_key(key, &buf);
+            if (len != 65 || buf == nullptr || static_cast<unsigned char>(buf[0]) != 0x04) {
+                if (buf) { OPENSSL_free(buf); }
+                setError_(error, "Unexpected EC P-256 public point");
+                return false;
+            }
+            outX = SwByteArray(reinterpret_cast<const char*>(buf + 1), 32);
+            outY = SwByteArray(reinterpret_cast<const char*>(buf + 33), 32);
+            OPENSSL_free(buf);
+            return true;
+        }
+
+        bool signContent(const SwByteArray& content, SwByteArray& outSignature, SwString* error) {
+            EVP_MD_CTX* md = EVP_MD_CTX_new();
+            if (!md) { setError_(error, "EVP_MD_CTX_new failed"); return false; }
+            std::size_t siglen = 0;
+            bool ok = EVP_DigestSignInit(md, nullptr, EVP_sha256(), nullptr, key) > 0
+                   && EVP_DigestSign(md, nullptr, &siglen,
+                        reinterpret_cast<const unsigned char*>(content.constData()),
+                        static_cast<std::size_t>(content.size())) > 0;
+            if (!ok) { EVP_MD_CTX_free(md); setError_(error, "EVP_DigestSign(size) failed"); return false; }
+            std::vector<unsigned char> sig(siglen);
+            ok = EVP_DigestSign(md, sig.data(), &siglen,
+                    reinterpret_cast<const unsigned char*>(content.constData()),
+                    static_cast<std::size_t>(content.size())) > 0;
+            EVP_MD_CTX_free(md);
+            if (!ok) { setError_(error, "EVP_DigestSign failed"); return false; }
+            // EVP_DigestSign produit directement l'ECDSA-Sig-Value DER (SEQUENCE{INTEGER r, INTEGER s}).
+            outSignature = SwByteArray(reinterpret_cast<const char*>(sig.data()), static_cast<int>(siglen));
+            return true;
+        }
+    };
+#endif
 
     // ---- minimal DER helpers ------------------------------------------------
 
@@ -400,7 +456,6 @@ private:
         clearError_(error);
         return true;
     }
-#endif
 };
 
 #endif
