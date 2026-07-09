@@ -62,6 +62,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <thread>
+#include <deque>
 static constexpr const char* kSwLogCategory_SwUdpSocket = "sw.core.io.swudpsocket";
 
 
@@ -565,20 +566,20 @@ public:
      */
     int64_t readDatagram(char* data, int64_t maxSize, SwString* sender = nullptr, uint16_t* senderPort = nullptr) {
         SwMutexLocker lock(m_queueMutex);
-        if (m_pending.isEmpty()) {
+        if (m_pending.empty()) {
             return -1;
         }
 
-        auto packet = std::move(m_pending.firstRef());
-        m_pending.removeAt(0);
+        auto packet = std::move(m_pending.front());
+        m_pending.pop_front();
         m_pendingDatagramCount.store(static_cast<uint64_t>(m_pending.size()), std::memory_order_relaxed);
 
         SwString sourceAddress;
         uint16_t sourcePort = 0;
-        if (!m_senderQueue.isEmpty()) {
-            sourceAddress = m_senderQueue.firstRef().first;
-            sourcePort = m_senderQueue.firstRef().second;
-            m_senderQueue.removeAt(0);
+        if (!m_senderQueue.empty()) {
+            sourceAddress = m_senderQueue.front().first;
+            sourcePort = m_senderQueue.front().second;
+            m_senderQueue.pop_front();
         }
         if (sender) {
             *sender = sourceAddress;
@@ -604,22 +605,22 @@ public:
      */
     SwByteArray receiveDatagram(SwString* sender = nullptr, uint16_t* senderPort = nullptr) {
         SwMutexLocker lock(m_queueMutex);
-        if (m_pending.isEmpty()) {
+        if (m_pending.empty()) {
             return SwByteArray();
         }
 
-        auto packet = std::move(m_pending.firstRef());
-        m_pending.removeAt(0);
+        auto packet = std::move(m_pending.front());
+        m_pending.pop_front();
         m_pendingDatagramCount.store(static_cast<uint64_t>(m_pending.size()), std::memory_order_relaxed);
 
-        if (sender && !m_senderQueue.isEmpty()) {
-            *sender = m_senderQueue.firstRef().first;
+        if (sender && !m_senderQueue.empty()) {
+            *sender = m_senderQueue.front().first;
         }
-        if (senderPort && !m_senderQueue.isEmpty()) {
-            *senderPort = m_senderQueue.firstRef().second;
+        if (senderPort && !m_senderQueue.empty()) {
+            *senderPort = m_senderQueue.front().second;
         }
-        if (!m_senderQueue.isEmpty()) {
-            m_senderQueue.removeAt(0);
+        if (!m_senderQueue.empty()) {
+            m_senderQueue.pop_front();
         }
 
         return packet;
@@ -633,7 +634,7 @@ public:
      */
     bool hasPendingDatagrams() const {
         SwMutexLocker lock(m_queueMutex);
-        return !m_pending.isEmpty();
+        return !m_pending.empty();
     }
 
     /**
@@ -644,7 +645,7 @@ public:
      */
     int pendingDatagramSize() const {
         SwMutexLocker lock(m_queueMutex);
-        return m_pending.isEmpty() ? 0 : static_cast<int>(m_pending.firstRef().size());
+        return m_pending.empty() ? 0 : static_cast<int>(m_pending.front().size());
     }
 
     /**
@@ -1151,16 +1152,16 @@ private:
         const SwString senderAddress = socketAddressToString_(sender);
         const uint16_t senderPort = socketAddressPort_(sender);
         SwMutexLocker lock(m_queueMutex);
-        m_pending.append(SwByteArray(data, bytes));
-        m_senderQueue.append(SwPair<SwString, uint16_t>(senderAddress, senderPort));
+        m_pending.push_back(SwByteArray(data, bytes));
+        m_senderQueue.push_back(SwPair<SwString, uint16_t>(senderAddress, senderPort));
         uint64_t queueDepth = static_cast<uint64_t>(m_pending.size());
         if (queueDepth > m_queueHighWatermark.load()) {
             m_queueHighWatermark.store(queueDepth);
         }
         if (m_pending.size() > m_maxPendingDatagrams) {
-            m_pending.removeAt(0);
-            if (!m_senderQueue.isEmpty()) {
-                m_senderQueue.removeAt(0);
+            m_pending.pop_front();
+            if (!m_senderQueue.empty()) {
+                m_senderQueue.pop_front();
             }
             ++m_totalQueueDrops;
             queueDepth = static_cast<uint64_t>(m_pending.size());
@@ -1267,17 +1268,17 @@ private:
             const uint16_t senderPort = socketAddressPort_(sender);
             {
                 SwMutexLocker lock(m_queueMutex);
-                m_pending.append(SwByteArray(m_readBuffer.data(), static_cast<size_t>(bytes)));
-                m_senderQueue.append(SwPair<SwString, uint16_t>(senderAddress, senderPort));
+                m_pending.push_back(SwByteArray(m_readBuffer.data(), static_cast<size_t>(bytes)));
+                m_senderQueue.push_back(SwPair<SwString, uint16_t>(senderAddress, senderPort));
                 uint64_t queueDepth = static_cast<uint64_t>(m_pending.size());
                 if (queueDepth > m_queueHighWatermark.load()) {
                     m_queueHighWatermark.store(queueDepth);
                 }
                 if (m_pending.size() > m_maxPendingDatagrams) {
-                    size_t droppedBytes = m_pending.firstRef().size();
-                    m_pending.removeAt(0);
-                    if (!m_senderQueue.isEmpty()) {
-                        m_senderQueue.removeAt(0);
+                    size_t droppedBytes = m_pending.front().size();
+                    m_pending.pop_front();
+                    if (!m_senderQueue.empty()) {
+                        m_senderQueue.pop_front();
                     }
                     ++m_totalQueueDrops;
                     swCWarning(kSwLogCategory_SwUdpSocket) << "[SwUdpSocket] Dropping oldest datagram (" << droppedBytes
@@ -1729,8 +1730,11 @@ private:
     socklen_t m_boundAddrLen{0};
     bool m_remoteSet{false};
     mutable SwMutex m_queueMutex;
-    SwList<SwByteArray> m_pending;
-    SwList<SwPair<SwString, uint16_t>> m_senderQueue;
+    // FIFO de réception : std::deque pour un pop-front (removeAt(0)) O(1). Un std::vector (ex-SwList) rend
+    // le pop-front O(n) -> drainer une file profonde (gros buffer kernel = gros backlog) devient O(n²) et
+    // effondre le débit de réception (mesuré identique sur recvfrom Windows et recvmmsg Linux).
+    std::deque<SwByteArray> m_pending;
+    std::deque<SwPair<SwString, uint16_t>> m_senderQueue;
     SwString m_boundAddress;
     uint16_t m_boundPort{0};
     SwString m_remoteAddress;
