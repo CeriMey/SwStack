@@ -21,6 +21,8 @@
 #include "quic/SwQuicVarIntCodec.h"
 #include "quic/SwQuicX25519.h"
 #include "quic/SwTls13KeySchedule.h"
+
+#include <functional>
 #include "quic/SwTls13Messages.h"
 
 #include <cstdint>
@@ -76,6 +78,16 @@ public:
     // CertificateVerify signature while skipping the trusted-root requirement.
     void setVerifyCertificateChain(bool verify) { m_verifyChain = verify; }
     bool verifyCertificateChain() const { return m_verifyChain; }
+
+    // Confiance déléguée par clé (RFC 7250 / politique applicative) : si un vérificateur est installé,
+    // la décision de confiance sur le certificat/clé publique du serveur lui est déléguée (p. ex.
+    // « cette clé est-elle un membre connu ? ») AU LIEU de la validation de chaîne X.509. La preuve de
+    // possession (CertificateVerify) reste exigée. Cette pile ne connaît pas la politique : elle
+    // fournit les octets présentés (serverCertificateDer) et honore la décision retournée.
+    void setRawPublicKeyVerifier(std::function<bool(const SwByteArray& certificateOrSpki)> verifier) {
+        m_rawPublicKeyVerifier = std::move(verifier);
+    }
+    bool hasRawPublicKeyVerifier() const { return static_cast<bool>(m_rawPublicKeyVerifier); }
 
     // Enable 0-RTT resumption: the next start() sends a resumption ClientHello
     // for this ticket and, if earlyData is non-empty, a 0-RTT packet carrying
@@ -631,9 +643,16 @@ private:
                 setError_(error, "Server did not send a certificate chain to verify");
                 return false;
             }
-            if (m_verifyChain &&
-                !SwQuicCertificateVerifier::verifyServerChain(m_serverCertificateChain,
-                                                              m_serverName, error)) {
+            if (m_rawPublicKeyVerifier) {
+                // Confiance déléguée : la clé/cert présentée doit être acceptée (ex. appartenance
+                // netmap). La chaîne PKI n'est PAS validée ; la preuve de possession l'est ci-dessous.
+                if (!m_rawPublicKeyVerifier(m_serverCertificateDer)) {
+                    setError_(error, "Server public key rejected by raw-public-key verifier");
+                    return false;
+                }
+            } else if (m_verifyChain &&
+                       !SwQuicCertificateVerifier::verifyServerChain(m_serverCertificateChain,
+                                                                     m_serverName, error)) {
                 return false;
             }
 
@@ -978,6 +997,7 @@ private:
 
     bool m_verifyPeer;
     bool m_verifyChain;
+    std::function<bool(const SwByteArray&)> m_rawPublicKeyVerifier;
     SwByteArray m_resumptionMasterSecret;
 
     // 0-RTT resumption state.
