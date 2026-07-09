@@ -25,6 +25,29 @@ class SwQuicPacketProtector {
 public:
     static const std::size_t kTagLength = 16;
 
+    // Retry Integrity Tag (RFC 9001 §5.8) : AEAD_AES_128_GCM avec clé et nonce FIXES pour QUIC v1,
+    // AAD = Retry Pseudo-Packet (ODCID_len ‖ ODCID ‖ paquet Retry sans le tag), plaintext vide ->
+    // sortie = 16 octets de tag seuls. Réutilise le chemin AEAD interne (bi-plateforme, zéro #ifdef ici).
+    static bool computeRetryIntegrityTag(const SwByteArray& retryPseudoPacket,
+                                         SwByteArray& outTag,
+                                         SwString* error = nullptr) {
+        static const SwByteArray kRetryKey =
+            SwByteArray::fromHex(SwByteArray("be0c690b9f66575a1d766b54e368c84e"));
+        static const SwByteArray kRetryNonce =
+            SwByteArray::fromHex(SwByteArray("461599d35d632bf2239825bb"));
+        SwByteArray ciphertextAndTag;
+        if (!aes128GcmEncrypt_(kRetryKey, kRetryNonce, retryPseudoPacket,
+                               SwByteArray(), ciphertextAndTag, error)) {
+            return false;
+        }
+        if (ciphertextAndTag.size() != static_cast<int>(kTagLength)) {
+            setError_(error, "Retry integrity tag has unexpected length");
+            return false;
+        }
+        outTag = ciphertextAndTag;
+        return true;
+    }
+
     static bool protectClientInitial(const SwQuicInitialKeys& keys,
                                      std::uint64_t packetNumber,
                                      std::uint8_t packetNumberLength,
