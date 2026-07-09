@@ -803,6 +803,12 @@ public:
         m_maxReadBatchDatagrams = maxPackets;
     }
 
+    // Réception par lots (recvmmsg) : draine la socket en 1 syscall pour N datagrammes au lieu d'un
+    // recvfrom par paquet. OPT-IN, défaut OFF -> le comportement historique est STRICTEMENT inchangé
+    // pour les appelants existants ; sans effet hors Linux (repli sur le chemin recvfrom).
+    void setBatchReceive(bool enabled) { m_batchReceive = enabled; }
+    bool batchReceive() const { return m_batchReceive; }
+
     void setBroadcastEnabled(bool enabled) {
         m_broadcastEnabled = enabled;
         applyBroadcastMode();
@@ -1135,11 +1141,98 @@ private:
         return 0;
     }
 
+#if defined(__linux__)
+    // Enqueue d'un datagramme reçu (mêmes règles que la boucle recvfrom : compteurs, file bornée,
+    // drop du plus ancien sous pression). Utilisé UNIQUEMENT par le chemin recvmmsg opt-in.
+    void enqueueDatagram_(const char* data, size_t bytes, const sockaddr_storage& sender) {
+        ++m_totalReceivedDatagrams;
+        m_totalReceivedBytes.fetch_add(static_cast<uint64_t>(bytes), std::memory_order_relaxed);
+        swSocketTrafficAddReceivedBytes(socketTrafficState_, static_cast<unsigned long long>(bytes));
+        const SwString senderAddress = socketAddressToString_(sender);
+        const uint16_t senderPort = socketAddressPort_(sender);
+        SwMutexLocker lock(m_queueMutex);
+        m_pending.append(SwByteArray(data, bytes));
+        m_senderQueue.append(SwPair<SwString, uint16_t>(senderAddress, senderPort));
+        uint64_t queueDepth = static_cast<uint64_t>(m_pending.size());
+        if (queueDepth > m_queueHighWatermark.load()) {
+            m_queueHighWatermark.store(queueDepth);
+        }
+        if (m_pending.size() > m_maxPendingDatagrams) {
+            m_pending.removeAt(0);
+            if (!m_senderQueue.isEmpty()) {
+                m_senderQueue.removeAt(0);
+            }
+            ++m_totalQueueDrops;
+            queueDepth = static_cast<uint64_t>(m_pending.size());
+        }
+        m_pendingDatagramCount.store(queueDepth, std::memory_order_relaxed);
+    }
+
+    // Chemin recvmmsg (opt-in) : jusqu'à kBatch datagrammes par appel syscall (amortit le coût du
+    // franchissement de syscall, ~x30 mesuré). Linux uniquement ; ne touche jamais le chemin par défaut.
+    void pollSocketBatch_() {
+        constexpr size_t kBatch = 64;
+        const size_t slot = m_maxDatagramSize;
+        if (static_cast<size_t>(m_batchRecvBuf.size()) < slot * kBatch) {
+            m_batchRecvBuf.resize(slot * kBatch);
+        }
+        struct mmsghdr   msgs[kBatch];
+        struct iovec     iovs[kBatch];
+        sockaddr_storage addrs[kBatch];
+        bool receivedAny = false;
+        size_t total = 0;
+        while (total < m_maxReadBatchDatagrams) {
+            for (size_t i = 0; i < kBatch; ++i) {
+                iovs[i].iov_base = m_batchRecvBuf.data() + i * slot;
+                iovs[i].iov_len  = slot;
+                std::memset(&msgs[i], 0, sizeof(msgs[i]));
+                msgs[i].msg_hdr.msg_iov     = &iovs[i];
+                msgs[i].msg_hdr.msg_iovlen  = 1;
+                msgs[i].msg_hdr.msg_name    = &addrs[i];
+                msgs[i].msg_hdr.msg_namelen = sizeof(sockaddr_storage);
+            }
+            const int r = ::recvmmsg(m_socket, msgs, static_cast<unsigned int>(kBatch), MSG_DONTWAIT, nullptr);
+            if (r <= 0) {
+                if (r < 0) {
+                    const int err = lastErrorCode();
+                    if (err != EWOULDBLOCK && err != EAGAIN) {
+                        swCError(kSwLogCategory_SwUdpSocket) << "[SwUdpSocket] recvmmsg error=" << err;
+                    }
+                }
+                break;
+            }
+            for (int i = 0; i < r; ++i) {
+                enqueueDatagram_(m_batchRecvBuf.data() + static_cast<size_t>(i) * slot,
+                                 static_cast<size_t>(msgs[i].msg_len), addrs[i]);
+                receivedAny = true;
+                ++total;
+            }
+            if (static_cast<size_t>(r) < kBatch) {
+                break; // socket drainé
+            }
+        }
+        if (receivedAny) {
+            const bool localEndpointChanged = refreshLocalEndpoint_();
+            publishTrafficMonitorUdpStats_(m_pendingDatagramCount.load(std::memory_order_relaxed));
+            if (localEndpointChanged) {
+                refreshTrafficMonitorEndpoints_();
+            }
+            scheduleReadyRead_();
+        }
+    }
+#endif // __linux__
+
     void pollSocket_(int timeoutMs) {
         if (!isSocketValid()) {
             return;
         }
         SW_UNUSED(timeoutMs)
+#if defined(__linux__)
+        if (m_batchReceive) { // opt-in : réception par lots recvmmsg (défaut OFF = chemin ci-dessous)
+            pollSocketBatch_();
+            return;
+        }
+#endif
 
         bool receivedAny = false;
         size_t batchCount = 0;
@@ -1662,6 +1755,8 @@ private:
     size_t m_maxReadBatchDatagrams{128};
     bool m_broadcastEnabled{false};
     SwByteArray m_readBuffer;
+    bool m_batchReceive{false};   // opt-in recvmmsg (Linux) ; défaut OFF = chemin recvfrom legacy inchangé
+    SwByteArray m_batchRecvBuf;   // buffer de réception par lots (kBatch * m_maxDatagramSize)
     SwSocketTrafficStateHandle socketTrafficState_;
     SwString m_publishedBoundAddress;
     uint16_t m_publishedBoundPort{0};
