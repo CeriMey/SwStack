@@ -58,6 +58,9 @@ public:
         m_socket.setMaxDatagramSize(65536);
         m_socket.setMaxPendingDatagrams(2048);
         m_socket.setMaxReadBatchDatagrams(256);
+        // Réception par lots recvmmsg (Linux) : ~x1,5 en débit de réception (mesuré), sûr depuis le
+        // correctif de file O(1) de SwUdpSocket. No-op sur Windows (recvmmsg absent, chemin recvfrom).
+        m_socket.setBatchReceive(true);
 
         if (!m_socket.bind(ip, port,
                            SwUdpSocket::ShareAddress | SwUdpSocket::ReuseAddressHint)) {
