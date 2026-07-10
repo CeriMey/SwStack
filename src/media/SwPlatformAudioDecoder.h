@@ -7,4 +7,5 @@
  */
 
 #include "media/SwMediaFoundationAudioDecoder.h"
+#include "media/SwOpusAudioDecoder.h"
 

@@ -916,7 +916,8 @@ private:
             }
             std::sort(auxiliaryTargets.begin(),
                       auxiliaryTargets.end(),
-                      [](const auto& lhs, const auto& rhs) {
+                      [](const std::pair<int, SetupTarget>& lhs,
+                         const std::pair<int, SetupTarget>& rhs) {
                           return lhs.first < rhs.first;
                       });
             for (const auto& target : auxiliaryTargets) {

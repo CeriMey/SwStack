@@ -63,10 +63,11 @@ inline void SwEmbeddedDb::rotateMutableToImmutableLocked_() {
     mutable_ = swEmbeddedDbDetail::MemTable_();
     mutable_.walId = manifest_.activeWalId;
     prepareMutableMemTableLocked_();
-    activeWalFile_.close();
-    if (!closing_) {
-        (void)openActiveWal_();
-    }
+    // The cached writer read model (base + overlay) survives rotation: moving
+    // the memtable to immutables_ does not change the logical content.
+    // The WAL file itself is switched by the write-service thread on its next
+    // commit (activeWalFileId_ mismatch check): closing it here would race the
+    // unlocked append/sync running on that thread.
 }
 
 inline void SwEmbeddedDb::scheduleFlushLocked_() {
@@ -86,12 +87,25 @@ inline void SwEmbeddedDb::flushBackground_() {
                 flushScheduled_ = false;
                 return;
             }
+            // The memtable stays in immutables_ while its sstable is written:
+            // snapshots and gets taken during the flush keep seeing these
+            // records (they used to vanish until the table install), and a
+            // failed flush no longer drops the only in-memory copy.
             mem = immutables_.first();
-            immutables_.removeAt(0);
         }
         const SwDbStatus status = flushMemTable_(mem, 0);
-        if (!status.ok()) {
-            swCError(kSwLogCategory_SwEmbeddedDb) << status.message();
+        {
+            SwEmbeddedDbLock_ lock(mutex_);
+            if (!status.ok()) {
+                flushScheduled_ = false;
+                swCError(kSwLogCategory_SwEmbeddedDb) << status.message();
+                return;
+            }
+            if (!immutables_.isEmpty() &&
+                immutables_.first().walId == mem.walId &&
+                immutables_.first().maxSeq == mem.maxSeq) {
+                immutables_.removeAt(0);
+            }
         }
     }
 }

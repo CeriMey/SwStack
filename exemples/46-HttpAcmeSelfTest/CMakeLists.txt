@@ -27,17 +27,10 @@ target_include_directories(HttpAcmeSelfTest PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}/generated
 )
 
+target_link_libraries(HttpAcmeSelfTest PRIVATE SwQuicCore)
+
 if(WIN32)
-    set(SW_OPENSSL_WIN_ROOT "C:/OpenSSL-Win64")
-    set(SW_OPENSSL_WIN_CRYPTO_LIB "${SW_OPENSSL_WIN_ROOT}/lib/VC/x64/MD/libcrypto.lib")
-    if(EXISTS "${SW_OPENSSL_WIN_ROOT}/include/openssl/ssl.h" AND EXISTS "${SW_OPENSSL_WIN_CRYPTO_LIB}")
-        target_include_directories(HttpAcmeSelfTest PRIVATE "${SW_OPENSSL_WIN_ROOT}/include")
-        target_link_libraries(HttpAcmeSelfTest PRIVATE "${SW_OPENSSL_WIN_CRYPTO_LIB}" ws2_32 secur32)
-    else()
-        find_package(OpenSSL REQUIRED)
-        target_link_libraries(HttpAcmeSelfTest PRIVATE OpenSSL::Crypto ws2_32 secur32)
-    endif()
-else()
-    find_package(OpenSSL REQUIRED)
-    target_link_libraries(HttpAcmeSelfTest PRIVATE OpenSSL::Crypto)
+    # OpenSSL::Crypto and Winsock are propagated by SwQuicCore; ACME also
+    # needs the Windows security package API.
+    target_link_libraries(HttpAcmeSelfTest PRIVATE secur32)
 endif()

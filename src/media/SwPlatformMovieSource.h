@@ -9,10 +9,8 @@
 #if defined(_WIN32)
 #include "media/SwMediaFoundationMovieSource.h"
 using SwPlatformMovieSource = SwMediaFoundationMovieSource;
-#elif defined(__linux__)
-#include "media/SwLinuxMovieSource.h"
-using SwPlatformMovieSource = SwLinuxMovieSource;
 #else
-#include "media/SwMediaFoundationMovieSource.h"
-using SwPlatformMovieSource = SwMediaFoundationMovieSource;
+// Every non-Windows platform gets the dependency-free native MP4 movie source.
+#include "media/SwMp4MovieSource.h"
+using SwPlatformMovieSource = SwMp4MovieSource;
 #endif

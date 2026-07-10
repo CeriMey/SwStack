@@ -182,7 +182,10 @@ public:
         for (std::size_t i = 0; i < walFiles.size(); ++i) {
             const unsigned long long walId =
                 swEmbeddedDbDetail::parseNumericSuffix_(swDbPlatform::fileName(walFiles[i]), "WAL-", ".log");
-            if (walId != 0 && walId < db_.manifest_.replayFromWalId) {
+            // Never delete the file the write-service thread still has open
+            // for append (it switches to manifest_.activeWalId on its next
+            // commit); it becomes deletable on a later cleanup pass.
+            if (walId != 0 && walId < db_.manifest_.replayFromWalId && walId != db_.activeWalFileId_) {
                 (void)swDbPlatform::removeFile(walFiles[i]);
             }
         }

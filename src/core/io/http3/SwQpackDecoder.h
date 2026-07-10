@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -30,8 +31,21 @@ public:
     static bool decodeFieldSection(const SwByteArray& in,
                                    std::vector<std::pair<SwByteArray, SwByteArray> >& out,
                                    SwString* error = nullptr) {
+        return decodeFieldSection(in, out, 0, 0, error);
+    }
+
+    static bool decodeFieldSection(
+        const SwByteArray& in,
+        std::vector<std::pair<SwByteArray, SwByteArray> >& out,
+        std::size_t maxFieldCount,
+        std::size_t maxDecodedBytes,
+        SwString* error = nullptr) {
         out.clear();
         std::size_t offset = 0;
+        std::size_t decodedBytes = 0;
+        const std::size_t decodedLimit = maxDecodedBytes == 0
+            ? (std::numeric_limits<std::size_t>::max)()
+            : maxDecodedBytes;
 
         // Encoded Field Section Prefix.
         std::uint64_t requiredInsertCount = 0;
@@ -52,6 +66,10 @@ public:
         }
 
         while (offset < in.size()) {
+            if (maxFieldCount > 0 && out.size() >= maxFieldCount) {
+                setError_(error, "QPACK field count exceeds the configured limit");
+                return false;
+            }
             const std::uint8_t first = static_cast<std::uint8_t>(in.constData()[offset]);
 
             if (first & 0x80U) {
@@ -70,7 +88,10 @@ public:
                     setError_(error, "QPACK Indexed Field Line has an out-of-range static index");
                     return false;
                 }
-                out.push_back(std::make_pair(name, value));
+                if (!appendField_(out, std::move(name), std::move(value),
+                                  decodedLimit, decodedBytes, error)) {
+                    return false;
+                }
             } else if (first & 0x40U) {
                 // Literal Field Line With Name Reference.
                 if (!(first & 0x10U)) {
@@ -89,21 +110,32 @@ public:
                     return false;
                 }
                 SwByteArray value;
-                if (!decodeString_(in, offset, 7, 0x80, value, error)) {
+                const std::size_t remaining = remainingBytes_(decodedLimit, decodedBytes,
+                                                               name.size());
+                if (!decodeString_(in, offset, 7, 0x80, remaining, value, error)) {
                     return false;
                 }
-                out.push_back(std::make_pair(name, value));
+                if (!appendField_(out, std::move(name), std::move(value),
+                                  decodedLimit, decodedBytes, error)) {
+                    return false;
+                }
             } else if (first & 0x20U) {
                 // Literal Field Line With Literal Name.
                 SwByteArray name;
-                if (!decodeString_(in, offset, 3, 0x08, name, error)) {
+                const std::size_t nameLimit = remainingBytes_(decodedLimit, decodedBytes, 0);
+                if (!decodeString_(in, offset, 3, 0x08, nameLimit, name, error)) {
                     return false;
                 }
                 SwByteArray value;
-                if (!decodeString_(in, offset, 7, 0x80, value, error)) {
+                const std::size_t valueLimit = remainingBytes_(decodedLimit, decodedBytes,
+                                                                name.size());
+                if (!decodeString_(in, offset, 7, 0x80, valueLimit, value, error)) {
                     return false;
                 }
-                out.push_back(std::make_pair(name, value));
+                if (!appendField_(out, std::move(name), std::move(value),
+                                  decodedLimit, decodedBytes, error)) {
+                    return false;
+                }
             } else {
                 setError_(error, "QPACK post-base field line representations are not supported");
                 return false;
@@ -115,6 +147,47 @@ public:
     }
 
 private:
+    static std::size_t remainingBytes_(std::size_t limit,
+                                       std::size_t used,
+                                       std::size_t reserved) {
+        if (used > limit || reserved > limit - used) {
+            return 0;
+        }
+        return limit - used - reserved;
+    }
+
+    static bool appendField_(
+        std::vector<std::pair<SwByteArray, SwByteArray> >& out,
+        SwByteArray name,
+        SwByteArray value,
+        std::size_t decodedLimit,
+        std::size_t& decodedBytes,
+        SwString* error) {
+        const std::size_t nameBytes = name.size();
+        const std::size_t valueBytes = value.size();
+        // SETTINGS_MAX_FIELD_SECTION_SIZE uses the HTTP field-section metric:
+        // name + value + 32 bytes per field line (RFC 9114 / QPACK).
+        static const std::size_t kFieldLineOverhead = 32;
+        if (decodedBytes > decodedLimit ||
+            kFieldLineOverhead > decodedLimit - decodedBytes) {
+            setError_(error, "QPACK decoded fields exceed the configured byte limit");
+            return false;
+        }
+        const std::size_t afterOverhead = decodedBytes + kFieldLineOverhead;
+        if (nameBytes > decodedLimit - afterOverhead) {
+            setError_(error, "QPACK decoded fields exceed the configured byte limit");
+            return false;
+        }
+        const std::size_t afterName = afterOverhead + nameBytes;
+        if (valueBytes > decodedLimit - afterName) {
+            setError_(error, "QPACK decoded fields exceed the configured byte limit");
+            return false;
+        }
+        decodedBytes = afterName + valueBytes;
+        out.push_back(std::make_pair(std::move(name), std::move(value)));
+        return true;
+    }
+
     static void setError_(SwString* error, const char* message) {
         if (error) {
             *error = SwString(message);
@@ -174,6 +247,7 @@ private:
                               std::size_t& offset,
                               int prefixBits,
                               std::uint8_t hBit,
+                              std::size_t maxOutputBytes,
                               SwByteArray& out,
                               SwString* error) {
         if (offset >= in.size()) {
@@ -191,12 +265,23 @@ private:
             setError_(error, "QPACK string literal length exceeds available data");
             return false;
         }
+        if ((!huffman && length > maxOutputBytes) ||
+            (huffman && maxOutputBytes <=
+                            (std::numeric_limits<std::size_t>::max)() / 4 &&
+             length > static_cast<std::uint64_t>(maxOutputBytes * 4))) {
+            setError_(error, "QPACK string literal exceeds the configured decoded limit");
+            return false;
+        }
+        if (length > static_cast<std::uint64_t>((std::numeric_limits<int>::max)())) {
+            setError_(error, "QPACK string literal is too large");
+            return false;
+        }
 
         SwByteArray raw = in.mid(static_cast<int>(offset), static_cast<int>(length));
         offset += static_cast<std::size_t>(length);
 
         if (huffman) {
-            return SwHpackHuffman::decode(raw, out, error);
+            return SwHpackHuffman::decode(raw, out, maxOutputBytes, error);
         }
         out = raw;
         return true;

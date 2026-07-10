@@ -7,8 +7,52 @@ HTTP/3 et WebTransport dans la couche `io` de SwStack.
 
 Le but n'est pas d'ajouter un gros objet `SwQuic` dans le serveur
 applicatif. Le but est de construire une pile claire, couche par couche,
-afin que `SwHttpApp` ou le futur `SwAppServer` puisse exposer les memes
-routes applicatives sur HTTP/1.x, WebSocket, HTTP/3 et WebTransport.
+afin que `SwHttpApp` puisse exposer les memes routes applicatives sur
+HTTP/1.x et HTTP/3, tout en conservant WebSocket sur HTTP/1.x et la voie
+Extended CONNECT dediee a WebTransport sur HTTP/3.
+
+## Integration SwHttpApp
+
+`SwHttpApp::listenHttps()` demarre maintenant deux listeners sur le meme
+numero de port : HTTPS sur TCP et HTTP/3 sur QUIC/UDP. Le couple certificat
+PEM/cle privee qui definit l'identite de l'origine est utilise par les deux
+handshakes TLS. Les surcharges multi-certificats conservent la selection SNI
+pour HTTP/3.
+
+Le chargeur QUIC accepte les cles X.509 Ed25519, ECDSA P-256/P-384, RSA et
+RSA-PSS. Pour une cle RSA-PSS restreinte, il selectionne le schema TLS 1.3
+`rsa_pss_pss_sha256`, `sha384` ou `sha512` autorise par la cle. Si aucune de ces
+signatures n'est permise, `listenHttps()` echoue avant d'ouvrir les listeners :
+il n'y a pas de repli silencieux qui presenterait une identite differente entre
+TCP et QUIC.
+
+```cpp
+SwHttpApp app;
+app.get("/api/status", [](SwHttpContext& ctx) {
+    ctx.setHeader("x-protocol", ctx.protocol());
+    ctx.json(status);
+});
+
+// TCP 443 (HTTPS) + UDP 443 (HTTP/3), memes routes et middlewares.
+if (!app.listenHttps("0.0.0.0", 443, "fullchain.pem", "privkey.pem")) {
+    // app.lastHttp3Error() fournit le diagnostic QUIC/certificat.
+}
+```
+
+Les reponses HTTPS annoncent automatiquement l'alternative standard
+`Alt-Svc: h3=":443"; ma=86400`. Le protocole effectivement utilise est visible
+avec `SwHttpContext::protocol()` et `SwHttpContext::isHttp3()`. Le listener QUIC
+est pilote par la readiness UDP et les deadlines QUIC dans la boucle
+`SwCoreApplication`; aucun appel manuel a `poll()` n'est requis.
+
+Le dispatch est commun jusque dans les chemins asynchrones : pre-routes
+d'authentification/ACL, routes asynchrones, timeouts, limites en vol, filtres de
+reponse et metriques passent tous par `SwHttpServer`. Les buffers de requete H3
+sont comptes dans le budget global partage avec TCP/TLS, liberes apres la
+reponse, et le credit `MAX_STREAMS` est renouvele pour les connexions longues.
+
+Pour un deploiement volontairement TCP-only, appeler
+`app.setHttp3Enabled(false)` avant `listenHttps()`.
 
 ## Principe d'architecture
 
@@ -411,7 +455,8 @@ Handshake client complet avec **authentification serveur reelle**
   appliques ;
 - validation X.509 via CNG/CryptoAPI (`SwQuicCertificateVerifier`) : chaine
   jusqu'a une racine de confiance Windows, correspondance du hostname (SNI), et
-  verification de la signature CertificateVerify (RSA-PSS et ECDSA P-256/384) ;
+  verification de la signature CertificateVerify (Ed25519, RSA-PSS et ECDSA
+  P-256/384 ; OpenSSL fournit Ed25519/RSA-PSS sous Windows) ;
 - resultat live Cloudflare : chaine de 3 certificats validee, ALPN `h3`,
   transport params (initial_max_data=10 Mo, idle 180 s), cles 1-RTT.
 
@@ -473,23 +518,26 @@ Durcissement issu d'une revue adversariale multi-agents (16 defauts confirmes,
   quic_transport_parameters exige + verification initial_source_connection_id ;
 - client : enforcement de TLS 1.3 via supported_versions et d'ALPN h3.
 
-Ce qui reste :
+Mise a jour 2026-07-10 : les deux points de durcissement ci-dessus sont
+implementes (ACK du Finished client, `HANDSHAKE_DONE`, fragmentation du flight
+certificat). `SwQuicHttp3Server` pilote maintenant le handshake et les sessions
+sur une vraie socket UDP, avec tickets de reprise et 0-RTT lies au SNI. Une
+requete forcee en QUIC depuis Chrome 149 a atteint `SwHttpApp` et a retourne
+`HTTP/3`, ce qui valide l'interoperabilite navigateur du chemin HTTP/3 courant.
+Les reponses `body`, les listes de chunks et les fichiers sont emises
+progressivement sous forme de frames DATA bornees (jusqu'a 64 Kio), avec
+reprise apres ACK et ordonnancement equitable entre les streams. Le self-test
+`HttpAppHttp3SelfTest` valide notamment un fichier de plus de 17 Mio sans le
+materialiser dans le writer HTTP/3.
 
-- durcissement serveur (2 findings restants, driver encore loopback-only) : le
-  serveur doit ACKer le Handshake du client et envoyer HANDSHAKE_DONE en 1-RTT,
-  et fragmenter son flight en plusieurs paquets/datagrammes pour une chaine de
-  certificats reelle (>1200 octets) -- non necessaire tant que le driver n'est
-  pas branche sur une socket avec un vrai client navigateur ;
-- QPACK table dynamique et streams d'instructions (le statique interopere) ;
-- key update 1-RTT (RFC 9001 s.6), Retry, 0-RTT, reprise de session ;
-- integration du handshake serveur dans `SwQuicServer` (aujourd'hui loopback) ;
-- agilite de suites (ChaCha20-Poly1305, AES-256) ; seul AES-128-GCM est gere.
+Ce qui reste hors de cette compatibilite HTTP/3 de base :
 
-La pile fait desormais un handshake QUIC/TLS 1.3 **client et serveur** complet
-et interoperable en loopback, authentifie l'identite du pair, et gere la
-migration de chemin de facon sure. Elle n'est pas encore un serveur branche sur
-socket accepte par un navigateur tant que le durcissement serveur ci-dessus
-n'est pas fait.
+- QPACK dynamique et ses streams d'instructions (la table statique utilisee
+  ici est interoperable) ;
+- Retry cote serveur et key update 1-RTT ;
+- agilite de suites (ChaCha20-Poly1305, AES-256) ; seul AES-128-GCM est gere ;
+- validation navigateur WebTransport separee : le GET HTTP/3 Chrome ne vaut
+  pas validation complete d'une session WebTransport.
 
 ## References standards
 

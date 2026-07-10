@@ -395,6 +395,17 @@ public:
         return liveThreads().count(thread) > 0;
     }
 
+    /** Atomically verifies thread lifetime and queues reliable affinity work. */
+    static bool postTaskOnLaneReliableIfLive(
+        Thread* thread,
+        std::function<void()> task,
+        SwFiberLane lane = SwFiberLane::Control) {
+        if (!thread || !task) return false;
+        RegistryLock_ lock(liveThreadsMutex());
+        if (liveThreads().count(thread) == 0) return false;
+        return thread->postTaskOnLaneReliable(std::move(task), lane);
+    }
+
     /**
      * @brief Adopts the current thread if it already owns a SwCoreApplication.
      *

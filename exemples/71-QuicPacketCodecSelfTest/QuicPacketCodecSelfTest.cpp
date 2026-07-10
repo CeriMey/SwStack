@@ -1510,6 +1510,51 @@ bool testStreamSendBackpressureBound() {
                        "stream send buffer rejected data at its exact bound");
 }
 
+bool testUnstagedStreamBytesUnderFlowControl() {
+    SwString error;
+    SwQuicConnection client(SwQuicConnection::Role::Client);
+    SwQuicConnection server(SwQuicConnection::Role::Server);
+    if (!setupAppPair(client, server, SwByteArray("flowcli1"),
+                      SwByteArray("flowsrv1"), &error)) {
+        std::cerr << error << std::endl;
+        return false;
+    }
+
+    SwQuicTransportParameters peer;
+    peer.initialMaxData = 64;
+    peer.initialMaxStreamDataBidiRemote = 3;
+    peer.initialMaxStreamsBidi = 2;
+    client.applyPeerTransportParameters(peer);
+
+    if (!requireTrue(client.unstagedStreamSendBytes(0) == 0,
+                     "unknown stream reported unstaged bytes") ||
+        !requireTrue(client.sendStreamData(0, SwByteArray("12345678"), false,
+                                           &error),
+                     "flow-controlled stream queue failed") ||
+        !requireTrue(client.sendStreamData(4, SwByteArray("ab"), false, &error),
+                     "credited stream queue failed") ||
+        !requireTrue(client.unstagedStreamSendBytes(0) == 8 &&
+                         client.unstagedStreamSendBytes(4) == 2,
+                     "queued bytes were not reported before staging")) {
+        std::cerr << error << std::endl;
+        return false;
+    }
+
+    SwVector<SwByteArray> wire;
+    if (!requireTrue(client.buildDatagrams(2450, wire, &error),
+                     "flow-control introspection packet build failed") ||
+        !requireTrue(!wire.empty(),
+                     "flow-control introspection emitted no packet")) {
+        std::cerr << error << std::endl;
+        return false;
+    }
+
+    return requireTrue(client.unstagedStreamSendBytes(0) == 5,
+                       "stream flow control did not leave five bytes unstaged") &&
+           requireTrue(client.unstagedStreamSendBytes(4) == 0,
+                       "credited stream still reported unstaged bytes");
+}
+
 bool testDatagramNegotiationAndQueueBounds() {
     SwString error;
     SwQuicConnection sender(SwQuicConnection::Role::Client);
@@ -1531,7 +1576,9 @@ bool testDatagramNegotiationAndQueueBounds() {
         !requireTrue(!sender.queueDatagramFrame(SwByteArray("three"), &error),
                      "DATAGRAM queue bound was not enforced") ||
         !requireTrue(!SwQuicConnection(SwQuicConnection::Role::Client)
-                          .queueDatagramFrame(SwByteArray(1200, 'x'), &error),
+                          .queueDatagramFrame(
+                              SwByteArray(SwQuicLimits::maximumUdpPayloadBytes(), 'x'),
+                              &error),
                      "oversized DATAGRAM should not fit one QUIC packet")) {
         return false;
     }
@@ -1666,6 +1713,73 @@ bool testResetStreamFinalSizeAccounting() {
 
     return requireTrue(accounted, "RESET_STREAM final size not accounted in flow control") &&
            requireTrue(rejected, "decreasing RESET_STREAM final size must be rejected");
+}
+
+// A PTO must not resurrect STREAM data from a packet that was sent before the
+// local send side entered Reset Sent. The oldest outstanding packet below
+// carries data, while the next one carries RESET_STREAM; the probe must skip
+// the now-obsolete data and retransmit the reset instead.
+bool testPtoDoesNotRetransmitStreamDataAfterReset() {
+    SwString error;
+    SwQuicConnection client(SwQuicConnection::Role::Client);
+    SwQuicConnection server(SwQuicConnection::Role::Server);
+    if (!setupAppPair(client, server, SwByteArray("ptorstc1"),
+                      SwByteArray("ptorsts1"), &error)) {
+        std::cerr << error << std::endl;
+        return false;
+    }
+
+    std::uint64_t now = 3500;
+    if (!requireTrue(client.sendStreamData(
+                         0, SwByteArray("obsolete-after-reset"), false, &error),
+                     "PTO reset test data queue failed")) {
+        return false;
+    }
+    SwVector<SwByteArray> droppedData;
+    if (!requireTrue(client.buildDatagrams(now, droppedData, &error),
+                     "PTO reset test data build failed") ||
+        !requireTrue(!droppedData.empty(),
+                     "PTO reset test produced no initial data packet")) {
+        return false;
+    }
+
+    if (!requireTrue(client.resetStream(0, 0x10c, &error),
+                     "PTO reset test could not reset stream")) {
+        return false;
+    }
+    SwVector<SwByteArray> droppedReset;
+    if (!requireTrue(client.buildDatagrams(now + 1, droppedReset, &error),
+                     "PTO reset test reset build failed") ||
+        !requireTrue(!droppedReset.empty(),
+                     "PTO reset test produced no RESET_STREAM packet")) {
+        return false;
+    }
+
+    const std::int64_t delay = client.nextTimeoutMs(now + 1);
+    if (!requireTrue(delay >= 0, "PTO reset test timer was not armed")) {
+        return false;
+    }
+    const std::uint64_t ptoAt = now + 1 + static_cast<std::uint64_t>(delay);
+    client.onTimeout(ptoAt);
+
+    SwVector<SwByteArray> probe;
+    if (!requireTrue(client.buildDatagrams(ptoAt, probe, &error),
+                     "PTO reset probe build failed") ||
+        !requireTrue(!probe.empty(), "PTO reset probe was not emitted")) {
+        return false;
+    }
+    for (std::size_t i = 0; i < probe.size(); ++i) {
+        if (!requireTrue(server.receiveDatagram(probe[i], ptoAt, &error),
+                         "PTO reset probe receive failed")) {
+            std::cerr << error << std::endl;
+            return false;
+        }
+    }
+
+    return requireTrue(server.readStream(0).isEmpty(),
+                       "PTO retransmitted obsolete STREAM data after reset") &&
+           requireTrue(server.isStreamReceiveReset(0),
+                       "PTO did not retransmit the outstanding RESET_STREAM");
 }
 
 // RFC 9002 7.6.2: on persistent congestion the sender collapses its congestion
@@ -1845,9 +1959,11 @@ int main() {
         !testDriverManagedPathValidationTupleBinding() ||
         !testUnopenedLocalStreamIsRejected() ||
         !testStreamSendBackpressureBound() ||
+        !testUnstagedStreamBytesUnderFlowControl() ||
         !testDatagramNegotiationAndQueueBounds() ||
         !testDatagramReceiveBackpressureAndConnectionIdLimit() ||
         !testResetStreamFinalSizeAccounting() ||
+        !testPtoDoesNotRetransmitStreamDataAfterReset() ||
         !testPersistentCongestionCollapsesWindow() ||
         !testAmplificationWithheldNoPhantomBytes()) {
         return 1;

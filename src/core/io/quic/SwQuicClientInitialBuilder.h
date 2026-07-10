@@ -22,6 +22,9 @@ public:
         SwString serverName;
         SwQuicConnectionId destinationConnectionId;
         SwQuicConnectionId sourceConnectionId;
+        // Empty for the first Initial. After a validated Retry this is the
+        // exact opaque token carried by the Retry packet (RFC 9000 17.2.5).
+        SwByteArray token;
         std::uint64_t packetNumber = 0;
     };
 
@@ -161,9 +164,11 @@ private:
         appendU8_(outHeader, static_cast<std::uint8_t>(options.sourceConnectionId.size()));
         outHeader.append(options.sourceConnectionId.bytes());
 
-        if (!SwQuicVarIntCodec::encode(0, outHeader, error)) {
+        if (!SwQuicVarIntCodec::encode(
+                static_cast<std::uint64_t>(options.token.size()), outHeader, error)) {
             return false;
         }
+        outHeader.append(options.token);
         if (!SwQuicVarIntCodec::encode(protectedPayloadLength + packetNumberLength_(),
                                        outHeader,
                                        error)) {

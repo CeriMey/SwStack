@@ -14,6 +14,7 @@ public:
                                      &error)) {
             return SwDbStatus(SwDbStatus::IoError, error);
         }
+        db_.activeWalFileId_ = db_.manifest_.activeWalId;
         const unsigned long long reserveBytes =
             std::max<unsigned long long>(db_.options_.memTableBytes, 1ull * 1024ull * 1024ull);
         db_.walScratch_.reserve(static_cast<std::size_t>(std::min<unsigned long long>(reserveBytes, 256ull * 1024ull)));
@@ -41,13 +42,30 @@ public:
         db_.prepareMutableMemTableLocked_();
         db_.lastVisibleSequence_ = db_.manifest_.maxSequence;
         const SwList<SwString> walFiles = swDbPlatform::listFiles(db_.walDir_, "WAL-", ".log");
+        // Replay strictly in walId order: directory listings are lexicographic
+        // and legacy WAL names are not zero-padded (WAL-10 sorts before WAL-9).
+        std::vector<std::pair<unsigned long long, SwString> > orderedWalFiles;
+        orderedWalFiles.reserve(walFiles.size());
         for (std::size_t i = 0; i < walFiles.size(); ++i) {
             const unsigned long long walId =
                 swEmbeddedDbDetail::parseNumericSuffix_(swDbPlatform::fileName(walFiles[i]), "WAL-", ".log");
             if (walId < db_.manifest_.replayFromWalId) {
                 continue;
             }
-            const SwDbStatus status = replayWalFileLocked(walId, walFiles[i]);
+            orderedWalFiles.push_back(std::make_pair(walId, walFiles[i]));
+        }
+        std::sort(orderedWalFiles.begin(), orderedWalFiles.end(),
+                  [](const std::pair<unsigned long long, SwString>& lhs,
+                     const std::pair<unsigned long long, SwString>& rhs) {
+                      if (lhs.first != rhs.first) {
+                          return lhs.first < rhs.first;
+                      }
+                      // Same walId in legacy (unpadded) and padded form: the
+                      // shorter legacy name is the older file, replay it first.
+                      return lhs.second.size() < rhs.second.size();
+                  });
+        for (std::size_t i = 0; i < orderedWalFiles.size(); ++i) {
+            const SwDbStatus status = replayWalFileLocked(orderedWalFiles[i].first, orderedWalFiles[i].second);
             if (!status.ok()) {
                 return status;
             }

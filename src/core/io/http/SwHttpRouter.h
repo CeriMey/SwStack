@@ -53,6 +53,7 @@
 using SwHttpRouteCallback = std::function<SwHttpResponse(const SwHttpRequest&)>;
 using SwHttpRouteResponder = std::function<void(const SwHttpResponse&)>;
 using SwHttpRouteAsyncCallback = std::function<void(const SwHttpRequest&, const SwHttpRouteResponder&)>;
+using SwHttpResponseFilter = std::function<void(const SwHttpRequest&, SwHttpResponse&)>;
 
 class SwHttpRouter {
 public:
@@ -264,6 +265,28 @@ public:
     }
 
     /**
+     * @brief Adds a final response filter shared by every transport using this router.
+     *
+     * Filters run after routing (including redirects, method errors and the not-found
+     * handler) and before the response is returned to HTTP/1.x or HTTP/3. They are useful
+     * for transport discovery headers such as Alt-Svc and for application-wide response
+     * metadata that must not be duplicated in every route.
+     */
+    void addResponseFilter(const SwHttpResponseFilter& filter) {
+        if (filter) {
+            m_responseFilters.append(filter);
+        }
+    }
+
+    void clearResponseFilters() {
+        m_responseFilters.clear();
+    }
+
+    void filterResponse(const SwHttpRequest& request, SwHttpResponse& response) const {
+        applyResponseFilters_(request, response);
+    }
+
+    /**
      * @brief Configures how paths that differ only by a trailing slash are handled.
      * @param policy Trailing-slash policy applied during route resolution.
      */
@@ -290,7 +313,16 @@ public:
      * fallback dispatch through the configured not-found handler.
      */
     bool route(const SwHttpRequest& request, SwHttpResponse& response) const {
+        return route(request, response, true);
+    }
+
+    bool route(const SwHttpRequest& request,
+               SwHttpResponse& response,
+               bool applyResponseFilters) const {
         if (shouldRedirectTrailingSlash_(request, response)) {
+            if (applyResponseFilters) {
+                applyResponseFilters_(request, response);
+            }
             return true;
         }
 
@@ -326,6 +358,9 @@ public:
                 response = swHttpTextResponse(500, "Async route requires async dispatch");
                 response.closeConnection = !request.keepAlive;
             }
+            if (applyResponseFilters) {
+                applyResponseFilters_(routedRequest, response);
+            }
             return true;
         }
 
@@ -342,11 +377,17 @@ public:
                 }
                 response.headers["allow"] = allowValue;
             }
+            if (applyResponseFilters) {
+                applyResponseFilters_(request, response);
+            }
             return true;
         }
 
         if (m_notFoundHandler) {
             response = m_notFoundHandler(request);
+            if (applyResponseFilters) {
+                applyResponseFilters_(request, response);
+            }
             return true;
         }
 
@@ -364,13 +405,23 @@ public:
      * The router transparently handles both synchronous and asynchronous route entries. Redirects,
      * `405` responses, and fallback responses are also emitted through `responder`.
      */
-    bool routeAsync(const SwHttpRequest& request, const SwHttpRouteResponder& responder) const {
+    bool routeAsync(const SwHttpRequest& request,
+                    const SwHttpRouteResponder& responder) const {
+        return routeAsync(request, responder, true);
+    }
+
+    bool routeAsync(const SwHttpRequest& request,
+                    const SwHttpRouteResponder& responder,
+                    bool applyResponseFilters) const {
         if (!responder) {
             return false;
         }
 
         SwHttpResponse redirectResponse;
         if (shouldRedirectTrailingSlash_(request, redirectResponse)) {
+            if (applyResponseFilters) {
+                applyResponseFilters_(request, redirectResponse);
+            }
             responder(redirectResponse);
             return true;
         }
@@ -401,18 +452,27 @@ public:
 
             SwHttpRequest routedRequest = request;
             routedRequest.pathParams = params;
+            SwHttpRouteResponder filteredResponder = responder;
+            if (applyResponseFilters) {
+                filteredResponder =
+                    [this, routedRequest, responder](const SwHttpResponse& source) {
+                        SwHttpResponse filtered = source;
+                        applyResponseFilters_(routedRequest, filtered);
+                        responder(filtered);
+                    };
+            }
             if (entry.asyncCallback) {
-                entry.asyncCallback(routedRequest, responder);
+                entry.asyncCallback(routedRequest, filteredResponder);
                 return true;
             }
             if (entry.callback) {
-                responder(entry.callback(routedRequest));
+                filteredResponder(entry.callback(routedRequest));
                 return true;
             }
 
             SwHttpResponse response = swHttpTextResponse(500, "Route callback missing");
             response.closeConnection = !request.keepAlive;
-            responder(response);
+            filteredResponder(response);
             return true;
         }
 
@@ -429,12 +489,19 @@ public:
                 }
                 response.headers["allow"] = allowValue;
             }
+            if (applyResponseFilters) {
+                applyResponseFilters_(request, response);
+            }
             responder(response);
             return true;
         }
 
         if (m_notFoundHandler) {
-            responder(m_notFoundHandler(request));
+            SwHttpResponse response = m_notFoundHandler(request);
+            if (applyResponseFilters) {
+                applyResponseFilters_(request, response);
+            }
+            responder(response);
             return true;
         }
 
@@ -509,8 +576,17 @@ private:
 
     SwList<SwHttpRouteEntry> m_routes;
     SwHttpRouteCallback m_notFoundHandler;
+    SwList<SwHttpResponseFilter> m_responseFilters;
     SwMap<SwString, SwString> m_namedPatterns;
     TrailingSlashPolicy m_trailingSlashPolicy = TrailingSlashPolicy::Ignore;
+
+    void applyResponseFilters_(const SwHttpRequest& request, SwHttpResponse& response) const {
+        for (std::size_t i = 0; i < m_responseFilters.size(); ++i) {
+            if (m_responseFilters[i]) {
+                m_responseFilters[i](request, response);
+            }
+        }
+    }
 
     static SwString normalizePattern_(const SwString& pattern) {
         SwString normalized = pattern.trimmed();

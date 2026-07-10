@@ -18,5 +18,5 @@ target_include_directories(EmbeddedDbSelfTest PRIVATE
 )
 
 if(WIN32)
-    target_link_libraries(EmbeddedDbSelfTest PRIVATE ws2_32 shell32)
+    target_link_libraries(EmbeddedDbSelfTest PRIVATE ws2_32 shell32 dbghelp)
 endif()

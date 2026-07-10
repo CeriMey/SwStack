@@ -114,6 +114,9 @@ private:
             return response.fileLength;
         }
         if (response.useChunkedTransfer) {
+            if (response.chunkedParts.isEmpty()) {
+                return response.body.size();
+            }
             std::size_t total = 0;
             for (std::size_t i = 0; i < response.chunkedParts.size(); ++i) {
                 total += response.chunkedParts[i].size();
@@ -748,6 +751,9 @@ private:
             return response.fileLength;
         }
         if (response.useChunkedTransfer) {
+            if (response.chunkedParts.isEmpty()) {
+                return response.body.size();
+            }
             std::size_t total = 0;
             for (std::size_t i = 0; i < response.chunkedParts.size(); ++i) {
                 total += response.chunkedParts[i].size();

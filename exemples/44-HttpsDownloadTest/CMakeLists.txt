@@ -17,6 +17,8 @@ target_include_directories(HttpsDownloadTest PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 
+target_link_libraries(HttpsDownloadTest PRIVATE SwQuicCore)
+
 if(WIN32)
     target_link_libraries(HttpsDownloadTest PRIVATE ws2_32 secur32)
 endif()

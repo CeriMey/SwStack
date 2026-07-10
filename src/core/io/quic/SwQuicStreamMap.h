@@ -71,6 +71,10 @@ public:
         return m_streams.size();
     }
 
+    bool removeStream(std::uint64_t streamId) {
+        return m_streams.erase(streamId) != 0;
+    }
+
     // Stream IDs currently tracked, ascending. Lets a higher layer (HTTP/3)
     // iterate received streams without exposing the internal container.
     SwVector<std::uint64_t> streamIds() const {

@@ -9,7 +9,15 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
-#include <vector>
+
+#include <openssl/err.h>
+#include <openssl/evp.h>
+#include <openssl/obj_mac.h>
+#include <openssl/objects.h>
+#include <openssl/opensslv.h>
+#include <openssl/pem.h>
+#include <openssl/rsa.h>
+#include <openssl/x509.h>
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -18,9 +26,7 @@
 #include <windows.h>
 #include <bcrypt.h>
 #else
-#include <openssl/evp.h>
 #include <openssl/ec.h>
-#include <openssl/obj_mac.h>
 #include <openssl/crypto.h>
 #endif
 
@@ -61,6 +67,316 @@ struct SwQuicServerCredential {
             return certificateChain.size() == 1 && !certificateChain.front().isEmpty();
         }
         return true;
+    }
+};
+
+// Loads the same PEM certificate chain and private key used by SwSslServer and
+// adapts them to TLS 1.3 CertificateVerify signing for QUIC. Keeping one identity
+// across TCP/TLS and QUIC is required when HTTP/3 is advertised as an alternative
+// service for an HTTPS origin.
+class SwQuicPemCredential {
+public:
+    static bool load(const SwString& certificatePath,
+                     const SwString& privateKeyPath,
+                     SwQuicServerCredential& outCredential,
+                     SwString* error = nullptr) {
+        outCredential = SwQuicServerCredential();
+
+        const SwString certPath = certificatePath.trimmed();
+        const SwString keyPath = privateKeyPath.trimmed();
+        if (certPath.empty() || keyPath.empty()) {
+            setError_(error, "Certificate and private-key paths are required");
+            return false;
+        }
+
+        BIO* certificateBio = BIO_new_file(certPath.c_str(), "rb");
+        if (!certificateBio) {
+            setOpenSslError_(error, "Unable to open the PEM certificate file");
+            return false;
+        }
+
+        SwVector<SwByteArray> chain;
+        X509* leaf = nullptr;
+        while (true) {
+            X509* certificate = PEM_read_bio_X509(certificateBio, nullptr, nullptr, nullptr);
+            if (!certificate) {
+                break;
+            }
+            if (!leaf) {
+                leaf = X509_dup(certificate);
+            }
+            const int derSize = i2d_X509(certificate, nullptr);
+            if (derSize <= 0) {
+                X509_free(certificate);
+                if (leaf) X509_free(leaf);
+                BIO_free(certificateBio);
+                setOpenSslError_(error, "Unable to encode a certificate from the PEM chain");
+                return false;
+            }
+            SwByteArray der;
+            der.resize(static_cast<std::size_t>(derSize));
+            unsigned char* cursor =
+                reinterpret_cast<unsigned char*>(der.data());
+            if (i2d_X509(certificate, &cursor) != derSize) {
+                X509_free(certificate);
+                if (leaf) X509_free(leaf);
+                BIO_free(certificateBio);
+                setOpenSslError_(error, "Unable to encode a certificate from the PEM chain");
+                return false;
+            }
+            chain.push_back(der);
+            X509_free(certificate);
+        }
+        BIO_free(certificateBio);
+        // PEM_read_bio_X509 leaves PEM_R_NO_START_LINE after the final block.
+        ERR_clear_error();
+        if (chain.empty() || !leaf) {
+            if (leaf) X509_free(leaf);
+            setError_(error, "The certificate file contains no PEM X.509 certificate");
+            return false;
+        }
+
+        BIO* keyBio = BIO_new_file(keyPath.c_str(), "rb");
+        if (!keyBio) {
+            X509_free(leaf);
+            setOpenSslError_(error, "Unable to open the PEM private-key file");
+            return false;
+        }
+        EVP_PKEY* key = PEM_read_bio_PrivateKey(keyBio, nullptr, nullptr, nullptr);
+        BIO_free(keyBio);
+        if (!key) {
+            X509_free(leaf);
+            setOpenSslError_(error, "Unable to read the PEM private key");
+            return false;
+        }
+        if (X509_check_private_key(leaf, key) != 1) {
+            EVP_PKEY_free(key);
+            X509_free(leaf);
+            setOpenSslError_(error, "The private key does not match the leaf certificate");
+            return false;
+        }
+
+        std::uint16_t signatureScheme = 0;
+        const int keyType = EVP_PKEY_base_id(key);
+        if (keyType == EVP_PKEY_EC) {
+            int curveNid = NID_undef;
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+            char groupName[80] = {};
+            std::size_t groupNameBytes = 0;
+            if (EVP_PKEY_get_group_name(key, groupName, sizeof(groupName),
+                                        &groupNameBytes) == 1) {
+                curveNid = OBJ_txt2nid(groupName);
+            }
+#else
+            const EC_KEY* ec = EVP_PKEY_get0_EC_KEY(key);
+            const EC_GROUP* group = ec ? EC_KEY_get0_group(ec) : nullptr;
+            curveNid = group ? EC_GROUP_get_curve_name(group) : NID_undef;
+#endif
+            if (curveNid == NID_X9_62_prime256v1) {
+                signatureScheme = 0x0403; // ecdsa_secp256r1_sha256
+            } else if (curveNid == NID_secp384r1) {
+                signatureScheme = 0x0503; // ecdsa_secp384r1_sha384
+            } else {
+                EVP_PKEY_free(key);
+                X509_free(leaf);
+                setError_(error,
+                          "HTTP/3 ECDSA certificate keys must use P-256 or P-384");
+                return false;
+            }
+        } else if (keyType == EVP_PKEY_ED25519) {
+            signatureScheme = 0x0807; // ed25519
+        } else if (keyType == EVP_PKEY_RSA || keyType == EVP_PKEY_RSA_PSS) {
+            if (EVP_PKEY_bits(key) < 2048) {
+                EVP_PKEY_free(key);
+                X509_free(leaf);
+                setError_(error, "HTTP/3 RSA certificate keys must contain at least 2048 bits");
+                return false;
+            }
+            if (keyType == EVP_PKEY_RSA) {
+                signatureScheme = 0x0804; // rsa_pss_rsae_sha256
+            } else {
+                const std::uint16_t candidates[] = {
+                    0x0809, // rsa_pss_pss_sha256
+                    0x080a, // rsa_pss_pss_sha384
+                    0x080b  // rsa_pss_pss_sha512
+                };
+                for (std::size_t i = 0;
+                     i < sizeof(candidates) / sizeof(candidates[0]); ++i) {
+                    if (KeyState_::supports(key, candidates[i])) {
+                        signatureScheme = candidates[i];
+                        break;
+                    }
+                }
+                if (signatureScheme == 0) {
+                    EVP_PKEY_free(key);
+                    X509_free(leaf);
+                    setError_(error,
+                              "The RSA-PSS key restrictions do not permit a TLS 1.3 "
+                              "CertificateVerify signature");
+                    return false;
+                }
+            }
+        } else {
+            EVP_PKEY_free(key);
+            X509_free(leaf);
+            setError_(error,
+                      "HTTP/3 requires an Ed25519, P-256/P-384 ECDSA, RSA, "
+                      "or RSA-PSS certificate key");
+            return false;
+        }
+        X509_free(leaf);
+
+        std::shared_ptr<KeyState_> state(new KeyState_(key, signatureScheme));
+        outCredential.certificateChain = chain;
+        outCredential.certificateType = SwQuicCertificateType::X509;
+        outCredential.signatureScheme = signatureScheme;
+        outCredential.sign = [state](const SwByteArray& content,
+                                     SwByteArray& signature,
+                                     SwString* signError) {
+            return state->sign(content, signature, signError);
+        };
+        clearError_(error);
+        return true;
+    }
+
+private:
+    struct KeyState_ {
+        EVP_PKEY* key;
+        std::uint16_t signatureScheme;
+
+        KeyState_(EVP_PKEY* value, std::uint16_t scheme)
+            : key(value), signatureScheme(scheme) {}
+
+        ~KeyState_() {
+            if (key) {
+                EVP_PKEY_free(key);
+            }
+        }
+
+        static const EVP_MD* digestForScheme(std::uint16_t scheme) {
+            if (scheme == 0x0503 || scheme == 0x0805 || scheme == 0x080a) {
+                return EVP_sha384();
+            }
+            if (scheme == 0x0806 || scheme == 0x080b) {
+                return EVP_sha512();
+            }
+            if (scheme == 0x0403 || scheme == 0x0804 || scheme == 0x0809) {
+                return EVP_sha256();
+            }
+            return nullptr;
+        }
+
+        static bool isRsaPssScheme(std::uint16_t scheme) {
+            return (scheme >= 0x0804 && scheme <= 0x0806) ||
+                   (scheme >= 0x0809 && scheme <= 0x080b);
+        }
+
+        static bool initializeSigner(EVP_MD_CTX* context,
+                                     EVP_PKEY* signingKey,
+                                     std::uint16_t scheme,
+                                     EVP_PKEY_CTX** keyContext) {
+            if (!context || !signingKey || !keyContext) {
+                return false;
+            }
+            const bool ed25519 = scheme == 0x0807;
+            const EVP_MD* digest = digestForScheme(scheme);
+            if (!ed25519 && !digest) {
+                return false;
+            }
+            bool ok = EVP_DigestSignInit(context, keyContext,
+                                         ed25519 ? nullptr : digest,
+                                         nullptr, signingKey) == 1;
+            if (ok && isRsaPssScheme(scheme)) {
+                ok = *keyContext &&
+                     EVP_PKEY_CTX_set_rsa_padding(*keyContext,
+                                                   RSA_PKCS1_PSS_PADDING) > 0 &&
+                     EVP_PKEY_CTX_set_rsa_mgf1_md(*keyContext, digest) > 0 &&
+                     EVP_PKEY_CTX_set_rsa_pss_saltlen(
+                         *keyContext, RSA_PSS_SALTLEN_DIGEST) > 0;
+            }
+            return ok;
+        }
+
+        static bool supports(EVP_PKEY* signingKey, std::uint16_t scheme) {
+            EVP_MD_CTX* context = EVP_MD_CTX_new();
+            EVP_PKEY_CTX* keyContext = nullptr;
+            const bool ok = context &&
+                            initializeSigner(context, signingKey, scheme, &keyContext);
+            if (context) {
+                EVP_MD_CTX_free(context);
+            }
+            ERR_clear_error();
+            return ok;
+        }
+
+        bool sign(const SwByteArray& content,
+                  SwByteArray& outSignature,
+                  SwString* error) const {
+            outSignature = SwByteArray();
+            EVP_MD_CTX* context = EVP_MD_CTX_new();
+            if (!context) {
+                setOpenSslError_(error, "Unable to allocate the CertificateVerify signer");
+                return false;
+            }
+            EVP_PKEY_CTX* keyContext = nullptr;
+            bool ok = initializeSigner(context, key, signatureScheme, &keyContext);
+            const unsigned char* bytesToSign =
+                reinterpret_cast<const unsigned char*>(content.constData());
+            std::size_t bytes = 0;
+            if (ok) {
+                ok = EVP_DigestSign(context, nullptr, &bytes,
+                                    bytesToSign, content.size()) == 1 && bytes > 0;
+            }
+            if (ok) {
+                outSignature.resize(bytes);
+                ok = EVP_DigestSign(
+                         context,
+                         reinterpret_cast<unsigned char*>(outSignature.data()),
+                         &bytes,
+                         bytesToSign,
+                         content.size()) == 1;
+                if (ok) {
+                    outSignature.resize(bytes);
+                }
+            }
+            EVP_MD_CTX_free(context);
+            if (!ok) {
+                outSignature = SwByteArray();
+                setOpenSslError_(error, "CertificateVerify signing failed");
+                return false;
+            }
+            clearError_(error);
+            return true;
+        }
+    };
+
+    static void setError_(SwString* error, const char* message) {
+        if (error) {
+            *error = SwString(message);
+        }
+    }
+
+    static void setOpenSslError_(SwString* error, const char* message) {
+        if (!error) {
+            ERR_clear_error();
+            return;
+        }
+        SwString detail(message);
+        const unsigned long code = ERR_get_error();
+        if (code != 0) {
+            char buffer[256] = {};
+            ERR_error_string_n(code, buffer, sizeof(buffer));
+            detail += ": ";
+            detail += buffer;
+        }
+        ERR_clear_error();
+        *error = SwString(detail);
+    }
+
+    static void clearError_(SwString* error) {
+        if (error) {
+            *error = SwString();
+        }
     }
 };
 
@@ -302,9 +618,16 @@ private:
         }
 
         bool exportPublicPoint(SwByteArray& outX, SwByteArray& outY, SwString* error) {
-            // Point public non compressé : 0x04 ‖ X(32) ‖ Y(32) = 65 octets (OpenSSL 3.0+).
+            // Uncompressed public point: 0x04 || X(32) || Y(32) = 65 bytes.
+            // OpenSSL 3 renamed the legacy TLS encoded-point accessor; keep
+            // the 1.1.1 path because that release still provides every EVP
+            // primitive required by the QUIC/TLS implementation.
             unsigned char* buf = nullptr;
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
             const std::size_t len = EVP_PKEY_get1_encoded_public_key(key, &buf);
+#else
+            const std::size_t len = EVP_PKEY_get1_tls_encodedpoint(key, &buf);
+#endif
             if (len != 65 || buf == nullptr || static_cast<unsigned char>(buf[0]) != 0x04) {
                 if (buf) { OPENSSL_free(buf); }
                 setError_(error, "Unexpected EC P-256 public point");

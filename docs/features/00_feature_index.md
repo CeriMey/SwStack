@@ -21,6 +21,8 @@ Chaque fiche suit une structure fixe:
   Config multi-couches + “nodes” JSON/args (SwRemoteObject, SwRemoteObjectNode, systemConfig)
 - `docs/features/60_networking_http_tls.md`  
   Sockets TCP/UDP, TLS, HTTP-like manager
+- `docs/features/61_http_seo_discovery.md`
+  Découverte SEO/IA pour SwHttpApp: HTML canonique, robots, sitemap, llms.txt et JSON-LD
 - `docs/features/70_gui_platform_widgets.md`  
   GUI: SwGuiApplication, intégration Win32/X11, widgets/rendu/layout
 - `docs/features/80_media_video_pipeline.md`  

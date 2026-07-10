@@ -10,6 +10,8 @@ add_executable(SwBridge
     SwBridgeHttpServer.cpp
 )
 
+target_link_libraries(SwBridge PRIVATE SwQuicCore)
+
 add_custom_command(TARGET SwBridge POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory
         $<TARGET_FILE_DIR:SwBridge>/css

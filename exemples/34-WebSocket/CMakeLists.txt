@@ -30,7 +30,7 @@ add_executable(HttpAppWebSocketSelfTest
 
 target_include_directories(HttpAppWebSocketSelfTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 find_package(OpenSSL REQUIRED)
-target_link_libraries(HttpAppWebSocketSelfTest PRIVATE OpenSSL::Crypto)
+target_link_libraries(HttpAppWebSocketSelfTest PRIVATE SwQuicCore OpenSSL::Crypto)
 
 if(WIN32)
     target_link_libraries(HttpAppWebSocketSelfTest PRIVATE ws2_32 secur32)

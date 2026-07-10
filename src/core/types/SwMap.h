@@ -589,6 +589,20 @@ public:
     iterator lower_bound(const Key& key) { return lowerBound(key); }
     const_iterator lower_bound(const Key& key) const { return lowerBound(key); }
 
+    /** Returns the first element whose key is greater than `key`. */
+    iterator upperBound(const Key& key) {
+        return iterator(m_map.upper_bound(key));
+    }
+
+    /** Returns the first element whose key is greater than `key`. */
+    const_iterator upperBound(const Key& key) const {
+        return const_iterator(m_map.upper_bound(key));
+    }
+
+    // STL-compatible spelling kept for SwStack consumers migrating ordered hotpaths.
+    iterator upper_bound(const Key& key) { return upperBound(key); }
+    const_iterator upper_bound(const Key& key) const { return upperBound(key); }
+
     /**
      * @brief Performs the `constFind` operation.
      * @param key Value passed to the method.

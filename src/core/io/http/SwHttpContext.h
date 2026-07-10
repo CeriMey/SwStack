@@ -135,6 +135,15 @@ public:
         return m_request.path;
     }
 
+    /** Returns the negotiated request protocol (for example HTTP/1.1 or HTTP/3). */
+    SwString protocol() const {
+        return m_request.protocol;
+    }
+
+    bool isHttp3() const {
+        return m_request.protocol.toUpper() == SwString("HTTP/3");
+    }
+
     bool isTls() const {
         return m_request.isTls;
     }

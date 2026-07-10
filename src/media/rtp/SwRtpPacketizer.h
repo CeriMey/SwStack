@@ -6,6 +6,7 @@
  */
 
 #include "core/types/SwByteArray.h"
+#include "media/SwHevcBitstream.h"
 #include "media/SwVideoPacket.h"
 #include "media/server/SwVideoPublishStream.h"
 
@@ -179,30 +180,17 @@ private:
         return nals;
     }
 
-    static uint32_t readBeLength_(const uint8_t* data, size_t bytes) {
-        uint32_t value = 0U;
-        for (size_t i = 0; i < bytes; ++i) {
-            value = (value << 8U) | static_cast<uint32_t>(data[i]);
-        }
-        return value;
-    }
-
     static bool splitLengthPrefixed_(const uint8_t* data,
                                      size_t size,
                                      size_t lengthBytes,
                                      std::vector<NalView>& out) {
+        // Shared walker (media/SwHevcBitstream.h) — same validation as the MP4 demuxer.
         std::vector<NalView> parsed;
-        size_t offset = 0U;
-        while (offset + lengthBytes <= size) {
-            const uint32_t nalSize = readBeLength_(data + offset, lengthBytes);
-            offset += lengthBytes;
-            if (nalSize == 0U || nalSize > size - offset) {
-                return false;
-            }
-            parsed.push_back(NalView(offset, nalSize));
-            offset += nalSize;
-        }
-        if (offset != size || parsed.empty()) {
+        if (!swForEachLengthPrefixedNalUnit(
+                data, size, lengthBytes,
+                [&parsed](const SwLengthPrefixedNalUnitView& nal) {
+                    parsed.push_back(NalView(nal.offset, nal.size));
+                })) {
             return false;
         }
         out.swap(parsed);

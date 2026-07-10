@@ -59,6 +59,10 @@ private:
             request->waitForDurable = !db_.options_.lazyWrite;
         }
 
+        // Encoded off-lock with the final sequence. Apply/enqueue order below
+        // may therefore diverge from sequence order under concurrent writers —
+        // the newest-sequence-wins guards in applyBatch*/emitSecondary* and the
+        // max-based targetSequence in drainWriteRequests_ absorb that.
         const std::chrono::steady_clock::time_point encodeStart = std::chrono::steady_clock::now();
         request->walFrame.clear();
         request->walFrame.reserve(static_cast<std::size_t>(estimateWalBytes(request->batch) + 32u));
@@ -77,6 +81,7 @@ private:
 
             const std::chrono::steady_clock::time_point applyStart = std::chrono::steady_clock::now();
             applyBatchLockedMutable(request->sequence, request->batch);
+            overlayMaybeCollapse();
             db_.metrics_.writeBatchCount += 1;
             db_.metrics_.walEncodeMicros += walEncodeMicros;
             db_.metrics_.applyBatchMicros += static_cast<unsigned long long>(
@@ -113,8 +118,92 @@ private:
         return swEmbeddedDbDetail::memTableBucketReserveHint_(db.options_);
     }
 
+    // ---- writer read-cache overlay maintenance (all under db_.mutex_) ------
+    // Only active while a cached base read model exists; every op mirrored
+    // here keeps scans incremental instead of forcing an O(N) rebuild.
+
+    bool overlayActive_() const {
+        return static_cast<bool>(db_.writerSnapshotState_);
+    }
+
+    void overlayStorePrimary(const SwByteArray& primaryKey,
+                             const swEmbeddedDbDetail::PrimaryRecord_& record) {
+        if (!overlayActive_()) {
+            return;
+        }
+        const std::map<SwByteArray, swEmbeddedDbDetail::PrimaryRecord_>::iterator it =
+            db_.writerOverlay_.primary.find(primaryKey);
+        if (it != db_.writerOverlay_.primary.end()) {
+            if (it->second.sequence <= record.sequence) {
+                it->second = record;
+            }
+        } else {
+            db_.writerOverlay_.primary.insert(std::make_pair(primaryKey, record));
+            db_.writerOverlay_.entryCount += 1;
+        }
+        db_.writerOverlay_.approximateBytes +=
+            static_cast<unsigned long long>(primaryKey.size() + record.value.size()) + 64ull;
+    }
+
+    void overlayStoreIndexEntries(const SwByteArray& primaryKey,
+                                  const SwMap<SwString, SwList<SwByteArray>>& secondaryKeys,
+                                  unsigned long long sequence,
+                                  bool deleted) {
+        if (!overlayActive_()) {
+            return;
+        }
+        for (SwMap<SwString, SwList<SwByteArray>>::const_iterator it = secondaryKeys.begin();
+             it != secondaryKeys.end();
+             ++it) {
+            std::map<SwByteArray, swEmbeddedDbDetail::OverlayIndexEntry_>& bucket =
+                db_.writerOverlay_.indexes[it.key()];
+            for (std::size_t i = 0; i < it.value().size(); ++i) {
+                swEmbeddedDbDetail::OverlayIndexEntry_ entry;
+                entry.deleted = deleted;
+                entry.sequence = sequence;
+                entry.secondaryKey = it.value()[i];
+                entry.primaryKey = primaryKey;
+                const SwByteArray compositeKey =
+                    swEmbeddedDbDetail::encodeIndexCompositeKey_(it.value()[i], primaryKey);
+                const std::map<SwByteArray, swEmbeddedDbDetail::OverlayIndexEntry_>::iterator entryIt =
+                    bucket.find(compositeKey);
+                if (entryIt != bucket.end()) {
+                    if (entryIt->second.sequence <= sequence) {
+                        entryIt->second = entry;
+                    }
+                } else {
+                    bucket.insert(std::make_pair(compositeKey, entry));
+                    db_.writerOverlay_.entryCount += 1;
+                }
+                db_.writerOverlay_.approximateBytes +=
+                    static_cast<unsigned long long>(compositeKey.size()) + 48ull;
+            }
+        }
+    }
+
+    void overlayMaybeCollapse() {
+        if (!overlayActive_()) {
+            return;
+        }
+        unsigned long long byteLimit = 2ull * 1024ull * 1024ull;
+        if (db_.writerSnapshotState_->readModel) {
+            byteLimit = std::max(byteLimit, db_.writerSnapshotState_->readModel->approximateBytes / 8ull);
+        }
+        if (db_.writerOverlay_.entryCount > 65536ull || db_.writerOverlay_.approximateBytes > byteLimit) {
+            // The overlay got big enough that merging it per scan costs more
+            // than a fresh O(N) base rebuild (done lazily by the next scan).
+            db_.invalidateWriterReadCacheLocked_();
+        }
+    }
+
 public:
     void applyBatchLocked(unsigned long long sequence, const SwDbWriteBatch& batch) {
+        // Replay path: it never runs with a live cached base (open() resets
+        // state first), but if that ever changes the overlay would silently
+        // miss these writes — drop the cache defensively.
+        if (db_.writerSnapshotState_) {
+            db_.invalidateWriterReadCacheLocked_();
+        }
         db_.mutable_.walId = db_.manifest_.activeWalId;
         if (db_.mutable_.minSeq == 0 || sequence < db_.mutable_.minSeq) {
             db_.mutable_.minSeq = sequence;
@@ -170,6 +259,12 @@ public:
                     hadPrevious = db_.lookupPrimaryLocked_(op.primaryKey, previous, false);
                 }
             }
+            if (mutableIt != db_.mutable_.primary.end() && mutableIt->second.sequence > sequence) {
+                // A newer write already superseded this op (out-of-order apply
+                // or replay): skip it entirely so no stale secondary
+                // tombstones/upserts are emitted for it.
+                continue;
+            }
             if (hadPrevious && !previous.deleted) {
                 for (SwMap<SwString, SwList<SwByteArray>>::const_iterator it = previous.secondaryKeys.begin();
                      it != previous.secondaryKeys.end();
@@ -188,7 +283,9 @@ public:
                 record.deleted = true;
                 record.sequence = sequence;
                 if (mutableIt != db_.mutable_.primary.end()) {
-                    mutableIt->second = record;
+                    if (mutableIt->second.sequence <= sequence) {
+                        mutableIt->second = record;
+                    }
                 } else {
                     db_.mutable_.primary.insert(std::move(op.primaryKey), std::move(record));
                 }
@@ -216,7 +313,9 @@ public:
             }
             record.secondaryKeys = op.secondaryKeys;
             if (mutableIt != db_.mutable_.primary.end()) {
-                mutableIt->second = record;
+                if (mutableIt->second.sequence <= sequence) {
+                    mutableIt->second = record;
+                }
             } else {
                 db_.mutable_.primary.insert(op.primaryKey, record);
             }
@@ -296,6 +395,12 @@ public:
                     hadPrevious = db_.lookupPrimaryLocked_(op.primaryKey, previous, false);
                 }
             }
+            if (mutableIt != db_.mutable_.primary.end() && mutableIt->second.sequence > sequence) {
+                // A newer write already superseded this op (out-of-order apply
+                // or replay): skip it entirely so no stale secondary
+                // tombstones/upserts are emitted for it.
+                continue;
+            }
             if (hadPrevious && !previous.deleted) {
                 for (SwMap<SwString, SwList<SwByteArray>>::const_iterator it = previous.secondaryKeys.begin();
                      it != previous.secondaryKeys.end();
@@ -310,10 +415,13 @@ public:
                 record.deleted = true;
                 record.sequence = sequence;
                 if (mutableIt != db_.mutable_.primary.end()) {
-                    mutableIt->second = record;
+                    if (mutableIt->second.sequence <= sequence) {
+                        mutableIt->second = record;
+                    }
                 } else {
                     db_.mutable_.primary.insert(op.primaryKey, record);
                 }
+                overlayStorePrimary(op.primaryKey, record);
                 primaryOrderDirty = true;
                 db_.mutable_.approximateBytes += static_cast<unsigned long long>(op.primaryKey.size()) + 24u;
                 if (db_.maxKnownPrimaryKey_.isEmpty() || db_.maxKnownPrimaryKey_ < op.primaryKey) {
@@ -348,8 +456,11 @@ public:
                 }
             }
             record.secondaryKeys = std::move(op.secondaryKeys);
+            overlayStorePrimary(op.primaryKey, record);
             if (mutableIt != db_.mutable_.primary.end()) {
-                mutableIt->second = std::move(record);
+                if (mutableIt->second.sequence <= sequence) {
+                    mutableIt->second = std::move(record);
+                }
             } else {
                 db_.mutable_.primary.insert(std::move(op.primaryKey), std::move(record));
             }
@@ -372,6 +483,7 @@ public:
     void emitSecondaryTombstonesLocked(const SwByteArray& primaryKey,
                                        const SwMap<SwString, SwList<SwByteArray>>& secondaryKeys,
                                        unsigned long long sequence) {
+        overlayStoreIndexEntries(primaryKey, secondaryKeys, sequence, true);
         for (SwMap<SwString, SwList<SwByteArray>>::const_iterator it = secondaryKeys.begin(); it != secondaryKeys.end();
              ++it) {
             SwHash<SwString, swEmbeddedDbDetail::SecondaryMemStore_>::iterator bucketIt =
@@ -389,7 +501,9 @@ public:
                     swEmbeddedDbDetail::encodeIndexCompositeKey_(it.value()[i], primaryKey);
                 const swEmbeddedDbDetail::SecondaryMemStore_::iterator entryIt = bucket.find(compositeKey);
                 if (entryIt != bucket.end()) {
-                    entryIt->second = entry;
+                    if (entryIt->second.sequence <= entry.sequence) {
+                        entryIt->second = entry;
+                    }
                 } else {
                     bucket.insert(compositeKey, entry);
                 }
@@ -402,6 +516,7 @@ public:
     void emitSecondaryUpsertsLocked(const SwByteArray& primaryKey,
                                     const SwMap<SwString, SwList<SwByteArray>>& secondaryKeys,
                                     unsigned long long sequence) {
+        overlayStoreIndexEntries(primaryKey, secondaryKeys, sequence, false);
         for (SwMap<SwString, SwList<SwByteArray>>::const_iterator it = secondaryKeys.begin(); it != secondaryKeys.end();
              ++it) {
             SwHash<SwString, swEmbeddedDbDetail::SecondaryMemStore_>::iterator bucketIt =
@@ -419,7 +534,9 @@ public:
                     swEmbeddedDbDetail::encodeIndexCompositeKey_(it.value()[i], primaryKey);
                 const swEmbeddedDbDetail::SecondaryMemStore_::iterator entryIt = bucket.find(compositeKey);
                 if (entryIt != bucket.end()) {
-                    entryIt->second = entry;
+                    if (entryIt->second.sequence <= entry.sequence) {
+                        entryIt->second = entry;
+                    }
                 } else {
                     bucket.insert(compositeKey, entry);
                 }
@@ -498,10 +615,26 @@ inline SwDbStatus SwEmbeddedDb::drainWriteRequests_(SwList<std::shared_ptr<Write
         return SwDbStatus::success();
     }
 
-    if (options_.commitWindowMs > 0 && !pendingWrites_.empty() && !writeServiceStop_) {
+    // A blocked durable writer gains nothing from the commit window: it cannot
+    // enqueue more work while it waits, so delaying its fsync is pure latency.
+    // Natural group commit still happens because requests arriving while the
+    // previous group's fsync is in flight are drained together on the next
+    // pass. The window therefore only batches lazy (fire-and-forget) commits.
+    const auto hasDurableWaiter = [this]() {
+        for (std::size_t i = 0; i < pendingWrites_.size(); ++i) {
+            if (pendingWrites_[i] && pendingWrites_[i]->waitForDurable) {
+                return true;
+            }
+        }
+        return false;
+    };
+    if (options_.commitWindowMs > 0 && !writeServiceStop_ && !hasDurableWaiter()) {
         writeServiceCv_.wait_for(lock,
                                  std::chrono::milliseconds(options_.commitWindowMs),
-                                 [this]() { return writeServiceStop_ || writeServiceFlushRequested_; });
+                                 [this, &hasDurableWaiter]() {
+                                     return writeServiceStop_ || writeServiceFlushRequested_ ||
+                                            hasDurableWaiter();
+                                 });
     }
 
     while (!pendingWrites_.empty()) {
@@ -511,7 +644,11 @@ inline SwDbStatus SwEmbeddedDb::drainWriteRequests_(SwList<std::shared_ptr<Write
     writeServiceFlushRequested_ = false;
     metrics_.pendingWriteCount = static_cast<unsigned long long>(pendingWrites_.size());
     if (!groupOut.isEmpty() && targetSequenceOut) {
-        *targetSequenceOut = groupOut.last()->sequence;
+        unsigned long long maxSequence = 0;
+        for (std::size_t i = 0; i < groupOut.size(); ++i) {
+            maxSequence = std::max(maxSequence, groupOut[i]->sequence);
+        }
+        *targetSequenceOut = maxSequence;
     }
     return SwDbStatus::success();
 }
@@ -527,7 +664,11 @@ inline SwDbStatus SwEmbeddedDb::commitWriteRequests_(const SwList<std::shared_pt
         if (!backgroundWriteError_.ok()) {
             return backgroundWriteError_;
         }
-        if (!activeWalFile_.isOpen()) {
+        // WAL rotation only bumps manifest_.activeWalId; the file switch happens
+        // here, on the sole thread that appends to activeWalFile_, so rotation
+        // can never close the file underneath an in-flight append/sync.
+        if (!activeWalFile_.isOpen() || activeWalFileId_ != manifest_.activeWalId) {
+            activeWalFile_.close();
             const SwDbStatus openStatus = openActiveWal_();
             if (!openStatus.ok()) {
                 return openStatus;

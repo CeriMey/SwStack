@@ -13,7 +13,12 @@
 namespace {
 
 void ensureCrashDumpsEnabled_() {
-#if defined(_WIN32)
+#if defined(_WIN32) && defined(__MINGW32__)
+    if (std::getenv("SW_CRASH_DUMPS")) {
+        return;
+    }
+    _putenv("SW_CRASH_DUMPS=1");
+#elif defined(_WIN32)
     char* value = nullptr;
     size_t len = 0;
     if (_dupenv_s(&value, &len, "SW_CRASH_DUMPS") == 0 && value) {

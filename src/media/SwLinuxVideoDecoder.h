@@ -68,6 +68,28 @@ inline bool swLinuxVaapiRuntimeHasSymbol_(const char* symbolName) {
 }
 #endif
 
+/**
+ * @brief Converts a packet pts (in `clockRate` units, default RTP 90 kHz) to 100ns units.
+ *
+ * Mirrors the MediaFoundation decoder's `packetPtsToHns_` so decoded-frame timestamps use
+ * the same clock on every platform (SwVideoWidget's presentation gate expects 100ns).
+ */
+inline std::int64_t swLinuxPacketPtsToHns(const SwVideoPacket& packet) {
+    const std::int64_t pts = packet.pts();
+    if (pts < 0) {
+        return pts;
+    }
+    const int clockRate = packet.clockRate() > 0 ? packet.clockRate() : 90000;
+    if (clockRate == 1000000) {
+        return pts * 10LL;
+    }
+    if (clockRate == 10000000) {
+        return pts;
+    }
+    return static_cast<std::int64_t>(
+        (static_cast<long double>(pts) * 10000000.0L) / static_cast<long double>(clockRate));
+}
+
 inline bool swLinuxOpenH264BackendBuilt() {
     return SW_MEDIA_LINUX_HAS_OPENH264_HEADERS != 0;
 }
@@ -575,7 +597,7 @@ private:
                         static_cast<std::size_t>(chromaWidth));
         }
 
-        frame.setTimestamp(packet.pts());
+        frame.setTimestamp(swLinuxPacketPtsToHns(packet));
         emitFrame(frame);
         return true;
 #endif
@@ -967,7 +989,7 @@ private:
             m_de265PushDataFn(m_de265Decoder,
                               packet.payload().constData(),
                               packet.payload().size(),
-                              static_cast<de265_PTS>(packet.pts()),
+                              static_cast<de265_PTS>(swLinuxPacketPtsToHns(packet)),
                               nullptr);
         if (!isLibDe265Ok_(pushStatus)) {
             const SwString reason = libDe265ErrorText_(pushStatus);
@@ -1540,13 +1562,14 @@ private:
             ok = m_vaSyncSurfaceFn(m_vaDisplay, targetSurface) == VA_STATUS_SUCCESS;
         }
         if (ok) {
+            const std::int64_t ptsHns = swLinuxPacketPtsToHns(packet);
             if (m_emitNativeVaapiFrames && m_vaExportSurfaceHandleFn) {
-                ok = emitNativeVaapiFrame_(targetSurface, packet.pts());
+                ok = emitNativeVaapiFrame_(targetSurface, ptsHns);
                 if (!ok) {
-                    ok = copySurfaceToFrame_(targetSurface, packet.pts());
+                    ok = copySurfaceToFrame_(targetSurface, ptsHns);
                 }
             } else {
-                ok = copySurfaceToFrame_(targetSurface, packet.pts());
+                ok = copySurfaceToFrame_(targetSurface, ptsHns);
             }
         }
 

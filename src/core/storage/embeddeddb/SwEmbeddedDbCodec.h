@@ -351,7 +351,13 @@ inline SwString blobFileName_(unsigned long long fileId) {
 }
 
 inline SwString walFileName_(unsigned long long fileId) {
-    return SwString("WAL-") + SwString::number(fileId) + ".log";
+    // Zero-padded so directory listings sort in walId order; readers parse the
+    // numeric part, so legacy unpadded names keep working.
+    SwString number = SwString::number(fileId);
+    while (number.size() < 10) {
+        number.prepend("0");
+    }
+    return SwString("WAL-") + number + ".log";
 }
 
 inline SwString manifestFileName_(unsigned long long fileId) {

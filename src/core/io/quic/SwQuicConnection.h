@@ -24,8 +24,7 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <map>
-#include <set>
+#include <limits>
 #include <vector>
 
 // Sans-IO QUIC connection endpoint.
@@ -155,6 +154,9 @@ public:
     // cannot resize the already-constructed flow controllers.
     void applyLocalTransportParameters(const SwQuicTransportParameters& parameters) {
         m_localParams = parameters;
+        m_localMaxStreamsBidi = parameters.initialMaxStreamsBidi;
+        m_localMaxStreamsUni = parameters.initialMaxStreamsUni;
+        m_retiredPeerBidiRanges.clear();
         m_connectionFlow = SwQuicConnectionFlowControl(parameters.initialMaxData);
         m_streamFlow.clear();
     }
@@ -457,6 +459,65 @@ public:
         m_maxBufferedStreamSendBytes = maximum;
     }
 
+    // Actual retained STREAM payload across the application send buffers,
+    // frames waiting for packetization, and retransmittable sent packets.
+    // Counting duplicate retransmissions is intentional: this is a memory
+    // pressure measurement, not a logical byte offset.
+    std::size_t queuedStreamSendBytes() const {
+        std::size_t total = m_bufferedStreamSendBytes;
+        const std::size_t maximum = (std::numeric_limits<std::size_t>::max)();
+        const Space_& application = space_(Level::Application);
+        for (SwDequeue<SwQuicFrame>::const_iterator it =
+                 application.pendingFrames.begin();
+             it != application.pendingFrames.end(); ++it) {
+            if (it->type() != SwQuicFrame::Type::Stream) continue;
+            const std::size_t bytes = static_cast<std::size_t>(it->data().size());
+            total = bytes > maximum - total ? maximum : total + bytes;
+        }
+        for (SwMap<std::uint64_t, SentRecord_>::const_iterator packet =
+                 application.sentPackets.begin();
+             packet != application.sentPackets.end(); ++packet) {
+            for (std::size_t i = 0;
+                 i < packet->second.retransmittable.size(); ++i) {
+                const SwQuicFrame& frame = packet->second.retransmittable[i];
+                if (frame.type() != SwQuicFrame::Type::Stream) continue;
+                const std::size_t bytes =
+                    static_cast<std::size_t>(frame.data().size());
+                total = bytes > maximum - total ? maximum : total + bytes;
+            }
+        }
+        return total;
+    }
+
+    std::size_t maxBufferedStreamSendBytes() const {
+        return m_maxBufferedStreamSendBytes;
+    }
+
+    std::size_t availableStreamSendBytes() const {
+        if (m_maxBufferedStreamSendBytes == 0) {
+            return (std::numeric_limits<std::size_t>::max)();
+        }
+        const std::size_t queued = queuedStreamSendBytes();
+        return queued >= m_maxBufferedStreamSendBytes
+                   ? 0
+                   : m_maxBufferedStreamSendBytes - queued;
+    }
+
+    // Payload retained in this stream's application send buffer, before it is
+    // transformed into STREAM frames. A non-zero value after packet building
+    // therefore identifies data that flow control (or another staging limit)
+    // has not admitted yet. Unknown and already-drained streams return zero.
+    std::size_t unstagedStreamSendBytes(std::uint64_t streamId) const {
+        SwMap<std::uint64_t, SendStream_>::const_iterator it =
+            m_sendStreams.find(streamId);
+        if (it == m_sendStreams.end()) return 0;
+        const std::size_t stored =
+            static_cast<std::size_t>(it->second.buffer.size());
+        return it->second.bufferOffset < stored
+                   ? stored - it->second.bufferOffset
+                   : 0;
+    }
+
     // Buffer stream data for transmission; it goes out on the next
     // buildDatagrams() within flow-control and congestion limits.
     bool sendStreamData(std::uint64_t streamId,
@@ -473,15 +534,16 @@ public:
         }
 
         const std::size_t dataSize = static_cast<std::size_t>(data.size());
+        const std::size_t queuedBytes = queuedStreamSendBytes();
         if (m_maxBufferedStreamSendBytes > 0 &&
-            (m_bufferedStreamSendBytes > m_maxBufferedStreamSendBytes ||
-             dataSize > m_maxBufferedStreamSendBytes - m_bufferedStreamSendBytes)) {
+            (queuedBytes > m_maxBufferedStreamSendBytes ||
+             dataSize > m_maxBufferedStreamSendBytes - queuedBytes)) {
             setError_(error, "QUIC stream send buffer is full");
             return false;
         }
 
         SendStream_& stream = m_sendStreams[streamId];
-        if (stream.finQueued) {
+        if (stream.finQueued || stream.resetQueued) {
             setError_(error, "QUIC stream already finished");
             return false;
         }
@@ -503,6 +565,78 @@ public:
         if (error) {
             *error = SwString();
         }
+        return true;
+    }
+
+    // Abort the local send side with RESET_STREAM. Bytes that have not yet
+    // reached a packet are discarded; already-sent STREAM frames stop being
+    // retransmitted. The reset itself remains retransmittable until ACKed.
+    bool resetStream(std::uint64_t streamId,
+                     std::uint64_t applicationErrorCode,
+                     SwString* error = nullptr) {
+        if (m_state != State::Open) {
+            setError_(error, "QUIC connection is not open for sending");
+            return false;
+        }
+        if (!validateSendStreamState_(streamId, error)) {
+            return false;
+        }
+
+        SendStream_& stream = m_sendStreams[streamId];
+        if (stream.resetQueued) {
+            clearError_(error);
+            return true;
+        }
+
+        const std::size_t stored = static_cast<std::size_t>(stream.buffer.size());
+        const std::size_t remaining = stream.bufferOffset < stored
+            ? stored - stream.bufferOffset
+            : 0;
+        m_bufferedStreamSendBytes = remaining <= m_bufferedStreamSendBytes
+            ? m_bufferedStreamSendBytes - remaining
+            : 0;
+        stream.buffer = SwByteArray();
+        stream.bufferOffset = 0;
+        stream.resetQueued = true;
+        stream.resetAcked = false;
+        removePendingSendFramesForStream_(streamId, false);
+        space_(Level::Application).pendingFrames.push_back(
+            SwQuicFrame::resetStream(streamId, applicationErrorCode,
+                                     stream.nextOffset));
+        clearError_(error);
+        return true;
+    }
+
+    // Ask the peer to abort its send side. This is intentionally independent
+    // from resetStream(): a bidirectional request rejected while its body is
+    // still arriving needs both STOP_SENDING and a RESET_STREAM response.
+    bool stopReceivingStream(std::uint64_t streamId,
+                             std::uint64_t applicationErrorCode,
+                             SwString* error = nullptr) {
+        if (m_state != State::Open) {
+            setError_(error, "QUIC connection is not open for sending");
+            return false;
+        }
+        if (isRetiredPeerBidirectional_(streamId)) {
+            clearError_(error);
+            return true;
+        }
+        const bool locallyInitiated =
+            (m_role == Role::Client) ? ((streamId & 0x1U) == 0)
+                                     : ((streamId & 0x1U) == 1);
+        const bool unidirectional = (streamId & 0x2U) != 0;
+        if (locallyInitiated && unidirectional) {
+            setError_(error, "Cannot stop receiving on a send-only stream");
+            return false;
+        }
+        if (!locallyInitiated && !m_streams.hasStream(streamId) &&
+            m_resetStreams.find(streamId) == m_resetStreams.end()) {
+            setError_(error, "Cannot stop receiving before the peer opens its stream");
+            return false;
+        }
+        space_(Level::Application).pendingFrames.push_back(
+            SwQuicFrame::stopSending(streamId, applicationErrorCode));
+        clearError_(error);
         return true;
     }
 
@@ -897,12 +1031,87 @@ public:
     const SwQuicStreamMap& streams() const { return m_streams; }
     SwQuicStreamMap& streams() { return m_streams; }
 
+    bool isStreamReceiveReset(std::uint64_t streamId) const {
+        return m_resetStreams.find(streamId) != m_resetStreams.end();
+    }
+
+    bool streamHasFinalSize(std::uint64_t streamId) const {
+        return m_streamFinalSize.find(streamId) != m_streamFinalSize.end();
+    }
+
+    bool isStreamSendReset(std::uint64_t streamId) const {
+        SwMap<std::uint64_t, SendStream_>::const_iterator it =
+            m_sendStreams.find(streamId);
+        return it != m_sendStreams.end() && it->second.resetQueued;
+    }
+
     SwByteArray readStream(std::uint64_t streamId) {
         SwByteArray data = m_streams.readContiguous(streamId);
         if (!data.isEmpty()) {
             creditFlowControl_(streamId, static_cast<std::uint64_t>(data.size()));
         }
+        // A payload-less FIN can make an abandoned receive side terminal too.
+        retireAcknowledgedPeerStreams_();
         return data;
+    }
+
+    // Return one unit of peer-initiated bidirectional-stream credit after the
+    // application consumed the complete receive side and queued its complete
+    // response (including FIN), or deliberately reset its send side. This only
+    // marks the application half as released. Credit is returned later, once
+    // the QUIC send state is terminal: RESET_STREAM ACKed, or FIN ACKed plus
+    // every byte below the final offset ACKed.
+    //
+    // RFC 9000 section 4.6 makes MAX_STREAMS cumulative: every released stream
+    // raises the largest stream count the peer may open. Remember released IDs
+    // so a repeated HTTP pump cannot grant the same credit twice.
+    bool releasePeerBidirectionalStream(std::uint64_t streamId,
+                                        SwString* error = nullptr) {
+        const bool peerInitiated =
+            (m_role == Role::Server) ? ((streamId & 0x1U) == 0)
+                                     : ((streamId & 0x1U) == 1);
+        if (!peerInitiated || (streamId & 0x2U) != 0) {
+            setError_(error, "Only peer-initiated bidirectional streams can be released");
+            return false;
+        }
+
+        SwMap<std::uint64_t, SendStream_>::iterator sendIt =
+            m_sendStreams.find(streamId);
+        if (sendIt == m_sendStreams.end() ||
+            (!sendIt->second.finQueued && !sendIt->second.resetQueued)) {
+            setError_(error, "QUIC stream cannot be released before its application send side finishes");
+            return false;
+        }
+
+        if (sendIt->second.peerCreditPending) {
+            clearError_(error);
+            return true;
+        }
+        // RFC 9000 section 4.6: do not return cumulative stream credit until
+        // both transport directions reach their terminal states.
+        sendIt->second.peerCreditPending = true;
+        retireAcknowledgedPeerStreams_();
+        clearError_(error);
+        return true;
+    }
+
+    bool isPeerBidirectionalStreamReleased(std::uint64_t streamId) const {
+        if (isRetiredPeerBidirectional_(streamId)) {
+            return true;
+        }
+        SwMap<std::uint64_t, SendStream_>::const_iterator it =
+            m_sendStreams.find(streamId);
+        return it != m_sendStreams.end() && it->second.peerCreditPending;
+    }
+
+    std::uint64_t localBidirectionalStreamLimit() const {
+        return m_localMaxStreamsBidi;
+    }
+
+    std::size_t trackedReceiveStreamCount() const { return m_streams.streamCount(); }
+    std::size_t trackedSendStreamCount() const { return m_sendStreams.size(); }
+    std::size_t retiredPeerBidirectionalRangeCount() const {
+        return m_retiredPeerBidiRanges.size();
     }
 
     // Streams whose receive state changed in the most recent datagram. This
@@ -1035,8 +1244,20 @@ private:
         std::uint64_t nextOffset;    // wire offset of buffer[bufferOffset]
         bool finQueued;
         bool finSent;
+        bool finAcked;
+        bool resetQueued;
+        bool resetAcked;
+        bool peerCreditPending;
+        std::uint64_t contiguousAckedOffset;
+        // Disjoint half-open ranges strictly above contiguousAckedOffset.
+        // They are merged on every ACK, so reordered/retransmitted packets do
+        // not grow this set with duplicate byte ranges.
+        SwMap<std::uint64_t, std::uint64_t> ackedRanges;
 
-        SendStream_() : bufferOffset(0), nextOffset(0), finQueued(false), finSent(false) {}
+        SendStream_()
+            : bufferOffset(0), nextOffset(0), finQueued(false), finSent(false),
+              finAcked(false), resetQueued(false), resetAcked(false),
+              peerCreditPending(false), contiguousAckedOffset(0) {}
     };
 
     static void setError_(SwString* error, const char* message) {
@@ -1077,10 +1298,21 @@ private:
     void requeueOldestUnacked_(Space_& space) {
         for (SwMap<std::uint64_t, SentRecord_>::iterator it = space.sentPackets.begin();
              it != space.sentPackets.end(); ++it) {
-            if (!it->second.retransmittable.empty()) {
-                for (std::size_t i = 0; i < it->second.retransmittable.size(); ++i) {
-                    space.pendingFrames.push_back(it->second.retransmittable[i]);
+            bool queued = false;
+            for (std::size_t i = 0; i < it->second.retransmittable.size(); ++i) {
+                const SwQuicFrame& frame = it->second.retransmittable[i];
+                // A stream can enter Reset Sent, become fully retired, or have
+                // this byte range acknowledged through another transmission
+                // while the original packet remains outstanding. PTO probes
+                // must apply the same obsolescence filter as loss recovery;
+                // otherwise stale STREAM data can be emitted after
+                // RESET_STREAM/STOP_SENDING.
+                if (shouldRetransmitFrame_(frame)) {
+                    space.pendingFrames.push_back(frame);
+                    queued = true;
                 }
+            }
+            if (queued) {
                 return;
             }
         }
@@ -1480,6 +1712,9 @@ private:
             }
             return true;
         case SwQuicFrame::Type::MaxStreamData: {
+            if (isRetiredPeerBidirectional_(frame.streamId())) {
+                return true;
+            }
             if (!validatePeerSendControlStream_(frame.streamId(), error)) {
                 return false;
             }
@@ -1501,30 +1736,19 @@ private:
         case SwQuicFrame::Type::ResetStream:
             return processResetStreamFrame_(frame, error);
         case SwQuicFrame::Type::StopSending: {
+            if (isRetiredPeerBidirectional_(frame.streamId())) {
+                return true;
+            }
             if (!validatePeerSendControlStream_(frame.streamId(), error)) {
                 return false;
             }
-            // The peer no longer wants this stream: reset our send side
-            // (RFC 9000 3.5). The final size is the number of bytes actually
-            // sent (RFC 9000 4.5) -- buffered-but-unsent bytes are discarded
-            // and must not be declared, so both sides' connection flow-control
-            // accounting stays consistent.
-            SendStream_& stream = m_sendStreams[frame.streamId()];
-            const std::uint64_t finalSize = stream.nextOffset;
-            const std::size_t stored = static_cast<std::size_t>(stream.buffer.size());
-            const std::size_t remaining = stream.bufferOffset < stored
-                ? stored - stream.bufferOffset
-                : 0;
-            m_bufferedStreamSendBytes = remaining <= m_bufferedStreamSendBytes
-                ? m_bufferedStreamSendBytes - remaining
-                : 0;
-            stream.buffer.clear();
-            stream.bufferOffset = 0;
-            stream.finQueued = true;
-            stream.finSent = true;
-            space_(Level::Application).pendingFrames.push_back(
-                SwQuicFrame::resetStream(frame.streamId(), frame.errorCode(), finalSize));
-            return true;
+            // The peer no longer wants this stream: enter Reset Sent and keep
+            // retransmitting RESET_STREAM (not stale STREAM data) until ACKed.
+            const bool reset = resetStream(frame.streamId(), frame.errorCode(), error);
+            if (reset) {
+                markStreamTouched_(frame.streamId());
+            }
+            return reset;
         }
         case SwQuicFrame::Type::NewToken:
             if (m_newTokens.size() < kMaxNewTokens_()) {
@@ -1677,6 +1901,27 @@ private:
             if (it->second.ackEliciting) {
                 m_congestion.onPacketAcked(it->second.sentBytes, it->second.sentTimeMs);
             }
+            for (std::size_t j = 0; j < it->second.retransmittable.size(); ++j) {
+                const SwQuicFrame& acknowledged = it->second.retransmittable[j];
+                if (acknowledged.type() == SwQuicFrame::Type::Stream) {
+                    SwMap<std::uint64_t, SendStream_>::iterator sendIt =
+                        m_sendStreams.find(acknowledged.streamId());
+                    if (sendIt != m_sendStreams.end()) {
+                        acknowledgeSendStreamRange_(
+                            sendIt->second, acknowledged.offset(),
+                            static_cast<std::uint64_t>(acknowledged.data().size()));
+                        if (acknowledged.fin()) {
+                            sendIt->second.finAcked = true;
+                        }
+                    }
+                } else if (acknowledged.type() == SwQuicFrame::Type::ResetStream) {
+                    SwMap<std::uint64_t, SendStream_>::iterator sendIt =
+                        m_sendStreams.find(acknowledged.streamId());
+                    if (sendIt != m_sendStreams.end()) {
+                        sendIt->second.resetAcked = true;
+                    }
+                }
+            }
             space.sentPackets.erase(it);
         }
 
@@ -1707,7 +1952,9 @@ private:
             }
             // Retransmission: lost retransmittable frames go back in the queue.
             for (std::size_t j = 0; j < it->second.retransmittable.size(); ++j) {
-                space.pendingFrames.push_back(it->second.retransmittable[j]);
+                if (shouldRetransmitFrame_(it->second.retransmittable[j])) {
+                    space.pendingFrames.push_back(it->second.retransmittable[j]);
+                }
             }
             space.sentPackets.erase(it);
         }
@@ -1723,6 +1970,11 @@ private:
             }
         }
 
+        // Retire only after loss processing. A reordered ACK can acknowledge a
+        // FIN while declaring older DATA packets lost in the same event; those
+        // bytes still need retransmission and acknowledgement before the send
+        // side is terminal and MAX_STREAMS can advance.
+        retireAcknowledgedPeerStreams_();
         refreshInFlightFlag_(space);
         return true;
     }
@@ -1751,10 +2003,12 @@ private:
     // stream's bytes in connection-level flow control so both peers stay in
     // sync, then credit them as consumed (the data is discarded).
     bool processResetStreamFrame_(const SwQuicFrame& frame, SwString* error) {
+        if (isRetiredPeerBidirectional_(frame.streamId())) {
+            return true;
+        }
         if (!enforceStreamLimit_(frame.streamId(), error)) {
             return false;
         }
-        m_resetStreams[frame.streamId()] = frame.errorCode();
 
         SwQuicStreamFlowControl& streamFlow = streamFlowControl_(frame.streamId());
         const std::uint64_t previousHighest = streamFlow.highestReceivedOffset();
@@ -1767,6 +2021,7 @@ private:
             setError_(error, "RESET_STREAM final size conflicts with received data (FINAL_SIZE_ERROR)");
             return false;
         }
+        m_resetStreams[frame.streamId()] = frame.errorCode();
         m_streamFinalSize[frame.streamId()] = finalSize;
 
         // Count the delta up to the final size against connection flow control.
@@ -1775,14 +2030,23 @@ private:
                 !m_connectionFlow.onDataReceived(finalSize - previousHighest, error)) {
                 return false;
             }
-            // The reset stream's data is discarded: credit it as consumed so a
-            // compensating MAX_DATA can be advertised.
-            creditFlowControl_(frame.streamId(), finalSize - previousHighest);
         }
+        // RESET_STREAM discards every byte up to Final Size. Credit exactly
+        // what the application had not consumed yet (including buffered data),
+        // rather than only the newly-accounted suffix or the same bytes twice.
+        const std::uint64_t alreadyConsumed = streamFlow.bytesConsumed();
+        if (finalSize > alreadyConsumed) {
+            creditFlowControl_(frame.streamId(), finalSize - alreadyConsumed);
+        }
+        markStreamTouched_(frame.streamId());
+        retireAcknowledgedPeerStreams_();
         return true;
     }
 
     bool processStreamFrame_(const SwQuicFrame& frame, SwString* error) {
+        if (isRetiredPeerBidirectional_(frame.streamId())) {
+            return true; // retransmission for a fully closed stream
+        }
         // Enforce the receive-side stream limit before creating any state
         // (RFC 9000 4.6): a peer opening a stream beyond the advertised
         // initial_max_streams is a STREAM_LIMIT_ERROR, not an unbounded
@@ -1899,6 +2163,217 @@ private:
         return true;
     }
 
+    bool isPeerInitiatedBidirectional_(std::uint64_t streamId) const {
+        const bool peerInitiated =
+            (m_role == Role::Server) ? ((streamId & 0x1U) == 0)
+                                     : ((streamId & 0x1U) == 1);
+        return peerInitiated && (streamId & 0x2U) == 0;
+    }
+
+    static void acknowledgeSendStreamRange_(SendStream_& stream,
+                                            std::uint64_t offset,
+                                            std::uint64_t length) {
+        if (length == 0) return;
+        const std::uint64_t maximum =
+            (std::numeric_limits<std::uint64_t>::max)();
+        std::uint64_t end = length > maximum - offset ? maximum : offset + length;
+        if (end <= stream.contiguousAckedOffset) return;
+        if (offset < stream.contiguousAckedOffset) {
+            offset = stream.contiguousAckedOffset;
+        }
+
+        std::uint64_t first = offset;
+        std::uint64_t last = end;
+        SwMap<std::uint64_t, std::uint64_t>::iterator next =
+            stream.ackedRanges.lower_bound(first);
+        if (next != stream.ackedRanges.begin()) {
+            SwMap<std::uint64_t, std::uint64_t>::iterator previous = next;
+            --previous;
+            if (previous->second >= first) {
+                first = previous->first;
+                if (previous->second > last) last = previous->second;
+                stream.ackedRanges.erase(previous);
+            }
+        }
+        next = stream.ackedRanges.lower_bound(first);
+        while (next != stream.ackedRanges.end() && next->first <= last) {
+            if (next->second > last) last = next->second;
+            SwMap<std::uint64_t, std::uint64_t>::iterator doomed = next++;
+            stream.ackedRanges.erase(doomed);
+        }
+        stream.ackedRanges[first] = last;
+
+        // Collapse every range that now touches the acknowledged prefix. In
+        // the common in-order case this leaves the auxiliary map empty.
+        while (!stream.ackedRanges.empty()) {
+            SwMap<std::uint64_t, std::uint64_t>::iterator begin =
+                stream.ackedRanges.begin();
+            if (begin->first > stream.contiguousAckedOffset) break;
+            if (begin->second > stream.contiguousAckedOffset) {
+                stream.contiguousAckedOffset = begin->second;
+            }
+            stream.ackedRanges.erase(begin);
+        }
+    }
+
+    static bool isSendStreamRangeAcked_(const SendStream_& stream,
+                                        std::uint64_t offset,
+                                        std::uint64_t length) {
+        if (length == 0) return true;
+        const std::uint64_t maximum =
+            (std::numeric_limits<std::uint64_t>::max)();
+        const std::uint64_t end = length > maximum - offset ? maximum : offset + length;
+        if (end <= stream.contiguousAckedOffset) return true;
+        if (offset < stream.contiguousAckedOffset) {
+            offset = stream.contiguousAckedOffset;
+        }
+        SwMap<std::uint64_t, std::uint64_t>::const_iterator next =
+            stream.ackedRanges.upper_bound(offset);
+        if (next == stream.ackedRanges.begin()) return false;
+        --next;
+        return next->first <= offset && next->second >= end;
+    }
+
+    bool shouldRetransmitFrame_(const SwQuicFrame& frame) const {
+        const bool belongsToStream =
+            frame.type() == SwQuicFrame::Type::Stream ||
+            frame.type() == SwQuicFrame::Type::ResetStream ||
+            frame.type() == SwQuicFrame::Type::StopSending ||
+            frame.type() == SwQuicFrame::Type::MaxStreamData;
+        if (!belongsToStream) {
+            return true;
+        }
+        if (isRetiredPeerBidirectional_(frame.streamId())) {
+            return false;
+        }
+        if (frame.type() == SwQuicFrame::Type::StopSending ||
+            frame.type() == SwQuicFrame::Type::MaxStreamData) {
+            return true;
+        }
+        SwMap<std::uint64_t, SendStream_>::const_iterator sendIt =
+            m_sendStreams.find(frame.streamId());
+        if (sendIt == m_sendStreams.end()) {
+            return true;
+        }
+        if (frame.type() == SwQuicFrame::Type::ResetStream) {
+            return !sendIt->second.resetAcked;
+        }
+        if (sendIt->second.resetQueued) {
+            return false;
+        }
+        const bool dataAcked = isSendStreamRangeAcked_(
+            sendIt->second, frame.offset(),
+            static_cast<std::uint64_t>(frame.data().size()));
+        return !dataAcked || (frame.fin() && !sendIt->second.finAcked);
+    }
+
+    void removePendingSendFramesForStream_(std::uint64_t streamId,
+                                           bool removeResetFrames) {
+        Space_& app = space_(Level::Application);
+        SwDequeue<SwQuicFrame> retained;
+        while (!app.pendingFrames.empty()) {
+            SwQuicFrame frame = std::move(app.pendingFrames.front());
+            app.pendingFrames.pop_front();
+            const bool streamFrame = frame.type() == SwQuicFrame::Type::Stream &&
+                                     frame.streamId() == streamId;
+            const bool resetFrame = removeResetFrames &&
+                                    frame.type() == SwQuicFrame::Type::ResetStream &&
+                                    frame.streamId() == streamId;
+            const bool obsoleteReceiveControl = removeResetFrames &&
+                (frame.type() == SwQuicFrame::Type::StopSending ||
+                 frame.type() == SwQuicFrame::Type::MaxStreamData) &&
+                frame.streamId() == streamId;
+            if (!streamFrame && !resetFrame && !obsoleteReceiveControl) {
+                retained.push_back(std::move(frame));
+            }
+        }
+        app.pendingFrames = std::move(retained);
+    }
+
+    bool isRetiredPeerBidirectional_(std::uint64_t streamId) const {
+        if (!isPeerInitiatedBidirectional_(streamId)) {
+            return false;
+        }
+        const std::uint64_t number = streamId >> 2;
+        SwMap<std::uint64_t, std::uint64_t>::const_iterator next =
+            m_retiredPeerBidiRanges.upper_bound(number);
+        if (next == m_retiredPeerBidiRanges.begin()) {
+            return false;
+        }
+        --next;
+        return number <= next->second;
+    }
+
+    void markRetiredPeerBidirectional_(std::uint64_t streamId) {
+        std::uint64_t first = streamId >> 2;
+        std::uint64_t last = first;
+        SwMap<std::uint64_t, std::uint64_t>::iterator next =
+            m_retiredPeerBidiRanges.lower_bound(first);
+        if (next != m_retiredPeerBidiRanges.begin()) {
+            SwMap<std::uint64_t, std::uint64_t>::iterator previous = next;
+            --previous;
+            if (previous->second == (std::numeric_limits<std::uint64_t>::max)() ||
+                previous->second + 1 >= first) {
+                first = previous->first;
+                if (previous->second > last) last = previous->second;
+                m_retiredPeerBidiRanges.erase(previous);
+            }
+        }
+        next = m_retiredPeerBidiRanges.lower_bound(first);
+        while (next != m_retiredPeerBidiRanges.end() &&
+               (last == (std::numeric_limits<std::uint64_t>::max)() ||
+                next->first <= last + 1)) {
+            if (next->second > last) last = next->second;
+            SwMap<std::uint64_t, std::uint64_t>::iterator doomed = next++;
+            m_retiredPeerBidiRanges.erase(doomed);
+        }
+        m_retiredPeerBidiRanges[first] = last;
+    }
+
+    void retirePeerBidirectionalState_(std::uint64_t streamId) {
+        markRetiredPeerBidirectional_(streamId);
+        removePendingSendFramesForStream_(streamId, true);
+        m_streams.removeStream(streamId);
+        m_streamFlow.erase(streamId);
+        m_peerStreamMaxData.erase(streamId);
+        m_resetStreams.erase(streamId);
+        m_streamFinalSize.erase(streamId);
+    }
+
+    void retireAcknowledgedPeerStreams_() {
+        for (SwMap<std::uint64_t, SendStream_>::iterator it = m_sendStreams.begin();
+             it != m_sendStreams.end();) {
+            const SwQuicStream* receiveStream = m_streams.stream(it->first);
+            const bool receiveTerminal =
+                m_resetStreams.find(it->first) != m_resetStreams.end() ||
+                (receiveStream && receiveStream->isReceiveComplete());
+            const bool resetTerminal =
+                it->second.resetQueued && it->second.resetAcked;
+            const bool gracefulTerminal =
+                !it->second.resetQueued && it->second.finQueued &&
+                it->second.finAcked &&
+                it->second.contiguousAckedOffset >= it->second.nextOffset;
+            if (!it->second.peerCreditPending || !receiveTerminal ||
+                (!resetTerminal && !gracefulTerminal)) {
+                ++it;
+                continue;
+            }
+            const std::uint64_t streamId = it->first;
+            retirePeerBidirectionalState_(streamId);
+            it = m_sendStreams.erase(it);
+            if (m_localMaxStreamsBidi < (std::uint64_t(1) << 60)) {
+                ++m_localMaxStreamsBidi;
+                space_(Level::Application).pendingFrames.push_back(
+                    SwQuicFrame::maxStreams(true, m_localMaxStreamsBidi));
+            }
+        }
+        if (m_sendStreams.empty()) {
+            m_streamSchedulingCursor = 0;
+        } else {
+            m_streamSchedulingCursor %= m_sendStreams.size();
+        }
+    }
+
     // RFC 9000 4.6: reject a peer-initiated stream whose number exceeds the
     // limit we advertised. Only applies to peer-initiated streams; streams we
     // already track are fine.
@@ -1918,8 +2393,8 @@ private:
         }
         const bool unidirectional = (streamId & 0x2U) != 0;
         const std::uint64_t streamNumber = streamId >> 2; // 0-based index
-        const std::uint64_t limit = unidirectional ? m_localParams.initialMaxStreamsUni
-                                                    : m_localParams.initialMaxStreamsBidi;
+        const std::uint64_t limit = unidirectional ? m_localMaxStreamsUni
+                                                    : m_localMaxStreamsBidi;
         if (streamNumber >= limit) {
             m_closeErrorCode = 0x04; // STREAM_LIMIT_ERROR
             setError_(error, "Peer exceeded the advertised stream limit (STREAM_LIMIT_ERROR)");
@@ -2273,7 +2748,7 @@ private:
                     : 0;
             const bool drained = stream.bufferOffset == stored;
             if (drained) {
-                stream.buffer.clear();
+                stream.buffer = SwByteArray();
                 stream.bufferOffset = 0;
             }
             const bool fin = stream.finQueued && drained;
@@ -2634,6 +3109,8 @@ private:
     SwMap<std::uint64_t, std::uint64_t> m_peerStreamMaxData;
     std::uint64_t m_peerMaxStreamsBidi;
     std::uint64_t m_peerMaxStreamsUni;
+    std::uint64_t m_localMaxStreamsBidi = 100;
+    std::uint64_t m_localMaxStreamsUni = 100;
     std::uint64_t m_totalStreamBytesSent = 0;
 
     SwQuicPacketHeader m_lastInitialHeader;
@@ -2648,6 +3125,9 @@ private:
     std::size_t m_maxBufferedStreamSendBytes = 16U * 1024U * 1024U;
     SwMap<std::uint64_t, std::uint64_t> m_resetStreams;
     SwMap<std::uint64_t, std::uint64_t> m_streamFinalSize; // established final sizes
+    // Compact inclusive stream-number ranges. A single low stream kept open
+    // cannot force one tombstone per later completed request.
+    SwMap<std::uint64_t, std::uint64_t> m_retiredPeerBidiRanges;
     SwDequeue<SwByteArray> m_datagrams;
     std::size_t m_receivedDatagramBytes = 0;
     std::size_t m_maxReceivedDatagrams = 1024;

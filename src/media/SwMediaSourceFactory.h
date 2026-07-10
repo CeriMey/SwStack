@@ -35,44 +35,41 @@ public:
     }
 
     static std::shared_ptr<SwMediaSource> createMediaSource(const SwMediaOpenOptions& options) {
-        const SwMediaOpenOptions resolvedOptions = resolveDirectTransportOptions_(options);
-        const SwString scheme = resolvedOptions.mediaUrl.scheme().toLower();
+        const SwString scheme = options.mediaUrl.scheme().toLower();
 
         if (scheme == "rtp" || scheme == "udp") {
-            if (auto source = createDirectRtpSourceFromSdp_(resolvedOptions)) {
-                return source;
+            // The SDP (inline text or file) is loaded and parsed exactly once: it both
+            // resolves the transport options and feeds the direct RTP source.
+            if (hasSdpOption_(options)) {
+                SwSdpMediaDescription description;
+                if (loadSdpDescription_(options, description)) {
+                    return createDirectRtpSource_(options, description);
+                }
             }
+            if (scheme == "rtp" || options.rtpPacketized ||
+                options.udpFormat == SwMediaOpenOptions::UdpPayloadFormat::Rtp) {
+                return std::make_shared<SwRtpVideoSource>(options);
+            }
+            return std::make_shared<SwUdpVideoSource>(options);
         }
 
         if (scheme == "rtsp" || scheme == "rtsps") {
-            return std::make_shared<SwRtspSource>(resolvedOptions);
+            return std::make_shared<SwRtspSource>(options);
         }
 
         if (scheme == "http") {
-            return std::make_shared<SwHttpMjpegSource>(resolvedOptions.sourceUrl());
-        }
-
-        if (scheme == "rtp") {
-            return std::make_shared<SwRtpVideoSource>(resolvedOptions);
-        }
-
-        if (scheme == "udp") {
-            if (resolvedOptions.rtpPacketized ||
-                resolvedOptions.udpFormat == SwMediaOpenOptions::UdpPayloadFormat::Rtp) {
-                return std::make_shared<SwRtpVideoSource>(resolvedOptions);
-            }
-            return std::make_shared<SwUdpVideoSource>(resolvedOptions);
+            return std::make_shared<SwHttpMjpegSource>(options.sourceUrl());
         }
 
         if (scheme == "swvtp") {
-            return std::make_shared<SwVtpVideoSource>(resolvedOptions);
+            return std::make_shared<SwVtpVideoSource>(options);
         }
 
         if (scheme == "file" || scheme.isEmpty()) {
-            if (auto source = createDirectRtpSourceFromSdpFile_(resolvedOptions)) {
+            if (auto source = createDirectRtpSourceFromSdpFile_(options)) {
                 return source;
             }
-            return createFileMediaSource_(resolvedOptions);
+            return createFileMediaSource_(options);
         }
 
         return std::shared_ptr<SwMediaSource>();
@@ -123,17 +120,25 @@ private:
         return true;
     }
 
-    static std::shared_ptr<SwMediaSource> createDirectRtpSourceFromSdp_(
-        const SwMediaOpenOptions& options) {
-        if (!hasSdpOption_(options)) {
-            return nullptr;
-        }
-        SwSdpMediaDescription description;
-        if (!loadSdpDescription_(options, description)) {
-            return nullptr;
-        }
+    static std::shared_ptr<SwMediaSource> createDirectRtpSource_(
+        const SwMediaOpenOptions& options,
+        const SwSdpMediaDescription& description) {
         SwMediaOpenOptions directOptions = options;
-        description.applyToOpenOptions(directOptions);
+        if (description.applyToOpenOptions(directOptions)) {
+            swCWarning(kSwLogCategory_SwMediaSourceFactory)
+                << "[SwMediaSourceFactory] Applied SDP to "
+                << directOptions.mediaUrl.toString()
+                << " transport=" << (directOptions.rtpPacketized ? "rtp" : "udp")
+                << " port="
+                << (directOptions.rtpPort != 0 ? directOptions.rtpPort
+                                               : directOptions.mediaUrl.port())
+                << " payload=" << directOptions.payloadType
+                << " codec=" << SwMediaOpenOptions::codecToString(directOptions.codec);
+        } else {
+            swCWarning(kSwLogCategory_SwMediaSourceFactory)
+                << "[SwMediaSourceFactory] SDP has no supported video track for "
+                << directOptions.mediaUrl.toString();
+        }
         return std::make_shared<SwDirectRtpMediaSource>(directOptions, description);
     }
 
@@ -149,51 +154,7 @@ private:
         if (!loadSdpDescription_(directOptions, description)) {
             return nullptr;
         }
-        description.applyToOpenOptions(directOptions);
-        return std::make_shared<SwDirectRtpMediaSource>(directOptions, description);
-    }
-
-    static SwMediaOpenOptions resolveDirectTransportOptions_(const SwMediaOpenOptions& options) {
-        const SwString scheme = options.mediaUrl.scheme().toLower();
-        if (scheme != "rtp" && scheme != "udp") {
-            return options;
-        }
-
-        SwMediaOpenOptions resolved = options;
-        std::string sdpText = resolved.sdpText.toStdString();
-        if (sdpText.empty() && !resolved.sdpFile.isEmpty()) {
-            if (!SwSdpMediaDescription::loadTextFromFile(resolved.sdpFile, sdpText)) {
-                swCWarning(kSwLogCategory_SwMediaSourceFactory)
-                    << "[SwMediaSourceFactory] Failed to load SDP file "
-                    << resolved.sdpFile;
-                return resolved;
-            }
-        }
-        if (sdpText.empty()) {
-            return resolved;
-        }
-
-        SwSdpMediaDescription description;
-        if (!SwSdpMediaDescription::parse(sdpText, description)) {
-            swCWarning(kSwLogCategory_SwMediaSourceFactory)
-                << "[SwMediaSourceFactory] Failed to parse SDP options for "
-                << resolved.mediaUrl.toString();
-            return resolved;
-        }
-        if (!description.applyToOpenOptions(resolved)) {
-            swCWarning(kSwLogCategory_SwMediaSourceFactory)
-                << "[SwMediaSourceFactory] SDP has no supported video track for "
-                << resolved.mediaUrl.toString();
-            return resolved;
-        }
-        swCWarning(kSwLogCategory_SwMediaSourceFactory)
-            << "[SwMediaSourceFactory] Applied SDP to "
-            << resolved.mediaUrl.toString()
-            << " transport=" << (resolved.rtpPacketized ? "rtp" : "udp")
-            << " port=" << (resolved.rtpPort != 0 ? resolved.rtpPort : resolved.mediaUrl.port())
-            << " payload=" << resolved.payloadType
-            << " codec=" << SwMediaOpenOptions::codecToString(resolved.codec);
-        return resolved;
+        return createDirectRtpSource_(directOptions, description);
     }
 
     static SwString localFilePath_(const SwMediaOpenOptions& options) {
@@ -211,7 +172,6 @@ private:
 
     static bool shouldUsePlatformFileSource_(const SwMediaOpenOptions& options,
                                              const SwString& filePath) {
-#if defined(_WIN32)
         if (options.codec != SwVideoPacket::Codec::Unknown) {
             return false;
         }
@@ -225,6 +185,7 @@ private:
             return false;
         }
         const std::string extension = lowerPath.substr(dotPos);
+#if defined(_WIN32)
         static const std::array<const char*, 11> kContainerExtensions = {{
             ".mp4", ".mov", ".m4v", ".mkv", ".avi", ".wmv",
             ".asf", ".mpg", ".mpeg", ".webm", ".ts"
@@ -233,19 +194,30 @@ private:
                          kContainerExtensions.end(),
                          extension) != kContainerExtensions.end();
 #else
-        (void)options;
-        (void)filePath;
-        return false;
+        // The native MP4 demuxer behind SwMp4MovieSource only handles the BMFF family.
+        // Sniff the header too: raw Annex-B elementary streams merely named .mp4 keep
+        // going through SwFileVideoSource, as they did before containers were supported.
+        static const std::array<const char*, 3> kContainerExtensions = {{
+            ".mp4", ".mov", ".m4v"
+        }};
+        if (std::find(kContainerExtensions.begin(),
+                      kContainerExtensions.end(),
+                      extension) == kContainerExtensions.end()) {
+            return false;
+        }
+        return SwMp4Demuxer::looksLikeBmff(filePath.toStdString());
 #endif
     }
 
     static std::shared_ptr<SwMediaSource> createFileMediaSource_(const SwMediaOpenOptions& options) {
         const SwString filePath = localFilePath_(options);
-#if defined(_WIN32)
         if (shouldUsePlatformFileSource_(options, filePath)) {
+#if defined(_WIN32)
             return std::make_shared<SwPlatformMovieSource>(filePath.toStdWString());
-        }
+#else
+            return std::make_shared<SwPlatformMovieSource>(filePath.toStdString());
 #endif
+        }
         return std::make_shared<SwFileVideoSource>(filePath.toStdString(),
                                                    options.codec);
     }

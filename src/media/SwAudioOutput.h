@@ -9,6 +9,8 @@
 #include "media/SwAudioSink.h"
 #if defined(_WIN32)
 #include "media/SwWasapiAudioSink.h"
+#elif defined(__linux__)
+#include "media/SwAlsaAudioSink.h"
 #endif
 
 #include <memory>
@@ -70,11 +72,10 @@ public:
         if (!m_sink || !frame.isValid()) {
             return false;
         }
-        SwAudioFrame adjusted = frame;
         if (m_muted || m_volume < 0.999f) {
-            adjusted = applyVolume_(frame);
+            return m_sink->pushFrame(applyVolume_(frame));
         }
-        return m_sink->pushFrame(adjusted);
+        return m_sink->pushFrame(frame);
     }
 
     std::int64_t playedTimestamp() const {
@@ -118,6 +119,13 @@ private:
     static std::shared_ptr<SwAudioSink> defaultSink_() {
 #if defined(_WIN32)
         return std::make_shared<SwWasapiAudioSink>();
+#elif defined(__linux__)
+        // Probe the device too: libasound is often installed on headless machines with no
+        // sound card, and a failing open() would otherwise be retried per audio packet.
+        if (SwAlsaAudioSink::defaultDeviceUsable()) {
+            return std::make_shared<SwAlsaAudioSink>();
+        }
+        return std::make_shared<SwNullAudioSink>();
 #else
         return std::make_shared<SwNullAudioSink>();
 #endif

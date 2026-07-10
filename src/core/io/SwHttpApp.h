@@ -49,11 +49,15 @@
 #include "SwHttpServer.h"
 #include "SwMailService.h"
 #include "SwWebSocket.h"
+#include "http3/SwQuicHttp3Server.h"
+#include "quic/SwQuicServerCredential.h"
 
 #include <utility>
 #include "auth/SwHttpAuthService.h"
 #include "http/SwHttpContext.h"
+#include "http/SwHttpSeo.h"
 
+#include <algorithm>
 #include <functional>
 #include <chrono>
 #include <exception>
@@ -79,6 +83,18 @@ public:
         bool enablePerMessageDeflate = true;
     };
 
+    struct SwHttp3Config {
+        // HTTPS listeners expose HTTP/1.x over TCP and HTTP/3 over QUIC/UDP on
+        // the same numeric port by default. Set enabled=false for a deliberate
+        // TCP-only deployment.
+        bool enabled = true;
+        bool advertise = true;
+        int altSvcMaxAgeSeconds = 86400;
+        std::size_t maxClients = 4096;
+        std::size_t maxPendingHandshakes = 1024;
+        std::uint64_t handshakeTimeoutMs = 10000;
+    };
+
     /**
      * @brief Constructs a `SwHttpApp` instance.
      * @param parent Optional parent object that owns this instance.
@@ -88,9 +104,50 @@ public:
     explicit SwHttpApp(SwObject* parent = nullptr)
         : m_server(parent),
           m_recoveryHandler(defaultRecoveryHandler_()) {
+        m_http3Server.setPendingRequestBudgetHandlers(
+            [this](std::size_t bytes) {
+                return m_server.tryReservePendingRequestBytes(bytes);
+            },
+            [this](std::size_t bytes) {
+                m_server.releasePendingRequestBytes(bytes);
+            });
+        m_http3Server.setAsyncRequestHandler(
+            [this](const SwHttpRequest& request,
+                   const SwHttp3Server::ResponseCallback& complete) {
+                m_server.dispatchRequest(request, complete);
+            });
+        m_server.router().addResponseFilter(
+            [this](const SwHttpRequest& request, SwHttpResponse& response) {
+                addHttp3DiscoveryHeader_(request, response);
+            });
+        SwObject::connect(&m_http3Server, &SwQuicHttp3Server::serverError,
+                          [this](const SwString& error) {
+                              m_lastHttp3Error = error;
+                          });
+    }
+
+    /**
+     * @brief Constructs an HTTP application with SEO discovery mounted before site routes.
+     * @param seoConfig Canonical site identity and crawler policy.
+     * @param parent Optional parent object that owns the underlying server.
+     *
+     * @details Derived site classes should prefer this constructor so the private-route noindex
+     * middleware is present before their API, administration and authentication routes are added.
+     */
+    explicit SwHttpApp(const SwHttpSeoConfig& seoConfig, SwObject* parent = nullptr)
+        : SwHttpApp(parent) {
+        SwString error;
+        if (!mountSeo(seoConfig, &error)) {
+            swError() << "[SwHttpApp] Failed to mount SEO discovery: " << error;
+        }
     }
 
     ~SwHttpApp() {
+        close();
+        // Routes and response filters capture SwHttpApp state (including the
+        // HTTP/3 discovery configuration). Drain every in-flight callback
+        // before any of those members or optional services are destroyed.
+        m_server.shutdownDispatching();
         stopAuth();
         stopMail();
     }
@@ -103,10 +160,17 @@ public:
      * @details The call affects the runtime state associated with the underlying resource or service.
      */
     bool listen(uint16_t port) {
+        // SwHttpServer::listen() replaces every TCP listener. Mirror that
+        // lifecycle for UDP so switching an app back to plaintext cannot leave
+        // an orphaned HTTP/3 origin serving the previous certificate/routes.
+        m_http3Server.setAutomaticPollingEnabled(false);
+        m_http3Server.close();
         return m_server.listen(port);
     }
 
     bool listen(const SwString& bindAddress, uint16_t port) {
+        m_http3Server.setAutomaticPollingEnabled(false);
+        m_http3Server.close();
         return m_server.listen(bindAddress, port);
     }
 
@@ -118,14 +182,14 @@ public:
      * @return `true` on success; otherwise `false`.
      */
     bool listen(uint16_t port, const SwString& certPath, const SwString& keyPath) {
-        return m_server.listen(port, certPath, keyPath);
+        return listenSecureTransports_(SwString(), port, certPath, keyPath, true);
     }
 
     bool listen(const SwString& bindAddress,
                 uint16_t port,
                 const SwString& certPath,
                 const SwString& keyPath) {
-        return m_server.listen(bindAddress, port, certPath, keyPath);
+        return listenSecureTransports_(bindAddress, port, certPath, keyPath, true);
     }
 
     bool listenHttp(uint16_t port) {
@@ -137,7 +201,7 @@ public:
     }
 
     bool listenHttps(uint16_t port, const SwString& certPath, const SwString& keyPath) {
-        const bool ok = m_server.listenHttps(port, certPath, keyPath);
+        const bool ok = listenSecureTransports_(SwString(), port, certPath, keyPath, false);
         if (ok && m_mailService) {
             SwString ignored;
             (void)m_mailService->reloadTlsCredentials(certPath, keyPath, &ignored);
@@ -149,7 +213,7 @@ public:
                      uint16_t port,
                      const SwString& certPath,
                      const SwString& keyPath) {
-        const bool ok = m_server.listenHttps(bindAddress, port, certPath, keyPath);
+        const bool ok = listenSecureTransports_(bindAddress, port, certPath, keyPath, false);
         if (ok && m_mailService) {
             SwString ignored;
             (void)m_mailService->reloadTlsCredentials(certPath, keyPath, &ignored);
@@ -158,7 +222,7 @@ public:
     }
 
     bool listenHttps(uint16_t port, const SwList<SwTlsCredentialEntry>& credentials) {
-        const bool ok = m_server.listenHttps(port, credentials);
+        const bool ok = listenSecureTransports_(SwString(), port, credentials);
         if (ok) {
             syncMailTlsCredentials_(credentials);
         }
@@ -168,7 +232,7 @@ public:
     bool listenHttps(const SwString& bindAddress,
                      uint16_t port,
                      const SwList<SwTlsCredentialEntry>& credentials) {
-        const bool ok = m_server.listenHttps(bindAddress, port, credentials);
+        const bool ok = listenSecureTransports_(bindAddress, port, credentials);
         if (ok) {
             syncMailTlsCredentials_(credentials);
         }
@@ -176,17 +240,46 @@ public:
     }
 
     bool reloadHttpsCredentials(uint16_t port, const SwString& certPath, const SwString& keyPath) {
+        SwQuicServerCredential credential;
+        if (m_http3Config.enabled &&
+            !SwQuicPemCredential::load(certPath, keyPath, credential, &m_lastHttp3Error)) {
+            return false;
+        }
         const bool ok = m_server.reloadHttpsCredentials(port, certPath, keyPath);
-        if (ok && m_mailService) {
-            SwString ignored;
-            (void)m_mailService->reloadTlsCredentials(certPath, keyPath, &ignored);
+        if (ok) {
+            if (m_http3Config.enabled) {
+                setHttp3Credential(credential);
+                m_http3AdvertisedHost = SwString();
+                if (!synchronizeHttp3ListenerAfterReload_()) {
+                    m_server.closeHttpsListener();
+                    return false;
+                }
+            }
+            if (m_mailService) {
+                SwString ignored;
+                (void)m_mailService->reloadTlsCredentials(certPath, keyPath, &ignored);
+            }
         }
         return ok;
     }
 
     bool reloadHttpsCredentials(uint16_t port, const SwList<SwTlsCredentialEntry>& credentials) {
+        SwQuicServerCredential credential;
+        SwQuicHttp3Server::CredentialMap credentialsByHost;
+        if (m_http3Config.enabled &&
+            !loadHttp3TlsCredentials_(credentials, credential, credentialsByHost)) {
+            return false;
+        }
         const bool ok = m_server.reloadHttpsCredentials(port, credentials);
         if (ok) {
+            if (m_http3Config.enabled) {
+                setHttp3Credentials(credential, credentialsByHost);
+                m_http3AdvertisedHost = SwString();
+                if (!synchronizeHttp3ListenerAfterReload_()) {
+                    m_server.closeHttpsListener();
+                    return false;
+                }
+            }
             syncMailTlsCredentials_(credentials);
         }
         return ok;
@@ -206,6 +299,108 @@ public:
 
     uint16_t httpsPort() const {
         return m_server.httpsPort();
+    }
+
+    void setHttp3Config(const SwHttp3Config& config) {
+        m_http3Config = config;
+        applyHttp3Config_();
+        if (!m_http3Config.enabled) {
+            m_http3Server.close();
+        }
+    }
+
+    const SwHttp3Config& http3Config() const {
+        return m_http3Config;
+    }
+
+    void setHttp3Enabled(bool enabled) {
+        SwHttp3Config config = m_http3Config;
+        config.enabled = enabled;
+        setHttp3Config(config);
+    }
+
+    bool isHttp3Enabled() const {
+        return m_http3Config.enabled;
+    }
+
+    void setHttp3Credential(const SwQuicServerCredential& credential) {
+        m_http3Credential = credential;
+        m_http3Credentials.clear();
+        m_hasHttp3Credential = credential.isValid();
+        m_http3Server.setCredential(credential);
+    }
+
+    void setHttp3Credentials(
+        const SwQuicServerCredential& defaultCredential,
+        const SwQuicHttp3Server::CredentialMap& credentialsByHost) {
+        m_http3Credential = defaultCredential;
+        m_http3Credentials = credentialsByHost;
+        m_hasHttp3Credential = defaultCredential.isValid();
+        m_http3Server.setCredentials(defaultCredential, credentialsByHost);
+    }
+
+    bool listenHttp3(uint16_t port, SwString* error = nullptr) {
+        return listenHttp3(SwString(), port, error);
+    }
+
+    bool listenHttp3(const SwString& bindAddress,
+                     uint16_t port,
+                     SwString* error = nullptr) {
+        if (!m_http3Config.enabled) {
+            setHttp3Error_(error, SwString("HTTP/3 is disabled in SwHttpApp"));
+            return false;
+        }
+        if (!m_hasHttp3Credential) {
+            setHttp3Error_(error, SwString("HTTP/3 has no valid TLS credential"));
+            return false;
+        }
+        if (!SwCoreApplication::instance(false)) {
+            setHttp3Error_(error,
+                           SwString("HTTP/3 automatic polling requires an active SwCoreApplication"));
+            return false;
+        }
+        applyHttp3Config_();
+        m_http3Server.setCredentials(m_http3Credential, m_http3Credentials);
+        m_http3Server.setRouter(nullptr);
+        m_http3Server.setAsyncRequestHandler(
+            [this](const SwHttpRequest& request,
+                   const SwHttp3Server::ResponseCallback& complete) {
+                m_server.dispatchRequest(request, complete);
+            });
+        m_http3Server.setAutomaticPollingEnabled(true);
+        SwString listenError;
+        if (!m_http3Server.listen(bindAddress, port, &listenError)) {
+            m_http3Server.setAutomaticPollingEnabled(false);
+            setHttp3Error_(error, listenError);
+            return false;
+        }
+        m_lastHttp3Error = SwString();
+        if (error) *error = SwString();
+        return true;
+    }
+
+    bool isHttp3Listening() const {
+        return m_http3Server.isListening();
+    }
+
+    uint16_t http3Port() const {
+        return m_http3Server.localPort();
+    }
+
+    SwString http3Address() const {
+        return m_http3Server.localAddress();
+    }
+
+    SwString lastHttp3Error() const {
+        return m_lastHttp3Error;
+    }
+
+    SwQuicHttp3Server& http3Server() {
+        return m_http3Server;
+    }
+
+    const SwQuicHttp3Server& http3Server() const {
+        return m_http3Server;
     }
 
     void setDomainTlsConfig(const SwDomainTlsConfig& config) {
@@ -316,6 +511,8 @@ public:
      * @details The call affects the runtime state associated with the underlying resource or service.
      */
     void close() {
+        m_http3Server.setAutomaticPollingEnabled(false);
+        m_http3Server.close();
         m_server.close();
     }
 
@@ -327,6 +524,10 @@ public:
      * @details The method stops accepting new work first, then waits until the active operations drain or the timeout expires.
      */
     bool closeGraceful(int timeoutMs = 5000) {
+        // QUIC graceful GOAWAY/draining is not exposed by the transport yet;
+        // stop accepting UDP traffic before draining HTTP/1.x sessions.
+        m_http3Server.setAutomaticPollingEnabled(false);
+        m_http3Server.close();
         return m_server.closeGraceful(timeoutMs);
     }
 
@@ -338,6 +539,7 @@ public:
      */
     void setLimits(const SwHttpLimits& limits) {
         m_server.setLimits(limits);
+        m_http3Server.setHttpLimits(limits);
     }
 
     /**
@@ -499,6 +701,72 @@ public:
             return SwString();
         }
         return out;
+    }
+
+    /**
+     * @brief Installs the SEO discovery endpoints and private-route noindex middleware.
+     * @details Call this before registering site routes. Middleware is snapshotted when a route is
+     * registered, and the SEO-aware constructor does this automatically for derived sites.
+     */
+    bool mountSeo(const SwHttpSeoConfig& config, SwString* errorOut = nullptr) {
+        if (m_seoMounted) {
+            if (errorOut) {
+                *errorOut = "SEO discovery is already mounted";
+            }
+            return false;
+        }
+
+        SwString error;
+        if (!m_seo.configure(config, &error)) {
+            if (errorOut) {
+                *errorOut = error;
+            }
+            return false;
+        }
+        const SwHttpSeoConfig effective = m_seo.config();
+
+        use([this](SwHttpContext& context, const SwHttpNext& next) {
+            if (next) {
+                next();
+            }
+            if (m_seo.shouldNoIndex(context.path())) {
+                context.response().headers["x-robots-tag"] = "noindex, nofollow";
+            }
+        });
+
+        mountSeoDiscoveryRoutes_(effective);
+        m_seoMounted = true;
+        if (errorOut) {
+            errorOut->clear();
+        }
+        return true;
+    }
+
+    bool seoMounted() const {
+        return m_seoMounted;
+    }
+
+    SwHttpSeo& seo() {
+        return m_seo;
+    }
+
+    const SwHttpSeo& seo() const {
+        return m_seo;
+    }
+
+    bool addSeoPage(const SwHttpSeoPage& page, SwString* errorOut = nullptr) {
+        return m_seo.addPage(page, errorOut);
+    }
+
+    bool removeSeoPage(const SwString& path) {
+        return m_seo.removePage(path);
+    }
+
+    SwString renderSeoPage(const SwString& pagePath,
+                           const SwString& bodyHtml,
+                           const SwString& extraHeadHtml = SwString(),
+                           bool* okOut = nullptr) const {
+        return m_seo.renderPage(pagePath, bodyHtml, extraHeadHtml, okOut);
     }
 
     /**
@@ -2079,9 +2347,17 @@ public:
 
 private:
     SwHttpServer m_server;
+    SwQuicHttp3Server m_http3Server;
+    SwHttp3Config m_http3Config;
+    SwQuicServerCredential m_http3Credential;
+    SwQuicHttp3Server::CredentialMap m_http3Credentials;
+    bool m_hasHttp3Credential = false;
+    SwString m_http3AdvertisedHost;
+    SwString m_lastHttp3Error;
     SwList<SwHttpMiddleware> m_middlewares;
     SwString m_groupPrefix;
     SwHttpRecoveryHandler m_recoveryHandler;
+    SwHttpSeo m_seo;
     SwMailConfig m_mailConfig;
     SwDomainTlsConfig m_domainTlsConfig;
     SwHttpAuthConfig m_authConfig;
@@ -2089,6 +2365,309 @@ private:
     SwHttpAuthService* m_authService = nullptr;
     bool m_mailAdminMounted = false;
     bool m_authApiMounted = false;
+    bool m_seoMounted = false;
+
+    void mountSeoDiscoveryRoutes_(const SwHttpSeoConfig& config) {
+        if (config.enableRobotsTxt) {
+            SwHttpRouteOptions options;
+            options.name = "seo.robots";
+            get(config.robotsPath, [this](SwHttpContext& context) {
+                applySeoDiscoveryHeaders_(context);
+                context.text(m_seo.robotsText(), 200);
+            }, options);
+        }
+
+        if (config.enableSitemap) {
+            SwHttpRouteOptions options;
+            options.name = "seo.sitemap";
+            get(config.sitemapPath, [this](SwHttpContext& context) {
+                applySeoDiscoveryHeaders_(context);
+                context.send(m_seo.sitemapXml(), "application/xml; charset=utf-8", 200);
+            }, options);
+        }
+
+        if (config.enableLlmsTxt) {
+            SwHttpRouteOptions options;
+            options.name = "seo.llms";
+            get(config.llmsPath, [this](SwHttpContext& context) {
+                applySeoDiscoveryHeaders_(context);
+                context.send(m_seo.llmsText(), "text/markdown; charset=utf-8", 200);
+            }, options);
+        }
+    }
+
+    void applySeoDiscoveryHeaders_(SwHttpContext& context) const {
+        const SwHttpSeoConfig config = m_seo.config();
+        if (!config.discoveryCacheControl.isEmpty()) {
+            context.response().headers["cache-control"] = config.discoveryCacheControl;
+        }
+        context.response().headers["x-content-type-options"] = "nosniff";
+        context.response().headers["x-robots-tag"] = "noindex";
+    }
+
+    void applyHttp3Config_() {
+        m_http3Server.setMaxClients(m_http3Config.maxClients);
+        m_http3Server.setMaxPendingHandshakes(m_http3Config.maxPendingHandshakes);
+        m_http3Server.setHandshakeTimeoutMs(m_http3Config.handshakeTimeoutMs);
+        m_http3Server.setHttpLimits(m_server.limits());
+    }
+
+    void setHttp3Error_(SwString* output, const SwString& error) {
+        m_lastHttp3Error = error;
+        if (output) {
+            *output = error;
+        }
+    }
+
+    static bool selectHttp3TlsCredential_(
+        const SwList<SwTlsCredentialEntry>& credentials,
+        SwTlsCredentialEntry& selected) {
+        bool found = false;
+        for (std::size_t i = 0; i < credentials.size(); ++i) {
+            const SwTlsCredentialEntry& candidate = credentials[i];
+            if (candidate.certPath.trimmed().isEmpty() ||
+                candidate.keyPath.trimmed().isEmpty()) {
+                continue;
+            }
+            if (!found) {
+                selected = candidate;
+                found = true;
+            }
+            // Match SwBackendSsl exactly: the first valid credential is the
+            // fallback, and every explicit default replaces the previous one.
+            // Consequently the last isDefault entry wins. An empty SNI host is
+            // not an implicit default once a valid credential already exists.
+            if (candidate.isDefault) {
+                selected = candidate;
+            }
+        }
+        return found;
+    }
+
+    bool loadHttp3TlsCredentials_(
+        const SwList<SwTlsCredentialEntry>& credentials,
+        SwQuicServerCredential& defaultCredential,
+        SwQuicHttp3Server::CredentialMap& credentialsByHost) {
+        SwTlsCredentialEntry selected;
+        if (!selectHttp3TlsCredential_(credentials, selected)) {
+            m_lastHttp3Error = SwString("No valid TLS credential is available for HTTP/3");
+            return false;
+        }
+
+        credentialsByHost.clear();
+        bool loadedDefault = false;
+        for (std::size_t i = 0; i < credentials.size(); ++i) {
+            const SwTlsCredentialEntry& entry = credentials[i];
+            if (entry.certPath.trimmed().isEmpty() || entry.keyPath.trimmed().isEmpty()) {
+                continue;
+            }
+            SwQuicServerCredential loaded;
+            if (!SwQuicPemCredential::load(entry.certPath, entry.keyPath,
+                                            loaded, &m_lastHttp3Error)) {
+                return false;
+            }
+            if (entry.certPath == selected.certPath && entry.keyPath == selected.keyPath &&
+                entry.host == selected.host && entry.isDefault == selected.isDefault) {
+                defaultCredential = loaded;
+                loadedDefault = true;
+            }
+            const SwString host = entry.host.trimmed().toLower();
+            if (!host.isEmpty()) {
+                credentialsByHost[host] = loaded;
+            }
+        }
+        return loadedDefault && defaultCredential.isValid();
+    }
+
+    bool startHttp3ForSecureOrigin_(const SwString& bindAddress,
+                                    uint16_t requestedPort,
+                                    const SwQuicServerCredential& credential,
+                                    const SwQuicHttp3Server::CredentialMap& credentialsByHost,
+                                    const SwString& advertisedHost,
+                                    uint16_t& selectedPort) {
+        selectedPort = requestedPort;
+        if (!m_http3Config.enabled) {
+            m_http3Server.setAutomaticPollingEnabled(false);
+            m_http3Server.close();
+            return true;
+        }
+        setHttp3Credentials(credential, credentialsByHost);
+        m_http3AdvertisedHost = advertisedHost.trimmed().toLower();
+        SwString error;
+        if (!listenHttp3(bindAddress, requestedPort, &error)) {
+            return false;
+        }
+        selectedPort = m_http3Server.localPort();
+        return true;
+    }
+
+    bool listenSecureTransports_(const SwString& bindAddress,
+                                 uint16_t port,
+                                 const SwString& certPath,
+                                 const SwString& keyPath,
+                                 bool replaceListeners) {
+        if (!m_http3Config.enabled) {
+            return replaceListeners
+                       ? m_server.listen(bindAddress, port, certPath, keyPath)
+                       : m_server.listenHttps(bindAddress, port, certPath, keyPath);
+        }
+
+        SwQuicServerCredential credential;
+        if (!SwQuicPemCredential::load(certPath, keyPath, credential, &m_lastHttp3Error)) {
+            return false;
+        }
+        if (replaceListeners) {
+            m_http3Server.setAutomaticPollingEnabled(false);
+            m_http3Server.close();
+        }
+        const SwQuicHttp3Server::CredentialMap noNamedCredentials;
+        const int attempts = port == 0 ? 32 : 1;
+        for (int attempt = 0; attempt < attempts; ++attempt) {
+            // On Windows, immediately reopening TCP port 0 can repeatedly
+            // yield the same numeric port. If UDP already owns that number,
+            // retrying TCP-first therefore never makes progress. For an
+            // ephemeral dual-transport origin, reserve UDP first and bind TCP
+            // to its selected port; a TCP collision then produces a fresh UDP
+            // choice on the next attempt.
+            if (port == 0) {
+                uint16_t selectedPort = 0;
+                if (!startHttp3ForSecureOrigin_(bindAddress, 0, credential,
+                                                noNamedCredentials, SwString(),
+                                                selectedPort)) {
+                    return false;
+                }
+                const bool tcpListening = replaceListeners
+                                              ? m_server.listen(bindAddress, selectedPort,
+                                                                certPath, keyPath)
+                                              : m_server.listenHttps(bindAddress, selectedPort,
+                                                                     certPath, keyPath);
+                if (tcpListening) {
+                    m_lastHttp3Error = SwString();
+                    return true;
+                }
+                m_http3Server.setAutomaticPollingEnabled(false);
+                m_http3Server.close();
+                continue;
+            }
+            const bool tcpListening = replaceListeners
+                                          ? m_server.listen(bindAddress, port,
+                                                            certPath, keyPath)
+                                          : m_server.listenHttps(bindAddress, port,
+                                                                 certPath, keyPath);
+            if (!tcpListening) {
+                m_http3Server.setAutomaticPollingEnabled(false);
+                m_http3Server.close();
+                return false;
+            }
+
+            uint16_t selectedPort = m_server.httpsPort();
+            if (startHttp3ForSecureOrigin_(bindAddress, selectedPort, credential,
+                                           noNamedCredentials, SwString(), selectedPort)) {
+                m_lastHttp3Error = SwString();
+                return true;
+            }
+
+            // TCP and UDP have independent ephemeral/excluded-port pools on
+            // Windows. With port 0, retry until the OS gives us a numeric port
+            // that both transports can own.
+            m_server.closeHttpsListener();
+            if (port != 0) {
+                break;
+            }
+        }
+        return false;
+    }
+
+    bool listenSecureTransports_(const SwString& bindAddress,
+                                 uint16_t port,
+                                 const SwList<SwTlsCredentialEntry>& credentials) {
+        if (!m_http3Config.enabled) {
+            return m_server.listenHttps(bindAddress, port, credentials);
+        }
+
+        SwQuicServerCredential credential;
+        SwQuicHttp3Server::CredentialMap credentialsByHost;
+        if (!loadHttp3TlsCredentials_(credentials, credential, credentialsByHost)) {
+            return false;
+        }
+        const int attempts = port == 0 ? 32 : 1;
+        for (int attempt = 0; attempt < attempts; ++attempt) {
+            if (port == 0) {
+                uint16_t selectedPort = 0;
+                if (!startHttp3ForSecureOrigin_(bindAddress, 0, credential,
+                                                credentialsByHost, SwString(),
+                                                selectedPort)) {
+                    return false;
+                }
+                if (m_server.listenHttps(bindAddress, selectedPort, credentials)) {
+                    m_lastHttp3Error = SwString();
+                    return true;
+                }
+                m_http3Server.setAutomaticPollingEnabled(false);
+                m_http3Server.close();
+                continue;
+            }
+            if (!m_server.listenHttps(bindAddress, port, credentials)) {
+                m_http3Server.setAutomaticPollingEnabled(false);
+                m_http3Server.close();
+                return false;
+            }
+            uint16_t selectedPort = m_server.httpsPort();
+            if (startHttp3ForSecureOrigin_(bindAddress, selectedPort, credential,
+                                           credentialsByHost, SwString(), selectedPort)) {
+                m_lastHttp3Error = SwString();
+                return true;
+            }
+            m_server.closeHttpsListener();
+            if (port != 0) {
+                break;
+            }
+        }
+        return false;
+    }
+
+    void addHttp3DiscoveryHeader_(const SwHttpRequest& request,
+                                  SwHttpResponse& response) const {
+        if (!m_http3Config.enabled || !m_http3Config.advertise ||
+            !m_http3Server.isListening() || !request.isTls) {
+            return;
+        }
+
+        if (!m_http3AdvertisedHost.isEmpty()) {
+            const SwString host = request.headers.value("host").trimmed().toLower();
+            if (host != m_http3AdvertisedHost &&
+                !host.startsWith(m_http3AdvertisedHost + SwString(":"))) {
+                return;
+            }
+        }
+
+        for (SwMap<SwString, SwString>::const_iterator it = response.headers.begin();
+             it != response.headers.end(); ++it) {
+            if (it.key().toLower() == SwString("alt-svc")) {
+                return;
+            }
+        }
+        const int maxAge = (std::max)(0, m_http3Config.altSvcMaxAgeSeconds);
+        response.headers["alt-svc"] =
+            SwString("h3=\":") + SwString::number(m_http3Server.localPort()) +
+            SwString("\"; ma=") + SwString::number(maxAge);
+    }
+
+    bool synchronizeHttp3ListenerAfterReload_() {
+        if (!m_http3Config.enabled) return true;
+        const uint16_t port = m_server.httpsPort();
+        if (port == 0) {
+            m_lastHttp3Error = SwString(
+                "HTTPS credential reload did not leave a TCP listener active");
+            return false;
+        }
+        if (m_http3Server.isListening() && m_http3Server.localPort() == port) {
+            return true;
+        }
+        m_http3Server.setAutomaticPollingEnabled(false);
+        m_http3Server.close();
+        return listenHttp3(m_server.httpsAddress(), port, &m_lastHttp3Error);
+    }
 
     SwMailService* ensureMailService_() {
         if (!m_mailService) {

@@ -2,7 +2,11 @@
 #define SWQUICHTTP3SERVER_H
 
 #include "SwObject.h"
+#include "SwMap.h"
+#include "SwMutex.h"
+#include "SwPointer.h"
 #include "SwString.h"
+#include "SwTimer.h"
 #include "SwUdpSocket.h"
 #include "SwVector.h"
 #include "http/SwHttpRouter.h"
@@ -15,9 +19,13 @@
 #include "quic/SwQuicSessionTicket.h"
 
 #include <chrono>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
+#include <exception>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <string>
@@ -40,18 +48,41 @@ class SwQuicHttp3Server : public SwObject {
 
 private:
     struct Client_;
+    struct AsyncCompletionCycle_;
 
 public:
     typedef std::function<SwHttpResponse(const SwHttpRequest&)> RequestHandler;
+    typedef std::function<void(const SwHttpRequest&,
+                               const SwHttp3Server::ResponseCallback&)>
+        AsyncRequestHandler;
+    typedef SwHttp3Server::PendingBytesReserveHandler PendingBytesReserveHandler;
+    typedef SwHttp3Server::PendingBytesReleaseHandler PendingBytesReleaseHandler;
+    typedef SwMap<SwString, SwQuicServerCredential> CredentialMap;
 
     explicit SwQuicHttp3Server(SwObject* parent = nullptr)
         : SwObject(parent),
-          m_router(nullptr) {
-        // Note: poll() is driven explicitly by the owner (event-loop timer or a
-        // dedicated loop). We deliberately do NOT auto-connect the socket's
-        // readyRead to poll() -- draining the socket inside poll() re-emits
-        // readyRead, which would re-enter poll() (a fiber may even run it on
-        // another thread) and corrupt per-client state.
+          m_router(nullptr),
+          m_asyncCompletionCycle(new AsyncCompletionCycle_()) {
+        m_tickTimer = new SwTimer(1, this);
+        m_tickTimer->setSingleShot(true);
+        SwObject::connect(&m_socket, &SwUdpSocket::readyRead, this, [this]() {
+            if (!m_automaticPolling || !isListening()) {
+                return;
+            }
+            SwString error;
+            if (poll(0, &error) < 0 && !error.isEmpty()) {
+                serverError(error);
+            }
+        });
+        SwObject::connect(m_tickTimer, &SwTimer::timeout, this, [this]() {
+            if (!m_automaticPolling || !isListening()) {
+                return;
+            }
+            SwString error;
+            if (poll(0, &error) < 0 && !error.isEmpty()) {
+                serverError(error);
+            }
+        });
     }
 
     ~SwQuicHttp3Server() override {
@@ -60,13 +91,38 @@ public:
 
     // The credential (certificate chain + CertificateVerify signer) the server
     // presents to every client. Required before listen()/poll().
-    void setCredential(const SwQuicServerCredential& credential) { m_credential = credential; }
+    void setCredential(const SwQuicServerCredential& credential) {
+        m_credential = credential;
+        m_namedCredentials.clear();
+        advanceCredentialGeneration_();
+        // Resumption PSKs authenticate the previous server identity. Never let
+        // them survive a credential rotation.
+        m_ticketStore.clear();
+    }
+
+    void setCredentials(const SwQuicServerCredential& defaultCredential,
+                        const CredentialMap& credentialsByHost) {
+        m_credential = defaultCredential;
+        m_namedCredentials.clear();
+        for (CredentialMap::const_iterator it = credentialsByHost.begin();
+             it != credentialsByHost.end(); ++it) {
+            const SwString host = it.key().trimmed().toLower();
+            if (!host.isEmpty() && it.value().isValid()) {
+                m_namedCredentials[host] = it.value();
+            }
+        }
+        advanceCredentialGeneration_();
+        m_ticketStore.clear();
+    }
 
     // Route requests through an SwHttpRouter (shared with the HTTP/1.x server).
     void setRouter(SwHttpRouter* router) { m_router = router; }
 
     // Or dispatch through a plain handler (takes precedence only if no router).
     void setRequestHandler(const RequestHandler& handler) { m_requestHandler = handler; }
+    void setAsyncRequestHandler(const AsyncRequestHandler& handler) {
+        m_asyncRequestHandler = handler;
+    }
     void setMaxClients(std::size_t maximum) { m_maxClients = maximum; }
     void setMaxPendingHandshakes(std::size_t maximum) {
         m_maxPendingHandshakes = maximum;
@@ -77,9 +133,42 @@ public:
     void setMaxSessionTickets(std::size_t maximum) {
         m_ticketStore.setMaxEntries(maximum);
     }
+    void setHttpLimits(const SwHttpLimits& limits) { m_httpLimits = limits; }
+    // Optional cross-transport budget. Configure before listen(); the driver
+    // still tracks its own H3 usage for diagnostics while the external gate can
+    // combine that usage with TCP/TLS sessions.
+    void setPendingRequestBudgetHandlers(
+        const PendingBytesReserveHandler& reserveHandler,
+        const PendingBytesReleaseHandler& releaseHandler) {
+        if (m_pendingRequestBytesGlobal != 0) {
+            return;
+        }
+        m_pendingBytesReserveHandler = reserveHandler;
+        m_pendingBytesReleaseHandler = releaseHandler;
+    }
+
+    // Event-loop integration. When enabled, UDP readiness drives packet work
+    // and a one-shot timer is re-armed to the earliest QUIC deadline. Manual
+    // poll() remains available for dedicated-loop users and existing tests.
+    void setAutomaticPollingEnabled(bool enabled) {
+        m_automaticPolling = enabled;
+        if (!enabled) {
+            if (m_tickTimer) m_tickTimer->stop();
+            return;
+        }
+        armTimer_();
+    }
+
+    bool automaticPollingEnabled() const { return m_automaticPolling; }
 
     bool listen(const SwString& bindAddress, uint16_t port, SwString* error = nullptr) {
+        if (m_polling) {
+            setError_(error, SwString(
+                "Cannot replace the QUIC listener from inside its poll callback"));
+            return false;
+        }
         close();
+        beginAsyncCompletionCycle_();
         if (!m_credential.isValid()) {
             setError_(error, SwString("QUIC HTTP/3 server has no valid credential"));
             return false;
@@ -91,7 +180,12 @@ public:
 
         if (!m_socket.bind(bindAddress, port,
                            SwUdpSocket::ShareAddress | SwUdpSocket::ReuseAddressHint)) {
-            setError_(error, m_socket.errorString());
+            // SwUdpSocket keeps its native descriptor alive after a failed
+            // bind so callers may inspect/reuse it. A server listener must not
+            // expose that unbound descriptor as an active HTTP/3 endpoint.
+            const SwString bindError = m_socket.errorString();
+            m_socket.close();
+            setError_(error, bindError);
             return false;
         }
         if (error) {
@@ -101,15 +195,18 @@ public:
     }
 
     void close() {
-        m_socket.close();
-        m_clients.clear();
-        m_connectionIdIndex.clear();
+        if (m_polling) {
+            m_closePending = true;
+            return;
+        }
+        closeNow_();
     }
 
     bool isListening() const { return m_socket.isOpen(); }
     uint16_t localPort() const { return m_socket.localPort(); }
     SwString localAddress() const { return m_socket.localAddress(); }
     std::size_t clientCount() const { return m_clients.size(); }
+    std::size_t pendingRequestBytes() const { return m_pendingRequestBytesGlobal; }
 
     int poll(int timeoutMs = 0, SwString* error = nullptr) {
         if (!isListening()) {
@@ -125,7 +222,8 @@ public:
             }
             return 0;
         }
-        m_polling = true;
+        PollScope_ scope(this);
+        drainAsyncCompletions_(m_asyncCompletionCycle);
         purgeClients_(nowMs_());
 
         m_socket.pollPendingDatagrams(timeoutMs);
@@ -145,12 +243,17 @@ public:
                 continue;
             }
             ++processed;
+            if (m_closePending) {
+                break;
+            }
         }
 
-        fireTimers_();
-        purgeClients_(nowMs_());
+        if (!m_closePending) {
+            fireTimers_();
+            purgeClients_(nowMs_());
+            armTimer_();
+        }
 
-        m_polling = false;
         if (error) {
             *error = SwString();
         }
@@ -162,8 +265,24 @@ public:
 signals:
     DECLARE_SIGNAL(requestServed, const SwHttpRequest&, const SwHttpResponse&)
     DECLARE_SIGNAL(clientRejected, const SwString&, uint16_t, const SwString&)
+    DECLARE_SIGNAL(serverError, const SwString&)
 
 private:
+    class PollScope_ {
+    public:
+        explicit PollScope_(SwQuicHttp3Server* server) : m_server(server) {
+            m_server->m_polling = true;
+        }
+        ~PollScope_() {
+            m_server->m_polling = false;
+            if (m_server->m_closePending) {
+                m_server->closeNow_();
+            }
+        }
+    private:
+        SwQuicHttp3Server* m_server;
+    };
+
     struct Client_ {
         SwQuicHandshakeServer handshake;
         std::unique_ptr<SwQuicConnection> connection;
@@ -171,23 +290,47 @@ private:
         SwString host;
         uint16_t port;
         bool credentialSet;
+        std::uint64_t credentialGeneration;
         bool established;
         bool failed;
         std::uint64_t createdMs;
         std::uint64_t lastActivityMs;
+        std::shared_ptr<std::atomic<std::size_t> > pendingAsyncResponses;
 
-        Client_() : port(0), credentialSet(false), established(false), failed(false),
-                    createdMs(0), lastActivityMs(0) {}
+        Client_() : port(0), credentialSet(false), credentialGeneration(0),
+                    established(false), failed(false),
+                    createdMs(0), lastActivityMs(0),
+                    pendingAsyncResponses(new std::atomic<std::size_t>(0)) {}
+    };
+
+    struct AsyncCompletion_ {
+        std::string clientKey;
+        std::uint64_t streamId = 0;
+        std::shared_ptr<SwHttpResponse> response;
+    };
+
+    struct AsyncCompletionCycle_ {
+        SwMutex mutex;
+        std::deque<AsyncCompletion_> queue;
+        std::atomic<std::size_t> queued{0};
+        bool accepting = true;
     };
 
     std::int64_t nextTimeoutMs_() const {
         const std::uint64_t now = nowMs_();
         std::int64_t next = -1;
+        bool pendingAsyncResponse = false;
         for (std::map<std::string, Client_>::const_iterator it = m_clients.begin();
              it != m_clients.end(); ++it) {
             const Client_& client = it->second;
+            if (client.pendingAsyncResponses &&
+                client.pendingAsyncResponses->load(std::memory_order_acquire) > 0) {
+                pendingAsyncResponse = true;
+            }
             std::int64_t candidate = -1;
-            if (client.established && client.connection) {
+            if (client.failed) {
+                candidate = 0;
+            } else if (client.established && client.connection) {
                 candidate = client.connection->nextTimeoutMs(now);
             } else if (m_handshakeTimeoutMs > 0) {
                 const std::uint64_t deadline = client.createdMs + m_handshakeTimeoutMs;
@@ -196,12 +339,110 @@ private:
             }
             if (candidate >= 0 && (next < 0 || candidate < next)) next = candidate;
         }
+        const std::shared_ptr<AsyncCompletionCycle_> cycle =
+            m_asyncCompletionCycle;
+        if (cycle &&
+            (cycle->queued.load(std::memory_order_acquire) > 0 ||
+             pendingAsyncResponse) &&
+            (next < 0 || next > 25)) {
+            // A reliable affinity post can still be rejected while its lane
+            // is saturated. Keep a low-frequency fallback poll armed for as
+            // long as an async request or queued completion exists.
+            next = 25;
+        }
         return next;
+    }
+
+    void armTimer_() {
+        if (!m_automaticPolling || !m_tickTimer || !isListening()) {
+            return;
+        }
+        const std::int64_t next = nextTimeoutMs_();
+        m_tickTimer->stop();
+        if (next < 0) {
+            return;
+        }
+        std::int64_t delay = next <= 0 ? 1 : next;
+        if (delay > static_cast<std::int64_t>((std::numeric_limits<int>::max)())) {
+            delay = (std::numeric_limits<int>::max)();
+        }
+        m_tickTimer->start(static_cast<int>(delay));
+    }
+
+    void closeNow_() {
+        m_closePending = false;
+        if (m_tickTimer) m_tickTimer->stop();
+        invalidateAsyncCompletionCycle_();
+        m_socket.close();
+        m_clients.clear();
+        m_pendingRequestBytesGlobal = 0;
+        m_connectionIdIndex.clear();
+        m_ticketStore.clear();
+    }
+
+    void beginAsyncCompletionCycle_() {
+        m_asyncCompletionCycle.reset(new AsyncCompletionCycle_());
+    }
+
+    void invalidateAsyncCompletionCycle_() {
+        const std::shared_ptr<AsyncCompletionCycle_> cycle =
+            m_asyncCompletionCycle;
+        if (!cycle) return;
+        SwMutexLocker lock(&cycle->mutex);
+        cycle->accepting = false;
+        cycle->queue.clear();
+        cycle->queued.store(0, std::memory_order_release);
+    }
+
+    void advanceCredentialGeneration_() {
+        if (m_credentialGeneration ==
+            (std::numeric_limits<std::uint64_t>::max)()) {
+            m_credentialGeneration = 1;
+        } else {
+            ++m_credentialGeneration;
+        }
+        // Existing established sessions may finish normally with their
+        // negotiated keys. Incomplete handshakes must not mint a ticket for a
+        // credential identity that has just been replaced.
+        for (std::map<std::string, Client_>::iterator it = m_clients.begin();
+             it != m_clients.end(); ++it) {
+            if (!it->second.established) {
+                it->second.failed = true;
+            }
+        }
     }
 
     static void setError_(SwString* error, const SwString& message) {
         if (error) {
             *error = message;
+        }
+    }
+
+    bool reservePendingRequestBytes_(std::size_t bytes) {
+        if (m_httpLimits.maxPendingRequestBytesGlobal > 0 &&
+            (m_pendingRequestBytesGlobal > m_httpLimits.maxPendingRequestBytesGlobal ||
+             bytes > m_httpLimits.maxPendingRequestBytesGlobal -
+                         m_pendingRequestBytesGlobal)) {
+            return false;
+        }
+        if (bytes > (std::numeric_limits<std::size_t>::max)() -
+                        m_pendingRequestBytesGlobal) {
+            return false;
+        }
+        if (m_pendingBytesReserveHandler && !m_pendingBytesReserveHandler(bytes)) {
+            return false;
+        }
+        m_pendingRequestBytesGlobal += bytes;
+        return true;
+    }
+
+    void releasePendingRequestBytes_(std::size_t bytes) {
+        const std::size_t released = bytes > m_pendingRequestBytesGlobal
+            ? m_pendingRequestBytesGlobal
+            : bytes;
+        m_pendingRequestBytesGlobal -= released;
+        if (released > 0 && m_pendingBytesReleaseHandler) {
+            m_pendingBytesReleaseHandler(released);
         }
     }
 
@@ -356,8 +597,21 @@ private:
         }
         if (!client.credentialSet) {
             client.handshake.setCredential(m_credential);
+            client.handshake.setCredentialSelector(
+                [this](const SwString& serverName,
+                       SwQuicServerCredential& selected) -> bool {
+                    const SwString normalized = serverName.trimmed().toLower();
+                    CredentialMap::const_iterator it = m_namedCredentials.find(normalized);
+                    if (it != m_namedCredentials.end()) {
+                        selected = it.value();
+                        return selected.isValid();
+                    }
+                    selected = m_credential;
+                    return selected.isValid();
+                });
             client.handshake.setTicketStore(&m_ticketStore); // enable 0-RTT
             client.credentialSet = true;
+            client.credentialGeneration = m_credentialGeneration;
         }
         if (newConnection) {
             client.host = sender;
@@ -380,7 +634,13 @@ private:
                 return false;
             }
             if (client.handshake.handshakeComplete()) {
-                if (!establishConnection_(client, error)) {
+                if (client.credentialGeneration != m_credentialGeneration) {
+                    setError_(error, SwString(
+                        "QUIC credential changed during the pending handshake"));
+                    client.failed = true;
+                    return false;
+                }
+                if (!establishConnection_(key, client, error)) {
                     client.failed = true;
                     return false;
                 }
@@ -419,7 +679,9 @@ private:
         return true;
     }
 
-    bool establishConnection_(Client_& client, SwString* error) {
+    bool establishConnection_(const std::string& clientKey,
+                              Client_& client,
+                              SwString* error) {
         client.connection.reset(new SwQuicConnection(SwQuicConnection::Role::Server));
         client.connection->applyLocalTransportParameters(
             client.handshake.localTransportParameters());
@@ -441,7 +703,21 @@ private:
         }
 
         client.http3.reset(new SwHttp3Server(client.connection.get()));
-        client.http3->setRequestHandler(makeRequestHandler_());
+        client.http3->setLimits(m_httpLimits);
+        client.http3->setPendingRequestBudgetHandlers(
+            [this](std::size_t bytes) -> bool {
+                return reservePendingRequestBytes_(bytes);
+            },
+            [this](std::size_t bytes) {
+                releasePendingRequestBytes_(bytes);
+            });
+        if (m_asyncRequestHandler) {
+            client.http3->setAsyncRequestHandler(makeAsyncRequestHandler_(&client));
+            client.http3->setAsyncResponseReadyHandler(
+                makeAsyncResponseReadyHandler_(clientKey));
+        } else {
+            client.http3->setRequestHandler(makeRequestHandler_(&client));
+        }
         if (!client.http3->start(error)) {
             return false;
         }
@@ -514,24 +790,179 @@ private:
         return true;
     }
 
-    SwHttp3Server::RequestHandler makeRequestHandler_() {
+    SwHttp3Server::RequestHandler makeRequestHandler_(Client_* client) {
         SwHttpRouter* router = m_router;
         RequestHandler handler = m_requestHandler;
         SwQuicHttp3Server* self = this;
-        return [router, handler, self](const SwHttpRequest& request) -> SwHttpResponse {
+        return [router, handler, self, client](const SwHttpRequest& request) -> SwHttpResponse {
+            SwHttpRequest enrichedRequest = request;
+            enrichedRequest.isTls = true;
+            enrichedRequest.localPort = self->localPort();
+            if (client) {
+                enrichedRequest.peerAddress = client->host;
+                enrichedRequest.peerPort = client->port;
+            }
             SwHttpResponse response;
-            if (router) {
-                if (!router->route(request, response)) {
+            try {
+                if (router) {
+                    if (!router->route(enrichedRequest, response)) {
+                        response = swHttpTextResponse(404, SwString("Not Found"));
+                    }
+                } else if (handler) {
+                    response = handler(enrichedRequest);
+                } else {
                     response = swHttpTextResponse(404, SwString("Not Found"));
                 }
-            } else if (handler) {
-                response = handler(request);
-            } else {
-                response = swHttpTextResponse(404, SwString("Not Found"));
+            } catch (const std::exception&) {
+                response = swHttpTextResponse(500, SwString("Internal Server Error"));
+            } catch (...) {
+                response = swHttpTextResponse(500, SwString("Internal Server Error"));
             }
-            self->requestServed(request, response);
+            self->requestServed(enrichedRequest, response);
             return response;
         };
+    }
+
+    SwHttp3Server::AsyncRequestHandler makeAsyncRequestHandler_(Client_* client) {
+        AsyncRequestHandler handler = m_asyncRequestHandler;
+        SwQuicHttp3Server* self = this;
+        const std::shared_ptr<std::atomic<std::size_t> > pending =
+            client ? client->pendingAsyncResponses
+                   : std::shared_ptr<std::atomic<std::size_t> >(
+                         new std::atomic<std::size_t>(0));
+        return [handler, self, client, pending](
+                   const SwHttpRequest& request,
+                   const SwHttp3Server::ResponseCallback& complete) {
+            SwHttpRequest enrichedRequest = request;
+            enrichedRequest.isTls = true;
+            enrichedRequest.localPort = self->localPort();
+            if (client) {
+                enrichedRequest.peerAddress = client->host;
+                enrichedRequest.peerPort = client->port;
+            }
+            const std::shared_ptr<std::atomic<bool> > completedOnce(
+                new std::atomic<bool>(false));
+            pending->fetch_add(1, std::memory_order_acq_rel);
+            const SwHttp3Server::ResponseCallback guardedComplete =
+                [pending, completedOnce, complete](SwHttpResponse response) mutable {
+                    if (completedOnce->exchange(true, std::memory_order_acq_rel)) {
+                        return;
+                    }
+                    try {
+                        if (complete) {
+                            complete(std::move(response));
+                        }
+                    } catch (...) {
+                        // The session may have closed concurrently. The cycle
+                        // accounting still has to reach zero.
+                    }
+                    pending->fetch_sub(1, std::memory_order_acq_rel);
+                };
+            if (!handler) {
+                guardedComplete(swHttpTextResponse(404, SwString("Not Found")));
+                return;
+            }
+            try {
+                handler(enrichedRequest, guardedComplete);
+            } catch (const std::exception&) {
+                guardedComplete(swHttpTextResponse(500, SwString("Internal Server Error")));
+            } catch (...) {
+                guardedComplete(swHttpTextResponse(500, SwString("Internal Server Error")));
+            }
+        };
+    }
+
+    SwHttp3Server::AsyncResponseReadyHandler makeAsyncResponseReadyHandler_(
+        const std::string& clientKey) {
+        SwPointer<SwQuicHttp3Server> self(this);
+        const std::shared_ptr<AsyncCompletionCycle_> cycle =
+            m_asyncCompletionCycle;
+        return [self, cycle, clientKey](std::uint64_t streamId,
+                                        SwHttpResponse response) mutable {
+            if (!cycle) return;
+            AsyncCompletion_ completion;
+            completion.clientKey = clientKey;
+            completion.streamId = streamId;
+            try {
+                completion.response.reset(
+                    new SwHttpResponse(std::move(response)));
+            } catch (...) {
+                return;
+            }
+            {
+                SwMutexLocker lock(&cycle->mutex);
+                if (!cycle->accepting) return;
+                cycle->queue.push_back(std::move(completion));
+                cycle->queued.fetch_add(1, std::memory_order_release);
+            }
+
+            if (!self) return;
+            ThreadHandle* affinity = self->threadHandle();
+            if (!affinity || ThreadHandle::currentThread() == affinity) {
+                self->drainAsyncCompletions_(cycle);
+                return;
+            }
+            if (!ThreadHandle::postTaskOnLaneReliableIfLive(
+                    affinity,
+                    [self, cycle]() {
+                        if (self) self->drainAsyncCompletions_(cycle);
+                    },
+                    SwFiberLane::Control)) {
+                // The request/queue counters keep the fallback timer armed;
+                // poll() will drain this exact response once affinity work is
+                // accepted again.
+            }
+        };
+    }
+
+    void drainAsyncCompletions_(
+        const std::shared_ptr<AsyncCompletionCycle_>& cycle) {
+        if (!cycle || cycle != m_asyncCompletionCycle) return;
+        while (true) {
+            AsyncCompletion_ completion;
+            {
+                SwMutexLocker lock(&cycle->mutex);
+                if (!cycle->accepting || cycle->queue.empty()) break;
+                completion = std::move(cycle->queue.front());
+                cycle->queue.pop_front();
+                cycle->queued.fetch_sub(1, std::memory_order_acq_rel);
+            }
+            deliverAsyncCompletion_(completion);
+            if (m_closePending || cycle != m_asyncCompletionCycle) break;
+        }
+        armTimer_();
+    }
+
+    void deliverAsyncCompletion_(AsyncCompletion_& completion) {
+        if (!completion.response) return;
+        std::map<std::string, Client_>::iterator it =
+            m_clients.find(completion.clientKey);
+        if (it == m_clients.end() || !it->second.http3 ||
+            !it->second.connection) {
+            return;
+        }
+
+        SwHttpRequest completedRequest;
+        SwString error;
+        if (!it->second.http3->completeAsyncResponse(
+                completion.streamId, *completion.response,
+                &completedRequest, &error)) {
+            it->second.failed = true;
+            if (!error.isEmpty()) serverError(error);
+            return;
+        }
+        // An empty protocol identifies a stale/duplicate completion after a
+        // route timeout, request reset, or client purge.
+        if (completedRequest.protocol.isEmpty()) return;
+
+        requestServed(completedRequest, *completion.response);
+        if (m_closePending) return;
+        it = m_clients.find(completion.clientKey);
+        if (it == m_clients.end() || !it->second.connection) return;
+        if (!flushConnection_(it->second, &error)) {
+            it->second.failed = true;
+            if (!error.isEmpty()) serverError(error);
+        }
     }
 
     // Drive per-connection QUIC timers (PTO retransmission, idle) for every
@@ -553,6 +984,9 @@ private:
     }
 
     bool flushConnection_(Client_& client, SwString* error) {
+        if (client.http3 && !client.http3->pumpResponseStreams(error)) {
+            return false;
+        }
         SwVector<SwByteArray> outgoing;
         if (!client.connection->buildDatagrams(nowMs_(), outgoing, error)) {
             return false;
@@ -584,15 +1018,28 @@ private:
 
     SwUdpSocket m_socket;
     SwQuicServerCredential m_credential;
+    CredentialMap m_namedCredentials;
     SwHttpRouter* m_router;
     RequestHandler m_requestHandler;
+    AsyncRequestHandler m_asyncRequestHandler;
+    PendingBytesReserveHandler m_pendingBytesReserveHandler;
+    PendingBytesReleaseHandler m_pendingBytesReleaseHandler;
+    // Shared by all live H3 sessions; declared before m_clients so it remains
+    // alive while their destructors return outstanding budget charges.
+    std::size_t m_pendingRequestBytesGlobal = 0;
     std::map<std::string, Client_> m_clients;
     std::map<std::string, std::string> m_connectionIdIndex;
     SwQuicTicketStore m_ticketStore; // 0-RTT resumption tickets
+    std::uint64_t m_credentialGeneration = 0;
+    std::shared_ptr<AsyncCompletionCycle_> m_asyncCompletionCycle;
+    SwTimer* m_tickTimer = nullptr;
     bool m_polling = false;
+    bool m_closePending = false;
+    bool m_automaticPolling = false;
     std::size_t m_maxClients = 4096;
     std::size_t m_maxPendingHandshakes = 1024;
     std::uint64_t m_handshakeTimeoutMs = 10000;
+    SwHttpLimits m_httpLimits;
 };
 
 #endif

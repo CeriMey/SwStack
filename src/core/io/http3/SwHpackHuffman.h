@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <map>
 
 //--------------------------------------------------------------------------------------------------
@@ -61,6 +62,13 @@ public:
     }
 
     static bool decode(const SwByteArray& in, SwByteArray& out, SwString* error = nullptr) {
+        return decode(in, out, (std::numeric_limits<std::size_t>::max)(), error);
+    }
+
+    static bool decode(const SwByteArray& in,
+                       SwByteArray& out,
+                       std::size_t maxOutputBytes,
+                       SwString* error = nullptr) {
         out.clear();
         const std::map<std::uint64_t, int>& lookup = decodeLookup_();
 
@@ -79,6 +87,10 @@ public:
                 if (it != lookup.end()) {
                     if (it->second == 256) {
                         setError_(error, "HPACK Huffman stream contains an explicit EOS symbol");
+                        return false;
+                    }
+                    if (out.size() >= maxOutputBytes) {
+                        setError_(error, "HPACK Huffman output exceeds the configured limit");
                         return false;
                     }
                     out.append(static_cast<char>(static_cast<std::uint8_t>(it->second)));

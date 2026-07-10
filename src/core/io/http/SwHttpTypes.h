@@ -141,7 +141,9 @@ struct SwHttpResponse {
     SwMap<SwString, SwString> headers;
     SwByteArray body;
 
-    // Streamed/chunked response support.
+    // Streamed/chunked response support. When explicit chunkedParts are
+    // present they are the payload; body is the fallback only when the list is
+    // empty. HTTP/1.x and HTTP/3 intentionally share this rule.
     bool useChunkedTransfer = false;
     SwList<SwByteArray> chunkedParts;
 

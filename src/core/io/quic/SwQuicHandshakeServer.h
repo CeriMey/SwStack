@@ -60,9 +60,18 @@ public:
         bool requireClientAuthentication = false;
         bool requireRawPublicKeys = false;
         std::function<bool(const SwByteArray&)> clientSpkiVerifier;
+        // Optional ALPN-specific snapshot. It is selected only after the
+        // complete ClientHello has authenticated its framing and before any
+        // ServerHello/Certificate bytes are constructed. An invalid value
+        // preserves the credential installed with setCredential().
+        SwQuicServerCredential credential;
+        SwQuicTransportParameters transportParameters;
+        bool hasTransportParameters = false;
     };
     using ApplicationProtocolSelector = std::function<bool(
         const SwVector<SwByteArray>& offered, ApplicationProtocolPolicy& selected)>;
+    using CredentialSelector = std::function<bool(
+        const SwString& serverName, SwQuicServerCredential& selected)>;
 
     SwQuicHandshakeServer()
         : m_state(State::Idle),
@@ -95,6 +104,20 @@ public:
     // transport parameters QUIC standards envoyes au client.
     const SwQuicConnectionId& originalDestinationConnectionId() const {
         return m_originalDestinationConnectionId;
+    }
+    // Installs the stateless Retry context before the first token-bearing
+    // Initial is processed. Initial protection keys are still derived from
+    // retrySourceConnectionId (the packet DCID); ODCID remains the first
+    // Initial's DCID and is authenticated into the transport parameters.
+    bool setRetryContext(const SwQuicConnectionId& originalDestinationConnectionId,
+                         const SwQuicConnectionId& retrySourceConnectionId) {
+        if (m_state != State::Idle ||
+            originalDestinationConnectionId.isEmpty() ||
+            retrySourceConnectionId.isEmpty()) return false;
+        m_originalDestinationConnectionId = originalDestinationConnectionId;
+        m_retrySourceConnectionId = retrySourceConnectionId;
+        m_retryUsed = true;
+        return true;
     }
     // Next 1-RTT packet number after the server confirmation flight: a
     // connection taking over the app space must continue from here so it never
@@ -144,6 +167,10 @@ public:
 
     // Install the certificate + signing credential the server presents.
     void setCredential(const SwQuicServerCredential& credential) { m_credential = credential; }
+    void setCredentialSelector(CredentialSelector selector) {
+        m_credentialSelector = std::move(selector);
+    }
+    const SwString& serverName() const { return m_serverName; }
 
     // Request and require TLS 1.3 client authentication. The verifier receives
     // only canonical DER SubjectPublicKeyInfo and is therefore suitable for a
@@ -370,18 +397,25 @@ private:
             m_state = State::WaitClientInitial;
         }
 
-        // The client's original DCID is the AEAD input for the Initial secrets;
-        // it is the cleartext DCID in the packet header.
+        // Initial protection uses the current packet DCID. Without Retry it is
+        // also the ODCID; after Retry it is retry_source_connection_id while
+        // the authenticated stateless token supplied the original DCID.
         SwQuicConnectionId packetDcid;
         if (!peekInitialDcid_(packet, packetDcid, error)) {
             return false;
         }
-        if (m_originalDestinationConnectionId.isEmpty()) {
-            m_originalDestinationConnectionId = packetDcid;
-            if (!SwQuicInitialSecrets::deriveV1(m_originalDestinationConnectionId,
-                                                m_clientInitialKeys, m_serverInitialKeys, error)) {
+        if (m_initialProtectionDestinationConnectionId.isEmpty()) {
+            if (m_retryUsed && packetDcid != m_retrySourceConnectionId) {
+                setError_(error, "Retried Initial destination connection id mismatch");
                 return false;
             }
+            m_initialProtectionDestinationConnectionId = packetDcid;
+            if (m_originalDestinationConnectionId.isEmpty()) {
+                m_originalDestinationConnectionId = packetDcid;
+            }
+            if (!SwQuicInitialSecrets::deriveV1(
+                    m_initialProtectionDestinationConnectionId,
+                    m_clientInitialKeys, m_serverInitialKeys, error)) return false;
         }
 
         SwQuicPacketHeader header;
@@ -514,6 +548,15 @@ private:
         if (!SwTls13Messages::parseClientHello(messages[0].body, clientHello, error)) {
             return false;
         }
+        m_serverName = SwString(clientHello.serverName.toStdString()).trimmed().toLower();
+        if (m_credentialSelector) {
+            SwQuicServerCredential selected;
+            if (!m_credentialSelector(m_serverName, selected) || !selected.isValid()) {
+                setError_(error, "No valid QUIC certificate is configured for the requested SNI");
+                return false;
+            }
+            m_credential = selected;
+        }
         if (!clientHello.offersAes128GcmSha256) {
             setError_(error, "Client did not offer TLS_AES_128_GCM_SHA256");
             return false;
@@ -543,6 +586,12 @@ private:
             m_requireClientAuth = policy.requireClientAuthentication ||
                                   policy.requireRawPublicKeys;
             m_clientSpkiVerifier = std::move(policy.clientSpkiVerifier);
+            if (policy.credential.isValid()) {
+                m_credential = std::move(policy.credential);
+            }
+            if (policy.hasTransportParameters) {
+                m_localParams = policy.transportParameters;
+            }
         } else if (!offersProtocol_(clientHello.alpnProtocols, m_applicationProtocol)) {
             setError_(error, "Client did not offer the configured ALPN (no_application_protocol)");
             return false;
@@ -605,7 +654,7 @@ private:
         // handshake and ignore offered PSKs fail-closed.
         if (!m_requireClientAuth && m_ticketStore && clientHello.hasPreSharedKey) {
             const SwQuicTicketStore::Entry entry =
-                m_ticketStore->lookup(clientHello.pskIdentity);
+                m_ticketStore->lookup(clientHello.pskIdentity, m_serverName);
             if (entry.found) {
                 SwByteArray expectedBinder;
                 SecretGuard_ expectedBinderGuard(expectedBinder);
@@ -936,6 +985,10 @@ private:
         params.hasOriginalDestinationConnectionId = true;
         params.initialSourceConnectionId = m_serverConnectionId.bytes();
         params.hasInitialSourceConnectionId = true;
+        if (m_retryUsed) {
+            params.retrySourceConnectionId = m_retrySourceConnectionId.bytes();
+            params.hasRetrySourceConnectionId = true;
+        }
 
         SwByteArray transportParameters;
         if (!params.encode(transportParameters, error)) {
@@ -959,10 +1012,16 @@ private:
             appendU16_(signatureSchemes, 2);
             appendU16_(signatureSchemes, 0x0807); // ed25519
         } else {
-            appendU16_(signatureSchemes, 6);
+            appendU16_(signatureSchemes, 18);
             appendU16_(signatureSchemes, 0x0403); // ecdsa_secp256r1_sha256
+            appendU16_(signatureSchemes, 0x0503); // ecdsa_secp384r1_sha384
+            appendU16_(signatureSchemes, 0x0807); // ed25519
             appendU16_(signatureSchemes, 0x0804); // rsa_pss_rsae_sha256
             appendU16_(signatureSchemes, 0x0805); // rsa_pss_rsae_sha384
+            appendU16_(signatureSchemes, 0x0806); // rsa_pss_rsae_sha512
+            appendU16_(signatureSchemes, 0x0809); // rsa_pss_pss_sha256
+            appendU16_(signatureSchemes, 0x080a); // rsa_pss_pss_sha384
+            appendU16_(signatureSchemes, 0x080b); // rsa_pss_pss_sha512
         }
         SwByteArray extensions;
         appendExtension_(extensions, 0x000d, signatureSchemes);
@@ -1248,7 +1307,11 @@ private:
                 return false;
             }
             if (!m_requireRawPublicKeys && signatureScheme != 0x0403 &&
-                signatureScheme != 0x0804 && signatureScheme != 0x0805) {
+                signatureScheme != 0x0503 &&
+                signatureScheme != 0x0804 && signatureScheme != 0x0805 &&
+                signatureScheme != 0x0806 && signatureScheme != 0x0807 &&
+                signatureScheme != 0x0809 && signatureScheme != 0x080a &&
+                signatureScheme != 0x080b) {
                 setError_(error, "Client CertificateVerify uses an unrequested signature scheme");
                 return false;
             }
@@ -1348,7 +1411,8 @@ public:
         if (!params.encode(serverParams, error)) {
             return false;
         }
-        store.store(ticket, psk, maxEarlyDataSize, serverParams);
+        store.store(ticket, psk, maxEarlyDataSize, serverParams, m_serverName,
+                    ticketLifetimeS);
         SwTls13Messages::buildNewSessionTicketBody(ticketLifetimeS, ticketAgeAdd, ticketNonce,
                                                    ticket, maxEarlyDataSize,
                                                    outNewSessionTicketBody);
@@ -1476,6 +1540,8 @@ private:
     State m_state;
     SwString m_error;
     SwQuicServerCredential m_credential;
+    CredentialSelector m_credentialSelector;
+    SwString m_serverName;
     bool m_requireClientAuth = false;
     bool m_requireRawPublicKeys = false;
     std::function<bool(const SwByteArray&)> m_clientSpkiVerifier;
@@ -1487,8 +1553,11 @@ private:
     ApplicationProtocolSelector m_applicationProtocolSelector;
 
     SwQuicConnectionId m_originalDestinationConnectionId;
+    SwQuicConnectionId m_initialProtectionDestinationConnectionId;
+    SwQuicConnectionId m_retrySourceConnectionId;
     SwQuicConnectionId m_clientConnectionId;
     SwQuicConnectionId m_serverConnectionId;
+    bool m_retryUsed = false;
 
     SwQuicInitialKeys m_clientInitialKeys;
     SwQuicInitialKeys m_serverInitialKeys;

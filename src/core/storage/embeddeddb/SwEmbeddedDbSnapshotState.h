@@ -6,8 +6,9 @@ public:
     SwString blobDir;
     SwEmbeddedDbOptions options;
     std::shared_ptr<ReadModel_> readModel;
-    MemTable_ mutableMem;
-    SwList<MemTable_> immutableMems;
+    std::shared_ptr<const WriterOverlay_> overlay;
+    std::shared_ptr<const MemTable_> mutableMem;
+    SwList<std::shared_ptr<const MemTable_>> immutableMems;
     std::vector<std::shared_ptr<TableHandle_>> primaryTablesNewestFirst;
     SwHash<SwString, std::vector<std::shared_ptr<TableHandle_>>> indexTablesNewestFirst;
 
@@ -39,14 +40,27 @@ public:
                                PrimaryRecord_& outRecord,
                                bool resolveBlob,
                                int* tableHint) const {
-        const PrimaryMemStore_::const_iterator mutableIt = mutableMem.primary.find(primaryKey);
-        if (mutableIt != mutableMem.primary.end()) {
-            outRecord = mutableIt->second;
-            return !outRecord.deleted && (!resolveBlob || resolveValue(outRecord));
+        if (overlay) {
+            const std::map<SwByteArray, PrimaryRecord_>::const_iterator overlayIt =
+                overlay->primary.find(primaryKey);
+            if (overlayIt != overlay->primary.end()) {
+                outRecord = overlayIt->second;
+                return !outRecord.deleted && (!resolveBlob || resolveValue(outRecord));
+            }
+        }
+        if (mutableMem) {
+            const PrimaryMemStore_::const_iterator mutableIt = mutableMem->primary.find(primaryKey);
+            if (mutableIt != mutableMem->primary.end()) {
+                outRecord = mutableIt->second;
+                return !outRecord.deleted && (!resolveBlob || resolveValue(outRecord));
+            }
         }
         for (std::size_t i = immutableMems.size(); i > 0; --i) {
-            const PrimaryMemStore_::const_iterator immutableIt = immutableMems[i - 1].primary.find(primaryKey);
-            if (immutableIt != immutableMems[i - 1].primary.end()) {
+            if (!immutableMems[i - 1]) {
+                continue;
+            }
+            const PrimaryMemStore_::const_iterator immutableIt = immutableMems[i - 1]->primary.find(primaryKey);
+            if (immutableIt != immutableMems[i - 1]->primary.end()) {
                 outRecord = immutableIt->second;
                 return !outRecord.deleted && (!resolveBlob || resolveValue(outRecord));
             }

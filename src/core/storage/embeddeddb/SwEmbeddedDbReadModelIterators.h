@@ -187,11 +187,205 @@ inline bool snapshotLookupPrimary_(const std::shared_ptr<SnapshotState_>& snapsh
     return snapshot && snapshot->lookupPrimary(primaryKey, outRecord, resolveBlob);
 }
 
+// Two-way sorted merge of the shared base read model with the writer overlay
+// (records written since the base was built). The overlay always wins on key
+// collisions (its sequences are newer); deleted overlay entries suppress the
+// matching base rows.
+class OverlayMergingPrimaryIteratorState_ : public IteratorState_ {
+public:
+    OverlayMergingPrimaryIteratorState_(const std::shared_ptr<SnapshotState_>& snapshot,
+                                        const SwByteArray& startKey,
+                                        const SwByteArray& endKey)
+        : snapshot_(snapshot),
+          endKey_(endKey),
+          base_(new ReadModelPrimaryIteratorState_(snapshot, snapshot->readModel, startKey, endKey)) {
+        overlayIt_ = startKey.isEmpty() ? snapshot_->overlay->primary.begin()
+                                        : snapshot_->overlay->primary.lower_bound(startKey);
+    }
+
+    bool next(SwDbEntry& outEntry) override {
+        while (true) {
+            if (!baseLoaded_) {
+                baseValid_ = base_->next(baseEntry_);
+                baseLoaded_ = true;
+            }
+            const bool overlayValid = overlayCurrentValid_();
+            if (!overlayValid && !baseValid_) {
+                return false;
+            }
+
+            bool takeOverlay = false;
+            bool alsoConsumeBase = false;
+            if (!overlayValid) {
+                takeOverlay = false;
+            } else if (!baseValid_) {
+                takeOverlay = true;
+            } else if (overlayIt_->first < baseEntry_.primaryKey) {
+                takeOverlay = true;
+            } else if (baseEntry_.primaryKey < overlayIt_->first) {
+                takeOverlay = false;
+            } else {
+                takeOverlay = true;
+                alsoConsumeBase = true;
+            }
+
+            if (takeOverlay) {
+                const SwByteArray key = overlayIt_->first;
+                PrimaryRecord_ record = overlayIt_->second;
+                ++overlayIt_;
+                if (alsoConsumeBase) {
+                    baseLoaded_ = false;
+                }
+                if (record.deleted) {
+                    continue;
+                }
+                if (!snapshot_->resolveValue(record)) {
+                    return false;
+                }
+                outEntry.primaryKey = key;
+                outEntry.secondaryKey = SwByteArray();
+                outEntry.value = record.value;
+                outEntry.secondaryKeys = record.secondaryKeys;
+                outEntry.sequence = record.sequence;
+                return true;
+            }
+
+            baseLoaded_ = false;
+            outEntry = baseEntry_;
+            return true;
+        }
+    }
+
+private:
+    bool overlayCurrentValid_() const {
+        if (overlayIt_ == snapshot_->overlay->primary.end()) {
+            return false;
+        }
+        if (!endKey_.isEmpty() && !(overlayIt_->first < endKey_)) {
+            return false;
+        }
+        return true;
+    }
+
+    std::shared_ptr<SnapshotState_> snapshot_;
+    SwByteArray endKey_;
+    std::shared_ptr<ReadModelPrimaryIteratorState_> base_;
+    std::map<SwByteArray, PrimaryRecord_>::const_iterator overlayIt_;
+    SwDbEntry baseEntry_;
+    bool baseValid_{false};
+    bool baseLoaded_{false};
+};
+
+class OverlayMergingIndexIteratorState_ : public IteratorState_ {
+public:
+    OverlayMergingIndexIteratorState_(const std::shared_ptr<SnapshotState_>& snapshot,
+                                      const SwString& indexName,
+                                      const SwByteArray& startSecondaryKey,
+                                      const SwByteArray& endSecondaryKey,
+                                      const std::map<SwByteArray, OverlayIndexEntry_>* overlayIndex)
+        : snapshot_(snapshot),
+          endSecondaryKey_(endSecondaryKey),
+          overlayIndex_(overlayIndex),
+          base_(new ReadModelIndexIteratorState_(snapshot,
+                                                 snapshot->readModel,
+                                                 indexName,
+                                                 startSecondaryKey,
+                                                 endSecondaryKey)) {
+        if (startSecondaryKey.isEmpty()) {
+            overlayIt_ = overlayIndex_->begin();
+        } else {
+            overlayIt_ = overlayIndex_->lower_bound(
+                encodeIndexCompositeKey_(startSecondaryKey, SwByteArray()));
+        }
+    }
+
+    bool next(SwDbEntry& outEntry) override {
+        while (true) {
+            if (!baseLoaded_) {
+                baseValid_ = base_->next(baseEntry_);
+                if (baseValid_) {
+                    baseCompositeKey_ = encodeIndexCompositeKey_(baseEntry_.secondaryKey, baseEntry_.primaryKey);
+                }
+                baseLoaded_ = true;
+            }
+            const bool overlayValid = overlayCurrentValid_();
+            if (!overlayValid && !baseValid_) {
+                return false;
+            }
+
+            bool takeOverlay = false;
+            bool alsoConsumeBase = false;
+            if (!overlayValid) {
+                takeOverlay = false;
+            } else if (!baseValid_) {
+                takeOverlay = true;
+            } else if (overlayIt_->first < baseCompositeKey_) {
+                takeOverlay = true;
+            } else if (baseCompositeKey_ < overlayIt_->first) {
+                takeOverlay = false;
+            } else {
+                takeOverlay = true;
+                alsoConsumeBase = true;
+            }
+
+            if (takeOverlay) {
+                const OverlayIndexEntry_ entry = overlayIt_->second;
+                ++overlayIt_;
+                if (alsoConsumeBase) {
+                    baseLoaded_ = false;
+                }
+                if (entry.deleted) {
+                    continue;
+                }
+                PrimaryRecord_ record;
+                if (!snapshot_->lookupPrimary(entry.primaryKey, record, true)) {
+                    continue;
+                }
+                outEntry.primaryKey = entry.primaryKey;
+                outEntry.secondaryKey = entry.secondaryKey;
+                outEntry.value = record.value;
+                outEntry.secondaryKeys = record.secondaryKeys;
+                outEntry.sequence = record.sequence;
+                return true;
+            }
+
+            baseLoaded_ = false;
+            outEntry = baseEntry_;
+            return true;
+        }
+    }
+
+private:
+    bool overlayCurrentValid_() const {
+        if (overlayIt_ == overlayIndex_->end()) {
+            return false;
+        }
+        if (!endSecondaryKey_.isEmpty() && !(overlayIt_->second.secondaryKey < endSecondaryKey_)) {
+            return false;
+        }
+        return true;
+    }
+
+    std::shared_ptr<SnapshotState_> snapshot_;
+    SwByteArray endSecondaryKey_;
+    const std::map<SwByteArray, OverlayIndexEntry_>* overlayIndex_{nullptr};
+    std::shared_ptr<ReadModelIndexIteratorState_> base_;
+    std::map<SwByteArray, OverlayIndexEntry_>::const_iterator overlayIt_;
+    SwDbEntry baseEntry_;
+    SwByteArray baseCompositeKey_;
+    bool baseValid_{false};
+    bool baseLoaded_{false};
+};
+
 inline std::shared_ptr<IteratorState_> createPrimaryIteratorState_(const std::shared_ptr<SnapshotState_>& snapshot,
                                                                    const SwByteArray& startKey,
                                                                    const SwByteArray& endKey) {
     if (!snapshot || !snapshot->readModel) {
         return std::shared_ptr<IteratorState_>();
+    }
+    if (snapshot->overlay && !snapshot->overlay->primary.empty()) {
+        return std::shared_ptr<IteratorState_>(
+            new OverlayMergingPrimaryIteratorState_(snapshot, startKey, endKey));
     }
     return std::shared_ptr<IteratorState_>(
         new ReadModelPrimaryIteratorState_(snapshot, snapshot->readModel, startKey, endKey));
@@ -203,6 +397,18 @@ inline std::shared_ptr<IteratorState_> createIndexIteratorState_(const std::shar
                                                                  const SwByteArray& endSecondaryKey) {
     if (!snapshot || !snapshot->readModel) {
         return std::shared_ptr<IteratorState_>();
+    }
+    if (snapshot->overlay) {
+        const SwHash<SwString, std::map<SwByteArray, OverlayIndexEntry_>>::const_iterator bucket =
+            snapshot->overlay->indexes.find(indexName);
+        if (bucket != snapshot->overlay->indexes.end() && !bucket->second.empty()) {
+            return std::shared_ptr<IteratorState_>(
+                new OverlayMergingIndexIteratorState_(snapshot,
+                                                      indexName,
+                                                      startSecondaryKey,
+                                                      endSecondaryKey,
+                                                      &bucket->second));
+        }
     }
     return std::shared_ptr<IteratorState_>(
         new ReadModelIndexIteratorState_(snapshot, snapshot->readModel, indexName, startSecondaryKey, endSecondaryKey));

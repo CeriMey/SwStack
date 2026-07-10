@@ -70,9 +70,14 @@ bool testLiveZeroRtt() {
         return false;
     }
     SwQuicTicketStore store;
+    std::uint64_t monotonicNowMs = 1000;
+    store.setMonotonicNowProvider([&monotonicNowMs]() {
+        return monotonicNowMs;
+    });
 
     // ---- Connection 1: full handshake + ticket issuance -----------------
-    SwQuicSessionTicket ticket;
+    SwQuicSessionTicket validTicket;
+    SwQuicSessionTicket expiringTicket;
     {
         SwQuicHandshakeClient client;
         client.setVerifyPeer(true);
@@ -93,34 +98,44 @@ bool testLiveZeroRtt() {
             return false;
         }
 
-        SwByteArray ticketBytes;
-        SwByteArray ticketNonce;
-        if (!SwQuicRandom::fill(ticketBytes, 24, &error) ||
-            !SwQuicRandom::fill(ticketNonce, 8, &error)) {
+        const auto issueTicket = [&](SwQuicSessionTicket& outTicket) -> bool {
+            SwByteArray ticketBytes;
+            SwByteArray ticketNonce;
+            if (!SwQuicRandom::fill(ticketBytes, 24, &error) ||
+                !SwQuicRandom::fill(ticketNonce, 8, &error)) {
+                return false;
+            }
+            SwByteArray nstBody;
+            return server.issueNewSessionTicket(
+                       store, ticketBytes, ticketNonce,
+                       2, 0x11223344, 0xffffffffu, nstBody, &error) &&
+                   client.processNewSessionTicket(
+                       nstBody, SwByteArray(), outTicket, &error);
+        };
+        if (!requireTrue(issueTicket(validTicket),
+                         "valid-window ticket issuance failed") ||
+            !requireTrue(issueTicket(expiringTicket),
+                         "expiry-window ticket issuance failed") ||
+            !requireTrue(validTicket.allowsEarlyData() &&
+                             expiringTicket.allowsEarlyData(),
+                         "issued tickets do not allow early data") ||
+            !requireTrue(store.size() == 2,
+                         "server did not retain both fresh tickets")) {
             std::cerr << error << std::endl;
-            return false;
-        }
-        SwByteArray nstBody;
-        if (!requireTrue(server.issueNewSessionTicket(store, ticketBytes, ticketNonce,
-                                                      7200, 0x11223344, 0xffffffffu, nstBody, &error),
-                         "ticket issuance failed") ||
-            !requireTrue(client.processNewSessionTicket(nstBody, SwByteArray(), ticket, &error),
-                         "client NST processing failed")) {
-            std::cerr << error << std::endl;
-            return false;
-        }
-        if (!requireTrue(ticket.allowsEarlyData(), "ticket does not allow early data")) {
             return false;
         }
     }
 
-    // ---- Connection 2: resumption + 0-RTT early data --------------------
+    // ---- Connection 2: resumption just before expiry --------------------
+    // Tickets were issued at t=1000ms with a two-second lifetime. The first
+    // remains valid at the last millisecond before its exclusive deadline.
+    monotonicNowMs = 2999;
     const SwByteArray earlyData("early GET /api/state HTTP/3");
 
     SwQuicHandshakeClient client2;
     client2.setVerifyPeer(true);
     client2.setVerifyCertificateChain(false);
-    client2.setResumption(ticket, earlyData);
+    client2.setResumption(validTicket, earlyData);
 
     SwQuicHandshakeServer server2;
     server2.setCredential(credential);
@@ -161,17 +176,58 @@ bool testLiveZeroRtt() {
 
     // The server must have accepted the PSK, decrypted the 0-RTT early data
     // during the handshake, and echoed early_data; both sides agree on keys.
-    return requireTrue(server2.isResuming(), "server did not resume the session") &&
-           requireTrue(server2.acceptedEarlyData(), "server did not accept early data") &&
-           requireTrue(server2.receivedEarlyData() == earlyData,
-                       "server did not recover the 0-RTT early data") &&
-           requireTrue(client2.earlyDataAccepted(),
-                       "client was not told early data was accepted") &&
-           requireTrue(clientExporter.size() == 32 && clientExporter == serverExporter,
-                       "resumed client/server exporters differ") &&
-           requireTrue(client2.clientApplicationKeys().key == server2.clientApplicationKeys().key &&
-                           client2.serverApplicationKeys().key == server2.serverApplicationKeys().key,
-                       "resumed 1-RTT keys differ between client and server");
+    if (!requireTrue(server2.isResuming(),
+                     "server rejected a ticket before its expiry") ||
+        !requireTrue(server2.acceptedEarlyData(),
+                     "server did not accept pre-expiry early data") ||
+        !requireTrue(server2.receivedEarlyData() == earlyData,
+                     "server did not recover the 0-RTT early data") ||
+        !requireTrue(client2.earlyDataAccepted(),
+                     "client was not told early data was accepted") ||
+        !requireTrue(clientExporter.size() == 32 && clientExporter == serverExporter,
+                     "resumed client/server exporters differ") ||
+        !requireTrue(client2.clientApplicationKeys().key ==
+                         server2.clientApplicationKeys().key &&
+                         client2.serverApplicationKeys().key ==
+                         server2.serverApplicationKeys().key,
+                     "resumed 1-RTT keys differ between client and server")) {
+        return false;
+    }
+
+    // ---- Connection 3: same policy exactly at/after expiry --------------
+    // At the exclusive deadline the second ticket must be removed and its PSK
+    // ignored. TLS still completes via a full certificate handshake, but 0-RTT
+    // is rejected and the server never exposes the early request to the app.
+    monotonicNowMs = 3000;
+    SwQuicHandshakeClient client3;
+    client3.setVerifyPeer(true);
+    client3.setVerifyCertificateChain(false);
+    client3.setResumption(expiringTicket, earlyData);
+
+    SwQuicHandshakeServer server3;
+    server3.setCredential(credential);
+    server3.setTicketStore(&store);
+
+    SwByteArray expiredInitial;
+    if (!requireTrue(client3.start(SwString("resume.test"), expiredInitial, &error),
+                     "expired-ticket fallback start failed") ||
+        !requireTrue(driveToCompletion(client3, server3, expiredInitial, &error),
+                     "expired-ticket full-handshake fallback failed")) {
+        std::cerr << "c=" << client3.errorString()
+                  << " s=" << server3.errorString() << std::endl;
+        return false;
+    }
+
+    return requireTrue(!server3.isResuming(),
+                       "server resumed with an expired ticket") &&
+           requireTrue(!server3.acceptedEarlyData() &&
+                           server3.receivedEarlyData().isEmpty(),
+                       "server accepted early data from an expired ticket") &&
+           requireTrue(!client3.earlyDataAccepted(),
+                       "client was told expired-ticket early data was accepted") &&
+           requireTrue(!store.lookup(expiringTicket.ticket).found &&
+                           store.size() == 0,
+                       "expired ticket was not purged from the store");
 }
 
 } // namespace

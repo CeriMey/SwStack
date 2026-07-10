@@ -7,6 +7,7 @@
 #include "quic/SwQuicInitialSecrets.h"
 #include "quic/SwQuicLimits.h"
 #include "quic/SwQuicPacketKeys.h"
+#include "quic/SwQuicTransportParameters.h"
 #include "quic/SwQuicVarIntCodec.h"
 #include "quic/SwTls13KeySchedule.h"
 
@@ -49,7 +50,8 @@ public:
                              const SwByteArray& applicationProtocol,
                              SwByteArray& outClientHello,
                              SwString* error = nullptr,
-                             bool rawPublicKey = false) {
+                             bool rawPublicKey = false,
+                             const SwQuicTransportParameters* localParameters = nullptr) {
         const SwString& host = serverName;
         if (host.empty() || host.size() > 255) {
             setError_(error, "Invalid QUIC TLS server name");
@@ -107,10 +109,16 @@ public:
         if (rawPublicKey) {
             appendU16_(signatureList, 0x0807); // ed25519
         } else {
-            appendU16_(signatureList, 0x0403);
-            appendU16_(signatureList, 0x0804);
-            appendU16_(signatureList, 0x0805);
-            appendU16_(signatureList, 0x0401);
+            appendU16_(signatureList, 0x0403); // ecdsa_secp256r1_sha256
+            appendU16_(signatureList, 0x0503); // ecdsa_secp384r1_sha384
+            appendU16_(signatureList, 0x0807); // ed25519
+            appendU16_(signatureList, 0x0804); // rsa_pss_rsae_sha256
+            appendU16_(signatureList, 0x0805); // rsa_pss_rsae_sha384
+            appendU16_(signatureList, 0x0806); // rsa_pss_rsae_sha512
+            appendU16_(signatureList, 0x0809); // rsa_pss_pss_sha256
+            appendU16_(signatureList, 0x080a); // rsa_pss_pss_sha384
+            appendU16_(signatureList, 0x080b); // rsa_pss_pss_sha512
+            appendU16_(signatureList, 0x0401); // rsa_pkcs1_sha256 (certificate signatures)
         }
         appendU16_(signatureAlgorithms, static_cast<std::uint16_t>(signatureList.size()));
         signatureAlgorithms.append(signatureList);
@@ -150,22 +158,9 @@ public:
         appendExtension_(extensions, 0x0033, keyShare);
 
         SwByteArray transportParameters;
-        if (!appendVarIntTransportParameter_(transportParameters, 0x01, 30000, error) ||
-            !appendVarIntTransportParameter_(transportParameters, 0x03,
-                                             SwQuicLimits::maximumUdpPayloadBytes(), error) ||
-            !appendVarIntTransportParameter_(transportParameters, 0x04, 1048576, error) ||
-            !appendVarIntTransportParameter_(transportParameters, 0x05, 262144, error) ||
-            !appendVarIntTransportParameter_(transportParameters, 0x06, 262144, error) ||
-            !appendVarIntTransportParameter_(transportParameters, 0x07, 262144, error) ||
-            !appendVarIntTransportParameter_(transportParameters, 0x08, 100, error) ||
-            !appendVarIntTransportParameter_(transportParameters, 0x09, 100, error) ||
-            !appendVarIntTransportParameter_(transportParameters, 0x0e, 4, error) ||
-            !appendVarIntTransportParameter_(transportParameters, 0x20,
-                                             SwQuicLimits::maximumDatagramFrameBytes(), error) ||
-            !appendTransportParameter_(transportParameters,
-                                       0x0f,
-                                       initialSourceConnectionId.bytes(),
-                                       error)) {
+        if (!encodeTransportParameters_(initialSourceConnectionId,
+                                        localParameters,
+                                        transportParameters, error)) {
             return false;
         }
         appendExtension_(extensions, 0x0039, transportParameters);
@@ -198,7 +193,8 @@ public:
                                         const SwByteArray& resumptionPsk,
                                         SwByteArray& outClientHello,
                                         SwQuicInitialKeys& outEarlyKeys,
-                                        SwString* error = nullptr) {
+                                        SwString* error = nullptr,
+                                        const SwQuicTransportParameters* localParameters = nullptr) {
         const SwString& host = serverName;
         if (host.empty() || host.size() > 255) {
             setError_(error, "Invalid QUIC TLS server name");
@@ -227,7 +223,9 @@ public:
         appendU8_(body, 0);
 
         SwByteArray extensions;
-        appendClientExtensions_(host, initialSourceConnectionId, x25519Public32, extensions);
+        if (!appendClientExtensions_(host, initialSourceConnectionId,
+                                     x25519Public32, localParameters,
+                                     extensions, error)) return false;
 
         // psk_key_exchange_modes: psk_dhe_ke(1).
         SwByteArray pskModes;
@@ -395,10 +393,12 @@ private:
     // The common ClientHello extensions shared by the fresh and resumption
     // handshakes: SNI, supported_groups, signature_algorithms, ALPN,
     // supported_versions, key_share (x25519), and QUIC transport parameters.
-    static void appendClientExtensions_(const SwString& host,
+    static bool appendClientExtensions_(const SwString& host,
                                         const SwQuicConnectionId& initialSourceConnectionId,
                                         const SwByteArray& x25519Public32,
-                                        SwByteArray& extensions) {
+                                        const SwQuicTransportParameters* localParameters,
+                                        SwByteArray& extensions,
+                                        SwString* error) {
         SwByteArray sni;
         SwByteArray sniList;
         appendU8_(sniList, 0);
@@ -418,10 +418,16 @@ private:
 
         SwByteArray signatureAlgorithms;
         SwByteArray signatureList;
-        appendU16_(signatureList, 0x0403);
-        appendU16_(signatureList, 0x0804);
-        appendU16_(signatureList, 0x0805);
-        appendU16_(signatureList, 0x0401);
+        appendU16_(signatureList, 0x0403); // ecdsa_secp256r1_sha256
+        appendU16_(signatureList, 0x0503); // ecdsa_secp384r1_sha384
+        appendU16_(signatureList, 0x0807); // ed25519
+        appendU16_(signatureList, 0x0804); // rsa_pss_rsae_sha256
+        appendU16_(signatureList, 0x0805); // rsa_pss_rsae_sha384
+        appendU16_(signatureList, 0x0806); // rsa_pss_rsae_sha512
+        appendU16_(signatureList, 0x0809); // rsa_pss_pss_sha256
+        appendU16_(signatureList, 0x080a); // rsa_pss_pss_sha384
+        appendU16_(signatureList, 0x080b); // rsa_pss_pss_sha512
+        appendU16_(signatureList, 0x0401); // rsa_pkcs1_sha256 (certificate signatures)
         appendU16_(signatureAlgorithms, static_cast<std::uint16_t>(signatureList.size()));
         signatureAlgorithms.append(signatureList);
         appendExtension_(extensions, 0x000d, signatureAlgorithms);
@@ -449,22 +455,45 @@ private:
         appendExtension_(extensions, 0x0033, keyShare);
 
         SwByteArray transportParameters;
-        SwString ignoredError;
-        appendVarIntTransportParameter_(transportParameters, 0x01, 30000, &ignoredError);
-        appendVarIntTransportParameter_(transportParameters, 0x03,
-                                        SwQuicLimits::maximumUdpPayloadBytes(), &ignoredError);
-        appendVarIntTransportParameter_(transportParameters, 0x04, 1048576, &ignoredError);
-        appendVarIntTransportParameter_(transportParameters, 0x05, 262144, &ignoredError);
-        appendVarIntTransportParameter_(transportParameters, 0x06, 262144, &ignoredError);
-        appendVarIntTransportParameter_(transportParameters, 0x07, 262144, &ignoredError);
-        appendVarIntTransportParameter_(transportParameters, 0x08, 100, &ignoredError);
-        appendVarIntTransportParameter_(transportParameters, 0x09, 100, &ignoredError);
-        appendVarIntTransportParameter_(transportParameters, 0x0e, 4, &ignoredError);
-        appendVarIntTransportParameter_(transportParameters, 0x20,
-                                        SwQuicLimits::maximumDatagramFrameBytes(), &ignoredError);
-        appendTransportParameter_(transportParameters, 0x0f,
-                                  initialSourceConnectionId.bytes(), &ignoredError);
+        if (!encodeTransportParameters_(initialSourceConnectionId,
+                                        localParameters,
+                                        transportParameters, error)) return false;
         appendExtension_(extensions, 0x0039, transportParameters);
+        return true;
+    }
+
+    static SwQuicTransportParameters defaultTransportParameters_() {
+        SwQuicTransportParameters parameters;
+        parameters.maxIdleTimeoutMs = 30000;
+        parameters.maxUdpPayloadSize = SwQuicLimits::maximumUdpPayloadBytes();
+        parameters.initialMaxData = 1048576;
+        parameters.initialMaxStreamDataBidiLocal = 262144;
+        parameters.initialMaxStreamDataBidiRemote = 262144;
+        parameters.initialMaxStreamDataUni = 262144;
+        parameters.initialMaxStreamsBidi = 100;
+        parameters.initialMaxStreamsUni = 100;
+        parameters.activeConnectionIdLimit = 4;
+        parameters.maxDatagramFrameSize =
+            SwQuicLimits::maximumDatagramFrameBytes();
+        return parameters;
+    }
+
+    static bool encodeTransportParameters_(
+            const SwQuicConnectionId& initialSourceConnectionId,
+            const SwQuicTransportParameters* localParameters,
+            SwByteArray& out, SwString* error) {
+        SwQuicTransportParameters parameters = localParameters
+            ? *localParameters : defaultTransportParameters_();
+        // These fields are server-only or generated by this ClientHello.
+        parameters.hasOriginalDestinationConnectionId = false;
+        parameters.originalDestinationConnectionId.clear();
+        parameters.hasStatelessResetToken = false;
+        parameters.statelessResetToken.clear();
+        parameters.hasRetrySourceConnectionId = false;
+        parameters.retrySourceConnectionId.clear();
+        parameters.hasInitialSourceConnectionId = true;
+        parameters.initialSourceConnectionId = initialSourceConnectionId.bytes();
+        return parameters.encode(out, error);
     }
 
     static void appendExtension_(SwByteArray& extensions,

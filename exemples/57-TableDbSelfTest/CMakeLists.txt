@@ -18,5 +18,5 @@ target_include_directories(SwTableDbSelfTest PRIVATE
 )
 
 if(WIN32)
-    target_link_libraries(SwTableDbSelfTest PRIVATE ws2_32 shell32)
+    target_link_libraries(SwTableDbSelfTest PRIVATE ws2_32 shell32 dbghelp)
 endif()

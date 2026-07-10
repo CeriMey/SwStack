@@ -187,18 +187,59 @@ public:
         db_.metrics_.snapshotCount += 1;
         if (db_.options_.readOnly && db_.readOnlySnapshotState_) {
             snapshot.state_ = db_.readOnlySnapshotState_;
+        } else if (!db_.options_.readOnly && db_.writerSnapshotState_ &&
+                   db_.writerSnapshotState_->visibleSequence == db_.lastVisibleSequence_) {
+            // Nothing written since the base was built: serve it as-is. The
+            // state is self-contained (shared memtable copies, shared table
+            // handles, materialized read model), and flush/compaction/blob GC
+            // never change the logical content at a given sequence.
+            db_.metrics_.snapshotCacheHitCount += 1;
+            snapshot.state_ = db_.writerSnapshotState_;
+        } else if (!db_.options_.readOnly && db_.writerSnapshotState_ &&
+                   db_.writerOverlay_.baseSequence == db_.writerSnapshotState_->visibleSequence) {
+            // Base + overlay: records written since the base was built are
+            // merged on top of it at iteration/lookup time. One immutable copy
+            // of the overlay is shared by every snapshot at this sequence.
+            if (!db_.writerOverlaySnapshot_ ||
+                db_.writerOverlaySnapshotSequence_ != db_.lastVisibleSequence_) {
+                db_.writerOverlaySnapshot_.reset(
+                    new swEmbeddedDbDetail::WriterOverlay_(db_.writerOverlay_));
+                db_.writerOverlaySnapshotSequence_ = db_.lastVisibleSequence_;
+            }
+            db_.metrics_.snapshotCacheHitCount += 1;
+            snapshot.state_.reset(new swEmbeddedDbDetail::SnapshotState_());
+            snapshot.state_->visibleSequence = db_.lastVisibleSequence_;
+            snapshot.state_->blobDir = db_.blobDir_;
+            snapshot.state_->options = db_.options_;
+            snapshot.state_->readModel = db_.writerSnapshotState_->readModel;
+            snapshot.state_->overlay = db_.writerOverlaySnapshot_;
+            snapshot.state_->mutableMem = db_.writerSnapshotState_->mutableMem;
+            snapshot.state_->immutableMems = db_.writerSnapshotState_->immutableMems;
+            snapshot.state_->primaryTablesNewestFirst = db_.writerSnapshotState_->primaryTablesNewestFirst;
+            snapshot.state_->indexTablesNewestFirst = db_.writerSnapshotState_->indexTablesNewestFirst;
         } else {
             snapshot.state_.reset(new swEmbeddedDbDetail::SnapshotState_());
             snapshot.state_->visibleSequence = db_.lastVisibleSequence_;
             snapshot.state_->blobDir = db_.blobDir_;
             snapshot.state_->options = db_.options_;
-            snapshot.state_->mutableMem = db_.mutable_;
-            snapshot.state_->immutableMems = db_.immutables_;
+            snapshot.state_->mutableMem.reset(new swEmbeddedDbDetail::MemTable_(db_.mutable_));
+            for (std::size_t i = 0; i < db_.immutables_.size(); ++i) {
+                snapshot.state_->immutableMems.append(
+                    std::shared_ptr<const swEmbeddedDbDetail::MemTable_>(
+                        new swEmbeddedDbDetail::MemTable_(db_.immutables_[i])));
+            }
             snapshot.state_->primaryTablesNewestFirst = db_.primaryTableHandlesNewestFirst_;
             snapshot.state_->indexTablesNewestFirst = db_.indexTableHandlesNewestFirst_;
             if (!db_.buildReadModelLocked_(snapshot.state_->readModel)) {
                 snapshot.state_.reset();
                 return snapshot;
+            }
+            if (!db_.options_.readOnly) {
+                db_.writerSnapshotState_ = snapshot.state_;
+                db_.writerOverlay_ = swEmbeddedDbDetail::WriterOverlay_();
+                db_.writerOverlay_.baseSequence = db_.lastVisibleSequence_;
+                db_.writerOverlaySnapshot_.reset();
+                db_.writerOverlaySnapshotSequence_ = 0;
             }
         }
         snapshot.valid_ = true;
@@ -215,6 +256,11 @@ public:
         db_.primaryTableHandlesNewestFirst_.clear();
         db_.indexTableHandlesNewestFirst_.clear();
         db_.readOnlySnapshotState_.reset();
+        db_.writerSnapshotState_.reset();
+        db_.writerOverlay_ = swEmbeddedDbDetail::WriterOverlay_();
+        db_.writerOverlaySnapshot_.reset();
+        db_.writerOverlaySnapshotSequence_ = 0;
+        db_.activeWalFileId_ = 0;
         db_.pendingWrites_.clear();
         db_.writerLockHeld_ = false;
         db_.writeServiceStop_ = false;

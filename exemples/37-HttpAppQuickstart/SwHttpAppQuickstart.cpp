@@ -2550,7 +2550,7 @@ R"HTML(
             SwJsonObject payload;
             payload["ok"] = true;
             payload["service"] = "SwHttpAppQuickstart";
-            payload["time"] = SwDateTime().toString();
+            payload["time"] = SwString(SwDateTime().toString());
             context.json(SwJsonDocument(payload), 200);
         }, healthRoute);
 

@@ -4,16 +4,20 @@
 
 Commun:
 - CMake ≥ 3.10 (`CMakeLists.txt` utilise `cmake_minimum_required(VERSION 3.10)`).
-- Compilateur C++ (C++11).
+- Compilateur C++ (socle C++11 ; C++17 pour `SwQuicCore`/`SwHttpApp`, qui expose la pile HTTP/3).
 
 Linux (et WSL):
 - libcurl + headers (root `CMakeLists.txt`: `find_package(CURL REQUIRED)`).
-- OpenSSL (root `CMakeLists.txt`: `find_package(OpenSSL REQUIRED)`).
+- OpenSSL >= 1.1.1 lorsque `SW_ENABLE_QUIC=ON` (valeur par defaut sous Linux).
 - X11 (certaines cibles GUI: `find_package(X11)` dans `exemples/**/CMakeLists.txt`).
 
 Windows:
 - Visual Studio (MSVC) ou toolchain compatible.
-- OpenSSL pour les exemples qui appellent `find_package(OpenSSL REQUIRED)` (`exemples/**/CMakeLists.txt`).
+- OpenSSL >= 1.1.1 lorsque `SW_ENABLE_QUIC=ON` (valeur par defaut sous Windows).
+
+macOS et Android:
+- `SW_ENABLE_QUIC` est desactive par defaut afin de ne pas imposer un paquet OpenSSL desktop.
+- Pour construire un consumer `SwHttpApp` avec HTTP/3, fournir une cible CMake OpenSSL compatible et configurer `-DSW_ENABLE_QUIC=ON`.
 
 ## Build via scripts (recommandé)
 

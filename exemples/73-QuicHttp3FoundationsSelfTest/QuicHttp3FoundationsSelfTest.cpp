@@ -14,6 +14,7 @@
 #include "core/types/SwPair.h"
 #include "core/types/SwVector.h"
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <utility>
@@ -145,6 +146,12 @@ bool testHpackHuffman() {
         return false;
     }
 
+    SwByteArray bounded;
+    if (!requireTrue(!SwHpackHuffman::decode(encoded, bounded, input.size() - 1, &error),
+                     "Huffman decoder ignored its output bound")) {
+        return false;
+    }
+
     return requireTrue(encoded == expected, "Huffman encoding does not match RFC 7541 vector") &&
            requireTrue(decoded == input, "Huffman round trip mismatch");
 }
@@ -186,6 +193,15 @@ bool testQpackRoundTrip() {
                          "QPACK header round trip mismatch")) {
             return false;
         }
+    }
+    std::vector<std::pair<SwByteArray, SwByteArray> > bounded;
+    if (!requireTrue(!SwQpackDecoder::decodeFieldSection(
+                         encoded, bounded, 2, 4096, &error),
+                     "QPACK decoder ignored the field-count limit") ||
+        !requireTrue(!SwQpackDecoder::decodeFieldSection(
+                         encoded, bounded, 100, 8, &error),
+                     "QPACK decoder ignored the decoded-byte limit")) {
+        return false;
     }
     return true;
 }
@@ -249,7 +265,11 @@ bool testLossRecoveryRtt() {
 bool testCongestionControl() {
     SwQuicCongestionControl cc;
     const std::uint64_t initial = cc.congestionWindow();
-    if (!requireTrue(initial == 12000, "congestion initial window mismatch")) {
+    const std::uint64_t maximumDatagram = cc.maxDatagramSize();
+    const std::uint64_t expectedInitial =
+        (std::min)(10 * maximumDatagram,
+                   (std::max)(2 * maximumDatagram, std::uint64_t(14720)));
+    if (!requireTrue(initial == expectedInitial, "congestion initial window mismatch")) {
         return false;
     }
 
@@ -260,7 +280,8 @@ bool testCongestionControl() {
     }
 
     cc.onPacketAcked(1200, 10);  // slow start: cwnd += acked
-    if (!requireTrue(cc.congestionWindow() == 13200, "congestion slow-start growth mismatch")) {
+    if (!requireTrue(cc.congestionWindow() == initial + 1200,
+                     "congestion slow-start growth mismatch")) {
         return false;
     }
 

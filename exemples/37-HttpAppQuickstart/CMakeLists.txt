@@ -30,6 +30,8 @@ target_include_directories(HttpAppQuickstart PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}/generated
 )
 
+target_link_libraries(HttpAppQuickstart PRIVATE SwQuicCore)
+
 if(WIN32)
     target_link_libraries(HttpAppQuickstart PRIVATE ws2_32)
 endif()

@@ -67,7 +67,9 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <exception>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <utility>
@@ -212,6 +214,8 @@ private:
     };
 
 public:
+    using SwHttpResponseCallback = SwHttpSession::SwHttpResponseCallback;
+
     enum class DispatchMode {
         Inline,
         ThreadPool
@@ -344,6 +348,17 @@ public:
         return m_sslServer.listen(bindAddress, port);
     }
 
+    // Listener-scoped shutdown is used by SwHttpApp when one half of a
+    // multi-transport origin fails to bind. It intentionally preserves the
+    // other listener and already-dispatched sessions.
+    void closeHttpListener() {
+        m_tcpServer.close();
+    }
+
+    void closeHttpsListener() {
+        m_sslServer.close();
+    }
+
     bool reloadHttpsCredentials(uint16_t port, const SwString& certPath, const SwString& keyPath) {
         if (!m_sslServer.reloadLocalCredentials(certPath, keyPath)) {
             return false;
@@ -448,6 +463,21 @@ public:
         return m_limits;
     }
 
+    // Transport adapters use this shared reservation gate so
+    // maxPendingRequestBytesGlobal remains global across TCP/TLS and QUIC.
+    bool tryReservePendingRequestBytes(std::size_t bytes) {
+        return reservePendingRequestBytes_(bytes);
+    }
+
+    void releasePendingRequestBytes(std::size_t bytes) {
+        releasePendingRequestBytes_(bytes);
+    }
+
+    std::size_t pendingRequestBytes() const {
+        SwMutexLocker locker(&m_metricsMutex);
+        return m_pendingRequestBytesGlobal;
+    }
+
     /**
      * @brief Applies the timeout policy used for subsequently created sessions.
      * @param timeouts Timeout configuration to copy into the server.
@@ -466,6 +496,88 @@ public:
      */
     const SwHttpTimeouts& timeouts() const {
         return m_timeouts;
+    }
+
+    /**
+     * @brief Returns the transport-neutral router used by this server.
+     *
+     * The same router can be attached to another HTTP transport (notably
+     * SwQuicHttp3Server), allowing one route table to serve HTTP/1.x and HTTP/3.
+     */
+    SwHttpRouter& router() {
+        return m_router;
+    }
+
+    const SwHttpRouter& router() const {
+        return m_router;
+    }
+
+    /**
+     * @brief Dispatches a request from a non-TCP transport on the current thread.
+     *
+     * This entry point shares synchronous pre-route handlers, route filters,
+     * in-flight limits and metrics with native HTTP sessions. Transports that
+     * can suspend a response must use dispatchRequest() so asynchronous
+     * authentication and route callbacks cannot be bypassed.
+     */
+    SwHttpResponse dispatchRequestInline(const SwHttpRequest& request) {
+        const auto startAt = std::chrono::steady_clock::now();
+        if (!tryAcquireInFlight_(request)) {
+            SwHttpResponse response = swHttpTextResponse(503, "Server busy");
+            response.closeConnection = !request.keepAlive;
+            filterResponseSafely_(request, response);
+            recordResponseMetrics_(response, elapsedMs_(startAt));
+            return response;
+        }
+
+        bool stopping = false;
+        {
+            SwMutexLocker locker(&m_dispatchMutex);
+            stopping = m_dispatchStopping;
+        }
+        SwHttpResponse response;
+        if (stopping) {
+            response = swHttpTextResponse(503, "Server shutting down");
+            response.closeConnection = true;
+            filterResponseSafely_(request, response);
+        } else if (!m_preRouteHandlersAsync.isEmpty()) {
+            // Never bypass an asynchronous authentication/authorization gate
+            // merely because a transport selected the inline dispatcher.
+            response = swHttpTextResponse(503, "Asynchronous request pipeline required");
+            response.closeConnection = !request.keepAlive;
+            filterResponseSafely_(request, response);
+        } else {
+            response = routeRequestInlineSafely_(request);
+        }
+        releaseInFlight_();
+        recordResponseMetrics_(response, elapsedMs_(startAt));
+        notifyDrainState_();
+        return response;
+    }
+
+    /**
+     * @brief Dispatches a request from another transport through the complete
+     *        synchronous/asynchronous HTTP application pipeline.
+     *
+     * Unlike dispatchRequestInline(), this entry point preserves asynchronous
+     * pre-route handlers and asynchronous route callbacks. The completion may
+     * therefore run after this method returns.
+     */
+    void dispatchRequest(const SwHttpRequest& request,
+                         const SwHttpResponseCallback& complete) {
+        dispatchRequest_(request, complete);
+    }
+
+    /**
+     * @brief Permanently rejects new dispatches and drains callback access.
+     *
+     * This is an irreversible destruction barrier for owners whose response
+     * filters or routes capture owner state. Normal close()/listen() cycles do
+     * not use it; aggregate owners call it before destroying captured members.
+     */
+    void shutdownDispatching() {
+        close();
+        shutdownLifetime_();
     }
 
     /**
@@ -887,15 +999,51 @@ private:
         return false;
     }
 
-    SwHttpResponse routeRequestInline_(const SwHttpRequest& request) {
+    static SwHttpResponse internalErrorResponse_(const SwHttpRequest& request) {
+        SwHttpResponse response = swHttpTextResponse(500, "Internal Server Error");
+        response.closeConnection = !request.keepAlive;
+        return response;
+    }
+
+    void filterResponseSafely_(const SwHttpRequest& request,
+                               SwHttpResponse& response) const {
+        try {
+            m_router.filterResponse(request, response);
+        } catch (...) {
+            response = internalErrorResponse_(request);
+            response.closeConnection = true;
+        }
+    }
+
+    SwHttpResponse routeRequestInlineSafely_(const SwHttpRequest& request,
+                                             bool applyResponseFilters = true) {
+        try {
+            return routeRequestInline_(request, applyResponseFilters);
+        } catch (...) {
+            // A throwing route/filter must not leak in-flight accounting or
+            // escape an event-loop / thread-pool dispatch boundary.
+            SwHttpResponse response = internalErrorResponse_(request);
+            response.closeConnection = true;
+            return response;
+        }
+    }
+
+    SwHttpResponse routeRequestInline_(const SwHttpRequest& request,
+                                       bool applyResponseFilters = true) {
         SwHttpResponse response;
         bool handled = tryPreRoute_(request, response);
+        if (handled && applyResponseFilters) {
+            m_router.filterResponse(request, response);
+        }
         if (!handled) {
-            handled = m_router.route(request, response);
+            handled = m_router.route(request, response, applyResponseFilters);
         }
         if (!handled) {
             response = swHttpTextResponse(404, "Not Found");
             response.closeConnection = !request.keepAlive;
+            if (applyResponseFilters) {
+                m_router.filterResponse(request, response);
+            }
         }
         return response;
     }
@@ -906,40 +1054,114 @@ private:
             return;
         }
         SwHttpResponse preRouteResponse;
-        if (tryPreRoute_(*request, preRouteResponse)) {
+        try {
+            if (tryPreRoute_(*request, preRouteResponse)) {
+                if (complete) {
+                    complete(std::move(preRouteResponse));
+                }
+                return;
+            }
+        } catch (...) {
             if (complete) {
-                complete(std::move(preRouteResponse));
+                complete(internalErrorResponse_(*request));
             }
             return;
         }
         std::shared_ptr<LifetimeState_> lifetime = m_lifetime;
-        tryPreRouteAsync_(request, 0, [lifetime, request, complete](bool handled, const SwHttpResponse& preRouteAsyncResponse) {
-            if (handled) {
-                if (complete) {
-                    complete(preRouteAsyncResponse);
-                }
-                return;
-            }
+        try {
+            tryPreRouteAsync_(request, 0,
+                [lifetime, request, complete](bool handled,
+                                              const SwHttpResponse& preRouteAsyncResponse) {
+                    if (handled) {
+                        if (complete) {
+                            complete(preRouteAsyncResponse);
+                        }
+                        return;
+                    }
 
+                    LifetimeAccess_ access(lifetime);
+                    if (!access) {
+                        return;
+                    }
+                    try {
+                        const bool routed = access.get()->m_router.routeAsync(
+                            *request,
+                            [request, complete](const SwHttpResponse& response) {
+                                if (complete) {
+                                    complete(response);
+                                }
+                            },
+                            false);
+                        if (routed) {
+                            return;
+                        }
+
+                        SwHttpResponse response = swHttpTextResponse(404, "Not Found");
+                        response.closeConnection = !request->keepAlive;
+                        if (complete) {
+                            complete(std::move(response));
+                        }
+                    } catch (...) {
+                        if (complete) {
+                            complete(internalErrorResponse_(*request));
+                        }
+                    }
+                });
+        } catch (...) {
+            if (complete) {
+                complete(internalErrorResponse_(*request));
+            }
+        }
+    }
+
+    static void finishAsyncResponse_(
+        const std::shared_ptr<LifetimeState_>& lifetime,
+        const std::shared_ptr<const SwHttpRequest>& request,
+        const std::shared_ptr<DispatchGate_>& gate,
+        SwHttpResponse response) {
+        if (!request || !gate || gate->completed.load(std::memory_order_acquire)) {
+            return;
+        }
+
+        std::shared_ptr<SwHttpResponse> responseState;
+        try {
+            responseState = std::make_shared<SwHttpResponse>(std::move(response));
+        } catch (...) {
+            gate->finish(internalErrorResponse_(*request));
+            return;
+        }
+
+        bool scheduled = false;
+        {
             LifetimeAccess_ access(lifetime);
             if (!access) {
                 return;
             }
-            const bool routed = access.get()->m_router.routeAsync(*request, [complete](const SwHttpResponse& response) {
-                if (complete) {
-                    complete(response);
-                }
-            });
-            if (routed) {
-                return;
+            try {
+                scheduled = access.get()->runOnAffinityReliable_(
+                    [lifetime, request, gate, responseState]() {
+                        if (gate->completed.load(std::memory_order_acquire)) {
+                            return;
+                        }
+                        LifetimeAccess_ callbackAccess(lifetime);
+                        if (!callbackAccess) {
+                            return;
+                        }
+                        callbackAccess.get()->filterResponseSafely_(
+                            *request, *responseState);
+                        gate->finish(std::move(*responseState));
+                    });
+            } catch (...) {
+                scheduled = false;
             }
+        }
 
-            SwHttpResponse response = swHttpTextResponse(404, "Not Found");
-            response.closeConnection = !request->keepAlive;
-            if (complete) {
-                complete(std::move(response));
-            }
-        });
+        if (!scheduled && !gate->completed.load(std::memory_order_acquire)) {
+            SwHttpResponse unavailable = swHttpTextResponse(
+                503, "Response finalization unavailable");
+            unavailable.closeConnection = true;
+            gate->finish(std::move(unavailable));
+        }
     }
 
     void dispatchRequest_(const SwHttpRequest& request,
@@ -948,6 +1170,7 @@ private:
         if (!tryAcquireInFlight_(request)) {
             SwHttpResponse response = swHttpTextResponse(503, "Server busy");
             response.closeConnection = !request.keepAlive;
+            filterResponseSafely_(request, response);
             recordResponseMetrics_(response, elapsedMs_(startAt));
             if (complete) {
                 complete(std::move(response));
@@ -963,6 +1186,7 @@ private:
             releaseInFlight_();
             SwHttpResponse response = swHttpTextResponse(503, "Server shutting down");
             response.closeConnection = true;
+            filterResponseSafely_(request, response);
             recordResponseMetrics_(response, elapsedMs_(startAt));
             if (complete) {
                 complete(std::move(response));
@@ -975,7 +1199,7 @@ private:
         if (m_dispatchMode == DispatchMode::Inline &&
             m_preRouteHandlersAsync.isEmpty() &&
             !m_router.willRouteAsync(request)) {
-            SwHttpResponse response = routeRequestInline_(request);
+            SwHttpResponse response = routeRequestInlineSafely_(request);
             releaseInFlight_();
             recordResponseMetrics_(response, elapsedMs_(startAt));
             SwPointer<SwHttpServer> self(this);
@@ -988,12 +1212,48 @@ private:
             return;
         }
 
-        std::shared_ptr<const SwHttpRequest> requestState =
-            std::make_shared<SwHttpRequest>(request);
-        std::shared_ptr<DispatchGate_> gate = std::make_shared<DispatchGate_>();
+        // Async dispatch owns a deep request snapshot. Charge that second body
+        // allocation independently so repeated HTTP/3 disconnects cannot drop
+        // the transport reservation while a slow application still retains
+        // the copied request.
+        const std::size_t dispatchRequestBytes = retainedRequestPayloadBytes_(request);
+        if (dispatchRequestBytes > 0 &&
+            !reservePendingRequestBytes_(dispatchRequestBytes)) {
+            releaseInFlight_();
+            SwHttpResponse response = swHttpTextResponse(503, "Request dispatch memory limit");
+            response.closeConnection = !request.keepAlive;
+            filterResponseSafely_(request, response);
+            recordResponseMetrics_(response, elapsedMs_(startAt));
+            if (complete) {
+                complete(std::move(response));
+            }
+            notifyDrainState_();
+            return;
+        }
+
+        std::shared_ptr<const SwHttpRequest> requestState;
+        std::shared_ptr<DispatchGate_> gate;
+        try {
+            requestState = std::make_shared<SwHttpRequest>(request);
+            gate = std::make_shared<DispatchGate_>();
+        } catch (...) {
+            if (dispatchRequestBytes > 0) {
+                releasePendingRequestBytes_(dispatchRequestBytes);
+            }
+            releaseInFlight_();
+            SwHttpResponse response = internalErrorResponse_(request);
+            response.closeConnection = true;
+            recordResponseMetrics_(response, elapsedMs_(startAt));
+            if (complete) {
+                complete(std::move(response));
+            }
+            notifyDrainState_();
+            return;
+        }
         std::shared_ptr<LifetimeState_> lifetime = m_lifetime;
         DispatchGate_* const gateKey = gate.get();
-        gate->finishCallback = [lifetime, complete, startAt, gateKey](SwHttpResponse response) mutable {
+        gate->finishCallback = [lifetime, complete, startAt, gateKey,
+                                dispatchRequestBytes](SwHttpResponse response) mutable {
             {
                 LifetimeAccess_ access(lifetime);
                 if (!access) {
@@ -1004,12 +1264,20 @@ private:
                     SwMutexLocker locker(&owner->m_dispatchMutex);
                     owner->m_dispatchGates.remove(gateKey);
                 }
+                if (dispatchRequestBytes > 0) {
+                    owner->releasePendingRequestBytes_(dispatchRequestBytes);
+                }
                 owner->releaseInFlight_();
                 owner->recordResponseMetrics_(response, elapsedMs_(startAt));
                 owner->notifyDrainState_();
             }
             if (complete) {
-                complete(std::move(response));
+                try {
+                    complete(std::move(response));
+                } catch (...) {
+                    // Accounting and gate removal are already complete. A
+                    // transport callback must not unwind through the server.
+                }
             }
         };
 
@@ -1018,9 +1286,11 @@ private:
             timeout->setSingleShot(true);
             gate->timeout = timeout;
             const bool keepAlive = request.keepAlive;
-            SwObject::connect(timeout, &SwTimer::timeout, this, [gate, keepAlive]() {
+            SwObject::connect(timeout, &SwTimer::timeout, this,
+                              [this, gate, keepAlive, requestState]() {
                 SwHttpResponse timedOut = swHttpTextResponse(504, "Route timeout");
                 timedOut.closeConnection = !keepAlive;
+                filterResponseSafely_(*requestState, timedOut);
                 gate->finish(std::move(timedOut));
             });
             timeout->start(m_timeouts.routeTimeoutMs);
@@ -1040,6 +1310,7 @@ private:
         if (!published) {
             SwHttpResponse stopping = swHttpTextResponse(503, "Server shutting down");
             stopping.closeConnection = true;
+            filterResponseSafely_(request, stopping);
             gate->finish(std::move(stopping));
             return;
         }
@@ -1052,6 +1323,7 @@ private:
             if (!tryReserveThreadPoolDispatch_()) {
                 SwHttpResponse response = swHttpTextResponse(503, "ThreadPool saturated");
                 response.closeConnection = !request.keepAlive;
+                filterResponseSafely_(request, response);
                 gate->finish(std::move(response));
                 return;
             }
@@ -1063,9 +1335,11 @@ private:
                     return;
                 }
                 SwHttpServer* owner = access.get();
-                SwHttpResponse computed = owner->routeRequestInline_(*requestState);
+                SwHttpResponse computed = owner->routeRequestInlineSafely_(
+                    *requestState, false);
                 owner->releaseThreadPoolDispatch_();
-                gate->finish(std::move(computed));
+                finishAsyncResponse_(lifetime, requestState, gate,
+                                     std::move(computed));
             }, 0, &rejectedByBackpressure);
 
             if (started) {
@@ -1078,13 +1352,14 @@ private:
                 rejectedByBackpressure ? SwString("ThreadPool saturated")
                                        : SwString("ThreadPool unavailable"));
             saturated.closeConnection = !request.keepAlive;
+            filterResponseSafely_(request, saturated);
             gate->finish(std::move(saturated));
             return;
         }
 #endif
 
-        routeRequestAsync_(requestState, [gate](SwHttpResponse response) {
-            gate->finish(std::move(response));
+        routeRequestAsync_(requestState, [lifetime, requestState, gate](SwHttpResponse response) {
+            finishAsyncResponse_(lifetime, requestState, gate, std::move(response));
         });
     }
 
@@ -1111,6 +1386,34 @@ private:
         }
         m_pendingRequestBytesGlobal += bytes;
         return true;
+    }
+
+    static void saturatingAdd_(std::size_t value, std::size_t& total) {
+        const std::size_t maximum = (std::numeric_limits<std::size_t>::max)();
+        total = value > maximum - total ? maximum : total + value;
+    }
+
+    static std::size_t retainedRequestPayloadBytes_(const SwHttpRequest& request) {
+        std::size_t total = static_cast<std::size_t>(request.body.size());
+        for (std::size_t i = 0; i < request.multipartParts.size(); ++i) {
+            const SwHttpRequest::MultipartPart& part = request.multipartParts[i];
+            saturatingAdd_(static_cast<std::size_t>(part.data.size()), total);
+            saturatingAdd_(part.name.size(), total);
+            saturatingAdd_(part.fileName.size(), total);
+            saturatingAdd_(part.contentType.size(), total);
+            saturatingAdd_(part.tempFilePath.size(), total);
+            for (SwMap<SwString, SwString>::const_iterator it = part.headers.begin();
+                 it != part.headers.end(); ++it) {
+                saturatingAdd_(it.key().size(), total);
+                saturatingAdd_(it.value().size(), total);
+            }
+        }
+        for (SwMap<SwString, SwString>::const_iterator it = request.formFields.begin();
+             it != request.formFields.end(); ++it) {
+            saturatingAdd_(it.key().size(), total);
+            saturatingAdd_(it.value().size(), total);
+        }
+        return total;
     }
 
     void releasePendingRequestBytes_(std::size_t bytes) {
@@ -1156,6 +1459,9 @@ private:
             return response.fileLength;
         }
         if (response.useChunkedTransfer) {
+            if (response.chunkedParts.isEmpty()) {
+                return response.body.size();
+            }
             size_t total = 0;
             for (size_t i = 0; i < response.chunkedParts.size(); ++i) {
                 total += response.chunkedParts[i].size();
@@ -1219,26 +1525,43 @@ private:
         }
 
         std::shared_ptr<LifetimeState_> lifetime = m_lifetime;
-        handler(*request, [lifetime, request, index, complete](bool handled, const SwHttpResponse& response) {
-            if (handled) {
-                if (complete) {
-                    complete(true, response);
-                }
-                return;
-            }
-            LifetimeAccess_ access(lifetime);
-            if (access) {
-                SwHttpServer* owner = access.get();
-                owner->runOnAffinityReliable_([lifetime, request, index, complete]() {
-                    LifetimeAccess_ continuationAccess(lifetime);
-                    if (continuationAccess) {
-                        continuationAccess.get()->tryPreRouteAsync_(request,
-                                                                   index + 1,
-                                                                   complete);
+        try {
+            handler(*request,
+                    [lifetime, request, index, complete](
+                        bool handled, const SwHttpResponse& response) {
+                if (handled) {
+                    if (complete) {
+                        complete(true, response);
                     }
-                });
+                    return;
+                }
+                LifetimeAccess_ access(lifetime);
+                if (!access) {
+                    return;
+                }
+                SwHttpServer* owner = access.get();
+                const bool scheduled = owner->runOnAffinityReliable_(
+                    [lifetime, request, index, complete]() {
+                        LifetimeAccess_ continuationAccess(lifetime);
+                        if (continuationAccess) {
+                            continuationAccess.get()->tryPreRouteAsync_(
+                                request, index + 1, complete);
+                        }
+                    });
+                if (!scheduled && complete) {
+                    SwHttpResponse unavailable = swHttpTextResponse(
+                        503, "Async pre-route continuation unavailable");
+                    unavailable.closeConnection = true;
+                    complete(true, unavailable);
+                }
+            });
+        } catch (...) {
+            if (complete) {
+                SwHttpResponse failed = internalErrorResponse_(*request);
+                failed.closeConnection = true;
+                complete(true, failed);
             }
-        });
+        }
     }
 };
 

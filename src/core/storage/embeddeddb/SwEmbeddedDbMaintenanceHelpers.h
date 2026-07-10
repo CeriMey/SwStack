@@ -8,7 +8,17 @@ inline void SwEmbeddedDb::removeTablesLocked_(const SwList<swEmbeddedDbDetail::T
         }
         tableHandles_.remove(toRemove[i].fileName);
     }
+    // Drop the cached writer snapshot: it pins handles of the removed tables,
+    // which would block the file deletions that follow a compaction.
+    invalidateWriterReadCacheLocked_();
     rebuildTableCachesLocked_();
+}
+
+inline void SwEmbeddedDb::invalidateWriterReadCacheLocked_() {
+    writerSnapshotState_.reset();
+    writerOverlay_ = swEmbeddedDbDetail::WriterOverlay_();
+    writerOverlaySnapshot_.reset();
+    writerOverlaySnapshotSequence_ = 0;
 }
 
 inline void SwEmbeddedDb::rebuildTableCachesLocked_() {
@@ -45,8 +55,12 @@ inline void SwEmbeddedDb::rebuildReadOnlySnapshotLocked_() {
     snapshotState->visibleSequence = lastVisibleSequence_;
     snapshotState->blobDir = blobDir_;
     snapshotState->options = options_;
-    snapshotState->mutableMem = mutable_;
-    snapshotState->immutableMems = immutables_;
+    snapshotState->mutableMem.reset(new swEmbeddedDbDetail::MemTable_(mutable_));
+    for (std::size_t i = 0; i < immutables_.size(); ++i) {
+        snapshotState->immutableMems.append(
+            std::shared_ptr<const swEmbeddedDbDetail::MemTable_>(
+                new swEmbeddedDbDetail::MemTable_(immutables_[i])));
+    }
     snapshotState->primaryTablesNewestFirst = primaryTableHandlesNewestFirst_;
     snapshotState->indexTablesNewestFirst = indexTableHandlesNewestFirst_;
     if (!buildReadModelLocked_(snapshotState->readModel)) {

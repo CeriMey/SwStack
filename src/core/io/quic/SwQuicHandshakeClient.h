@@ -18,6 +18,7 @@
 #include "quic/SwQuicPacketKeys.h"
 #include "quic/SwQuicPacketProtector.h"
 #include "quic/SwQuicRandom.h"
+#include "quic/SwQuicRetry.h"
 #include "quic/SwQuicSessionTicket.h"
 #include "quic/SwQuicServerCredential.h"
 #include "quic/SwQuicStream.h"
@@ -164,6 +165,24 @@ public:
     const SwQuicTransportParameters& localTransportParameters() const {
         return m_localTransportParameters;
     }
+    bool setLocalTransportParameters(const SwQuicTransportParameters& parameters) {
+        if (m_state != State::Idle || parameters.hasOriginalDestinationConnectionId ||
+            parameters.hasStatelessResetToken ||
+            parameters.hasInitialSourceConnectionId ||
+            parameters.hasRetrySourceConnectionId ||
+            parameters.maxUdpPayloadSize <
+                SwQuicLimits::minimumInitialUdpPayloadBytes() ||
+            parameters.maxUdpPayloadSize >
+                SwQuicLimits::maximumUdpPayloadBytes() ||
+            parameters.activeConnectionIdLimit < 2 ||
+            parameters.maxDatagramFrameSize >
+                SwQuicLimits::maximumDatagramFrameBytes()) return false;
+        SwByteArray encoded;
+        SwString error;
+        if (!parameters.encode(encoded, &error)) return false;
+        m_localTransportParameters = parameters;
+        return true;
+    }
     const SwByteArray& negotiatedAlpn() const { return m_negotiatedAlpn; }
     bool setApplicationProtocol(const SwByteArray& protocol) {
         if (m_state != State::Idle || protocol.isEmpty() || protocol.size() > 255) return false;
@@ -184,6 +203,7 @@ public:
     const SwQuicConnectionId& originalDestinationConnectionId() const {
         return m_originalDestinationConnectionId;
     }
+    bool retryReceived() const { return m_retryReceived; }
 
     // RFC 8446 section 7.5. The exporter master secret never leaves the
     // handshake driver; callers can only derive labelled keying material.
@@ -271,7 +291,7 @@ public:
                     serverName, m_sourceConnectionId, m_clientPublicKey, m_clientRandom,
                     m_resumptionTicket.ticket, m_resumptionTicket.ticketAgeAdd,
                     m_resumptionTicket.resumptionPsk, m_clientHelloMessage, m_earlyKeys,
-                    error)) {
+                    error, &m_localTransportParameters)) {
                 return fail_(error);
             }
             m_hasEarlyKeys = true;
@@ -282,7 +302,8 @@ public:
                                                            m_applicationProtocol,
                                                            m_clientHelloMessage,
                                                            error,
-                                                           m_requireRawPublicKeys)) {
+                                                           m_requireRawPublicKeys,
+                                                           &m_localTransportParameters)) {
             return fail_(error);
         }
 
@@ -361,9 +382,13 @@ public:
                 if (!handleServerHandshake_(*remaining, consumed, error)) {
                     return fail_(error);
                 }
+            } else if (longType == 0x30U) {
+                if (!handleRetry_(*remaining, consumed, outDatagrams, error)) {
+                    return fail_(error);
+                }
             } else {
-                // Retry (0x30) or 0-RTT (0x10): not handled in this client.
-                setError_(error, "QUIC Retry or 0-RTT packet is not supported by this client");
+                // A server never sends 0-RTT packets.
+                setError_(error, "QUIC server sent an invalid 0-RTT packet");
                 return fail_(error);
             }
 
@@ -486,6 +511,92 @@ private:
     }
 
     // ------------------------------------------------------------ Initial ---
+
+    bool handleRetry_(const SwByteArray& packet,
+                      std::size_t& consumed,
+                      SwVector<SwByteArray>& outDatagrams,
+                      SwString* error) {
+        consumed = 0;
+        const auto discard = [&]() {
+            // Retry has no length field and is always the final/only packet in
+            // its datagram. RFC 9000 requires invalid, late and additional
+            // Retry packets to be discarded, not turned into an off-path DoS.
+            consumed = static_cast<std::size_t>(packet.size());
+            clearError_(error);
+            return true;
+        };
+        if (m_state != State::WaitServerHello || m_retryReceived ||
+            m_initialKeysDiscarded || !m_serverInitialCrypto.isEmpty() ||
+            !m_receivedInitialPacketNumbers.empty() ||
+            !m_serverHandshakeTrafficSecret.isEmpty()) {
+            return discard();
+        }
+
+        SwQuicRetry::ParsedRetry parsed;
+        if (!SwQuicRetry::parseRetryPacket(packet, parsed, error) ||
+            !SwQuicRetry::verifyRetryPacket(
+                packet, m_originalDestinationConnectionId.bytes(), error)) {
+            return discard();
+        }
+        if (!(parsed.destinationConnectionId == m_sourceConnectionId.bytes())) {
+            return discard();
+        }
+        if (parsed.sourceConnectionId.isEmpty() || parsed.token.isEmpty() ||
+            parsed.sourceConnectionId == m_serverConnectionId.bytes()) {
+            return discard();
+        }
+
+        SwQuicConnectionId retrySource;
+        if (!SwQuicConnectionId::fromBytes(
+                parsed.sourceConnectionId, retrySource, error)) return discard();
+
+        // RFC 9000 17.2.5: replace the destination CID and derive fresh
+        // Initial keys. Packet numbers in every space keep increasing after
+        // Retry. In particular, 0-RTT and 1-RTT share the Application Data
+        // packet-number space and the 0-RTT keys do not change.
+        secureClearKeys_(m_clientInitialKeys);
+        secureClearKeys_(m_serverInitialKeys);
+        m_serverConnectionId = retrySource;
+        m_retrySourceConnectionId = retrySource;
+        m_retryToken = parsed.token;
+        m_retryReceived = true;
+        m_receivedInitialPacketNumbers.clear();
+        m_pendingInitialAck = false;
+        if (!SwQuicInitialSecrets::deriveV1(m_serverConnectionId,
+                                            m_clientInitialKeys,
+                                            m_serverInitialKeys,
+                                            error)) {
+            return false;
+        }
+
+        SwQuicClientInitialBuilder::Options options;
+        options.serverName = m_serverName;
+        options.destinationConnectionId = m_serverConnectionId;
+        options.sourceConnectionId = m_sourceConnectionId;
+        options.token = m_retryToken;
+        options.packetNumber = m_clientInitialPacketNumber;
+        SwByteArray retriedInitial;
+        if (!SwQuicClientInitialBuilder::buildFromClientHello(
+                options, m_clientHelloMessage, retriedInitial, error)) {
+            return false;
+        }
+        ++m_clientInitialPacketNumber;
+
+        if (m_resuming && !m_earlyData.isEmpty()) {
+            SwByteArray zeroRttPacket;
+            if (!buildZeroRttPacket_(m_earlyData, zeroRttPacket, error)) return false;
+            if (retriedInitial.size() + zeroRttPacket.size() > 2048) {
+                setError_(error,
+                          "Retried Initial and 0-RTT flight exceeds UDP receive budget");
+                return false;
+            }
+            retriedInitial.append(zeroRttPacket);
+        }
+        outDatagrams.push_back(retriedInitial);
+        consumed = static_cast<std::size_t>(packet.size());
+        clearError_(error);
+        return true;
+    }
 
     bool handleServerInitial_(const SwByteArray& packet,
                               std::size_t& consumed,
@@ -696,6 +807,19 @@ private:
             setError_(error, "Server initial_source_connection_id mismatch (RFC 9000 7.3)");
             return false;
         }
+        if (m_retryReceived) {
+            if (!m_peerTransportParameters.hasRetrySourceConnectionId ||
+                !(m_peerTransportParameters.retrySourceConnectionId ==
+                  m_retrySourceConnectionId.bytes())) {
+                setError_(error,
+                          "Server retry_source_connection_id mismatch (RFC 9000 7.3)");
+                return false;
+            }
+        } else if (m_peerTransportParameters.hasRetrySourceConnectionId) {
+            setError_(error,
+                      "Server sent retry_source_connection_id without a Retry");
+            return false;
+        }
         return true;
     }
 
@@ -892,13 +1016,17 @@ private:
             }
             // RFC 8446 4.4.3: the CertificateVerify scheme MUST be one we
             // advertised (signature_algorithms) and valid for TLS 1.3
-            // CertificateVerify. We offer only these three.
+            // CertificateVerify. We offer only these supported schemes.
             if (m_requireRawPublicKeys && signatureScheme != 0x0807) {
                 setError_(error, "Server RPK CertificateVerify is not ed25519");
                 return false;
             }
             if (!m_requireRawPublicKeys && signatureScheme != 0x0403 &&
-                signatureScheme != 0x0804 && signatureScheme != 0x0805) {
+                signatureScheme != 0x0503 &&
+                signatureScheme != 0x0804 && signatureScheme != 0x0805 &&
+                signatureScheme != 0x0806 && signatureScheme != 0x0807 &&
+                signatureScheme != 0x0809 && signatureScheme != 0x080a &&
+                signatureScheme != 0x080b) {
                 setError_(error, "Server CertificateVerify uses a non-offered signature scheme");
                 return false;
             }
@@ -1424,6 +1552,9 @@ private:
     SwQuicConnectionId m_originalDestinationConnectionId;
     SwQuicConnectionId m_sourceConnectionId;
     SwQuicConnectionId m_serverConnectionId;
+    SwQuicConnectionId m_retrySourceConnectionId;
+    SwByteArray m_retryToken;
+    bool m_retryReceived = false;
 
     SwQuicInitialKeys m_clientInitialKeys;
     SwQuicInitialKeys m_serverInitialKeys;

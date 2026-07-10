@@ -237,7 +237,7 @@ public:
             return;
         }
         if (!m_captureThread) {
-            m_captureThread = std::make_unique<CaptureThread>(this);
+            m_captureThread = std::unique_ptr<CaptureThread>(new CaptureThread(this));
         }
         setRunning(true);
         m_captureThread->start();

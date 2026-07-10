@@ -314,7 +314,7 @@ public:
         m_lastPositionMs.store(0);
         setRunning(true);
         if (!m_captureThread) {
-            m_captureThread = std::make_unique<MovieCaptureThread>(this);
+            m_captureThread = std::unique_ptr<MovieCaptureThread>(new MovieCaptureThread(this));
         }
         m_captureThread->start();
     }

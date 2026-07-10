@@ -11,8 +11,16 @@
 #include "core/io/quic/SwQuicCertificateVerifier.h"
 #include "core/io/quic/SwQuicServerCredential.h"
 
+#include <openssl/err.h>
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/rsa.h>
+#include <openssl/x509.h>
+
+#include <cstdio>
 #include <cstdint>
 #include <iostream>
+#include <string>
 #include "core/types/SwVector.h"
 
 namespace {
@@ -53,6 +61,176 @@ bool driveHandshake(SwQuicHandshakeClient& client,
         if (client.handshakeComplete() && server.handshakeComplete()) return true;
     }
     return false;
+}
+
+struct PemFixture {
+    std::string certificatePath;
+    std::string privateKeyPath;
+
+    ~PemFixture() {
+        if (!certificatePath.empty()) std::remove(certificatePath.c_str());
+        if (!privateKeyPath.empty()) std::remove(privateKeyPath.c_str());
+    }
+};
+
+bool setOpenSslError(SwString* error, const char* message) {
+    if (error) {
+        *error = SwString(message);
+        const unsigned long code = ERR_get_error();
+        if (code != 0) {
+            char detail[256] = {};
+            ERR_error_string_n(code, detail, sizeof(detail));
+            *error += SwString(": ") + SwString(detail);
+        }
+    }
+    ERR_clear_error();
+    return false;
+}
+
+bool generatePemFixture(const char* label,
+                        int keyType,
+                        bool restrictRsaPssToSha384,
+                        PemFixture& fixture,
+                        SwString* error) {
+    fixture.certificatePath = std::string("swquic_") + label + "_certificate.pem";
+    fixture.privateKeyPath = std::string("swquic_") + label + "_private_key.pem";
+
+    EVP_PKEY_CTX* keyContext = EVP_PKEY_CTX_new_id(keyType, nullptr);
+    EVP_PKEY* key = nullptr;
+    bool ok = keyContext && EVP_PKEY_keygen_init(keyContext) == 1;
+    if (ok && keyType == EVP_PKEY_RSA_PSS) {
+        ok = EVP_PKEY_CTX_set_rsa_keygen_bits(keyContext, 2048) > 0;
+        if (ok && restrictRsaPssToSha384) {
+            ok = EVP_PKEY_CTX_set_rsa_pss_keygen_md(keyContext, EVP_sha384()) > 0 &&
+                 EVP_PKEY_CTX_set_rsa_pss_keygen_mgf1_md(keyContext, EVP_sha384()) > 0 &&
+                 EVP_PKEY_CTX_set_rsa_pss_keygen_saltlen(keyContext, 48) > 0;
+        }
+    }
+    if (ok) ok = EVP_PKEY_keygen(keyContext, &key) == 1 && key;
+    if (keyContext) EVP_PKEY_CTX_free(keyContext);
+    if (!ok) {
+        if (key) EVP_PKEY_free(key);
+        return setOpenSslError(error, "Unable to generate the test private key");
+    }
+
+    X509* certificate = X509_new();
+    ok = certificate &&
+         X509_set_version(certificate, 2) == 1 &&
+         ASN1_INTEGER_set(X509_get_serialNumber(certificate),
+                          keyType == EVP_PKEY_ED25519 ? 7001 : 7002) == 1 &&
+         X509_gmtime_adj(X509_get_notBefore(certificate), -60) &&
+         X509_gmtime_adj(X509_get_notAfter(certificate), 3600) &&
+         X509_set_pubkey(certificate, key) == 1;
+    X509_NAME* subject = certificate ? X509_get_subject_name(certificate) : nullptr;
+    if (ok) {
+        ok = subject &&
+             X509_NAME_add_entry_by_txt(
+                 subject, "CN", MBSTRING_ASC,
+                 reinterpret_cast<const unsigned char*>("loopback.test"),
+                 -1, -1, 0) == 1 &&
+             X509_set_issuer_name(certificate, subject) == 1;
+    }
+    const EVP_MD* certificateDigest =
+        keyType == EVP_PKEY_ED25519 ? nullptr : EVP_sha384();
+    if (ok) ok = X509_sign(certificate, key, certificateDigest) > 0;
+    if (!ok) {
+        if (certificate) X509_free(certificate);
+        EVP_PKEY_free(key);
+        return setOpenSslError(error, "Unable to create the test certificate");
+    }
+
+    BIO* certificateBio = BIO_new_file(fixture.certificatePath.c_str(), "wb");
+    ok = certificateBio && PEM_write_bio_X509(certificateBio, certificate) == 1;
+    if (certificateBio) BIO_free(certificateBio);
+    BIO* keyBio = ok ? BIO_new_file(fixture.privateKeyPath.c_str(), "wb") : nullptr;
+    if (ok) {
+        ok = keyBio &&
+             PEM_write_bio_PrivateKey(keyBio, key, nullptr, nullptr, 0,
+                                      nullptr, nullptr) == 1;
+    }
+    if (keyBio) BIO_free(keyBio);
+    X509_free(certificate);
+    EVP_PKEY_free(key);
+    if (!ok) {
+        return setOpenSslError(error, "Unable to write the test PEM credential");
+    }
+    if (error) error->clear();
+    return true;
+}
+
+bool testPemCredential(const char* label,
+                       int keyType,
+                       bool restrictRsaPssToSha384,
+                       std::uint16_t expectedSignatureScheme) {
+    SwString error;
+    PemFixture fixture;
+    if (!requireTrue(generatePemFixture(label, keyType, restrictRsaPssToSha384,
+                                        fixture, &error),
+                     "PEM fixture generation failed")) {
+        std::cerr << error << std::endl;
+        return false;
+    }
+
+    SwQuicServerCredential credential;
+    if (!requireTrue(SwQuicPemCredential::load(
+                         SwString(fixture.certificatePath),
+                         SwString(fixture.privateKeyPath), credential, &error),
+                     "PEM credential loading failed") ||
+        !requireTrue(credential.signatureScheme == expectedSignatureScheme,
+                     "PEM credential selected the wrong TLS signature scheme")) {
+        std::cerr << error << std::endl;
+        return false;
+    }
+
+    SwQuicHandshakeClient client;
+    client.setVerifyPeer(true);
+    client.setVerifyCertificateChain(false);
+    SwQuicHandshakeServer server;
+    server.setCredential(credential);
+    if (!requireTrue(driveHandshake(client, server, SwString("loopback.test"), &error),
+                     "PEM credential handshake failed")) {
+        std::cerr << error << std::endl;
+        return false;
+    }
+    if (!requireTrue(client.handshakeComplete() && server.handshakeComplete(),
+                     "PEM credential handshake did not authenticate both endpoints")) {
+        return false;
+    }
+
+    // Exercise the same credential in the client-authentication direction so
+    // CertificateRequest negotiation and server-side CertificateVerify
+    // validation cover the newly supported schemes too.
+    SwQuicServerCredential mutualTlsServerCredential;
+    if (!requireTrue(SwQuicEcdsaCredential::createSelfSigned(
+                         SwString("mtls-loopback.test"),
+                         mutualTlsServerCredential, &error),
+                     "mTLS server credential generation failed")) {
+        std::cerr << error << std::endl;
+        return false;
+    }
+    SwQuicHandshakeClient mutualTlsClient;
+    mutualTlsClient.setVerifyPeer(true);
+    mutualTlsClient.setVerifyCertificateChain(false);
+    mutualTlsClient.setCredential(credential);
+    SwQuicHandshakeServer mutualTlsServer;
+    mutualTlsServer.setCredential(mutualTlsServerCredential);
+    mutualTlsServer.setRequireClientAuthentication(true);
+    mutualTlsServer.setClientSubjectPublicKeyInfoVerifier(
+        [](const SwByteArray& spki) { return !spki.isEmpty(); });
+    if (!requireTrue(driveHandshake(mutualTlsClient, mutualTlsServer,
+                                    SwString("mtls-loopback.test"), &error),
+                     "PEM client credential mTLS handshake failed")) {
+        std::cerr << error << std::endl;
+        return false;
+    }
+    return requireTrue(mutualTlsClient.handshakeComplete() &&
+                           mutualTlsServer.handshakeComplete(),
+                       "PEM client credential did not complete mutual TLS");
+}
+
+bool testModernPemCredentials() {
+    return testPemCredential("ed25519", EVP_PKEY_ED25519, false, 0x0807) &&
+           testPemCredential("rsa_pss_sha384", EVP_PKEY_RSA_PSS, true, 0x080a);
 }
 
 bool testLoopbackHandshake() {
@@ -256,8 +434,8 @@ bool testServerRejectsUnofferedSignatureScheme() {
         std::cerr << error << std::endl;
         return false;
     }
-    // The client offers {0x0403, 0x0804, 0x0805, 0x0401}; force a scheme outside
-    // that set so the server cannot authenticate with a scheme the client accepts.
+    // Force a scheme outside the client's advertised set so the server cannot
+    // authenticate with a scheme the client accepts.
     credential.signatureScheme = 0x0603; // ecdsa_secp521r1_sha512 — not offered by the client
 
     SwQuicHandshakeClient client;
@@ -408,7 +586,8 @@ bool testClientDiscardsInitialKeys() {
 } // namespace
 
 int main() {
-    if (!testLoopbackHandshake() ||
+    if (!testModernPemCredentials() ||
+        !testLoopbackHandshake() ||
         !testMutualAuthenticationAndCustomAlpn() ||
         !testServerRejectsUnofferedSignatureScheme() ||
         !testClientDiscardsInitialKeys()) {

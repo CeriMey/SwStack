@@ -27,6 +27,7 @@
 #include <deque>
 #include <functional>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -86,6 +87,7 @@ struct SwDbMetrics {
     unsigned long long compactionCount{0};
     unsigned long long getCount{0};
     unsigned long long snapshotCount{0};
+    unsigned long long snapshotCacheHitCount{0};
     unsigned long long blobBytesWritten{0};
     unsigned long long blobBytesRead{0};
     unsigned long long tableCount{0};
@@ -465,6 +467,24 @@ struct SecondaryEntry_ {
     unsigned long long sequence{0};
 };
 
+// Delta of records written since the cached writer read model (the "base")
+// was built. Snapshots merge it on top of the base at iteration time, so a
+// write does not force an O(N) read-model rebuild.
+struct OverlayIndexEntry_ {
+    bool deleted{false};
+    unsigned long long sequence{0};
+    SwByteArray secondaryKey;
+    SwByteArray primaryKey;
+};
+
+struct WriterOverlay_ {
+    unsigned long long baseSequence{0};
+    unsigned long long entryCount{0};
+    unsigned long long approximateBytes{0};
+    std::map<SwByteArray, PrimaryRecord_> primary;
+    SwHash<SwString, std::map<SwByteArray, OverlayIndexEntry_>> indexes;
+};
+
 struct ByteArrayHash_ {
     std::size_t operator()(const SwByteArray& value) const;
 };
@@ -664,6 +684,7 @@ private:
     void removeTablesLocked_(const SwList<swEmbeddedDbDetail::TableMeta_>& toRemove);
     void rebuildTableCachesLocked_();
     void rebuildReadOnlySnapshotLocked_();
+    void invalidateWriterReadCacheLocked_();
     void maybeRefreshFromNotifications_();
     void setupShmNotifications_();
     void teardownShmNotifications_();
@@ -691,9 +712,14 @@ private:
     std::vector<std::shared_ptr<swEmbeddedDbDetail::TableHandle_>> primaryTableHandlesNewestFirst_;
     SwHash<SwString, std::vector<std::shared_ptr<swEmbeddedDbDetail::TableHandle_>>> indexTableHandlesNewestFirst_;
     std::shared_ptr<swEmbeddedDbDetail::SnapshotState_> readOnlySnapshotState_;
+    std::shared_ptr<swEmbeddedDbDetail::SnapshotState_> writerSnapshotState_;
+    swEmbeddedDbDetail::WriterOverlay_ writerOverlay_;
+    std::shared_ptr<const swEmbeddedDbDetail::WriterOverlay_> writerOverlaySnapshot_;
+    unsigned long long writerOverlaySnapshotSequence_{0};
     swDbPlatform::FileLock writerLock_;
     bool writerLockHeld_{false};
     swDbPlatform::RandomAccessFile activeWalFile_;
+    unsigned long long activeWalFileId_{0};
     std::deque<std::shared_ptr<WriteRequest_>> pendingWrites_;
     SwEmbeddedDbCondition_ writeServiceCv_;
     std::thread writeServiceThread_;

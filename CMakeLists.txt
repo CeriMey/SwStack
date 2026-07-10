@@ -22,8 +22,15 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
     # Preserve symbols in Release and enable section splitting so the linker can strip more dead code.
     string(APPEND CMAKE_C_FLAGS_RELEASE " -g -ffunction-sections -fdata-sections")
     string(APPEND CMAKE_CXX_FLAGS_RELEASE " -g -ffunction-sections -fdata-sections")
-    string(APPEND CMAKE_EXE_LINKER_FLAGS_RELEASE " -Wl,--gc-sections")
-    string(APPEND CMAKE_SHARED_LINKER_FLAGS_RELEASE " -Wl,--gc-sections")
+    if(APPLE)
+        # ld64 uses -dead_strip; GNU --gc-sections is rejected by AppleClang's
+        # linker driver even though AppleClang matches the compiler branch.
+        string(APPEND CMAKE_EXE_LINKER_FLAGS_RELEASE " -Wl,-dead_strip")
+        string(APPEND CMAKE_SHARED_LINKER_FLAGS_RELEASE " -Wl,-dead_strip")
+    else()
+        string(APPEND CMAKE_EXE_LINKER_FLAGS_RELEASE " -Wl,--gc-sections")
+        string(APPEND CMAKE_SHARED_LINKER_FLAGS_RELEASE " -Wl,--gc-sections")
+    endif()
 endif()
 
 check_ipo_supported(RESULT SW_ENABLE_IPO OUTPUT SW_IPO_ERROR)
@@ -48,13 +55,31 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src/core/platform)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src/core/storage)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src/core/types)
 
+# QUIC's TLS 1.3 implementation uses the OpenSSL EVP/X.509 APIs directly.
+# Keep that dependency opt-out at configure time so Android, macOS and builds
+# which do not consume SwQuicCore are not forced by the QUIC integration to
+# provide a desktop OpenSSL package. Windows and Linux retain the existing
+# HTTP/3-enabled default.
+set(SW_ENABLE_QUIC_DEFAULT ON)
+if(APPLE OR ANDROID)
+    set(SW_ENABLE_QUIC_DEFAULT OFF)
+endif()
+option(SW_ENABLE_QUIC "Enable QUIC/HTTP3 targets and their OpenSSL dependency" ${SW_ENABLE_QUIC_DEFAULT})
+
+if(SW_ENABLE_QUIC)
+    find_package(OpenSSL 1.1.1 REQUIRED)
+endif()
+
+find_package(Threads REQUIRED)
+
 if(UNIX AND NOT APPLE AND NOT ANDROID)
     find_package(CURL REQUIRED)
     include_directories(${CURL_INCLUDE_DIRS})
     link_libraries(${CURL_LIBRARIES})
 
-    find_package(OpenSSL REQUIRED)
-    link_libraries(OpenSSL::Crypto)
+    if(SW_ENABLE_QUIC)
+        link_libraries(OpenSSL::Crypto)
+    endif()
 endif()
 
 # Third-party: miniz (used by SwWebSocket permessage-deflate).
@@ -72,17 +97,38 @@ add_library(SwQuicCore INTERFACE)
 target_include_directories(SwQuicCore INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/runtime
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/object
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/remote
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/gui
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core/io
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/installer
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/fs
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/hw
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/platform
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/storage
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core/types
 )
-if(WIN32)
-    find_package(OpenSSL REQUIRED)
-endif()
-if(TARGET OpenSSL::Crypto)
+# SwHttpApp is part of this public header aggregate and currently reaches
+# SwAny, which uses C++17 `if constexpr`. Isolated QUIC primitives remain
+# C++11-compatible, but consumers of this aggregate need the honest standard.
+target_compile_features(SwQuicCore INTERFACE cxx_std_17)
+target_link_libraries(SwQuicCore INTERFACE SwMiniz Threads::Threads ${CMAKE_DL_LIBS})
+
+if(SW_ENABLE_QUIC)
     target_link_libraries(SwQuicCore INTERFACE OpenSSL::Crypto)
-endif()
-if(WIN32)
-    target_link_libraries(SwQuicCore INTERFACE bcrypt crypt32)
+    if(WIN32)
+        target_link_libraries(SwQuicCore INTERFACE bcrypt crypt32 ws2_32)
+    endif()
+    if(MINGW)
+        # The header-only HTTP/3 stack creates large COFF translation units.
+        target_compile_options(SwQuicCore INTERFACE -Wa,-mbig-obj)
+    endif()
+else()
+    # Downstream projects can use this marker to avoid including the QUIC
+    # headers. A target which actually includes SwHttpApp/QUIC still needs to
+    # configure with SW_ENABLE_QUIC=ON because those public headers use OpenSSL.
+    target_compile_definitions(SwQuicCore INTERFACE SW_QUIC_DEPENDENCIES_DISABLED=1)
 endif()
 
 add_subdirectory(tools/SwInstallerPack)
@@ -102,7 +148,40 @@ set_target_properties(SwizioNodes PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # Default behavior stays close to the current tree: only WhatsApp is enabled by default.
 option(SW_BUILD_ALL_EXAMPLES "Build all top-level examples" OFF)
 
+# These targets include SwHttpApp or the native QUIC/TLS headers and therefore
+# require the OpenSSL dependency enabled above. Keep SW_BUILD_ALL_EXAMPLES
+# usable on Apple/Android and in deliberate dependency-free configurations.
+set(SW_QUIC_DEPENDENT_EXAMPLES
+    exemples/34-WebSocket
+    exemples/37-HttpAppQuickstart
+    exemples/44-HttpsDownloadTest
+    exemples/46-HttpAcmeSelfTest
+    exemples/71-QuicPacketCodecSelfTest
+    exemples/72-QuicCloudflareProbe
+    exemples/73-QuicHttp3FoundationsSelfTest
+    exemples/74-QuicHandshakeSelfTest
+    exemples/75-QuicHandshakeProbe
+    exemples/76-Http3ServerSelfTest
+    exemples/77-QuicHandshakeLoopbackSelfTest
+    exemples/78-Http3ServerOverUdpSelfTest
+    exemples/79-Http3ClientServerSelfTest
+    exemples/80-QuicZeroRttSelfTest
+    exemples/81-QuicZeroRttLiveSelfTest
+    exemples/82-Http3ZeroRttClientServerSelfTest
+    exemples/86-SwTlsSecretLifetimeSelfTest
+    exemples/90-SwQuicSocket
+    exemples/92-HttpAppHttp3SelfTest
+    exemples/93-HttpSeoSelfTest
+    exemples/94-HttpAppDbBench
+)
+
 function(sw_add_example_subdirectory example_dir default_enabled)
+    list(FIND SW_QUIC_DEPENDENT_EXAMPLES "${example_dir}" quic_example_index)
+    if(NOT SW_ENABLE_QUIC AND NOT quic_example_index EQUAL -1)
+        message(STATUS "Skipping ${example_dir}: SW_ENABLE_QUIC=OFF")
+        return()
+    endif()
+
     string(REPLACE "/" "_" option_suffix "${example_dir}")
     string(REPLACE "-" "_" option_suffix "${option_suffix}")
     string(REGEX REPLACE "[^A-Za-z0-9_]" "_" option_suffix "${option_suffix}")
@@ -208,11 +287,22 @@ sw_add_example_subdirectory(exemples/66-MediaTransportEndToEndSelfTest ON)
   sw_add_example_subdirectory(exemples/89-HttpClientSelfTest OFF)
   sw_add_example_subdirectory(exemples/90-SwQuicSocket OFF)
   sw_add_example_subdirectory(exemples/91-TimerSchedulerSelfTest OFF)
+  sw_add_example_subdirectory(exemples/92-HttpAppHttp3SelfTest OFF)
+  sw_add_example_subdirectory(exemples/93-HttpSeoSelfTest OFF)
+  sw_add_example_subdirectory(exemples/94-HttpAppDbBench OFF)
+  sw_add_example_subdirectory(exemples/95-LinuxMediaBackendsSelfTest ON)
   sw_add_example_subdirectory(sandbox/SwMainWindowApplication OFF)
 endif()
 
 # Sw "nodes"/tools
 add_subdirectory(tools/SwNode)
+
+# SwBridge includes SwHttpApp and therefore cannot be built without the QUIC
+# crypto headers. Keep the remaining SwNode tools available in a deliberate
+# dependency-free configuration while preventing SwBridge from entering ALL.
+if(NOT SW_ENABLE_QUIC AND TARGET SwBridge)
+    set_target_properties(SwBridge PROPERTIES EXCLUDE_FROM_ALL TRUE)
+endif()
 
 # SwCreator (UI designer)
 if(NOT ANDROID)

@@ -16,6 +16,9 @@ target_include_directories(MediaTransportEndToEndSelfTest PRIVATE
 if(WIN32)
     target_link_libraries(MediaTransportEndToEndSelfTest PRIVATE
         ws2_32
+        secur32
+        crypt32
+        gdiplus
         d3d11
         dxgi
         winmm
@@ -29,7 +32,7 @@ if(WIN32)
         uuid
     )
 elseif(UNIX AND NOT APPLE)
-    target_link_libraries(MediaTransportEndToEndSelfTest PRIVATE pthread)
+    target_link_libraries(MediaTransportEndToEndSelfTest PRIVATE pthread ${CMAKE_DL_LIBS})
 endif()
 
 add_test(NAME MediaTransportEndToEndSelfTest COMMAND MediaTransportEndToEndSelfTest)

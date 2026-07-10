@@ -89,6 +89,49 @@ inline bool swForEachHevcAnnexBNalUnit(const uint8_t* data,
     return foundAny;
 }
 
+struct SwLengthPrefixedNalUnitView {
+    std::size_t offset{0}; // offset of the NAL payload, right after its length prefix
+    std::size_t size{0};
+};
+
+/**
+ * @brief Walks length-prefixed NAL units (avcC/hvcC sample layout, big-endian 1-4 byte
+ *        lengths), with the strict validation shared by the MP4 demuxer and the RTP
+ *        packetizer: a zero-length NAL, a length overrunning the buffer, an empty buffer
+ *        or trailing bytes all fail the walk.
+ * @return `true` only when the buffer parses exactly into one or more NAL units.
+ */
+inline bool swForEachLengthPrefixedNalUnit(
+    const uint8_t* data,
+    std::size_t size,
+    std::size_t lengthBytes,
+    const std::function<void(const SwLengthPrefixedNalUnitView&)>& visitor) {
+    if (!data || lengthBytes == 0 || lengthBytes > 4) {
+        return false;
+    }
+    std::size_t offset = 0;
+    bool foundAny = false;
+    while (offset + lengthBytes <= size) {
+        std::uint32_t nalSize = 0;
+        for (std::size_t i = 0; i < lengthBytes; ++i) {
+            nalSize = (nalSize << 8) | data[offset + i];
+        }
+        offset += lengthBytes;
+        if (nalSize == 0 || nalSize > size - offset) {
+            return false;
+        }
+        if (visitor) {
+            SwLengthPrefixedNalUnitView view;
+            view.offset = offset;
+            view.size = nalSize;
+            visitor(view);
+        }
+        foundAny = true;
+        offset += nalSize;
+    }
+    return foundAny && offset == size;
+}
+
 class SwHevcBitReader {
 public:
     SwHevcBitReader(const uint8_t* data, std::size_t size)
