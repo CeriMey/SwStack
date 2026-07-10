@@ -22,6 +22,7 @@
  * Every fallible function returns bool and reports the reason through a trailing SwString* error.
  */
 
+#include "SwVector.h"
 #include "SwByteArray.h"
 #include "SwCrypto.h"
 #include "SwString.h"
@@ -40,7 +41,7 @@ public:
      * @return The 32-byte SHA-256 digest.
      */
     static SwByteArray transcriptHash(const SwByteArray& messages) {
-        const std::vector<unsigned char> digest =
+        const SwVector<unsigned char> digest =
             SwCrypto::generateHashSHA256(messages.toStdString());
         return SwByteArray(reinterpret_cast<const char*>(digest.data()), digest.size());
     }
@@ -333,7 +334,7 @@ private:
 
     /// HMAC-SHA256(key, data). SwCrypto takes (data, key) — mind the order.
     static SwByteArray hmacSha256_(const SwByteArray& key, const SwByteArray& data) {
-        const std::vector<unsigned char> digest =
+        const SwVector<unsigned char> digest =
             SwCrypto::generateKeyedHashSHA256(data.toStdString(), key.toStdString());
         return SwByteArray(reinterpret_cast<const char*>(digest.data()), digest.size());
     }
@@ -382,7 +383,7 @@ private:
             SwByteArray info;
             appendU16_(info, static_cast<std::uint16_t>(outputLength));
             info.append(static_cast<char>(fullLabel.size()));
-            info.append(fullLabel.toStdString());
+            info.append(fullLabel.constData(), fullLabel.size());
             info.append(static_cast<char>(context.size()));
             if (context.size() > 0) {
                 info.append(context.constData(), context.size());

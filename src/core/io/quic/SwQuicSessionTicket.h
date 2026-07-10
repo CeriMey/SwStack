@@ -2,10 +2,9 @@
 #define SWQUICSESSIONTICKET_H
 
 #include "SwByteArray.h"
+#include "SwMap.h"
 
 #include <cstdint>
-#include <map>
-#include <string>
 
 // Client-side resumption state kept after a NewSessionTicket (RFC 8446 4.6.1):
 // the opaque ticket to echo as the PSK identity, the derived resumption PSK,
@@ -56,12 +55,11 @@ public:
         entry.maxEarlyDataSize = maxEarlyDataSize;
         entry.serverTransportParams = serverTransportParams;
         entry.found = true;
-        m_entries[ticket.toStdString()] = entry;
+        m_entries[ticket] = entry;
     }
 
     Entry lookup(const SwByteArray& ticket) const {
-        std::map<std::string, Entry>::const_iterator it =
-            m_entries.find(ticket.toStdString());
+        SwMap<SwByteArray, Entry>::const_iterator it = m_entries.find(ticket);
         if (it == m_entries.end()) {
             return Entry();
         }
@@ -71,14 +69,14 @@ public:
     // Single-use tickets are the safest default against 0-RTT replay
     // (RFC 8446 8.1): a resumed ticket is consumed so it cannot be replayed.
     void consume(const SwByteArray& ticket) {
-        m_entries.erase(ticket.toStdString());
+        m_entries.erase(ticket);
     }
 
     std::size_t size() const { return m_entries.size(); }
     void clear() { m_entries.clear(); }
 
 private:
-    std::map<std::string, Entry> m_entries;
+    SwMap<SwByteArray, Entry> m_entries;
 };
 
 #endif

@@ -1,6 +1,9 @@
+#include "SwPair.h"
+#include "SwMap.h"
 #ifndef SWQUICSTREAMMAP_H
 #define SWQUICSTREAMMAP_H
 
+#include "SwVector.h"
 #include "SwByteArray.h"
 #include "SwString.h"
 #include "quic/SwQuicFrame.h"
@@ -19,9 +22,9 @@ public:
             return false;
         }
 
-        std::map<std::uint64_t, SwQuicStream>::iterator it = m_streams.find(frame.streamId());
+        SwMap<std::uint64_t, SwQuicStream>::iterator it = m_streams.find(frame.streamId());
         if (it == m_streams.end()) {
-            it = m_streams.insert(std::make_pair(frame.streamId(),
+            it = m_streams.insert(SwMakePair(frame.streamId(),
                                                  SwQuicStream(frame.streamId()))).first;
         }
 
@@ -33,7 +36,7 @@ public:
     }
 
     SwQuicStream* stream(std::uint64_t streamId) {
-        std::map<std::uint64_t, SwQuicStream>::iterator it = m_streams.find(streamId);
+        SwMap<std::uint64_t, SwQuicStream>::iterator it = m_streams.find(streamId);
         if (it == m_streams.end()) {
             return nullptr;
         }
@@ -41,7 +44,7 @@ public:
     }
 
     const SwQuicStream* stream(std::uint64_t streamId) const {
-        std::map<std::uint64_t, SwQuicStream>::const_iterator it = m_streams.find(streamId);
+        SwMap<std::uint64_t, SwQuicStream>::const_iterator it = m_streams.find(streamId);
         if (it == m_streams.end()) {
             return nullptr;
         }
@@ -62,10 +65,10 @@ public:
 
     // Stream IDs currently tracked, ascending. Lets a higher layer (HTTP/3)
     // iterate received streams without exposing the internal container.
-    std::vector<std::uint64_t> streamIds() const {
-        std::vector<std::uint64_t> ids;
+    SwVector<std::uint64_t> streamIds() const {
+        SwVector<std::uint64_t> ids;
         ids.reserve(m_streams.size());
-        for (std::map<std::uint64_t, SwQuicStream>::const_iterator it = m_streams.begin();
+        for (SwMap<std::uint64_t, SwQuicStream>::const_iterator it = m_streams.begin();
              it != m_streams.end(); ++it) {
             ids.push_back(it->first);
         }
@@ -83,7 +86,7 @@ private:
         }
     }
 
-    std::map<std::uint64_t, SwQuicStream> m_streams;
+    SwMap<std::uint64_t, SwQuicStream> m_streams;
 };
 
 #endif

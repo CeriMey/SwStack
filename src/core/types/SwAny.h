@@ -74,6 +74,19 @@
 #include "SwDebug.h"
 static constexpr const char* kSwLogCategory_SwAny = "sw.core.types.swany";
 
+namespace swAnyDetail {
+
+template <typename Left, typename Right>
+inline bool typesDiffer() noexcept {
+    if constexpr (std::is_same<Left, Right>::value) {
+        return false;
+    } else {
+        return true;
+    }
+}
+
+} // namespace swAnyDetail
+
 
 
 
@@ -1003,7 +1016,7 @@ public:
             return SwAny(*static_cast<int*>(ptr));
         } else if (typeNameStr == typeid(long long).name()) {
             return SwAny(*static_cast<long long*>(ptr));
-        } else if (!std::is_same<std::int64_t, long long>::value &&
+        } else if (swAnyDetail::typesDiffer<std::int64_t, long long>() &&
                    typeNameStr == typeid(std::int64_t).name()) {
             return SwAny(*static_cast<std::int64_t*>(ptr));
         } else if (typeNameStr == typeid(float).name()) {
@@ -1015,7 +1028,7 @@ public:
             return SwAny(*static_cast<uint32_t*>(ptr));
         } else if (typeNameStr == typeid(unsigned long long).name()) {
             return SwAny(*static_cast<unsigned long long*>(ptr));
-        } else if (!std::is_same<std::uint64_t, unsigned long long>::value &&
+        } else if (swAnyDetail::typesDiffer<std::uint64_t, unsigned long long>() &&
                    typeNameStr == typeid(std::uint64_t).name()) {
             return SwAny(*static_cast<std::uint64_t*>(ptr));
         } else if (typeNameStr == typeid(std::string).name()) {
@@ -1106,7 +1119,7 @@ public:
             return const_cast<void*>(static_cast<const void*>(&storage.i));
         } else if (typeNameStr == typeid(long long).name()) {
             return const_cast<void*>(static_cast<const void*>(&storage.i64));
-        } else if (!std::is_same<std::int64_t, long long>::value &&
+        } else if (swAnyDetail::typesDiffer<std::int64_t, long long>() &&
                    typeNameStr == typeid(std::int64_t).name()) {
             return const_cast<void*>(static_cast<const void*>(&storage.stdI64));
         } else if (typeNameStr == typeid(float).name()) {
@@ -1118,7 +1131,7 @@ public:
             return const_cast<void*>(static_cast<const void*>(&storage.u32));
         } else if (typeNameStr == typeid(unsigned long long).name()) {
             return const_cast<void*>(static_cast<const void*>(&storage.u64));
-        } else if (!std::is_same<std::uint64_t, unsigned long long>::value &&
+        } else if (swAnyDetail::typesDiffer<std::uint64_t, unsigned long long>() &&
                    typeNameStr == typeid(std::uint64_t).name()) {
             return const_cast<void*>(static_cast<const void*>(&storage.stdU64));
         } else if (typeNameStr == typeid(std::string).name()) {
@@ -1168,7 +1181,7 @@ public:
         } else if (otherTypeName == typeid(long long).name()) {
             storage.i64 = other.storage.i64;
             typeNameStr = otherTypeName;
-        } else if (!std::is_same<std::int64_t, long long>::value &&
+        } else if (swAnyDetail::typesDiffer<std::int64_t, long long>() &&
                    otherTypeName == typeid(std::int64_t).name()) {
             storage.stdI64 = other.storage.stdI64;
             typeNameStr = otherTypeName;
@@ -1185,7 +1198,7 @@ public:
         } else if (otherTypeName == typeid(unsigned long long).name()) {
             storage.u64 = other.storage.u64;
             typeNameStr = otherTypeName;
-        } else if (!std::is_same<std::uint64_t, unsigned long long>::value &&
+        } else if (swAnyDetail::typesDiffer<std::uint64_t, unsigned long long>() &&
                    otherTypeName == typeid(std::uint64_t).name()) {
             storage.stdU64 = other.storage.stdU64;
             typeNameStr = otherTypeName;
@@ -1240,7 +1253,7 @@ public:
             storage.i = other.storage.i;
         } else if (typeNameStr == typeid(long long).name()) {
             storage.i64 = other.storage.i64;
-        } else if (!std::is_same<std::int64_t, long long>::value &&
+        } else if (swAnyDetail::typesDiffer<std::int64_t, long long>() &&
                    typeNameStr == typeid(std::int64_t).name()) {
             storage.stdI64 = other.storage.stdI64;
         } else if (typeNameStr == typeid(uint32_t).name() ||
@@ -1248,7 +1261,7 @@ public:
             storage.u32 = other.storage.u32;
         } else if (typeNameStr == typeid(unsigned long long).name()) {
             storage.u64 = other.storage.u64;
-        } else if (!std::is_same<std::uint64_t, unsigned long long>::value &&
+        } else if (swAnyDetail::typesDiffer<std::uint64_t, unsigned long long>() &&
                    typeNameStr == typeid(std::uint64_t).name()) {
             storage.stdU64 = other.storage.stdU64;
         } else if (typeNameStr == typeid(float).name()) {
@@ -1506,7 +1519,7 @@ public:
             return get<int>() != 0;
         } else if (typeNameStr == typeid(long long).name()) {
             return get<long long>() != 0;
-        } else if (!std::is_same<std::int64_t, long long>::value &&
+        } else if (swAnyDetail::typesDiffer<std::int64_t, long long>() &&
                    typeNameStr == typeid(std::int64_t).name()) {
             return get<std::int64_t>() != 0;
         } else if (typeNameStr == typeid(unsigned int).name()) {
@@ -1515,7 +1528,7 @@ public:
             return get<uint32_t>() != 0u;
         } else if (typeNameStr == typeid(unsigned long long).name()) {
             return get<unsigned long long>() != 0ull;
-        } else if (!std::is_same<std::uint64_t, unsigned long long>::value &&
+        } else if (swAnyDetail::typesDiffer<std::uint64_t, unsigned long long>() &&
                    typeNameStr == typeid(std::uint64_t).name()) {
             return get<std::uint64_t>() != 0ull;
         } else if (typeNameStr == typeid(double).name()) {
@@ -1558,7 +1571,7 @@ public:
             }
             if (ok) *ok = true;
             return static_cast<int>(value);
-        } else if (!std::is_same<std::int64_t, long long>::value &&
+        } else if (swAnyDetail::typesDiffer<std::int64_t, long long>() &&
                    typeNameStr == typeid(std::int64_t).name()) {
             const std::int64_t value = get<std::int64_t>();
             if (value < static_cast<std::int64_t>(std::numeric_limits<int>::min()) ||
@@ -1592,7 +1605,7 @@ public:
             }
             if (ok) *ok = true;
             return static_cast<int>(value);
-        } else if (!std::is_same<std::uint64_t, unsigned long long>::value &&
+        } else if (swAnyDetail::typesDiffer<std::uint64_t, unsigned long long>() &&
                    typeNameStr == typeid(std::uint64_t).name()) {
             const std::uint64_t value = get<std::uint64_t>();
             if (value > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
@@ -1648,7 +1661,7 @@ public:
         if (typeNameStr == typeid(long long).name()) {
             if (ok) *ok = true;
             return get<long long>();
-        } else if (!std::is_same<std::int64_t, long long>::value &&
+        } else if (swAnyDetail::typesDiffer<std::int64_t, long long>() &&
                    typeNameStr == typeid(std::int64_t).name()) {
             if (ok) *ok = true;
             return static_cast<long long>(get<std::int64_t>());
@@ -1669,7 +1682,7 @@ public:
             }
             if (ok) *ok = true;
             return static_cast<long long>(value);
-        } else if (!std::is_same<std::uint64_t, unsigned long long>::value &&
+        } else if (swAnyDetail::typesDiffer<std::uint64_t, unsigned long long>() &&
                    typeNameStr == typeid(std::uint64_t).name()) {
             const std::uint64_t value = get<std::uint64_t>();
             if (value > static_cast<std::uint64_t>(std::numeric_limits<long long>::max())) {
@@ -1737,7 +1750,7 @@ public:
             if (ok) *ok = true;
             return static_cast<std::uint64_t>(get<unsigned long long>());
         }
-        if (!std::is_same<std::uint64_t, unsigned long long>::value &&
+        if (swAnyDetail::typesDiffer<std::uint64_t, unsigned long long>() &&
             typeNameStr == typeid(std::uint64_t).name()) {
             if (ok) *ok = true;
             return get<std::uint64_t>();
@@ -1768,7 +1781,7 @@ public:
             if (ok) *ok = true;
             return static_cast<std::uint64_t>(value);
         }
-        if (!std::is_same<std::int64_t, long long>::value &&
+        if (swAnyDetail::typesDiffer<std::int64_t, long long>() &&
             typeNameStr == typeid(std::int64_t).name()) {
             const std::int64_t value = get<std::int64_t>();
             if (value < 0) {
@@ -1856,7 +1869,7 @@ public:
             return static_cast<float>(get<int>());
         } else if (typeNameStr == typeid(long long).name()) {
             return static_cast<float>(get<long long>());
-        } else if (!std::is_same<std::int64_t, long long>::value &&
+        } else if (swAnyDetail::typesDiffer<std::int64_t, long long>() &&
                    typeNameStr == typeid(std::int64_t).name()) {
             return static_cast<float>(get<std::int64_t>());
         } else if (typeNameStr == typeid(unsigned int).name()) {
@@ -1865,7 +1878,7 @@ public:
             return static_cast<float>(get<uint32_t>());
         } else if (typeNameStr == typeid(unsigned long long).name()) {
             return static_cast<float>(get<unsigned long long>());
-        } else if (!std::is_same<std::uint64_t, unsigned long long>::value &&
+        } else if (swAnyDetail::typesDiffer<std::uint64_t, unsigned long long>() &&
                    typeNameStr == typeid(std::uint64_t).name()) {
             return static_cast<float>(get<std::uint64_t>());
         } else if (typeNameStr == typeid(SwString).name()) {
@@ -1911,7 +1924,7 @@ public:
         if (typeNameStr == typeid(long long).name()) {
             return static_cast<double>(get<long long>());
         }
-        if (!std::is_same<std::int64_t, long long>::value &&
+        if (swAnyDetail::typesDiffer<std::int64_t, long long>() &&
             typeNameStr == typeid(std::int64_t).name()) {
             return static_cast<double>(get<std::int64_t>());
         }
@@ -1924,7 +1937,7 @@ public:
         if (typeNameStr == typeid(unsigned long long).name()) {
             return static_cast<double>(get<unsigned long long>());
         }
-        if (!std::is_same<std::uint64_t, unsigned long long>::value &&
+        if (swAnyDetail::typesDiffer<std::uint64_t, unsigned long long>() &&
             typeNameStr == typeid(std::uint64_t).name()) {
             return static_cast<double>(get<std::uint64_t>());
         }
@@ -1972,7 +1985,7 @@ public:
                 return std::numeric_limits<uint32_t>::max();
             }
             return static_cast<uint32_t>(v);
-        } else if (!std::is_same<std::int64_t, long long>::value &&
+        } else if (swAnyDetail::typesDiffer<std::int64_t, long long>() &&
                    typeNameStr == typeid(std::int64_t).name()) {
             const std::int64_t v = get<std::int64_t>();
             if (v < 0) return 0u;
@@ -1986,7 +1999,7 @@ public:
                 return std::numeric_limits<uint32_t>::max();
             }
             return static_cast<uint32_t>(v);
-        } else if (!std::is_same<std::uint64_t, unsigned long long>::value &&
+        } else if (swAnyDetail::typesDiffer<std::uint64_t, unsigned long long>() &&
                    typeNameStr == typeid(std::uint64_t).name()) {
             const std::uint64_t v = get<std::uint64_t>();
             if (v > static_cast<std::uint64_t>(std::numeric_limits<uint32_t>::max())) {
@@ -2173,7 +2186,7 @@ inline bool operator==(const SwAny& lhs, const SwAny& rhs)
         if (lt == typeid(long long).name())
             return lhs.get<long long>() == rhs.get<long long>();
 
-        if (!std::is_same<std::int64_t, long long>::value &&
+        if (swAnyDetail::typesDiffer<std::int64_t, long long>() &&
             lt == typeid(std::int64_t).name())
             return lhs.get<std::int64_t>() == rhs.get<std::int64_t>();
 
@@ -2186,7 +2199,7 @@ inline bool operator==(const SwAny& lhs, const SwAny& rhs)
         if (lt == typeid(unsigned long long).name())
             return lhs.get<unsigned long long>() == rhs.get<unsigned long long>();
 
-        if (!std::is_same<std::uint64_t, unsigned long long>::value &&
+        if (swAnyDetail::typesDiffer<std::uint64_t, unsigned long long>() &&
             lt == typeid(std::uint64_t).name())
             return lhs.get<std::uint64_t>() == rhs.get<std::uint64_t>();
 

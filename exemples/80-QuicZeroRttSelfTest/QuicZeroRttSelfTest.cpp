@@ -24,7 +24,7 @@
 
 #include <cstdint>
 #include <iostream>
-#include <vector>
+#include "core/types/SwVector.h"
 
 namespace {
 
@@ -44,13 +44,13 @@ bool runHandshake(SwQuicHandshakeClient& client, SwQuicHandshakeServer& server,
         return false;
     }
 
-    std::vector<SwByteArray> clientToServer;
+    SwVector<SwByteArray> clientToServer;
     clientToServer.push_back(clientInitial);
 
     for (int round = 0; round < 8; ++round) {
-        std::vector<SwByteArray> serverToClient;
+        SwVector<SwByteArray> serverToClient;
         for (std::size_t i = 0; i < clientToServer.size(); ++i) {
-            std::vector<SwByteArray> replies;
+            SwVector<SwByteArray> replies;
             if (!server.processIncomingDatagram(clientToServer[i], replies, error)) {
                 return false;
             }
@@ -60,7 +60,7 @@ bool runHandshake(SwQuicHandshakeClient& client, SwQuicHandshakeServer& server,
         }
         clientToServer.clear();
         for (std::size_t i = 0; i < serverToClient.size(); ++i) {
-            std::vector<SwByteArray> replies;
+            SwVector<SwByteArray> replies;
             if (!client.processIncomingDatagram(serverToClient[i], replies, error)) {
                 return false;
             }
@@ -83,7 +83,7 @@ bool testZeroRtt() {
     if (!requireTrue(SwQuicEcdsaCredential::createSelfSigned(SwString("resume.test"),
                                                              credential, &error),
                      "credential generation failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -94,8 +94,8 @@ bool testZeroRtt() {
     server1.setCredential(credential);
 
     if (!requireTrue(runHandshake(client1, server1, &error), "connection 1 handshake failed")) {
-        std::cerr << "c=" << client1.errorString().toStdString()
-                  << " s=" << server1.errorString().toStdString() << std::endl;
+        std::cerr << "c=" << client1.errorString()
+                  << " s=" << server1.errorString() << std::endl;
         return false;
     }
 
@@ -111,14 +111,14 @@ bool testZeroRtt() {
     SwByteArray ticketNonce;
     if (!SwQuicRandom::fill(ticketBytes, 24, &error) ||
         !SwQuicRandom::fill(ticketNonce, 8, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
     SwByteArray nstBody;
     if (!requireTrue(server1.issueNewSessionTicket(store, ticketBytes, ticketNonce,
                                                    7200, 0x01020304, 0xffffffffu, nstBody, &error),
                      "server ticket issuance failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -126,7 +126,7 @@ bool testZeroRtt() {
     SwQuicSessionTicket ticket;
     if (!requireTrue(client1.processNewSessionTicket(nstBody, SwByteArray(), ticket, &error),
                      "client NST processing failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -148,13 +148,13 @@ bool testZeroRtt() {
     if (!SwQuicRandom::fill(priv, 32, &error) ||
         !SwQuicX25519::derivePublicKey(priv, pub, &error) ||
         !SwQuicRandom::fill(random, 32, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
     SwQuicConnectionId scid;
     if (!SwQuicConnectionId::fromBytes(SwByteArray("rtt-scid"), scid, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -165,7 +165,7 @@ bool testZeroRtt() {
                          ticket.ticket, ticket.ticketAgeAdd, ticket.resumptionPsk,
                          resumptionClientHello, clientEarlyKeys, &error),
                      "resumption ClientHello build failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -176,7 +176,7 @@ bool testZeroRtt() {
         4, static_cast<int>(resumptionClientHello.size() - 4));
     if (!requireTrue(SwTls13Messages::parseClientHello(chBody, parsed, &error),
                      "server ClientHello parse failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
     if (!requireTrue(parsed.hasPreSharedKey, "server did not see a pre_shared_key") ||
@@ -194,7 +194,7 @@ bool testZeroRtt() {
     if (!requireTrue(SwQuicClientHelloBuilder::computeExpectedBinder(
                          resumptionClientHello, entry.resumptionPsk, expectedBinder, &error),
                      "server binder computation failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
     if (!requireTrue(expectedBinder == parsed.pskBinder,
@@ -207,7 +207,7 @@ bool testZeroRtt() {
     if (!requireTrue(SwQuicClientHelloBuilder::deriveServerEarlyKeys(
                          resumptionClientHello, entry.resumptionPsk, serverEarlyKeys, &error),
                      "server early key derivation failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
     if (!requireTrue(clientEarlyKeys.key == serverEarlyKeys.key &&
@@ -222,12 +222,12 @@ bool testZeroRtt() {
     SwQuicConnectionId clientScid;
     if (!SwQuicConnectionId::fromBytes(SwByteArray("srv-dcid"), serverDcid, &error) ||
         !SwQuicConnectionId::fromBytes(SwByteArray("cli-scid"), clientScid, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
     // Build a 0-RTT long header (type bits 0x10 -> first byte 0xd0 | pnLen-1).
-    std::vector<SwQuicFrame> earlyFrames;
+    SwVector<SwQuicFrame> earlyFrames;
     earlyFrames.push_back(SwQuicFrame::stream(0, 0, SwByteArray("early GET /resource"), true));
     SwByteArray earlyPayload;
     if (!requireTrue(SwQuicFrameCodec::encodeFrames(earlyFrames, earlyPayload, &error),
@@ -255,7 +255,7 @@ bool testZeroRtt() {
             static_cast<std::uint64_t>(earlyPayload.size() + pnLen +
                                        SwQuicPacketProtector::kTagLength);
         if (!SwQuicVarIntCodec::encode(lengthField, header, &error)) {
-            std::cerr << error.toStdString() << std::endl;
+            std::cerr << error << std::endl;
             return false;
         }
     }
@@ -269,7 +269,7 @@ bool testZeroRtt() {
                                                              pnLen, header, earlyPayload,
                                                              zeroRttPacket, &error),
                      "0-RTT packet protection failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -278,11 +278,11 @@ bool testZeroRtt() {
     if (!requireTrue(SwQuicPacketProtector::unprotectZeroRtt(serverEarlyKeys, zeroRttPacket,
                                                             outHeader, outPayload, nullptr, &error),
                      "0-RTT packet deprotection failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
-    std::vector<SwQuicFrame> decodedFrames;
+    SwVector<SwQuicFrame> decodedFrames;
     if (!requireTrue(SwQuicFrameCodec::decodeFrames(outPayload, decodedFrames, &error),
                      "0-RTT frame decode failed") ||
         !requireTrue(!decodedFrames.empty(), "no frames in 0-RTT packet")) {
@@ -314,17 +314,17 @@ bool testResumptionBinderTruncationLength() {
     if (!SwQuicRandom::fill(priv, 32, &error) ||
         !SwQuicX25519::derivePublicKey(priv, pub, &error) ||
         !SwQuicRandom::fill(random, 32, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
     SwQuicConnectionId scid;
     if (!SwQuicConnectionId::fromBytes(SwByteArray("bindscid"), scid, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
     SwByteArray ticket, psk;
     if (!SwQuicRandom::fill(ticket, 24, &error) || !SwQuicRandom::fill(psk, 32, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -334,7 +334,7 @@ bool testResumptionBinderTruncationLength() {
                          SwString("resume.test"), scid, pub, random, ticket,
                          0x11223344, psk, ch, earlyKeys, &error),
                      "resumption ClientHello build failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -342,7 +342,7 @@ bool testResumptionBinderTruncationLength() {
     const SwByteArray chBody = ch.mid(4, static_cast<int>(ch.size() - 4));
     if (!requireTrue(SwTls13Messages::parseClientHello(chBody, parsed, &error),
                      "ClientHello parse failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -358,7 +358,7 @@ bool testResumptionBinderTruncationLength() {
     if (!requireTrue(SwQuicClientHelloBuilder::computeExpectedBinder(
                          ch, psk, withParsed, &error, parsed.pskBindersTotalLength),
                      "binder recompute with parsed length failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
     if (!requireTrue(withParsed == parsed.pskBinder,

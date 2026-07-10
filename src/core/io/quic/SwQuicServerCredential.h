@@ -1,6 +1,7 @@
 #ifndef SWQUICSERVERCREDENTIAL_H
 #define SWQUICSERVERCREDENTIAL_H
 
+#include "SwVector.h"
 #include "SwByteArray.h"
 #include "SwString.h"
 
@@ -36,7 +37,7 @@
 // CertificateVerify signature but does not require the chain to reach a trusted
 // root (SwQuicHandshakeClient::setVerifyCertificateChain(false)).
 struct SwQuicServerCredential {
-    std::vector<SwByteArray> certificateChain; // leaf first, DER
+    SwVector<SwByteArray> certificateChain; // leaf first, DER
     std::uint16_t signatureScheme;             // TLS SignatureScheme
     // Signs the fully assembled CertificateVerify content and returns the
     // signature exactly as it must appear on the wire (DER for ECDSA).
@@ -139,7 +140,7 @@ private:
                 setError_(error, "BCryptExportKey(size) failed");
                 return false;
             }
-            std::vector<unsigned char> blob(size, 0);
+            SwVector<unsigned char> blob(size, 0);
             if (BCryptExportKey(key, nullptr, BCRYPT_ECCPUBLIC_BLOB, blob.data(), size, &size, 0) != 0) {
                 setError_(error, "BCryptExportKey failed");
                 return false;
@@ -176,7 +177,7 @@ private:
                 setError_(error, "BCryptSignHash(size) failed");
                 return false;
             }
-            std::vector<unsigned char> raw(size, 0);
+            SwVector<unsigned char> raw(size, 0);
             if (BCryptSignHash(key, nullptr,
                                reinterpret_cast<PUCHAR>(const_cast<char*>(digest.constData())),
                                static_cast<ULONG>(digest.size()),
@@ -252,7 +253,7 @@ private:
                 setError_(error, "BCryptOpenAlgorithmProvider(SHA256) failed");
                 return false;
             }
-            std::vector<unsigned char> digest(32, 0);
+            SwVector<unsigned char> digest(32, 0);
             const NTSTATUS status = BCryptHash(provider, nullptr, 0,
                                                reinterpret_cast<PUCHAR>(
                                                    const_cast<char*>(data.constData())),
@@ -309,7 +310,7 @@ private:
                         reinterpret_cast<const unsigned char*>(content.constData()),
                         static_cast<std::size_t>(content.size())) > 0;
             if (!ok) { EVP_MD_CTX_free(md); setError_(error, "EVP_DigestSign(size) failed"); return false; }
-            std::vector<unsigned char> sig(siglen);
+            SwVector<unsigned char> sig(siglen);
             ok = EVP_DigestSign(md, sig.data(), &siglen,
                     reinterpret_cast<const unsigned char*>(content.constData()),
                     static_cast<std::size_t>(content.size())) > 0;
@@ -413,7 +414,7 @@ private:
         // Name = SEQUENCE { SET { SEQUENCE { OID cn, UTF8String host } } }.
         SwByteArray attribute;
         attribute.append(derOid_(oidCommonName, sizeof(oidCommonName)));
-        attribute.append(derTlv_(0x0c, SwByteArray(hostName.toStdString())));
+        attribute.append(derTlv_(0x0c, SwByteArray(hostName.constData(), hostName.size())));
         const SwByteArray rdn = derTlv_(0x31, derTlv_(0x30, attribute));
         const SwByteArray name = derTlv_(0x30, rdn);
 
@@ -425,8 +426,8 @@ private:
 
         // version [0] EXPLICIT INTEGER v3(2).
         const SwByteArray version =
-            derTlv_(0xA0, derInteger_(SwByteArray(std::string(1, '\x02'))));
-        const SwByteArray serial = derInteger_(SwByteArray(std::string(1, '\x01')));
+            derTlv_(0xA0, derInteger_(SwByteArray(SwString(1, '\x02'))));
+        const SwByteArray serial = derInteger_(SwByteArray(SwString(1, '\x01')));
 
         SwByteArray tbs;
         tbs.append(version);
@@ -441,8 +442,8 @@ private:
         // Placeholder signature value (the chain is not validated by the test
         // peer; the CertificateVerify signature is what proves possession).
         SwByteArray placeholderSig;
-        placeholderSig.append(derInteger_(SwByteArray(std::string(1, '\x01'))));
-        placeholderSig.append(derInteger_(SwByteArray(std::string(1, '\x01'))));
+        placeholderSig.append(derInteger_(SwByteArray(SwString(1, '\x01'))));
+        placeholderSig.append(derInteger_(SwByteArray(SwString(1, '\x01'))));
         SwByteArray sigBitString;
         sigBitString.append(static_cast<char>(0));
         sigBitString.append(derTlv_(0x30, placeholderSig));

@@ -1,3 +1,4 @@
+#include "SwMap.h"
 #ifndef SWQUICSTREAM_H
 #define SWQUICSTREAM_H
 
@@ -66,7 +67,7 @@ public:
         }
 
         if (fragment.size() > 0) {
-            std::map<std::uint64_t, SwByteArray>::iterator existing =
+            SwMap<std::uint64_t, SwByteArray>::iterator existing =
                 m_fragments.find(fragmentOffset);
             if (existing == m_fragments.end() || existing->second.size() < fragment.size()) {
                 m_fragments[fragmentOffset] = fragment;
@@ -93,7 +94,7 @@ public:
     }
 
     bool hasReadableData() const {
-        for (std::map<std::uint64_t, SwByteArray>::const_iterator it = m_fragments.begin();
+        for (SwMap<std::uint64_t, SwByteArray>::const_iterator it = m_fragments.begin();
              it != m_fragments.end();
              ++it) {
             const std::uint64_t start = it->first;
@@ -112,7 +113,7 @@ public:
         SwByteArray out;
 
         while (!m_fragments.empty()) {
-            std::map<std::uint64_t, SwByteArray>::iterator it = m_fragments.begin();
+            SwMap<std::uint64_t, SwByteArray>::iterator it = m_fragments.begin();
             const std::uint64_t start = it->first;
             const std::uint64_t size = static_cast<std::uint64_t>(it->second.size());
             const std::uint64_t end = start + size;
@@ -168,7 +169,7 @@ private:
     std::uint64_t m_readOffset;
     bool m_finReceived;
     std::uint64_t m_finalOffset;
-    std::map<std::uint64_t, SwByteArray> m_fragments;
+    SwMap<std::uint64_t, SwByteArray> m_fragments;
 };
 
 #endif

@@ -49,9 +49,8 @@
 #include "SwByteArray.h"
 #include "SwDebug.h"
 #include "SwHostResolver.h"
+#include "SwHash.h"
 #include "SwMutex.h"
-#include "SwList.h"
-#include "SwPair.h"
 #include "SwSocketTrafficTelemetry.h"
 
 #include <atomic>
@@ -61,8 +60,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <functional>
 #include <thread>
-#include <deque>
+#include <vector>
 static constexpr const char* kSwLogCategory_SwUdpSocket = "sw.core.io.swudpsocket";
 
 
@@ -85,7 +85,40 @@ static constexpr const char* kSwLogCategory_SwUdpSocket = "sw.core.io.swudpsocke
 class SwUdpSocket : public SwIODevice {
     SW_OBJECT(SwUdpSocket, SwIODevice)
 
+    struct PendingDatagram {
+        std::vector<char> bytes;
+        size_t size{0};
+        sockaddr_storage sender{};
+
+        PendingDatagram() = default;
+
+        void resizeBuffer(size_t capacity) {
+            if (bytes.size() != capacity) {
+                bytes.resize(capacity);
+                if (size > capacity) {
+                    size = capacity;
+                }
+            }
+        }
+
+        void assign(const char* data, size_t length, const sockaddr_storage& source) {
+            if (bytes.size() < length) {
+                bytes.resize(length);
+            }
+            if (length > 0) {
+                std::memcpy(bytes.data(), data, length);
+            }
+            size = length;
+            sender = source;
+        }
+    };
+
 public:
+    using NativeSocketHandle = uintptr_t;
+    using NativeSocketPrepareHandler =
+        std::function<bool(NativeSocketHandle socket, SwString& error)>;
+    using NativeSocketClosedHandler = std::function<void(NativeSocketHandle socket)>;
+
     struct ResolvedAddress {
         sockaddr_storage storage{};
         socklen_t length{0};
@@ -143,6 +176,10 @@ public:
         std::memset(&m_boundAddr, 0, sizeof(m_boundAddr));
         m_remoteAddrLen = 0;
         m_boundAddrLen = 0;
+        m_pending.resize(m_maxPendingDatagrams);
+        for (size_t i = 0; i < m_pending.size(); ++i) {
+            m_pending[i].resizeBuffer(m_maxDatagramSize);
+        }
         m_readBuffer.resize(m_maxDatagramSize);
     }
 
@@ -188,6 +225,22 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     int systemError() const { return m_lastSystemError; }
+
+    /**
+     * Installs a direct platform hook executed once after native socket creation and before
+     * bind/connect. Full-tunnel runtimes use it to keep infrastructure traffic out of the TUN.
+     * A rejected hook closes the just-created socket and makes the operation fail synchronously.
+     */
+    void setNativeSocketLifecycleHandlers(NativeSocketPrepareHandler prepare,
+                                          NativeSocketClosedHandler closed = {}) {
+        m_nativeSocketPrepare = std::move(prepare);
+        m_nativeSocketClosed = std::move(closed);
+    }
+
+    NativeSocketHandle nativeSocketHandle() const {
+        if (!isSocketValid()) return static_cast<NativeSocketHandle>(-1);
+        return static_cast<NativeSocketHandle>(m_socket);
+    }
 
     /**
      * @brief Performs the `bind` operation.
@@ -484,6 +537,30 @@ public:
         return sendDatagram(data, static_cast<size_t>(size), resolved);
     }
 
+    // Fast path for a stable UDP peer: resolve host:port once per socket, then reuse the native
+    // sockaddr for every datagram. This is the intended path for QUIC connections; it keeps DNS/
+    // inet_pton and address-family coercion out of the per-packet hot path.
+    int64_t writeDatagramCached(const char* data, int64_t size,
+                                const SwString& host, uint16_t port) {
+        SwString key = host;
+        key.push_back('\0');
+        key.push_back(static_cast<char>((port >> 8) & 0xffU));
+        key.push_back(static_cast<char>(port & 0xffU));
+
+        auto it = m_resolvedAddressCache.find(key);
+        if (it == m_resolvedAddressCache.end()) {
+            ResolvedAddress target{};
+            if (!resolveRemoteAddress_(host, port, target)) {
+                setSocketError(SocketError::HostNotFoundError, SwString("Invalid host address"));
+                return -1;
+            }
+            it = m_resolvedAddressCache.emplace(std::move(key), std::move(target)).first;
+        }
+        return writeDatagram(data, size, it->second);
+    }
+
+    void clearResolvedAddressCache() { m_resolvedAddressCache.clear(); }
+
     /**
      * @brief Performs the `writeDatagram` operation on the associated resource.
      * @param payload Value passed to the method.
@@ -565,35 +642,40 @@ public:
      * @return The resulting datagram.
      */
     int64_t readDatagram(char* data, int64_t maxSize, SwString* sender = nullptr, uint16_t* senderPort = nullptr) {
-        SwMutexLocker lock(m_queueMutex);
-        if (m_pending.empty()) {
-            return -1;
+        sockaddr_storage source{};
+        size_t datagramSize = 0;
+        size_t bytesToCopy = 0;
+        {
+            SwMutexLocker lock(m_queueMutex);
+            if (pendingEmptyLocked_()) {
+                return -1;
+            }
+
+            PendingDatagram& datagram = pendingFrontLocked_();
+            datagramSize = datagram.size;
+            source = datagram.sender;
+
+            if (data && maxSize > 0) {
+                bytesToCopy = static_cast<size_t>(
+                    std::min<int64_t>(maxSize, static_cast<int64_t>(datagramSize)));
+                if (bytesToCopy > 0) {
+                    std::memcpy(data, datagram.bytes.data(), bytesToCopy);
+                }
+            }
+
+            popPendingFrontLocked_();
         }
 
-        auto packet = std::move(m_pending.front());
-        m_pending.pop_front();
-        m_pendingDatagramCount.store(static_cast<uint64_t>(m_pending.size()), std::memory_order_relaxed);
-
-        SwString sourceAddress;
-        uint16_t sourcePort = 0;
-        if (!m_senderQueue.empty()) {
-            sourceAddress = m_senderQueue.front().first;
-            sourcePort = m_senderQueue.front().second;
-            m_senderQueue.pop_front();
-        }
         if (sender) {
-            *sender = sourceAddress;
+            *sender = socketAddressToString_(source);
         }
         if (senderPort) {
-            *senderPort = sourcePort;
+            *senderPort = socketAddressPort_(source);
         }
 
         if (!data || maxSize <= 0) {
-            return static_cast<int64_t>(packet.size());
+            return static_cast<int64_t>(datagramSize);
         }
-
-        const auto bytesToCopy = static_cast<size_t>(std::min<int64_t>(maxSize, static_cast<int64_t>(packet.size())));
-        std::memcpy(data, packet.data(), bytesToCopy);
         return static_cast<int64_t>(bytesToCopy);
     }
 
@@ -604,26 +686,28 @@ public:
      * @return The requested receive Datagram.
      */
     SwByteArray receiveDatagram(SwString* sender = nullptr, uint16_t* senderPort = nullptr) {
-        SwMutexLocker lock(m_queueMutex);
-        if (m_pending.empty()) {
-            return SwByteArray();
+        SwByteArray result;
+        sockaddr_storage source{};
+        {
+            SwMutexLocker lock(m_queueMutex);
+            if (pendingEmptyLocked_()) {
+                return SwByteArray();
+            }
+
+            PendingDatagram& datagram = pendingFrontLocked_();
+            result = SwByteArray(datagram.bytes.data(), datagram.size);
+            source = datagram.sender;
+            popPendingFrontLocked_();
         }
 
-        auto packet = std::move(m_pending.front());
-        m_pending.pop_front();
-        m_pendingDatagramCount.store(static_cast<uint64_t>(m_pending.size()), std::memory_order_relaxed);
-
-        if (sender && !m_senderQueue.empty()) {
-            *sender = m_senderQueue.front().first;
+        if (sender) {
+            *sender = socketAddressToString_(source);
         }
-        if (senderPort && !m_senderQueue.empty()) {
-            *senderPort = m_senderQueue.front().second;
-        }
-        if (!m_senderQueue.empty()) {
-            m_senderQueue.pop_front();
+        if (senderPort) {
+            *senderPort = socketAddressPort_(source);
         }
 
-        return packet;
+        return result;
     }
 
     /**
@@ -634,7 +718,7 @@ public:
      */
     bool hasPendingDatagrams() const {
         SwMutexLocker lock(m_queueMutex);
-        return !m_pending.empty();
+        return !pendingEmptyLocked_();
     }
 
     /**
@@ -645,7 +729,7 @@ public:
      */
     int pendingDatagramSize() const {
         SwMutexLocker lock(m_queueMutex);
-        return m_pending.empty() ? 0 : static_cast<int>(m_pending.front().size());
+        return pendingEmptyLocked_() ? 0 : static_cast<int>(pendingFrontLocked_().size);
     }
 
     /**
@@ -782,6 +866,10 @@ public:
         if (m_readBuffer.size() < m_maxDatagramSize) {
             m_readBuffer.resize(m_maxDatagramSize);
         }
+        {
+            SwMutexLocker lock(m_queueMutex);
+            resizePendingPayloadBuffersLocked_();
+        }
     }
 
     /**
@@ -794,7 +882,9 @@ public:
         if (maxPackets == 0) {
             return;
         }
+        SwMutexLocker lock(m_queueMutex);
         m_maxPendingDatagrams = maxPackets;
+        configurePendingQueueLocked_(maxPackets);
     }
 
     void setMaxReadBatchDatagrams(size_t maxPackets) {
@@ -831,6 +921,10 @@ public:
         swSocketTrafficSetOpenState(socketTrafficState_, false);
         if (!isSocketValid()) {
             m_readyReadPosted.store(false);
+            {
+                SwMutexLocker lock(m_queueMutex);
+                clearPendingLocked_();
+            }
             m_pendingDatagramCount.store(0, std::memory_order_relaxed);
             publishTrafficMonitorUdpStats_(0);
             m_state = SocketState::UnconnectedState;
@@ -845,6 +939,10 @@ public:
             m_dualStackEnabled = false;
             return;
         }
+        const NativeSocketHandle closingHandle = nativeSocketHandle();
+        if (m_nativeSocketClosed && closingHandle != static_cast<NativeSocketHandle>(-1)) {
+            m_nativeSocketClosed(closingHandle);
+        }
 #if defined(_WIN32)
         if (m_event != WSA_INVALID_EVENT) {
             WSACloseEvent(m_event);
@@ -858,8 +956,7 @@ public:
 #endif
         {
             SwMutexLocker lock(m_queueMutex);
-            m_pending.clear();
-            m_senderQueue.clear();
+            clearPendingLocked_();
         }
         m_pendingDatagramCount.store(0, std::memory_order_relaxed);
         publishTrafficMonitorUdpStats_(0);
@@ -950,6 +1047,21 @@ private:
             fcntl(m_socket, F_SETFL, flags | O_NONBLOCK);
         }
 #endif
+        SwString platformError;
+        if (m_nativeSocketPrepare &&
+            !m_nativeSocketPrepare(static_cast<NativeSocketHandle>(m_socket), platformError)) {
+#if defined(_WIN32)
+            closesocket(m_socket);
+            m_socket = INVALID_SOCKET;
+#else
+            ::close(m_socket);
+            m_socket = -1;
+#endif
+            setSocketError(SocketError::SocketAccessError,
+                           platformError.isEmpty() ? SwString("Native socket platform hook failed")
+                                                   : platformError);
+            return false;
+        }
         m_socketFamily = family;
         m_dualStackEnabled = false;
         if (family == AF_INET6) {
@@ -1009,6 +1121,9 @@ private:
     }
 
     void refreshTrafficMonitorEndpoints_(bool force = false) {
+        (void)force;
+        return;
+
         if (!force &&
             m_publishedBoundAddress == m_boundAddress &&
             m_publishedBoundPort == m_boundPort &&
@@ -1142,33 +1257,126 @@ private:
         return 0;
     }
 
+    struct PendingQueueResult_ {
+        uint64_t queueDepth{0};
+        size_t droppedCount{0};
+        size_t droppedBytes{0};
+    };
+
+    bool pendingEmptyLocked_() const {
+        return m_pendingSize == 0;
+    }
+
+    size_t pendingTailIndexLocked_() const {
+        return (m_pendingHead + m_pendingSize) % m_pending.size();
+    }
+
+    PendingDatagram& pendingFrontLocked_() {
+        return m_pending[m_pendingHead];
+    }
+
+    const PendingDatagram& pendingFrontLocked_() const {
+        return m_pending[m_pendingHead];
+    }
+
+    void popPendingFrontLocked_() {
+        if (m_pendingSize == 0 || m_pending.empty()) {
+            return;
+        }
+        m_pending[m_pendingHead].size = 0;
+        --m_pendingSize;
+        if (m_pendingSize == 0) {
+            m_pendingHead = 0;
+        } else {
+            m_pendingHead = (m_pendingHead + 1) % m_pending.size();
+        }
+        m_pendingDatagramCount.store(static_cast<uint64_t>(m_pendingSize), std::memory_order_relaxed);
+    }
+
+    void clearPendingLocked_() {
+        for (size_t i = 0; i < m_pending.size(); ++i) {
+            m_pending[i].size = 0;
+        }
+        m_pendingHead = 0;
+        m_pendingSize = 0;
+        m_pendingDatagramCount.store(0, std::memory_order_relaxed);
+    }
+
+    void resizePendingPayloadBuffersLocked_() {
+        for (size_t i = 0; i < m_pending.size(); ++i) {
+            m_pending[i].resizeBuffer(m_maxDatagramSize);
+        }
+    }
+
+    void configurePendingQueueLocked_(size_t capacity) {
+        if (capacity == 0) {
+            return;
+        }
+
+        const size_t oldCapacity = m_pending.size();
+        const size_t keep = std::min(m_pendingSize, capacity);
+        const size_t dropped = m_pendingSize - keep;
+        std::vector<PendingDatagram> next(capacity);
+
+        for (size_t i = 0; i < capacity; ++i) {
+            next[i].resizeBuffer(m_maxDatagramSize);
+        }
+
+        if (oldCapacity > 0 && keep > 0) {
+            const size_t firstKept = (m_pendingHead + dropped) % oldCapacity;
+            for (size_t i = 0; i < keep; ++i) {
+                const size_t oldIndex = (firstKept + i) % oldCapacity;
+                const PendingDatagram& source = m_pending[oldIndex];
+                next[i].assign(source.bytes.data(), source.size, source.sender);
+            }
+        }
+
+        m_pending.swap(next);
+        m_pendingHead = 0;
+        m_pendingSize = keep;
+        m_pendingDatagramCount.store(static_cast<uint64_t>(m_pendingSize), std::memory_order_relaxed);
+    }
+
+    PendingQueueResult_ enqueuePendingDatagramLocked_(const char* data,
+                                                      size_t bytes,
+                                                      const sockaddr_storage& sender) {
+        PendingQueueResult_ result{};
+        if (m_pending.size() != m_maxPendingDatagrams) {
+            configurePendingQueueLocked_(m_maxPendingDatagrams);
+        }
+
+        if (m_pending.empty()) {
+            ++result.droppedCount;
+            m_totalQueueDrops.fetch_add(1, std::memory_order_relaxed);
+            result.queueDepth = static_cast<uint64_t>(m_pendingSize);
+            m_pendingDatagramCount.store(result.queueDepth, std::memory_order_relaxed);
+            return result;
+        }
+
+        while (m_pendingSize >= m_pending.size()) {
+            result.droppedBytes += pendingFrontLocked_().size;
+            popPendingFrontLocked_();
+            ++result.droppedCount;
+        }
+
+        PendingDatagram& slot = m_pending[pendingTailIndexLocked_()];
+        slot.assign(data, bytes, sender);
+        ++m_pendingSize;
+
+        result.queueDepth = static_cast<uint64_t>(m_pendingSize);
+        if (result.queueDepth > m_queueHighWatermark.load(std::memory_order_relaxed)) {
+            m_queueHighWatermark.store(result.queueDepth, std::memory_order_relaxed);
+        }
+        if (result.droppedCount > 0) {
+            m_totalQueueDrops.fetch_add(static_cast<uint64_t>(result.droppedCount), std::memory_order_relaxed);
+        }
+        m_pendingDatagramCount.store(result.queueDepth, std::memory_order_relaxed);
+        return result;
+    }
+
 #if defined(__linux__)
     // Enqueue d'un datagramme reçu (mêmes règles que la boucle recvfrom : compteurs, file bornée,
     // drop du plus ancien sous pression). Utilisé UNIQUEMENT par le chemin recvmmsg opt-in.
-    void enqueueDatagram_(const char* data, size_t bytes, const sockaddr_storage& sender) {
-        ++m_totalReceivedDatagrams;
-        m_totalReceivedBytes.fetch_add(static_cast<uint64_t>(bytes), std::memory_order_relaxed);
-        swSocketTrafficAddReceivedBytes(socketTrafficState_, static_cast<unsigned long long>(bytes));
-        const SwString senderAddress = socketAddressToString_(sender);
-        const uint16_t senderPort = socketAddressPort_(sender);
-        SwMutexLocker lock(m_queueMutex);
-        m_pending.push_back(SwByteArray(data, bytes));
-        m_senderQueue.push_back(SwPair<SwString, uint16_t>(senderAddress, senderPort));
-        uint64_t queueDepth = static_cast<uint64_t>(m_pending.size());
-        if (queueDepth > m_queueHighWatermark.load()) {
-            m_queueHighWatermark.store(queueDepth);
-        }
-        if (m_pending.size() > m_maxPendingDatagrams) {
-            m_pending.pop_front();
-            if (!m_senderQueue.empty()) {
-                m_senderQueue.pop_front();
-            }
-            ++m_totalQueueDrops;
-            queueDepth = static_cast<uint64_t>(m_pending.size());
-        }
-        m_pendingDatagramCount.store(queueDepth, std::memory_order_relaxed);
-    }
-
     // Chemin recvmmsg (opt-in) : jusqu'à kBatch datagrammes par appel syscall (amortit le coût du
     // franchissement de syscall, ~x30 mesuré). Linux uniquement ; ne touche jamais le chemin par défaut.
     void pollSocketBatch_() {
@@ -1183,7 +1391,8 @@ private:
         bool receivedAny = false;
         size_t total = 0;
         while (total < m_maxReadBatchDatagrams) {
-            for (size_t i = 0; i < kBatch; ++i) {
+            const size_t batchLimit = std::min(kBatch, m_maxReadBatchDatagrams - total);
+            for (size_t i = 0; i < batchLimit; ++i) {
                 iovs[i].iov_base = m_batchRecvBuf.data() + i * slot;
                 iovs[i].iov_len  = slot;
                 std::memset(&msgs[i], 0, sizeof(msgs[i]));
@@ -1192,7 +1401,7 @@ private:
                 msgs[i].msg_hdr.msg_name    = &addrs[i];
                 msgs[i].msg_hdr.msg_namelen = sizeof(sockaddr_storage);
             }
-            const int r = ::recvmmsg(m_socket, msgs, static_cast<unsigned int>(kBatch), MSG_DONTWAIT, nullptr);
+            const int r = ::recvmmsg(m_socket, msgs, static_cast<unsigned int>(batchLimit), MSG_DONTWAIT, nullptr);
             if (r <= 0) {
                 if (r < 0) {
                     const int err = lastErrorCode();
@@ -1202,13 +1411,33 @@ private:
                 }
                 break;
             }
-            for (int i = 0; i < r; ++i) {
-                enqueueDatagram_(m_batchRecvBuf.data() + static_cast<size_t>(i) * slot,
-                                 static_cast<size_t>(msgs[i].msg_len), addrs[i]);
-                receivedAny = true;
-                ++total;
+            PendingQueueResult_ queueResult{};
+            size_t receivedBytes = 0;
+            {
+                SwMutexLocker lock(m_queueMutex);
+                for (int i = 0; i < r; ++i) {
+                    const size_t length = static_cast<size_t>(msgs[i].msg_len);
+                    const PendingQueueResult_ one = enqueuePendingDatagramLocked_(
+                        m_batchRecvBuf.data() + static_cast<size_t>(i) * slot,
+                        length,
+                        addrs[i]);
+                    queueResult.queueDepth = one.queueDepth;
+                    queueResult.droppedCount += one.droppedCount;
+                    queueResult.droppedBytes += one.droppedBytes;
+                    receivedBytes += length;
+                }
             }
-            if (static_cast<size_t>(r) < kBatch) {
+            m_totalReceivedDatagrams.fetch_add(static_cast<uint64_t>(r), std::memory_order_relaxed);
+            m_totalReceivedBytes.fetch_add(static_cast<uint64_t>(receivedBytes), std::memory_order_relaxed);
+            swSocketTrafficAddReceivedBytes(socketTrafficState_, static_cast<unsigned long long>(receivedBytes));
+            if (queueResult.droppedCount > 0) {
+                swCWarning(kSwLogCategory_SwUdpSocket) << "[SwUdpSocket] Dropping " << queueResult.droppedCount
+                            << " oldest datagram(s) (" << queueResult.droppedBytes
+                            << " bytes) due to queue pressure (limit=" << m_maxPendingDatagrams << ")";
+            }
+            receivedAny = true;
+            total += static_cast<size_t>(r);
+            if (static_cast<size_t>(r) < batchLimit) {
                 break; // socket drainé
             }
         }
@@ -1264,32 +1493,21 @@ private:
             m_totalReceivedBytes.fetch_add(static_cast<uint64_t>(bytes), std::memory_order_relaxed);
             swSocketTrafficAddReceivedBytes(socketTrafficState_, static_cast<unsigned long long>(bytes));
             uint64_t pendingDatagramCount = 0;
-            const SwString senderAddress = socketAddressToString_(sender);
-            const uint16_t senderPort = socketAddressPort_(sender);
+            PendingQueueResult_ queueResult{};
             {
                 SwMutexLocker lock(m_queueMutex);
-                m_pending.push_back(SwByteArray(m_readBuffer.data(), static_cast<size_t>(bytes)));
-                m_senderQueue.push_back(SwPair<SwString, uint16_t>(senderAddress, senderPort));
-                uint64_t queueDepth = static_cast<uint64_t>(m_pending.size());
-                if (queueDepth > m_queueHighWatermark.load()) {
-                    m_queueHighWatermark.store(queueDepth);
-                }
-                if (m_pending.size() > m_maxPendingDatagrams) {
-                    size_t droppedBytes = m_pending.front().size();
-                    m_pending.pop_front();
-                    if (!m_senderQueue.empty()) {
-                        m_senderQueue.pop_front();
-                    }
-                    ++m_totalQueueDrops;
-                    swCWarning(kSwLogCategory_SwUdpSocket) << "[SwUdpSocket] Dropping oldest datagram (" << droppedBytes
-                                << " bytes) due to queue pressure (limit=" << m_maxPendingDatagrams << ")";
-                    queueDepth = static_cast<uint64_t>(m_pending.size());
-                }
-                pendingDatagramCount = queueDepth;
-                m_pendingDatagramCount.store(queueDepth, std::memory_order_relaxed);
+                queueResult = enqueuePendingDatagramLocked_(m_readBuffer.data(), static_cast<size_t>(bytes), sender);
+                pendingDatagramCount = queueResult.queueDepth;
+            }
+            if (queueResult.droppedCount > 0) {
+                swCWarning(kSwLogCategory_SwUdpSocket) << "[SwUdpSocket] Dropping " << queueResult.droppedCount
+                            << " oldest datagram(s) (" << queueResult.droppedBytes
+                            << " bytes) due to queue pressure (limit=" << m_maxPendingDatagrams << ")";
             }
             auto rx = ++m_debugRxCount;
             if (rx <= 5 || (rx % 100) == 0) {
+                const SwString senderAddress = socketAddressToString_(sender);
+                const uint16_t senderPort = socketAddressPort_(sender);
                 swCDebug(kSwLogCategory_SwUdpSocket) << "[SwUdpSocket] rx bytes=" << bytes
                           << " from=" << senderAddress.toStdString()
                           << ":" << senderPort;
@@ -1730,11 +1948,10 @@ private:
     socklen_t m_boundAddrLen{0};
     bool m_remoteSet{false};
     mutable SwMutex m_queueMutex;
-    // FIFO de réception : std::deque pour un pop-front (removeAt(0)) O(1). Un std::vector (ex-SwList) rend
-    // le pop-front O(n) -> drainer une file profonde (gros buffer kernel = gros backlog) devient O(n²) et
-    // effondre le débit de réception (mesuré identique sur recvfrom Windows et recvmmsg Linux).
-    std::deque<SwByteArray> m_pending;
-    std::deque<SwPair<SwString, uint16_t>> m_senderQueue;
+    // FIFO de reception preallouee : pop-front O(1), slots contigus, et payload+endpoint synchronises.
+    std::vector<PendingDatagram> m_pending;
+    size_t m_pendingHead{0};
+    size_t m_pendingSize{0};
     SwString m_boundAddress;
     uint16_t m_boundPort{0};
     SwString m_remoteAddress;
@@ -1761,7 +1978,10 @@ private:
     SwByteArray m_readBuffer;
     bool m_batchReceive{false};   // opt-in recvmmsg (Linux) ; défaut OFF = chemin recvfrom legacy inchangé
     SwByteArray m_batchRecvBuf;   // buffer de réception par lots (kBatch * m_maxDatagramSize)
+    SwHash<SwString, ResolvedAddress> m_resolvedAddressCache;
     SwSocketTrafficStateHandle socketTrafficState_;
+    NativeSocketPrepareHandler m_nativeSocketPrepare;
+    NativeSocketClosedHandler m_nativeSocketClosed;
     SwString m_publishedBoundAddress;
     uint16_t m_publishedBoundPort{0};
     SwString m_publishedRemoteAddress;

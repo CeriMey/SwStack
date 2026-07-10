@@ -1,6 +1,7 @@
 #ifndef SWQUICINITIALSECRETS_H
 #define SWQUICINITIALSECRETS_H
 
+#include "SwVector.h"
 #include "SwByteArray.h"
 #include "SwCrypto.h"
 #include "SwString.h"
@@ -70,7 +71,7 @@ public:
         SwByteArray info;
         appendU16_(info, static_cast<std::uint16_t>(outputLength));
         info.append(static_cast<char>(fullLabel.size()));
-        info.append(fullLabel.toStdString());
+        info.append(fullLabel.constData(), fullLabel.size());
         info.append(static_cast<char>(0));
 
         return hkdfExpand_(secret, info, outputLength, outBytes, error);
@@ -84,7 +85,7 @@ private:
     }
 
     static SwByteArray hmacSha256_(const SwByteArray& key, const SwByteArray& data) {
-        const std::vector<unsigned char> digest =
+        const SwVector<unsigned char> digest =
             SwCrypto::generateKeyedHashSHA256(data.toStdString(), key.toStdString());
         return SwByteArray(reinterpret_cast<const char*>(digest.data()), digest.size());
     }

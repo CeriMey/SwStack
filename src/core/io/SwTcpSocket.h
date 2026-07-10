@@ -30,6 +30,7 @@
 
 #include "SwAbstractSocket.h"
 #include "SwByteArray.h"
+#include "SwByteRingBuffer.h"
 #include "SwCoreApplication.h"
 #include "SwDebug.h"
 #include "SwEventLoop.h"
@@ -40,8 +41,10 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <limits>
 
 static constexpr const char* kSwLogCategory_SwTcpSocket = "sw.core.io.swtcpsocket";
+static constexpr int kSwTcpDefaultReadChunkSize = 16 * 1024;
 
 #if defined(_WIN32)
 #include <winsock2.h>
@@ -316,47 +319,67 @@ public:
         setState(UnconnectedState);
     }
 
+    int64_t readInto(char* data, int64_t maxSize) override {
+        if (!data || maxSize <= 0 || !isSocketValid_() || state() != ConnectedState) {
+            return 0;
+        }
+
+#if defined(_WIN32)
+        const int toRead = static_cast<int>(
+            std::min<int64_t>(maxSize, static_cast<int64_t>(std::numeric_limits<int>::max())));
+        const int ret = ::recv(m_socket, data, toRead, 0);
+        if (ret > 0) {
+            incrementTotalReceivedBytes_(static_cast<size_t>(ret));
+            return ret;
+        }
+        if (ret == 0) {
+            m_remoteClosed = true;
+            close();
+            return 0;
+        }
+
+        const int err = WSAGetLastError();
+        if (err == WSAEWOULDBLOCK) {
+            return 0;
+        }
+        emit errorOccurred(err);
+        return -1;
+#else
+        const ssize_t ret = ::recv(m_socket, data, static_cast<size_t>(maxSize), 0);
+        if (ret > 0) {
+            incrementTotalReceivedBytes_(static_cast<size_t>(ret));
+            return static_cast<int64_t>(ret);
+        }
+        if (ret == 0) {
+            m_remoteClosed = true;
+            close();
+            return 0;
+        }
+        if (errno == EWOULDBLOCK || errno == EAGAIN) {
+            return 0;
+        }
+        emit errorOccurred(errno);
+        return -1;
+#endif
+    }
+
     SwByteArray read(int64_t maxSize = 0) override {
         if (!isSocketValid_() || state() != ConnectedState) {
             return SwByteArray();
         }
 
-        char buffer[1024];
-        const int toRead =
-            (maxSize > 0 && maxSize < static_cast<int64_t>(sizeof(buffer))) ? static_cast<int>(maxSize)
-                                                                            : static_cast<int>(sizeof(buffer));
-#if defined(_WIN32)
-        const int ret = ::recv(m_socket, buffer, toRead, 0);
-        if (ret > 0) {
-            incrementTotalReceivedBytes_(static_cast<size_t>(ret));
-            return SwByteArray(buffer, static_cast<size_t>(ret));
-        }
-        if (ret == 0) {
-            m_remoteClosed = true;
-            close();
+        const int64_t requested = maxSize > 0 ? maxSize : kSwTcpDefaultReadChunkSize;
+        const int64_t capped = std::min<int64_t>(
+            requested, static_cast<int64_t>(std::numeric_limits<int>::max()));
+        SwByteArray result;
+        result.resize(static_cast<size_t>(capped));
+        const int64_t ret = readInto(result.data(), capped);
+        if (ret <= 0) {
             return SwByteArray();
         }
 
-        const int err = WSAGetLastError();
-        if (err != WSAEWOULDBLOCK) {
-            emit errorOccurred(err);
-        }
-#else
-        const ssize_t ret = ::recv(m_socket, buffer, static_cast<size_t>(toRead), 0);
-        if (ret > 0) {
-            incrementTotalReceivedBytes_(static_cast<size_t>(ret));
-            return SwByteArray(buffer, static_cast<size_t>(ret));
-        }
-        if (ret == 0) {
-            m_remoteClosed = true;
-            close();
-            return SwByteArray();
-        }
-        if (errno != EWOULDBLOCK && errno != EAGAIN) {
-            emit errorOccurred(errno);
-        }
-#endif
-        return SwByteArray();
+        result.resize(static_cast<size_t>(ret));
+        return result;
     }
 
     bool write(const SwString& data) override {
@@ -370,7 +393,7 @@ public:
         if (data.isEmpty()) {
             return true;
         }
-        m_writeBuffer.append(data.constData(), data.size());
+        m_writeBuffer.append(data);
         onWriteQueued_();
         return true;
     }
@@ -562,7 +585,7 @@ public:
 
 protected:
     SwNativeSocketHandle m_socket = kSwInvalidSocketHandle;
-    SwByteArray m_writeBuffer;
+    SwByteRingBuffer m_writeBuffer;
     SwString m_lastHost;
     bool m_remoteClosed = false;
     size_t m_dispatchToken = 0;
@@ -639,6 +662,7 @@ protected:
 
     virtual void onWriteQueued_() {
         tryFlushWriteBuffer_();
+        updateDispatcherInterest_();
     }
 
     virtual void tryFlushWriteBuffer_() {
@@ -646,37 +670,59 @@ protected:
             return;
         }
 
+        bool madeProgress = false;
+        while (!m_writeBuffer.isEmpty()) {
+            const char* data = m_writeBuffer.contiguousData();
+            const std::size_t available = m_writeBuffer.contiguousSize();
+            if (!data || available == 0) {
+                break;
+            }
+
 #if defined(_WIN32)
-        const int sent = ::send(m_socket, m_writeBuffer.data(), static_cast<int>(m_writeBuffer.size()), 0);
-        if (sent > 0) {
-            incrementTotalSentBytes_(static_cast<size_t>(sent));
-            m_writeBuffer.remove(0, sent);
-            if (m_writeBuffer.isEmpty()) {
-                emit writeFinished();
+            const int toSend = static_cast<int>(
+                std::min<std::size_t>(available, static_cast<std::size_t>(std::numeric_limits<int>::max())));
+            const int sent = ::send(m_socket, data, toSend, 0);
+            if (sent > 0) {
+                madeProgress = true;
+                incrementTotalSentBytes_(static_cast<size_t>(sent));
+                m_writeBuffer.consume(static_cast<std::size_t>(sent));
+                if (sent < toSend) {
+                    break;
+                }
+                continue;
             }
-            return;
-        }
-        if (sent == SOCKET_ERROR) {
-            const int err = WSAGetLastError();
-            if (err != WSAEWOULDBLOCK) {
-                emit errorOccurred(err);
+
+            if (sent == SOCKET_ERROR) {
+                const int err = WSAGetLastError();
+                if (err != WSAEWOULDBLOCK) {
+                    emit errorOccurred(err);
+                }
             }
-        }
+            break;
 #else
-        const ssize_t sent = ::send(m_socket, m_writeBuffer.data(), m_writeBuffer.size(), 0);
-        if (sent > 0) {
-            incrementTotalSentBytes_(static_cast<size_t>(sent));
-            m_writeBuffer.remove(0, static_cast<int>(sent));
-            if (m_writeBuffer.isEmpty()) {
-                emit writeFinished();
+            const ssize_t sent = ::send(m_socket, data, available, 0);
+            if (sent > 0) {
+                madeProgress = true;
+                incrementTotalSentBytes_(static_cast<size_t>(sent));
+                m_writeBuffer.consume(static_cast<std::size_t>(sent));
+                if (static_cast<std::size_t>(sent) < available) {
+                    break;
+                }
+                continue;
             }
-            return;
-        }
-        if (sent < 0 && errno != EWOULDBLOCK && errno != EAGAIN) {
-            emit errorOccurred(errno);
-            close();
-        }
+
+            if (sent < 0 && errno != EWOULDBLOCK && errno != EAGAIN) {
+                emit errorOccurred(errno);
+                close();
+                return;
+            }
+            break;
 #endif
+        }
+
+        if (madeProgress && m_writeBuffer.isEmpty()) {
+            emit writeFinished();
+        }
     }
 
 #if !defined(_WIN32)

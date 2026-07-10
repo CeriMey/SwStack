@@ -69,6 +69,7 @@
 ### Types & sérialisation
 
 - `src/core/types/SwString.h`, `src/core/types/SwByteArray.h`
+- Conteneurs: `src/core/types/SwList.h`, `src/core/types/SwVector.h`, `src/core/types/SwMap.h`, `src/core/types/SwDequeue.h`, `src/core/types/SwRingQueue.h`, `src/core/types/SwByteRingBuffer.h`
 - JSON: `src/core/types/SwJsonDocument.h`, `src/core/types/SwJsonObject.h`, `src/core/types/SwJsonArray.h`, `src/core/types/SwJsonValue.h`
 - Regex: `src/core/types/SwRegularExpression.h`
 - Debug/log: `src/core/types/SwDebug.h`

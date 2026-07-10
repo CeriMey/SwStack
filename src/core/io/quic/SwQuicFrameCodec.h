@@ -1,6 +1,7 @@
 #ifndef SWQUICFRAMECODEC_H
 #define SWQUICFRAMECODEC_H
 
+#include "SwVector.h"
 #include "SwByteArray.h"
 #include "SwString.h"
 #include "quic/SwQuicFrame.h"
@@ -8,6 +9,7 @@
 
 #include <cstddef>
 #include <limits>
+#include <utility>
 #include <vector>
 
 class SwQuicFrameCodec {
@@ -203,7 +205,7 @@ public:
         return false;
     }
 
-    static bool encodeFrames(const std::vector<SwQuicFrame>& frames,
+    static bool encodeFrames(const SwVector<SwQuicFrame>& frames,
                              SwByteArray& outPayload,
                              SwString* error = nullptr) {
         outPayload.clear();
@@ -220,7 +222,7 @@ public:
     }
 
     static bool decodeFrames(const SwByteArray& payload,
-                             std::vector<SwQuicFrame>& outFrames,
+                             SwVector<SwQuicFrame>& outFrames,
                              SwString* error = nullptr) {
         outFrames.clear();
         std::size_t offset = 0;
@@ -229,7 +231,7 @@ public:
             if (!decodeFrame(payload, offset, frame, error)) {
                 return false;
             }
-            outFrames.push_back(frame);
+            outFrames.push_back(std::move(frame));
         }
 
         if (error) {
@@ -422,7 +424,8 @@ private:
             return false;
         }
 
-        const SwByteArray reason(frame.reasonPhrase().toStdString());
+        const SwString& reasonPhrase = frame.reasonPhrase();
+        const SwByteArray reason(reasonPhrase.constData(), reasonPhrase.size());
         return appendVarInt_(static_cast<std::uint64_t>(reason.size()), outPayload, error) &&
                (outPayload.append(reason), true);
     }
@@ -454,7 +457,7 @@ private:
             return false;
         }
 
-        std::vector<SwQuicFrame::AckRange> ranges;
+        SwVector<SwQuicFrame::AckRange> ranges;
         for (std::uint64_t i = 0; i < ackRangeCount; ++i) {
             SwQuicFrame::AckRange range = {0, 0};
             if (!readVarInt_(payload, offset, range.gap, error) ||
@@ -769,7 +772,7 @@ private:
             return false;
         }
 
-        outFrame = SwQuicFrame::datagram(data);
+        outFrame = SwQuicFrame::datagram(std::move(data));
         return true;
     }
 };

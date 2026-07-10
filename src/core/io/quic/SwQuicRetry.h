@@ -1,6 +1,7 @@
 #ifndef SWQUICRETRY_H
 #define SWQUICRETRY_H
 
+#include "SwVector.h"
 #include "SwByteArray.h"
 #include "SwString.h"
 #include "SwCrypto.h" // generateKeyedHashSHA256 (HMAC-SHA256 portable Win/Linux)
@@ -131,9 +132,9 @@ private:
     static SwByteArray tokenMac_(const SwByteArray& key, const SwByteArray& addr,
                                  const SwByteArray& odcid, const SwByteArray& ts) {
         SwByteArray data = addr; data.append(odcid); data.append(ts);
-        const std::string dataStr(data.constData(), static_cast<size_t>(data.size()));
-        const std::string keyStr(key.constData(), static_cast<size_t>(key.size()));
-        const std::vector<unsigned char> d = SwCrypto::generateKeyedHashSHA256(dataStr, keyStr);
+        const SwString dataStr(data.constData(), static_cast<size_t>(data.size()));
+        const SwString keyStr(key.constData(), static_cast<size_t>(key.size()));
+        const SwVector<unsigned char> d = SwCrypto::generateKeyedHashSHA256(dataStr, keyStr);
         return SwByteArray(reinterpret_cast<const char*>(d.data()), static_cast<int>(d.size()));
     }
 

@@ -1,6 +1,7 @@
 #ifndef SWQUICPACKETPROTECTOR_H
 #define SWQUICPACKETPROTECTOR_H
 
+#include "SwVector.h"
 #include "SwByteArray.h"
 #include "SwMap.h"
 #include "SwString.h"
@@ -12,10 +13,12 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstddef>
+#include <cstring>
 #include <cwchar>
+#include <limits>
 #include <vector>
 
-#if defined(_WIN32)
+#if defined(_WIN32) && !defined(SW_QUIC_USE_OPENSSL)
 #include "SwCrypto.h"
 #else
 #include <openssl/evp.h>
@@ -480,11 +483,39 @@ public:
             setError_(error, "Invalid QUIC packet number length for protection");
             return false;
         }
+        if (packetNumber > ((std::uint64_t{1} << 62) - 1)) {
+            setError_(error, "QUIC packet number exceeds the 62-bit limit");
+            return false;
+        }
         if (!validateInitialKeys_(keys, error)) {
             return false;
         }
 
-        SwByteArray header;
+        SwByteArray aliasedPlaintext;
+        const SwByteArray* plaintext = &plaintextPayload;
+        if (&plaintextPayload == &outPacket) {
+            aliasedPlaintext = plaintextPayload;
+            plaintext = &aliasedPlaintext;
+        }
+        const SwByteArray& connectionIdBytes = destinationConnectionId.bytes();
+        const std::size_t connectionIdSize = connectionIdBytes.size();
+        const std::size_t packetNumberOffset = 1 + connectionIdSize;
+        const std::size_t headerSize = packetNumberOffset + packetNumberLength;
+        const std::size_t maximumPacketSize =
+            static_cast<std::size_t>((std::numeric_limits<int>::max)());
+        if (plaintext->size() > maximumPacketSize - headerSize - kTagLength) {
+            setError_(error, "QUIC protected packet is too large");
+            return false;
+        }
+        const std::size_t packetSize = headerSize + plaintext->size() + kTagLength;
+        const std::size_t sampleOffset = packetNumberOffset + 4;
+        if (packetSize < sampleOffset + 16) {
+            setError_(error, "QUIC packet is too short for header protection sample");
+            return false;
+        }
+
+        outPacket = SwByteArray(packetSize, '\0');
+        unsigned char* packetBytes = reinterpret_cast<unsigned char*>(outPacket.data());
         std::uint8_t firstByte = static_cast<std::uint8_t>(0x40U | (packetNumberLength - 1U));
         if (spinBit) {
             firstByte = static_cast<std::uint8_t>(firstByte | 0x20U);
@@ -492,39 +523,48 @@ public:
         if (keyPhase) {
             firstByte = static_cast<std::uint8_t>(firstByte | 0x04U);
         }
-        header.append(static_cast<char>(firstByte));
-        header.append(destinationConnectionId.bytes());
-        const std::size_t packetNumberOffset = header.size();
-        appendPacketNumber_(header, packetNumber, packetNumberLength);
+        packetBytes[0] = firstByte;
+        if (connectionIdSize > 0) {
+            std::memcpy(packetBytes + 1, connectionIdBytes.constData(), connectionIdSize);
+        }
+        for (std::uint8_t i = 0; i < packetNumberLength; ++i) {
+            const std::uint8_t shift = static_cast<std::uint8_t>(
+                (packetNumberLength - 1U - i) * 8U);
+            packetBytes[packetNumberOffset + i] =
+                static_cast<unsigned char>((packetNumber >> shift) & 0xffU);
+        }
 
-        const SwByteArray nonce = nonceForPacketNumber_(keys.iv, packetNumber);
-        SwByteArray ciphertextAndTag;
-        if (!aes128GcmEncrypt_(keys.key, nonce, header, plaintextPayload, ciphertextAndTag, error)) {
+        unsigned char nonce[12];
+        nonceForPacketNumberRaw_(keys.iv, packetNumber, nonce);
+        if (!aes128GcmEncryptRaw_(
+                keys.key,
+                nonce,
+                sizeof(nonce),
+                packetBytes,
+                headerSize,
+                reinterpret_cast<const unsigned char*>(plaintext->constData()),
+                plaintext->size(),
+                packetBytes + headerSize,
+                packetBytes + headerSize + plaintext->size(),
+                error)) {
+            outPacket = SwByteArray();
             return false;
         }
 
-        outPacket = header;
-        outPacket.append(ciphertextAndTag);
-
-        const std::size_t sampleOffset = packetNumberOffset + 4;
-        if (outPacket.size() < sampleOffset + 16) {
-            setError_(error, "QUIC packet is too short for header protection sample");
-            return false;
-        }
-
-        SwByteArray sample = outPacket.mid(static_cast<int>(sampleOffset), 16);
-        SwByteArray mask;
-        if (!aes128EcbEncryptBlock_(keys.headerProtectionKey, sample, mask, error)) {
+        unsigned char mask[16];
+        if (!aes128EcbEncryptBlockRaw_(keys.headerProtectionKey,
+                                       packetBytes + sampleOffset,
+                                       mask,
+                                       error)) {
+            outPacket = SwByteArray();
             return false;
         }
 
         // Short header protects the low 5 bits of the first byte.
-        outPacket[0] = static_cast<char>(static_cast<unsigned char>(outPacket[0]) ^
-                                        (static_cast<unsigned char>(mask[0]) & 0x1fU));
+        packetBytes[0] = static_cast<unsigned char>(packetBytes[0] ^ (mask[0] & 0x1fU));
         for (std::uint8_t i = 0; i < packetNumberLength; ++i) {
-            outPacket[packetNumberOffset + i] =
-                static_cast<char>(static_cast<unsigned char>(outPacket[packetNumberOffset + i]) ^
-                                  static_cast<unsigned char>(mask[1 + i]));
+            packetBytes[packetNumberOffset + i] =
+                static_cast<unsigned char>(packetBytes[packetNumberOffset + i] ^ mask[1 + i]);
         }
 
         if (error) {
@@ -570,14 +610,18 @@ public:
             return false;
         }
 
-        SwByteArray sample = packet.mid(static_cast<int>(sampleOffset), 16);
-        SwByteArray mask;
-        if (!aes128EcbEncryptBlock_(keys.headerProtectionKey, sample, mask, error)) {
+        const unsigned char* packetBytes =
+            reinterpret_cast<const unsigned char*>(packet.constData());
+        unsigned char mask[16];
+        if (!aes128EcbEncryptBlockRaw_(keys.headerProtectionKey,
+                                       packetBytes + sampleOffset,
+                                       mask,
+                                       error)) {
             return false;
         }
 
         const std::uint8_t firstByte = static_cast<std::uint8_t>(
-            protectedFirstByte ^ (static_cast<std::uint8_t>(mask[0]) & 0x1fU));
+            protectedFirstByte ^ (mask[0] & 0x1fU));
         const std::uint8_t packetNumberLength = static_cast<std::uint8_t>((firstByte & 0x03U) + 1U);
         const std::size_t packetNumberEnd = packetNumberOffset + packetNumberLength;
         if (packet.size() < packetNumberEnd + kTagLength) {
@@ -585,38 +629,50 @@ public:
             return false;
         }
 
-        SwByteArray aad = packet.mid(0, static_cast<int>(packetNumberEnd));
-        aad[0] = static_cast<char>(firstByte);
+        unsigned char aad[1 + SwQuicConnectionId::kMaxLength + 4];
+        std::memcpy(aad, packetBytes, packetNumberEnd);
+        aad[0] = firstByte;
         for (std::uint8_t i = 0; i < packetNumberLength; ++i) {
             aad[packetNumberOffset + i] =
-                static_cast<char>(static_cast<std::uint8_t>(aad[packetNumberOffset + i]) ^
-                                  static_cast<std::uint8_t>(mask[1 + i]));
+                static_cast<unsigned char>(aad[packetNumberOffset + i] ^ mask[1 + i]);
         }
 
-        std::uint64_t packetNumber =
-            readPacketNumber_(aad, packetNumberOffset, packetNumberLength);
+        std::uint64_t packetNumber = 0;
+        for (std::uint8_t i = 0; i < packetNumberLength; ++i) {
+            packetNumber = (packetNumber << 8) | aad[packetNumberOffset + i];
+        }
         if (largestReceivedPn) {
             packetNumber = SwQuicPacketCodec::expandPacketNumber(*largestReceivedPn, true,
                                                                  packetNumber,
                                                                  packetNumberLength);
         }
-        const SwByteArray ciphertextAndTag =
-            packet.mid(static_cast<int>(packetNumberEnd),
-                       static_cast<int>(packet.size() - packetNumberEnd));
+        const std::size_t ciphertextSize = packet.size() - packetNumberEnd - kTagLength;
+        SwByteArray plaintext(ciphertextSize, '\0');
+        unsigned char nonce[12];
+        nonceForPacketNumberRaw_(keys.iv, packetNumber, nonce);
+        if (!aes128GcmDecryptRaw_(
+                keys.key,
+                nonce,
+                sizeof(nonce),
+                aad,
+                packetNumberEnd,
+                packetBytes + packetNumberEnd,
+                ciphertextSize,
+                packetBytes + packetNumberEnd + ciphertextSize,
+                reinterpret_cast<unsigned char*>(plaintext.data()),
+                error)) {
+            return false;
+        }
 
-        SwByteArray plaintext;
-        if (!aes128GcmDecrypt_(keys.key,
-                               nonceForPacketNumber_(keys.iv, packetNumber),
-                               aad,
-                               ciphertextAndTag,
-                               plaintext,
-                               error)) {
+        // Les bits reserves du short header ne sont valides qu'apres authentification de l'AAD.
+        if ((firstByte & 0x18U) != 0) {
+            setError_(error, "QUIC short header reserved bits are non-zero");
             return false;
         }
 
         outPacketNumber = packetNumber;
         outKeyPhase = (firstByte & 0x04U) != 0;
-        outPlaintextPayload = plaintext;
+        outPlaintextPayload = std::move(plaintext);
         if (error) {
             *error = SwString();
         }
@@ -705,7 +761,7 @@ private:
         return true;
     }
 
-#if defined(_WIN32)
+#if defined(_WIN32) && !defined(SW_QUIC_USE_OPENSSL)
     static bool openAes_(BCRYPT_ALG_HANDLE& algorithm,
                          const wchar_t* chainingMode,
                          SwString* error) {
@@ -731,7 +787,7 @@ private:
     static bool generateAesKey_(BCRYPT_ALG_HANDLE algorithm,
                                 const SwByteArray& key,
                                 BCRYPT_KEY_HANDLE& outKey,
-                                std::vector<unsigned char>& keyObject,
+                                SwVector<unsigned char>& keyObject,
                                 SwString* error) {
         outKey = nullptr;
         ULONG cbData = 0;
@@ -763,7 +819,7 @@ private:
     // --- Cache thread-local des handles CNG : provider AES ouvert une fois par mode,
     //     clé importée une fois par jeu d'octets, réutilisés à chaque paquet.
     //     Les octets produits sont identiques -> optimisation invisible sur le fil (conforme RFC 9001). ---
-    struct CngKey_ { BCRYPT_KEY_HANDLE handle = nullptr; std::vector<unsigned char> object; };
+    struct CngKey_ { BCRYPT_KEY_HANDLE handle = nullptr; SwVector<unsigned char> object; };
     struct CngCache_ {
         BCRYPT_ALG_HANDLE gcmAlg = nullptr;
         BCRYPT_ALG_HANDLE ecbAlg = nullptr;
@@ -826,28 +882,247 @@ private:
     static EVP_CIPHER_CTX* evpEcbCtx_()    { static thread_local EvpCtxHolder_ h; return h.get(); }
 #endif
 
+    static void nonceForPacketNumberRaw_(const SwByteArray& iv,
+                                         std::uint64_t packetNumber,
+                                         unsigned char outNonce[12]) {
+        std::memcpy(outNonce, iv.constData(), 12);
+        for (std::size_t i = 0; i < 8; ++i) {
+            outNonce[11 - i] = static_cast<unsigned char>(
+                outNonce[11 - i] ^ static_cast<unsigned char>((packetNumber >> (i * 8)) & 0xffU));
+        }
+    }
+
+    static bool aes128GcmEncryptRaw_(const SwByteArray& key,
+                                     const unsigned char* nonce,
+                                     std::size_t nonceSize,
+                                     const unsigned char* aad,
+                                     std::size_t aadSize,
+                                     const unsigned char* plaintext,
+                                     std::size_t plaintextSize,
+                                     unsigned char* outCiphertext,
+                                     unsigned char* outTag,
+                                     SwString* error) {
+#if defined(_WIN32) && !defined(SW_QUIC_USE_OPENSSL)
+        BCRYPT_KEY_HANDLE aesKey = cachedGcmKey_(key, error);
+        if (!aesKey) return false;
+
+        BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO authInfo;
+        BCRYPT_INIT_AUTH_MODE_INFO(authInfo);
+        authInfo.pbNonce = const_cast<PUCHAR>(nonce);
+        authInfo.cbNonce = static_cast<ULONG>(nonceSize);
+        authInfo.pbAuthData = const_cast<PUCHAR>(aad);
+        authInfo.cbAuthData = static_cast<ULONG>(aadSize);
+        authInfo.pbTag = outTag;
+        authInfo.cbTag = static_cast<ULONG>(kTagLength);
+
+        ULONG outputSize = 0;
+        const NTSTATUS status = BCryptEncrypt(
+            aesKey,
+            const_cast<PUCHAR>(plaintext),
+            static_cast<ULONG>(plaintextSize),
+            &authInfo,
+            nullptr,
+            0,
+            outCiphertext,
+            static_cast<ULONG>(plaintextSize),
+            &outputSize,
+            0);
+        if (status != 0 || outputSize != plaintextSize) {
+            setError_(error, "BCryptEncrypt(AES-GCM) failed");
+            return false;
+        }
+        return true;
+#else
+        EVP_CIPHER_CTX* ctx = evpGcmEncCtx_();
+        if (!ctx) { setError_(error, "EVP_CIPHER_CTX_new failed"); return false; }
+        int outLen = 0;
+        if (EVP_EncryptInit_ex(ctx, EVP_aes_128_gcm(), nullptr, nullptr, nullptr) != 1 ||
+            EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN,
+                                static_cast<int>(nonceSize), nullptr) != 1 ||
+            EVP_EncryptInit_ex(ctx, nullptr, nullptr,
+                               reinterpret_cast<const unsigned char*>(key.constData()),
+                               nonce) != 1) {
+            setError_(error, "EVP_EncryptInit(AES-128-GCM) failed");
+            return false;
+        }
+        if (aadSize > 0 &&
+            EVP_EncryptUpdate(ctx, nullptr, &outLen, aad, static_cast<int>(aadSize)) != 1) {
+            setError_(error, "EVP_EncryptUpdate(AAD) failed");
+            return false;
+        }
+        int ciphertextLength = 0;
+        if (plaintextSize > 0 &&
+            EVP_EncryptUpdate(ctx, outCiphertext, &ciphertextLength, plaintext,
+                              static_cast<int>(plaintextSize)) != 1) {
+            setError_(error, "EVP_EncryptUpdate(AES-128-GCM) failed");
+            return false;
+        }
+        int finalLength = 0;
+        if (EVP_EncryptFinal_ex(ctx, outCiphertext + ciphertextLength, &finalLength) != 1 ||
+            static_cast<std::size_t>(ciphertextLength + finalLength) != plaintextSize) {
+            setError_(error, "EVP_EncryptFinal(AES-128-GCM) failed");
+            return false;
+        }
+        if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, static_cast<int>(kTagLength),
+                                outTag) != 1) {
+            setError_(error, "EVP_CTRL_GCM_GET_TAG failed");
+            return false;
+        }
+        return true;
+#endif
+    }
+
+    static bool aes128GcmDecryptRaw_(const SwByteArray& key,
+                                     const unsigned char* nonce,
+                                     std::size_t nonceSize,
+                                     const unsigned char* aad,
+                                     std::size_t aadSize,
+                                     const unsigned char* ciphertext,
+                                     std::size_t ciphertextSize,
+                                     const unsigned char* tag,
+                                     unsigned char* outPlaintext,
+                                     SwString* error) {
+#if defined(_WIN32) && !defined(SW_QUIC_USE_OPENSSL)
+        BCRYPT_KEY_HANDLE aesKey = cachedGcmKey_(key, error);
+        if (!aesKey) return false;
+
+        BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO authInfo;
+        BCRYPT_INIT_AUTH_MODE_INFO(authInfo);
+        authInfo.pbNonce = const_cast<PUCHAR>(nonce);
+        authInfo.cbNonce = static_cast<ULONG>(nonceSize);
+        authInfo.pbAuthData = const_cast<PUCHAR>(aad);
+        authInfo.cbAuthData = static_cast<ULONG>(aadSize);
+        authInfo.pbTag = const_cast<PUCHAR>(tag);
+        authInfo.cbTag = static_cast<ULONG>(kTagLength);
+
+        ULONG outputSize = 0;
+        const NTSTATUS status = BCryptDecrypt(
+            aesKey,
+            const_cast<PUCHAR>(ciphertext),
+            static_cast<ULONG>(ciphertextSize),
+            &authInfo,
+            nullptr,
+            0,
+            outPlaintext,
+            static_cast<ULONG>(ciphertextSize),
+            &outputSize,
+            0);
+        if (status != 0 || outputSize != ciphertextSize) {
+            setError_(error, "BCryptDecrypt(AES-GCM) failed");
+            return false;
+        }
+        return true;
+#else
+        EVP_CIPHER_CTX* ctx = evpGcmDecCtx_();
+        if (!ctx) { setError_(error, "EVP_CIPHER_CTX_new failed"); return false; }
+        int outLen = 0;
+        if (EVP_DecryptInit_ex(ctx, EVP_aes_128_gcm(), nullptr, nullptr, nullptr) != 1 ||
+            EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN,
+                                static_cast<int>(nonceSize), nullptr) != 1 ||
+            EVP_DecryptInit_ex(ctx, nullptr, nullptr,
+                               reinterpret_cast<const unsigned char*>(key.constData()),
+                               nonce) != 1) {
+            setError_(error, "EVP_DecryptInit(AES-128-GCM) failed");
+            return false;
+        }
+        if (aadSize > 0 &&
+            EVP_DecryptUpdate(ctx, nullptr, &outLen, aad, static_cast<int>(aadSize)) != 1) {
+            setError_(error, "EVP_DecryptUpdate(AAD) failed");
+            return false;
+        }
+        int plaintextLength = 0;
+        if (ciphertextSize > 0 &&
+            EVP_DecryptUpdate(ctx, outPlaintext, &plaintextLength, ciphertext,
+                              static_cast<int>(ciphertextSize)) != 1) {
+            setError_(error, "EVP_DecryptUpdate(AES-128-GCM) failed");
+            return false;
+        }
+        if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, static_cast<int>(kTagLength),
+                                const_cast<unsigned char*>(tag)) != 1) {
+            setError_(error, "EVP_CTRL_GCM_SET_TAG failed");
+            return false;
+        }
+        int finalLength = 0;
+        if (EVP_DecryptFinal_ex(ctx, outPlaintext + plaintextLength, &finalLength) != 1 ||
+            static_cast<std::size_t>(plaintextLength + finalLength) != ciphertextSize) {
+            setError_(error, "AES-128-GCM authentication failed");
+            return false;
+        }
+        return true;
+#endif
+    }
+
+    static bool aes128EcbEncryptBlockRaw_(const SwByteArray& key,
+                                          const unsigned char block[16],
+                                          unsigned char outBlock[16],
+                                          SwString* error) {
+#if defined(_WIN32) && !defined(SW_QUIC_USE_OPENSSL)
+        BCRYPT_KEY_HANDLE aesKey = cachedEcbKey_(key, error);
+        if (!aesKey) return false;
+        ULONG outputSize = 0;
+        const NTSTATUS status = BCryptEncrypt(aesKey,
+                                              const_cast<PUCHAR>(block),
+                                              16,
+                                              nullptr,
+                                              nullptr,
+                                              0,
+                                              outBlock,
+                                              16,
+                                              &outputSize,
+                                              0);
+        if (status != 0 || outputSize != 16) {
+            setError_(error, "BCryptEncrypt(AES-ECB) failed");
+            return false;
+        }
+        return true;
+#else
+        EVP_CIPHER_CTX* ctx = evpEcbCtx_();
+        if (!ctx) { setError_(error, "EVP_CIPHER_CTX_new failed"); return false; }
+        if (EVP_EncryptInit_ex(ctx, EVP_aes_128_ecb(), nullptr,
+                               reinterpret_cast<const unsigned char*>(key.constData()),
+                               nullptr) != 1) {
+            setError_(error, "EVP_EncryptInit(AES-128-ECB) failed");
+            return false;
+        }
+        if (EVP_CIPHER_CTX_set_padding(ctx, 0) != 1) {
+            setError_(error, "EVP_CIPHER_CTX_set_padding failed");
+            return false;
+        }
+        int outLen = 0;
+        if (EVP_EncryptUpdate(ctx, outBlock, &outLen, block, 16) != 1 || outLen != 16) {
+            setError_(error, "EVP_EncryptUpdate(AES-128-ECB) failed");
+            return false;
+        }
+        int finalLength = 0;
+        if (EVP_EncryptFinal_ex(ctx, outBlock + outLen, &finalLength) != 1 || finalLength != 0) {
+            setError_(error, "EVP_EncryptFinal(AES-128-ECB) failed");
+            return false;
+        }
+        return true;
+#endif
+    }
+
     static bool aes128GcmEncrypt_(const SwByteArray& key,
                                   const SwByteArray& nonce,
                                   const SwByteArray& aad,
                                   const SwByteArray& plaintext,
                                   SwByteArray& outCiphertextAndTag,
                                   SwString* error) {
-#if defined(_WIN32)
+#if defined(_WIN32) && !defined(SW_QUIC_USE_OPENSSL)
         BCRYPT_KEY_HANDLE aesKey = cachedGcmKey_(key, error); // handle mis en cache (thread-local)
         if (!aesKey) {
             return false;
         }
 
-        SwByteArray ciphertext(plaintext.size(), '\0');
-        SwByteArray tag(kTagLength, '\0');
+        outCiphertextAndTag = SwByteArray(plaintext.size() + kTagLength, '\0');
         BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO authInfo;
         BCRYPT_INIT_AUTH_MODE_INFO(authInfo);
         authInfo.pbNonce = reinterpret_cast<PUCHAR>(const_cast<char*>(nonce.constData()));
         authInfo.cbNonce = static_cast<ULONG>(nonce.size());
         authInfo.pbAuthData = reinterpret_cast<PUCHAR>(const_cast<char*>(aad.constData()));
         authInfo.cbAuthData = static_cast<ULONG>(aad.size());
-        authInfo.pbTag = reinterpret_cast<PUCHAR>(tag.data());
-        authInfo.cbTag = static_cast<ULONG>(tag.size());
+        authInfo.pbTag = reinterpret_cast<PUCHAR>(outCiphertextAndTag.data() + plaintext.size());
+        authInfo.cbTag = static_cast<ULONG>(kTagLength);
 
         ULONG outputSize = 0;
         const NTSTATUS status = BCryptEncrypt(aesKey,
@@ -856,8 +1131,8 @@ private:
                                               &authInfo,
                                               nullptr,
                                               0,
-                                              reinterpret_cast<PUCHAR>(ciphertext.data()),
-                                              static_cast<ULONG>(ciphertext.size()),
+                                              reinterpret_cast<PUCHAR>(outCiphertextAndTag.data()),
+                                              static_cast<ULONG>(plaintext.size()),
                                               &outputSize,
                                               0);
         if (status != 0 || outputSize != plaintext.size()) {
@@ -865,8 +1140,6 @@ private:
             return false;
         }
 
-        outCiphertextAndTag = ciphertext;
-        outCiphertextAndTag.append(tag);
         return true;
 #else
         EVP_CIPHER_CTX* ctx = evpGcmEncCtx_();
@@ -917,7 +1190,7 @@ private:
                                   const SwByteArray& ciphertextAndTag,
                                   SwByteArray& outPlaintext,
                                   SwString* error) {
-#if defined(_WIN32)
+#if defined(_WIN32) && !defined(SW_QUIC_USE_OPENSSL)
         if (ciphertextAndTag.size() < kTagLength) {
             setError_(error, "AES-GCM ciphertext is shorter than its tag");
             return false;
@@ -929,9 +1202,7 @@ private:
         }
 
         const std::size_t ciphertextSize = ciphertextAndTag.size() - kTagLength;
-        SwByteArray ciphertext = ciphertextAndTag.mid(0, static_cast<int>(ciphertextSize));
-        SwByteArray tag = ciphertextAndTag.mid(static_cast<int>(ciphertextSize), kTagLength);
-        SwByteArray plaintext(ciphertextSize, '\0');
+        outPlaintext = SwByteArray(ciphertextSize, '\0');
 
         BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO authInfo;
         BCRYPT_INIT_AUTH_MODE_INFO(authInfo);
@@ -939,26 +1210,27 @@ private:
         authInfo.cbNonce = static_cast<ULONG>(nonce.size());
         authInfo.pbAuthData = reinterpret_cast<PUCHAR>(const_cast<char*>(aad.constData()));
         authInfo.cbAuthData = static_cast<ULONG>(aad.size());
-        authInfo.pbTag = reinterpret_cast<PUCHAR>(tag.data());
-        authInfo.cbTag = static_cast<ULONG>(tag.size());
+        authInfo.pbTag = reinterpret_cast<PUCHAR>(
+            const_cast<char*>(ciphertextAndTag.constData()) + ciphertextSize);
+        authInfo.cbTag = static_cast<ULONG>(kTagLength);
 
         ULONG outputSize = 0;
         const NTSTATUS status = BCryptDecrypt(aesKey,
-                                              reinterpret_cast<PUCHAR>(ciphertext.data()),
-                                              static_cast<ULONG>(ciphertext.size()),
+                                              reinterpret_cast<PUCHAR>(
+                                                  const_cast<char*>(ciphertextAndTag.constData())),
+                                              static_cast<ULONG>(ciphertextSize),
                                               &authInfo,
                                               nullptr,
                                               0,
-                                              reinterpret_cast<PUCHAR>(plaintext.data()),
-                                              static_cast<ULONG>(plaintext.size()),
+                                              reinterpret_cast<PUCHAR>(outPlaintext.data()),
+                                              static_cast<ULONG>(outPlaintext.size()),
                                               &outputSize,
                                               0);
-        if (status != 0 || outputSize != plaintext.size()) {
+        if (status != 0 || outputSize != outPlaintext.size()) {
             setError_(error, "BCryptDecrypt(AES-GCM) failed");
             return false;
         }
 
-        outPlaintext = plaintext;
         return true;
 #else
         if (ciphertextAndTag.size() < kTagLength) {
@@ -1011,7 +1283,7 @@ private:
                                        const SwByteArray& block,
                                        SwByteArray& outBlock,
                                        SwString* error) {
-#if defined(_WIN32)
+#if defined(_WIN32) && !defined(SW_QUIC_USE_OPENSSL)
         if (block.size() != 16) {
             setError_(error, "AES-ECB header protection sample must be 16 bytes");
             return false;
@@ -1061,14 +1333,12 @@ private:
 
     static SwByteArray nonceForPacketNumber_(const SwByteArray& iv, std::uint64_t packetNumber) {
         SwByteArray nonce = iv;
-        SwByteArray packetNumberBytes;
-        appendPacketNumber_(packetNumberBytes, packetNumber, 8);
-
-        const std::size_t nonceOffset = nonce.size() - packetNumberBytes.size();
-        for (std::size_t i = 0; i < packetNumberBytes.size(); ++i) {
-            nonce[nonceOffset + i] =
-                static_cast<char>(static_cast<unsigned char>(nonce[nonceOffset + i]) ^
-                                  static_cast<unsigned char>(packetNumberBytes[i]));
+        const std::size_t bytes = nonce.size() < 8 ? nonce.size() : 8;
+        for (std::size_t i = 0; i < bytes; ++i) {
+            const std::size_t index = nonce.size() - 1 - i;
+            nonce[index] = static_cast<char>(
+                static_cast<unsigned char>(nonce[index]) ^
+                static_cast<unsigned char>((packetNumber >> (i * 8)) & 0xffU));
         }
         return nonce;
     }

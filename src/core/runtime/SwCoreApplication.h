@@ -1505,7 +1505,7 @@ public:
         lock.unlock();
 
         {
-            RegistryLock_ lock(eventQueueMutex);
+            RegistryLock_ queueLock(eventQueueMutex);
             if (!priorityPostedEventQueue_.empty() ||
                 !postedEventQueue_.empty()) {
                 return 0;
@@ -2811,6 +2811,7 @@ private:
                                                  handles.data(),
                                                  FALSE,
                                                  timeoutMs);
+        (void)r;
         if (timeoutTimer) {
             ::CancelWaitableTimer(timeoutTimer);
             ::CloseHandle(timeoutTimer);

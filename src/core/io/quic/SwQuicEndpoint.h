@@ -12,12 +12,24 @@
 // and is fed received datagrams through onUdpPacket(). Demultiplexing of any
 // non-QUIC traffic happens above this class, before onUdpPacket() is ever called.
 //
-// Auth: SwQuicAuthMode::RawPublicKey wires SwQuicCallbacks::verifyPeerKey onto
-// SwQuicHandshakeClient::setRawPublicKeyVerifier (RFC 7250 delegated trust): the
-// key/cert bytes the server presents are handed to the caller's lambda, which
-// decides membership. The PKI chain is NOT validated; the CertificateVerify
-// proof-of-possession still is.
+// Auth transition: SwQuicAuthMode::RawPublicKey currently wires the
+// verifyPeerKey hook onto X.509/SPKI pinning. SwQuic extracts canonical SPKI DER
+// from the peer certificate and hands only that SPKI to the decision hook. The
+// PKI chain is not validated and CertificateVerify still proves possession.
+// RFC 7250 RawPublicKey negotiation is not implemented by this mode yet.
+//
+// SIGNAL-DRIVEN NOTIFICATION: this layer no longer notifies through std::function
+// callbacks. SwQuicConnectionHandle and SwQuicEndpoint are SwObjects and raise
+// SwObject signals (DECLARE_SIGNAL) — "data on the UDP -> a signal climbs the
+// layers". A datagram deciphered on a connection EMITS datagramReceived(bytes);
+// the handshake completing EMITS established(); a fresh server connection accepted
+// by listen() EMITS connectionAccepted(conn). The ONLY std::function that remains
+// is verifyPeerKey — it is a DECISION (returns bool), not a notification.
 
+#include "SwHash.h"
+#include "SwMap.h"
+#include "SwVector.h"
+#include "SwObject.h"
 #include "SwByteArray.h"
 #include "SwString.h"
 
@@ -33,16 +45,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <map>
 #include <memory>
-#include <set>
-#include <string>
-#include <vector>
 
 // ------------------------------------------------------------------- public types
 
 enum class SwQuicAuthMode {
-    RawPublicKey  // RFC 7250 delegated trust via verifyPeerKey (the only mode)
+    RawPublicKey  // transitional X.509/SPKI pinning; RFC 7250 wire support pending
 };
 
 // Opaque identifier of the network path a datagram arrived on. Generic: the
@@ -52,16 +60,9 @@ struct SwQuicPathHandle {
     bool isCarrier = false;
 };
 
-// Per-connection application callbacks. All optional.
+// The only per-connection hook left is a DECISION, not a notification. Data,
+// stream, and establishment events are delivered as SwObject signals instead.
 struct SwQuicCallbacks {
-    // Unreliable QUIC DATAGRAM frame received (RFC 9221).
-    std::function<void(const SwQuicPathHandle& path,
-                       const std::uint8_t* data, std::size_t len)> onDatagram;
-    // Contiguous stream bytes received.
-    std::function<void(std::uint64_t streamId,
-                       const std::uint8_t* data, std::size_t len)> onStreamData;
-    // A peer-visible stream first appeared (dir: 0 = bidi, 1 = uni).
-    std::function<void(std::uint64_t streamId, int dir)> onStreamOpen;
     // Delegated trust decision on the peer's presented key/cert (SPKI DER).
     // Return true to accept. Client-side only.
     std::function<bool(const SwByteArray& spkiDer)> verifyPeerKey;
@@ -71,15 +72,29 @@ struct SwQuicCallbacks {
 
 // One QUIC connection. Owns its handshake driver until the 1-RTT keys are handed
 // off to an internal SwQuicConnection, then exposes the data-plane API.
-class SwQuicConnectionHandle
-    : public std::enable_shared_from_this<SwQuicConnectionHandle> {
+//
+// It is an SwObject: it does not call back: it EMITS. established() fires once the
+// handshake hands off; datagramReceived(bytes) fires per deciphered application
+// datagram; streamData(id, bytes) fires per contiguous stream read. Owners connect
+// slots with SwObject::connect(conn.get(), &SwQuicConnectionHandle::signal, ...).
+class SwQuicConnectionHandle : public SwObject {
+    SW_OBJECT(SwQuicConnectionHandle, SwObject)
+
 public:
     using SendSink = std::function<void(const std::uint8_t* data, std::size_t len,
                                         const SwString& toAddr, std::uint16_t toPort)>;
-    using OnAccept = std::function<void(std::shared_ptr<SwQuicConnectionHandle>)>;
 
     SwQuicConnectionHandle() = default;
 
+signals:
+    // Handshake handed off to the 1-RTT data plane: the connection is usable.
+    DECLARE_SIGNAL_VOID(established);
+    // One application QUIC DATAGRAM frame deciphered (RFC 9221) -> climbs as bytes.
+    DECLARE_SIGNAL(datagramReceived, SwByteArray);
+    // Contiguous stream bytes deciphered for a stream id.
+    DECLARE_SIGNAL(streamData, std::uint64_t, SwByteArray);
+
+public:
     // ---- fabrique client : arme le handshake (l'Initial part via startClient_) ----
     void initClient(SendSink sink, const SwString& host, std::uint16_t port,
                     const SwString& alpn, SwQuicAuthMode authMode, SwQuicCallbacks cbs) {
@@ -90,7 +105,7 @@ public:
         m_authMode = authMode;
         m_cbs = std::move(cbs);
         m_role = SwQuicConnection::Role::Client;
-        m_path.handle = std::hash<std::string>{}(addrKey_(host, port));
+        m_path.handle = std::hash<SwString>{}(addrKey_(host, port));
         m_path.isCarrier = false;
 
         m_hsClient.reset(new SwQuicHandshakeClient());
@@ -98,37 +113,41 @@ public:
         m_hsClient->setVerifyCertificateChain(false); // trust delegated to the key (RPK)
         if (m_cbs.verifyPeerKey) {
             std::function<bool(const SwByteArray&)> vp = m_cbs.verifyPeerKey;
-            m_hsClient->setRawPublicKeyVerifier(
-                [vp](const SwByteArray& certOrSpki) -> bool { return vp(certOrSpki); });
+            m_hsClient->setSubjectPublicKeyInfoVerifier(
+                [vp](const SwByteArray& spkiDer) -> bool { return vp(spkiDer); });
         }
     }
 
     // Émet l'Initial ; la suite du handshake se déroule via handleIncoming().
     bool startClientHandshake() {
+        if (!m_hsClient || !m_hsClient->hasSubjectPublicKeyInfoVerifier()) {
+            return false;
+        }
         SwByteArray initial;
         SwString err;
         if (!m_hsClient->start(SwString(kServerName_()), initial, &err)) {
             return false;
         }
         m_localCid = m_hsClient->sourceConnectionId();
-        std::vector<SwByteArray> out;
+        SwVector<SwByteArray> out;
         out.push_back(initial);
         emit_(out);
         return true;
     }
 
     // ---- fabrique serveur : un handshake serveur par nouvelle conn cliente ----
+    // No accept callback: the owner (SwQuicEndpoint) connects a slot to this
+    // connection's established() signal and re-emits connectionAccepted(conn).
     void initServer(SendSink sink, const SwString& fromAddr, std::uint16_t fromPort,
                     const SwString& alpn, SwQuicAuthMode authMode,
-                    const SwQuicServerCredential& credential, OnAccept onAccept) {
+                    const SwQuicServerCredential& credential) {
         m_sink = std::move(sink);
         m_peerAddr = fromAddr;
         m_peerPort = fromPort;
         m_alpn = alpn;
         m_authMode = authMode;
-        m_onAccept = std::move(onAccept);
         m_role = SwQuicConnection::Role::Server;
-        m_path.handle = std::hash<std::string>{}(addrKey_(fromAddr, fromPort));
+        m_path.handle = std::hash<SwString>{}(addrKey_(fromAddr, fromPort));
         m_path.isCarrier = false;
 
         m_hsServer.reset(new SwQuicHandshakeServer());
@@ -205,11 +224,23 @@ public:
         flush_();
     }
 
-    // TLS-Exporter (RFC 8446 7.5). Same jalon limitation as the meshq engine: the
-    // SwQuicHandshake* drivers do not yet surface exporter_master_secret, so this
-    // returns empty (fail-closed). Wire it to SwTls13KeySchedule once exposed.
-    std::vector<std::uint8_t> exporter(const SwString& /*label*/, std::size_t /*len*/) const {
-        return std::vector<std::uint8_t>();
+    SwVector<std::uint8_t> exporter(const SwString& label, std::size_t len) const {
+        if (!m_established) return SwVector<std::uint8_t>();
+        SwByteArray material;
+        SwString error;
+        const SwByteArray emptyContext(static_cast<std::size_t>(0), '\0');
+        const bool ok = m_role == SwQuicConnection::Role::Client
+            ? m_hsClient && m_hsClient->exportKeyingMaterial(
+                  label, emptyContext, len, material, &error)
+            : m_hsServer && m_hsServer->exportKeyingMaterial(
+                  label, emptyContext, len, material, &error);
+        if (!ok || material.size() != len || (len != 0 && !material.constData())) {
+            return SwVector<std::uint8_t>();
+        }
+        if (len == 0) return SwVector<std::uint8_t>();
+        return SwVector<std::uint8_t>(
+            reinterpret_cast<const std::uint8_t*>(material.constData()),
+            reinterpret_cast<const std::uint8_t*>(material.constData()) + material.size());
     }
 
     void close(std::uint64_t appErrorCode) {
@@ -222,8 +253,8 @@ public:
 private:
     static const char* kServerName_() { return "swquic.node"; }
 
-    static std::string addrKey_(const SwString& addr, std::uint16_t port) {
-        return addr.toStdString() + ":" + std::to_string(port);
+    static SwString addrKey_(const SwString& addr, std::uint16_t port) {
+        return addr + ":" + SwString::number(static_cast<unsigned int>(port));
     }
 
     static SwByteArray toSwBytes_(const std::uint8_t* data, std::size_t len) {
@@ -237,7 +268,7 @@ private:
                 std::chrono::steady_clock::now().time_since_epoch()).count());
     }
 
-    void emit_(const std::vector<SwByteArray>& out) {
+    void emit_(const SwVector<SwByteArray>& out) {
         if (!m_sink) return;
         for (std::size_t i = 0; i < out.size(); ++i) {
             const SwByteArray& d = out[i];
@@ -249,7 +280,7 @@ private:
 
     void driveHandshake_(const SwByteArray& datagram) {
         SwString err;
-        std::vector<SwByteArray> out;
+        SwVector<SwByteArray> out;
         if (m_role == SwQuicConnection::Role::Client) {
             if (!m_hsClient->processIncomingDatagram(datagram, out, &err)) return; // fail-closed
             emit_(out);
@@ -264,7 +295,6 @@ private:
             emit_(out); // includes, at completion, the Handshake ACK + HANDSHAKE_DONE (1-RTT)
             if (m_hsServer->handshakeComplete() && !m_established) {
                 handoffServer_();
-                if (m_onAccept) m_onAccept(shared_from_this());
             }
         }
     }
@@ -281,6 +311,7 @@ private:
                                       m_hsClient->clientEarlyPacketNumber());
         m_localCid = m_hsClient->sourceConnectionId();
         m_established = true;
+        established(); // SIGNAL: data plane ready (climbs to the owner's slot)
     }
 
     void handoffServer_() {
@@ -295,6 +326,7 @@ private:
                                       m_hsServer->serverApplicationPacketNumber());
         m_localCid = m_hsServer->serverConnectionId();
         m_established = true;
+        established(); // SIGNAL: server side accepted -> owner re-emits connectionAccepted
     }
 
     void deliverEstablished_(const SwByteArray& datagram) {
@@ -304,24 +336,16 @@ private:
 
         while (m_conn->pendingDatagramCount() > 0) {
             const SwByteArray dg = m_conn->takeDatagram();
-            if (m_cbs.onDatagram) {
-                m_cbs.onDatagram(m_path,
-                                 reinterpret_cast<const std::uint8_t*>(dg.constData()),
-                                 static_cast<std::size_t>(dg.size()));
-            }
+            datagramReceived(dg); // SIGNAL: application datagram climbs as bytes
         }
 
-        const std::vector<std::uint64_t> ids = m_conn->streams().streamIds();
+        const SwVector<std::uint64_t> ids = m_conn->streams().streamIds();
         for (std::size_t i = 0; i < ids.size(); ++i) {
             const std::uint64_t id = ids[i];
-            if (m_seenStreams.insert(id).second && m_cbs.onStreamOpen) {
-                m_cbs.onStreamOpen(id, (id & 0x2U) ? 1 : 0);
-            }
+            m_seenStreams.insert(id, true);
             const SwByteArray sd = m_conn->readStream(id);
-            if (!sd.isEmpty() && m_cbs.onStreamData) {
-                m_cbs.onStreamData(id,
-                                   reinterpret_cast<const std::uint8_t*>(sd.constData()),
-                                   static_cast<std::size_t>(sd.size()));
+            if (!sd.isEmpty()) {
+                streamData(id, sd); // SIGNAL: contiguous stream bytes climb
             }
         }
 
@@ -331,7 +355,7 @@ private:
     void flush_() {
         if (!m_conn) return;
         SwString err;
-        std::vector<SwByteArray> out;
+        SwVector<SwByteArray> out;
         m_conn->buildDatagrams(nowMs_(), out, &err);
         emit_(out);
     }
@@ -351,7 +375,6 @@ private:
     SwString m_alpn;
     SwQuicAuthMode m_authMode = SwQuicAuthMode::RawPublicKey;
     SwQuicCallbacks m_cbs;
-    OnAccept m_onAccept;
     SwQuicPathHandle m_path;
 
     SwQuicConnection::Role m_role = SwQuicConnection::Role::Client;
@@ -364,7 +387,7 @@ private:
 
     std::uint64_t m_nextBidiStream = 0;
     std::uint64_t m_nextUniStream = 0;
-    std::set<std::uint64_t> m_seenStreams;
+    SwHash<std::uint64_t, bool> m_seenStreams;
 };
 
 // ---------------------------------------------------------------------- endpoint
@@ -372,30 +395,52 @@ private:
 // The generic QUIC engine. Routes incoming datagrams to their connection by peer
 // 4-tuple then by destination connection ID (survives migration), and mints a
 // server-role connection for a fresh Initial while listening.
-class SwQuicEndpoint {
+//
+// It is an SwObject. When listen() accepts a fresh server connection (its
+// handshake completes) it EMITS connectionAccepted(conn); the owner connects a
+// slot to wire that connection's own datagramReceived/streamData signals.
+class SwQuicEndpoint : public SwObject {
+    SW_OBJECT(SwQuicEndpoint, SwObject)
+
 public:
     using SendSink = SwQuicConnectionHandle::SendSink;
 
+    explicit SwQuicEndpoint(SwObject* parent = nullptr) : SwObject(parent) {}
+
+signals:
+    // A fresh inbound connection finished its handshake and is ready.
+    DECLARE_SIGNAL(connectionAccepted, std::shared_ptr<SwQuicConnectionHandle>);
+
+public:
     void setSendSink(SendSink sink) { m_sink = std::move(sink); }
+
+    // Delegated-trust DECISION hook (RFC 7250). Stays a std::function because it
+    // returns bool — it is NOT a notification. Applied to every client connection.
+    void setVerifyPeerKey(std::function<bool(const SwByteArray& spkiDer)> verifier) {
+        m_verifyPeerKey = std::move(verifier);
+    }
 
     std::shared_ptr<SwQuicConnectionHandle> connect(const SwString& host, std::uint16_t port,
                                                     const SwString& alpn,
-                                                    SwQuicAuthMode authMode,
-                                                    SwQuicCallbacks cbs) {
+                                                    SwQuicAuthMode authMode) {
         std::shared_ptr<SwQuicConnectionHandle> conn = std::make_shared<SwQuicConnectionHandle>();
+        SwQuicCallbacks cbs;
+        cbs.verifyPeerKey = m_verifyPeerKey; // the only surviving hook (a decision)
         conn->initClient(m_sink, host, port, alpn, authMode, std::move(cbs));
-        m_byPeer[addrKey_(host, port)] = conn;
-        conn->startClientHandshake(); // emits the Initial; handshake proceeds via onUdpPacket()
+        const SwString peerKey = addrKey_(host, port);
+        m_byPeer[peerKey] = conn;
+        if (!conn->startClientHandshake()) {
+            m_byPeer.erase(peerKey);
+            return std::shared_ptr<SwQuicConnectionHandle>();
+        }
         registerCid_(conn);
         return conn;
     }
 
-    void listen(const SwString& alpn, SwQuicAuthMode authMode,
-                std::function<void(std::shared_ptr<SwQuicConnectionHandle>)> onAccept) {
+    void listen(const SwString& alpn, SwQuicAuthMode authMode) {
         m_listening = true;
         m_listenAlpn = alpn;
         m_listenAuth = authMode;
-        m_onAccept = std::move(onAccept);
         SwString err;
         SwQuicEcdsaCredential::createSelfSigned(SwString("swquic.node"), m_credential, &err);
     }
@@ -407,8 +452,8 @@ public:
         if (dg.isEmpty()) return;
 
         // 1) Route by source 4-tuple (deterministic for a stable path).
-        const std::string peerK = addrKey_(fromAddr, fromPort);
-        std::map<std::string, std::shared_ptr<SwQuicConnectionHandle>>::iterator it =
+        const SwString peerK = addrKey_(fromAddr, fromPort);
+        SwMap<SwString, std::shared_ptr<SwQuicConnectionHandle>>::iterator it =
             m_byPeer.find(peerK);
         if (it != m_byPeer.end()) {
             it->second->handleIncoming(dg);
@@ -417,9 +462,9 @@ public:
         }
 
         // 2) Route by destination CID (survives an address change: migration).
-        std::string dcid;
+        SwString dcid;
         if (extractDcid_(dg, dcid)) {
-            std::map<std::string, std::shared_ptr<SwQuicConnectionHandle>>::iterator ci =
+            SwMap<SwString, std::shared_ptr<SwQuicConnectionHandle>>::iterator ci =
                 m_byCid.find(dcid);
             if (ci != m_byCid.end()) {
                 ci->second->handleIncoming(dg);
@@ -432,9 +477,19 @@ public:
             std::shared_ptr<SwQuicConnectionHandle> conn =
                 std::make_shared<SwQuicConnectionHandle>();
             conn->initServer(m_sink, fromAddr, fromPort, m_listenAlpn, m_listenAuth,
-                             m_credential, m_onAccept);
+                             m_credential);
+            // Re-emit the per-connection established() as the endpoint-level
+            // connectionAccepted(conn). weak_ptr avoids a self-retaining cycle
+            // (the slot lives on conn, which the endpoint already owns in m_byPeer).
+            std::weak_ptr<SwQuicConnectionHandle> weak = conn;
+            SwObject::connect(conn.get(), &SwQuicConnectionHandle::established, this,
+                              [this, weak]() {
+                                  if (std::shared_ptr<SwQuicConnectionHandle> sp = weak.lock()) {
+                                      connectionAccepted(sp);
+                                  }
+                              });
             m_byPeer[peerK] = conn;
-            conn->handleIncoming(dg);
+            conn->handleIncoming(dg); // handshake spans several datagrams; established() fires later
             registerCid_(conn);
             return;
         }
@@ -444,20 +499,20 @@ public:
 
     // Drive every connection's timers once (called from the owner's periodic tick).
     void onTick() {
-        for (std::map<std::string, std::shared_ptr<SwQuicConnectionHandle>>::iterator it =
+        for (SwMap<SwString, std::shared_ptr<SwQuicConnectionHandle>>::iterator it =
                  m_byPeer.begin(); it != m_byPeer.end(); ++it) {
             it->second->onTick();
         }
     }
 
 private:
-    static std::string addrKey_(const SwString& addr, std::uint16_t port) {
-        return addr.toStdString() + ":" + std::to_string(port);
+    static SwString addrKey_(const SwString& addr, std::uint16_t port) {
+        return addr + ":" + SwString::number(static_cast<unsigned int>(port));
     }
 
-    static std::string cidKey_(const SwQuicConnectionId& cid) {
+    static SwString cidKey_(const SwQuicConnectionId& cid) {
         const SwByteArray& b = cid.bytes();
-        return std::string(b.constData() ? b.constData() : "", static_cast<std::size_t>(b.size()));
+        return SwString(b.constData() ? b.constData() : "", static_cast<std::size_t>(b.size()));
     }
 
     static SwByteArray toSwBytes_(const std::uint8_t* data, std::size_t len) {
@@ -467,7 +522,7 @@ private:
 
     // Extract the DCID (the CID the peer put in destination = OUR local CID) to
     // route the inbound even if the source address changed (migration).
-    static bool extractDcid_(const SwByteArray& dg, std::string& outDcid) {
+    static bool extractDcid_(const SwByteArray& dg, SwString& outDcid) {
         if (dg.isEmpty()) return false;
         const std::uint8_t first = static_cast<std::uint8_t>(dg.constData()[0]);
         if ((first & 0x80U) != 0) { // long header: byte0(1) version(4) dcidLen(1) dcid(...)
@@ -499,11 +554,11 @@ private:
     bool m_listening = false;
     SwString m_listenAlpn;
     SwQuicAuthMode m_listenAuth = SwQuicAuthMode::RawPublicKey;
-    std::function<void(std::shared_ptr<SwQuicConnectionHandle>)> m_onAccept;
+    std::function<bool(const SwByteArray& spkiDer)> m_verifyPeerKey; // X.509/SPKI decision hook
     SwQuicServerCredential m_credential;
 
-    std::map<std::string, std::shared_ptr<SwQuicConnectionHandle>> m_byPeer;
-    std::map<std::string, std::shared_ptr<SwQuicConnectionHandle>> m_byCid;
+    SwMap<SwString, std::shared_ptr<SwQuicConnectionHandle>> m_byPeer;
+    SwMap<SwString, std::shared_ptr<SwQuicConnectionHandle>> m_byCid;
 };
 
 #endif // SWQUICENDPOINT_H

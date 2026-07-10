@@ -1,6 +1,10 @@
+#include "SwPair.h"
+#include "SwMap.h"
 #ifndef SWQUICCONNECTION_H
 #define SWQUICCONNECTION_H
 
+#include "SwVector.h"
+#include "SwDequeue.h"
 #include "SwByteArray.h"
 #include "SwString.h"
 #include "quic/SwQuicAckTracker.h"
@@ -62,6 +66,20 @@ public:
     static std::uint8_t kPacketNumberLength() { return 4; }
     static std::uint64_t kLocalAckDelayExponent() { return 3; }
     static std::uint64_t kLocalMaxAckDelayMs() { return 25; }
+    static std::size_t kMaxPathControlEvents() { return 4; }
+
+    // Événements de validation extraits d'un paquet déjà authentifié. Le
+    // driver de socket les émet sur le tuple où ils ont été reçus, au lieu de
+    // les laisser rejoindre la file de perte globale du chemin actif.
+    struct PathControlEvents {
+        SwVector<SwByteArray> challenges;
+        SwVector<SwByteArray> responses;
+
+        void clear() {
+            challenges.clear();
+            responses.clear();
+        }
+    };
 
     explicit SwQuicConnection(Role role = Role::Server)
         : m_role(role),
@@ -192,24 +210,101 @@ public:
     // Feed one received UDP datagram (possibly carrying coalesced packets).
     bool receiveDatagram(const SwByteArray& datagram,
                          std::uint64_t nowMs,
-                         SwString* error = nullptr) {
+                         SwString* error = nullptr,
+                         bool* authenticatedOut = nullptr) {
+        return receiveDatagramImpl_(datagram, nowMs, error, authenticatedOut, nullptr);
+    }
+
+    // Variante utilisée par un driver qui connaît le tuple candidat. Les
+    // PATH_CHALLENGE/PATH_RESPONSE sont remontés séparément et ne sont jamais
+    // mis dans pendingFrames, donc un PTO du chemin actif ne peut pas les
+    // retransmettre vers le mauvais tuple.
+    bool receiveDatagramWithPathEvents(const SwByteArray& datagram,
+                                       std::uint64_t nowMs,
+                                       PathControlEvents& pathEvents,
+                                       SwString* error = nullptr,
+                                       bool* authenticatedOut = nullptr,
+                                       std::uint64_t* authenticatedBytesOut = nullptr) {
+        pathEvents.clear();
+        if (authenticatedBytesOut) {
+            *authenticatedBytesOut = 0;
+        }
+        PathControlEvents* const previous = m_pathControlEventsOut;
+        m_pathControlEventsOut = &pathEvents;
+        bool authenticated = false;
+        bool* const authenticatedResult = authenticatedOut ? authenticatedOut : &authenticated;
+        const bool received = receiveDatagramImpl_(datagram, nowMs, error,
+                                                   authenticatedResult,
+                                                   authenticatedBytesOut);
+        m_pathControlEventsOut = previous;
+        if (!received || !*authenticatedResult) {
+            pathEvents.clear();
+        }
+        return received;
+    }
+
+    bool receiveDatagramImpl_(const SwByteArray& datagram,
+                              std::uint64_t nowMs,
+                              SwString* error,
+                              bool* authenticatedOut,
+                              std::uint64_t* authenticatedBytesOut) {
+        if (authenticatedOut) {
+            *authenticatedOut = false;
+        }
+        if (authenticatedBytesOut) {
+            *authenticatedBytesOut = 0;
+        }
         if (m_state == State::Closed) {
             setError_(error, "Cannot receive QUIC packet on a closed connection");
             return false;
         }
 
-        // Received bytes credit the current path's anti-amplification budget
-        // (RFC 9000 8.1 / 9.3) while the path is not yet validated.
-        m_bytesReceivedThisPath += static_cast<std::uint64_t>(datagram.size());
+        // Le header court 1-RTT occupe toujours tout le datagramme UDP dans
+        // notre dataplane. Évite une copie profonde de 1,2 Ko par paquet.
+        if (!datagram.isEmpty() &&
+            (static_cast<std::uint8_t>(datagram.constData()[0]) & 0x80U) == 0) {
+            std::size_t consumed = 0;
+            bool authenticated = false;
+            if (!receivePacket_(datagram, nowMs, consumed, authenticated, error)) {
+                return false;
+            }
+            // Seuls des octets authentifiés créditent le budget 3x du chemin
+            // candidat. Créditer avant l'AEAD permettrait à un paquet forgé
+            // portant un CID observable d'augmenter la surface de réflexion.
+            // PATH_RESPONSE peut valider le chemin pendant receivePacket_() :
+            // dans ce cas le budget vient d'être levé et n'a plus à croître.
+            if (authenticated && !m_pathValidated) {
+                m_bytesReceivedThisPath += static_cast<std::uint64_t>(datagram.size());
+            }
+            if (authenticatedOut) {
+                *authenticatedOut = authenticated;
+            }
+            if (authenticatedBytesOut && authenticated) {
+                *authenticatedBytesOut = static_cast<std::uint64_t>(datagram.size());
+            }
+            // Un paquet au CID visible mais non authentifié ne doit pas maintenir
+            // artificiellement la connexion en vie (idle-timeout DoS).
+            if (authenticated) {
+                m_lastNetworkActivityMs = nowMs;
+                m_hasNetworkActivity = true;
+            }
+            clearError_(error);
+            return true;
+        }
 
         std::size_t offset = 0;
+        std::uint64_t authenticatedBytes = 0;
         while (offset < datagram.size()) {
             const SwByteArray remainder =
                 datagram.mid(static_cast<int>(offset),
                              static_cast<int>(datagram.size() - offset));
             std::size_t consumed = 0;
-            if (!receivePacket_(remainder, nowMs, consumed, error)) {
+            bool authenticated = false;
+            if (!receivePacket_(remainder, nowMs, consumed, authenticated, error)) {
                 return false;
+            }
+            if (authenticated) {
+                authenticatedBytes += static_cast<std::uint64_t>(consumed);
             }
             if (consumed == 0) {
                 break; // rest of the datagram was skipped (padding, unknown keys)
@@ -217,8 +312,23 @@ public:
             offset += consumed;
         }
 
-        m_lastNetworkActivityMs = nowMs;
-        m_hasNetworkActivity = true;
+        // Même règle pour un datagramme coalescé : seuls les octets des
+        // paquets effectivement ouverts par l'AEAD sont crédités. Un paquet
+        // long inconnu/sans clé ou un suffixe sauté ne peut donc augmenter le
+        // budget d'un paquet authentifié qui le précède.
+        if (authenticatedBytes > 0 && !m_pathValidated) {
+            m_bytesReceivedThisPath += authenticatedBytes;
+        }
+        if (authenticatedOut) {
+            *authenticatedOut = authenticatedBytes > 0;
+        }
+        if (authenticatedBytesOut) {
+            *authenticatedBytesOut = authenticatedBytes;
+        }
+        if (authenticatedBytes > 0) {
+            m_lastNetworkActivityMs = nowMs;
+            m_hasNetworkActivity = true;
+        }
         if (error) {
             *error = SwString();
         }
@@ -245,6 +355,22 @@ public:
     }
 
     // ---- application send API ----------------------------------------------
+
+    // Bornes du driver I/O : 0 conserve le comportement historique illimité. Le quota par build
+    // empêche une ACK compression / grande cwnd de vider plusieurs Mo vers sendto en une rafale.
+    void setMaxDatagramsPerBuild(std::size_t maximum) { m_maxDatagramsPerBuild = maximum; }
+    void setDatagramPacing(std::size_t datagramsPerMillisecond,
+                           std::size_t maximumBurst) {
+        m_pacingRatePerMillisecond = datagramsPerMillisecond;
+        m_pacingMaximumBurst = maximumBurst < datagramsPerMillisecond
+                                   ? datagramsPerMillisecond
+                                   : maximumBurst;
+        m_pacingLastRefillMs = 0;
+        m_pacingTokens = m_pacingMaximumBurst;
+    }
+    void setMaxPendingDatagramFrames(std::size_t maximum) {
+        m_maxPendingDatagramFrames = maximum;
+    }
 
     // Buffer stream data for transmission; it goes out on the next
     // buildDatagrams() within flow-control and congestion limits.
@@ -291,10 +417,38 @@ public:
             setError_(error, "Peer does not accept QUIC DATAGRAM frames");
             return false;
         }
-        space_(Level::Application).pendingFrames.push_back(SwQuicFrame::datagram(data));
+        Space_& app = space_(Level::Application);
+        if (m_maxPendingDatagramFrames > 0 &&
+            app.pendingFrames.size() >= m_maxPendingDatagramFrames) {
+            setError_(error, "QUIC DATAGRAM pending queue is full");
+            return false;
+        }
+        app.pendingFrames.push_back(SwQuicFrame::datagram(data));
+        ++m_queuedDatagramFrames;
         if (error) {
             *error = SwString();
         }
+        return true;
+    }
+
+    bool queueDatagramFrame(SwByteArray&& data, SwString* error = nullptr) {
+        if (m_state != State::Open) {
+            setError_(error, "QUIC connection is not open for sending");
+            return false;
+        }
+        if (m_hasPeerParams && m_peerParams.maxDatagramFrameSize == 0) {
+            setError_(error, "Peer does not accept QUIC DATAGRAM frames");
+            return false;
+        }
+        Space_& app = space_(Level::Application);
+        if (m_maxPendingDatagramFrames > 0 &&
+            app.pendingFrames.size() >= m_maxPendingDatagramFrames) {
+            setError_(error, "QUIC DATAGRAM pending queue is full");
+            return false;
+        }
+        app.pendingFrames.push_back(SwQuicFrame::datagram(std::move(data)));
+        ++m_queuedDatagramFrames;
+        clearError_(error);
         return true;
     }
 
@@ -323,9 +477,24 @@ public:
 
     // Drain everything currently sendable into ready-to-write UDP datagrams.
     bool buildDatagrams(std::uint64_t nowMs,
-                        std::vector<SwByteArray>& outDatagrams,
+                        SwVector<SwByteArray>& outDatagrams,
                         SwString* error = nullptr) {
         outDatagrams.clear();
+        if (m_pacingRatePerMillisecond > 0) {
+            if (m_pacingLastRefillMs == 0) {
+                m_pacingLastRefillMs = nowMs;
+                m_pacingTokens = m_pacingMaximumBurst;
+            } else if (nowMs > m_pacingLastRefillMs) {
+                const std::uint64_t elapsed = nowMs - m_pacingLastRefillMs;
+                const std::uint64_t added =
+                    elapsed * static_cast<std::uint64_t>(m_pacingRatePerMillisecond);
+                const std::uint64_t available =
+                    static_cast<std::uint64_t>(m_pacingTokens) + added;
+                m_pacingTokens = static_cast<std::size_t>(
+                    available > m_pacingMaximumBurst ? m_pacingMaximumBurst : available);
+                m_pacingLastRefillMs = nowMs;
+            }
+        }
 
         if (m_state == State::Draining || m_state == State::Closed) {
             if (error) {
@@ -339,6 +508,10 @@ public:
         }
 
         for (std::size_t i = 0; i < kLevelCount(); ++i) {
+            if (m_maxDatagramsPerBuild > 0 &&
+                outDatagrams.size() >= m_maxDatagramsPerBuild) {
+                break;
+            }
             const Level level = static_cast<Level>(i);
             if (!buildDatagramsForLevel_(level, nowMs, outDatagrams, error)) {
                 return false;
@@ -428,6 +601,53 @@ public:
 
     // ---- connection migration / path validation (RFC 9000 section 9) --------
 
+    // Construit exactement un paquet 1-RTT de contrôle de chemin. Le paquet
+    // consomme le prochain PN de l'espace Application ordinaire : deux tuples
+    // ne peuvent donc jamais réutiliser le même nonce AEAD. La frame ciblée
+    // n'est volontairement pas enregistrée comme retransmissible dans la loss
+    // queue globale ; son driver possède le retry borné et le tuple de sortie.
+    // maxWireBytes borne le budget 3x propre au candidat. UINT64_MAX désactive
+    // uniquement cette borne externe (challenge initié localement, non réfléchi).
+    bool buildPathControlDatagram(bool response,
+                                  const SwByteArray& controlData,
+                                  std::uint64_t nowMs,
+                                  std::uint64_t maxWireBytes,
+                                  SwByteArray& outDatagram,
+                                  SwString* error = nullptr) {
+        outDatagram.clear();
+        if (m_state != State::Open || controlData.size() != 8 ||
+            !space_(Level::Application).hasTxKeys) {
+            setError_(error, "Cannot build QUIC path control packet");
+            return false;
+        }
+        SwVector<SwQuicFrame> frames;
+        frames.push_back(response ? SwQuicFrame::pathResponse(controlData)
+                                  : SwQuicFrame::pathChallenge(controlData));
+        bool amplificationBlocked = false;
+        if (!encodePacket_(Level::Application, frames, true, nowMs, outDatagram,
+                           amplificationBlocked, error, maxWireBytes,
+                           false /* no loss/congestion state for targeted control */)) {
+            return false;
+        }
+        if (amplificationBlocked) {
+            outDatagram.clear();
+        }
+        clearError_(error);
+        return true;
+    }
+
+    // Le driver appelle ceci seulement après un PATH_RESPONSE authentifié sur
+    // le tuple candidat. Les PN et la loss map restent communs à la connexion ;
+    // seul le contrôleur de congestion est réinitialisé pour le nouveau chemin.
+    void commitPathMigration() {
+        m_congestion = SwQuicCongestionControl();
+        m_pathValidated = true;
+        m_awaitingPathResponse = false;
+        m_resetCcOnValidation = false;
+        m_bytesReceivedThisPath = 0;
+        m_bytesSentThisPath = 0;
+    }
+
     // Called by the driver when a packet for this connection arrives from a
     // new peer address (the connection is found by its connection ID, so it
     // survives the address change). This starts path validation: a
@@ -507,8 +727,8 @@ public:
             return SwByteArray();
         }
 
-        const SwByteArray datagram = m_datagrams.front();
-        m_datagrams.erase(m_datagrams.begin());
+        SwByteArray datagram = std::move(m_datagrams.front());
+        m_datagrams.pop_front();
         return datagram;
     }
 
@@ -546,9 +766,50 @@ public:
     const SwQuicCongestionControl& congestionControl() const { return m_congestion; }
     const SwQuicConnectionFlowControl& connectionFlowControl() const { return m_connectionFlow; }
 
+    struct DiagnosticStats {
+        std::size_t pendingFrames = 0;
+        std::size_t sentPackets = 0;
+        std::size_t ackElicitingSinceAck = 0;
+        std::size_t probesPending = 0;
+        std::uint64_t congestionWindow = 0;
+        std::uint64_t bytesInFlight = 0;
+        std::uint64_t nextTxPacketNumber = 0;
+        std::uint64_t largestReceivedPacketNumber = 0;
+        std::uint64_t ackDeadlineMs = 0;
+        std::int64_t nextTimeoutMs = -1;
+        bool hasLargestReceivedPacketNumber = false;
+        bool hasAckDeadline = false;
+        bool hasAckElicitingInFlight = false;
+        std::uint64_t queuedDatagramFrames = 0;
+        std::uint64_t encodedDatagramFrames = 0;
+        std::uint64_t receivedDatagramFrames = 0;
+    };
+
+    DiagnosticStats diagnosticStats(Level level, std::uint64_t nowMs) const {
+        const Space_& space = space_(level);
+        DiagnosticStats stats;
+        stats.pendingFrames = space.pendingFrames.size();
+        stats.sentPackets = space.sentPackets.size();
+        stats.ackElicitingSinceAck = space.ackElicitingSinceAck;
+        stats.probesPending = space.probesPending;
+        stats.congestionWindow = m_congestion.congestionWindow();
+        stats.bytesInFlight = m_congestion.bytesInFlight();
+        stats.nextTxPacketNumber = space.nextTxPn;
+        stats.largestReceivedPacketNumber = space.largestReceivedPn;
+        stats.ackDeadlineMs = space.ackDeadlineMs;
+        stats.nextTimeoutMs = nextTimeoutMs(nowMs);
+        stats.hasLargestReceivedPacketNumber = space.hasLargestReceivedPn;
+        stats.hasAckDeadline = space.hasAckDeadline;
+        stats.hasAckElicitingInFlight = space.hasAckElicitingInFlight;
+        stats.queuedDatagramFrames = m_queuedDatagramFrames;
+        stats.encodedDatagramFrames = m_encodedDatagramFrames;
+        stats.receivedDatagramFrames = m_receivedDatagramFrames;
+        return stats;
+    }
+
 private:
     struct SentRecord_ {
-        std::vector<SwQuicFrame> retransmittable;
+        SwVector<SwQuicFrame> retransmittable;
         std::size_t sentBytes;
         std::uint64_t sentTimeMs;
         bool ackEliciting;
@@ -566,14 +827,15 @@ private:
         std::uint64_t largestReceivedPn;
         bool hasLargestReceivedPn;
         std::uint64_t nextTxPn;
-        std::vector<SwQuicFrame> pendingFrames;
-        std::map<std::uint64_t, SentRecord_> sentPackets;
+        SwDequeue<SwQuicFrame> pendingFrames; // FIFO O(1), surface SwStack
+        SwMap<std::uint64_t, SentRecord_> sentPackets;
         std::uint64_t ackDeadlineMs;
         bool hasAckDeadline;
         std::uint64_t lastAckElicitingSentMs;
         bool hasAckElicitingInFlight;
         std::uint64_t largestReceivedTimeMs; // arrival time of largestReceivedPn
         std::size_t probesPending;           // PTO probes owed, allowed past cwnd
+        std::size_t ackElicitingSinceAck;    // ack-eliciting rx'd since last ACK sent (RFC 9000 13.2.1)
 
         Space_()
             : hasRxKeys(false),
@@ -586,7 +848,8 @@ private:
               lastAckElicitingSentMs(0),
               hasAckElicitingInFlight(false),
               largestReceivedTimeMs(0),
-              probesPending(0) {}
+              probesPending(0),
+              ackElicitingSinceAck(0) {}
     };
 
     struct SendStream_ {
@@ -634,7 +897,7 @@ private:
     // packet in the space so a lost packet is recovered directly; if none carry
     // retransmittable data, queue a PING to elicit an ACK.
     void requeueOldestUnacked_(Space_& space) {
-        for (std::map<std::uint64_t, SentRecord_>::iterator it = space.sentPackets.begin();
+        for (SwMap<std::uint64_t, SentRecord_>::iterator it = space.sentPackets.begin();
              it != space.sentPackets.end(); ++it) {
             if (!it->second.retransmittable.empty()) {
                 for (std::size_t i = 0; i < it->second.retransmittable.size(); ++i) {
@@ -665,11 +928,25 @@ private:
 
     // ---- receive internals ---------------------------------------------------
 
+    bool packetNumberAlreadyConsumed_(Level level, std::uint64_t packetNumber) const {
+        const Space_& space = space_(level);
+        if (space.ackTracker.containsReceivedPacket(packetNumber)) {
+            return true;
+        }
+        // Les numéros sortis de la fenêtre bornée de l'ACK tracker restent
+        // des replays : ne jamais les rendre de nouveau acceptables après prune.
+        return space.hasLargestReceivedPn && packetNumber <= space.largestReceivedPn &&
+               space.largestReceivedPn - packetNumber >=
+                   static_cast<std::uint64_t>(SwQuicAckTracker::kMaxTrackedPackets());
+    }
+
     bool receivePacket_(const SwByteArray& packet,
                         std::uint64_t nowMs,
                         std::size_t& outConsumed,
+                        bool& outAuthenticated,
                         SwString* error) {
         outConsumed = 0;
+        outAuthenticated = false;
         if (packet.isEmpty()) {
             return true;
         }
@@ -702,6 +979,11 @@ private:
                 clearError_(error);
                 return true;
             }
+            if (packetNumberAlreadyConsumed_(Level::Application, packetNumber)) {
+                clearError_(error);
+                return true;
+            }
+            outAuthenticated = true;
             return processDecodedPacket_(Level::Application, packetNumber, plaintext,
                                          nowMs, error);
         }
@@ -749,6 +1031,12 @@ private:
                     }
                     return true;
                 }
+                if (packetNumberAlreadyConsumed_(Level::Initial, header.packetNumber())) {
+                    clearError_(error);
+                    outConsumed = consumed;
+                    return true;
+                }
+                outAuthenticated = true;
             } else {
                 if (!SwQuicPacketCodec::decodeInitialPacket(packet, header, plaintext,
                                                             &consumed, error)) {
@@ -785,6 +1073,12 @@ private:
                 }
                 return true;
             }
+            if (packetNumberAlreadyConsumed_(Level::Handshake, header.packetNumber())) {
+                clearError_(error);
+                outConsumed = consumed;
+                return true;
+            }
+            outAuthenticated = true;
             outConsumed = consumed;
             return processDecodedPacket_(Level::Handshake, header.packetNumber(), plaintext,
                                          nowMs, error);
@@ -852,7 +1146,7 @@ private:
                                const SwByteArray& payload,
                                std::uint64_t nowMs,
                                SwString* error) {
-        std::vector<SwQuicFrame> frames;
+        SwVector<SwQuicFrame> frames;
         if (!SwQuicFrameCodec::decodeFrames(payload, frames, error)) {
             return false;
         }
@@ -866,6 +1160,11 @@ private:
             }
         }
 
+        // Reordering test BEFORE largestReceivedPn is advanced: a gap in the
+        // received packet-number sequence forces an immediate ACK (RFC 9000 13.2.1).
+        const bool outOfOrder = space.hasLargestReceivedPn &&
+                                packetNumber != space.largestReceivedPn + 1;
+
         space.ackTracker.recordReceivedPacket(packetNumber, ackEliciting);
         if (!space.hasLargestReceivedPn || packetNumber > space.largestReceivedPn) {
             space.largestReceivedPn = packetNumber;
@@ -873,12 +1172,22 @@ private:
             space.largestReceivedTimeMs = nowMs; // for a measured ACK Delay
         }
 
-        if (ackEliciting && !space.hasAckDeadline) {
-            // Initial/Handshake ACKs go out immediately; application ACKs may
-            // wait up to our max_ack_delay (RFC 9000 13.2.1).
-            space.ackDeadlineMs =
-                (level == Level::Application) ? nowMs + kLocalMaxAckDelayMs() : nowMs;
-            space.hasAckDeadline = true;
+        if (ackEliciting) {
+            ++space.ackElicitingSinceAck;
+            // RFC 9000 13.2.1: an ACK is sent immediately when a SECOND
+            // ack-eliciting packet arrives since the last ACK, or when a packet
+            // is received out of order; otherwise an application ACK may be held
+            // up to max_ack_delay. Initial/Handshake ACKs are always immediate.
+            const bool immediate = (level != Level::Application) ||
+                                   space.ackElicitingSinceAck >= 2 ||
+                                   outOfOrder;
+            if (!space.hasAckDeadline) {
+                space.ackDeadlineMs = immediate ? nowMs : nowMs + kLocalMaxAckDelayMs();
+                space.hasAckDeadline = true;
+            } else if (immediate) {
+                // A delayed deadline was already pending: pull the ACK forward to now.
+                space.ackDeadlineMs = nowMs;
+            }
         }
 
         for (std::size_t i = 0; i < frames.size(); ++i) {
@@ -900,7 +1209,7 @@ private:
     }
 
     bool processFrame_(Level level,
-                       const SwQuicFrame& frame,
+                       SwQuicFrame& frame,
                        std::uint64_t nowMs,
                        SwString* error) {
         switch (frame.type()) {
@@ -922,16 +1231,28 @@ private:
             armDrainTimer_(nowMs);
             return true;
         case SwQuicFrame::Type::Datagram:
-            m_datagrams.push_back(frame.data());
+            m_datagrams.push_back(frame.takeData());
+            ++m_receivedDatagramFrames;
             return true;
         case SwQuicFrame::Type::PathChallenge:
             m_lastPathChallenge = frame.data();
-            // Echo the 8 challenge bytes back on the same path (RFC 9000 8.2.2).
-            space_(levelForPathResponse_(level)).pendingFrames.push_back(
-                SwQuicFrame::pathResponse(frame.data()));
+            if (m_pathControlEventsOut) {
+                if (m_pathControlEventsOut->challenges.size() < kMaxPathControlEvents()) {
+                    m_pathControlEventsOut->challenges.push_back(frame.data());
+                }
+            } else {
+                // Chemin actif : la file normale est bien émise sur le tuple
+                // actif. Un driver candidat utilise le canal ciblé ci-dessus.
+                space_(levelForPathResponse_(level)).pendingFrames.push_back(
+                    SwQuicFrame::pathResponse(frame.data()));
+            }
             return true;
         case SwQuicFrame::Type::PathResponse:
-            if (m_awaitingPathResponse && frame.data() == m_pathChallengeData) {
+            if (m_pathControlEventsOut) {
+                if (m_pathControlEventsOut->responses.size() < kMaxPathControlEvents()) {
+                    m_pathControlEventsOut->responses.push_back(frame.data());
+                }
+            } else if (m_awaitingPathResponse && frame.data() == m_pathChallengeData) {
                 // Path validated (RFC 9000 8.2.3): the new path is now the
                 // active one. Reset congestion controller and RTT for the new
                 // path characteristics (RFC 9000 9.4) and lift the
@@ -1029,16 +1350,16 @@ private:
 
         // Rebuild the inclusive acked ranges from the wire encoding
         // (RFC 9000 19.3.1).
-        std::vector<std::pair<std::uint64_t, std::uint64_t> > ranges;
+        SwVector<SwPair<std::uint64_t, std::uint64_t> > ranges;
         std::uint64_t high = frame.largestAcknowledged();
         if (frame.firstAckRange() > high) {
             setError_(error, "QUIC ACK first range underflows");
             return false;
         }
         std::uint64_t low = high - frame.firstAckRange();
-        ranges.push_back(std::make_pair(low, high));
+        ranges.push_back(SwMakePair(low, high));
 
-        const std::vector<SwQuicFrame::AckRange>& wireRanges = frame.ackRanges();
+        const SwVector<SwQuicFrame::AckRange>& wireRanges = frame.ackRanges();
         for (std::size_t i = 0; i < wireRanges.size(); ++i) {
             if (low < wireRanges[i].gap + 2) {
                 setError_(error, "QUIC ACK range underflows");
@@ -1050,7 +1371,7 @@ private:
                 return false;
             }
             low = high - wireRanges[i].rangeLength;
-            ranges.push_back(std::make_pair(low, high));
+            ranges.push_back(SwMakePair(low, high));
         }
 
         // Decode ack delay: microseconds shifted by the peer's exponent.
@@ -1067,7 +1388,7 @@ private:
         space.probesPending = 0; // the peer responded: no probe owed
 
         for (std::size_t i = 0; i < result.newlyAcked.size(); ++i) {
-            std::map<std::uint64_t, SentRecord_>::iterator it =
+            SwMap<std::uint64_t, SentRecord_>::iterator it =
                 space.sentPackets.find(result.newlyAcked[i]);
             if (it == space.sentPackets.end()) {
                 continue;
@@ -1086,7 +1407,7 @@ private:
         std::size_t lostAckElicitingCount = 0;
 
         for (std::size_t i = 0; i < result.lost.size(); ++i) {
-            std::map<std::uint64_t, SentRecord_>::iterator it =
+            SwMap<std::uint64_t, SentRecord_>::iterator it =
                 space.sentPackets.find(result.lost[i]);
             if (it == space.sentPackets.end()) {
                 continue;
@@ -1154,7 +1475,7 @@ private:
         const std::uint64_t previousHighest = streamFlow.highestReceivedOffset();
         const std::uint64_t finalSize = frame.finalSize();
 
-        std::map<std::uint64_t, std::uint64_t>::iterator establishedIt =
+        SwMap<std::uint64_t, std::uint64_t>::iterator establishedIt =
             m_streamFinalSize.find(frame.streamId());
         if (finalSize < previousHighest ||
             (establishedIt != m_streamFinalSize.end() && establishedIt->second != finalSize)) {
@@ -1186,7 +1507,7 @@ private:
         }
         // Data beyond a final size established by a prior RESET_STREAM or FIN is
         // a FINAL_SIZE_ERROR (RFC 9000 4.5).
-        std::map<std::uint64_t, std::uint64_t>::iterator finalIt =
+        SwMap<std::uint64_t, std::uint64_t>::iterator finalIt =
             m_streamFinalSize.find(frame.streamId());
         if (finalIt != m_streamFinalSize.end()) {
             const std::uint64_t end = frame.offset() +
@@ -1248,10 +1569,10 @@ private:
     }
 
     SwQuicStreamFlowControl& streamFlowControl_(std::uint64_t streamId) {
-        std::map<std::uint64_t, SwQuicStreamFlowControl>::iterator it =
+        SwMap<std::uint64_t, SwQuicStreamFlowControl>::iterator it =
             m_streamFlow.find(streamId);
         if (it == m_streamFlow.end()) {
-            it = m_streamFlow.insert(std::make_pair(
+            it = m_streamFlow.insert(SwMakePair(
                 streamId,
                 SwQuicStreamFlowControl(localStreamWindow_(streamId)))).first;
         }
@@ -1271,7 +1592,7 @@ private:
     }
 
     std::uint64_t peerStreamSendLimit_(std::uint64_t streamId) const {
-        std::map<std::uint64_t, std::uint64_t>::const_iterator it =
+        SwMap<std::uint64_t, std::uint64_t>::const_iterator it =
             m_peerStreamMaxData.find(streamId);
         std::uint64_t limit = 0;
         if (m_hasPeerParams) {
@@ -1318,7 +1639,7 @@ private:
 
     void refreshInFlightFlag_(Space_& space) {
         space.hasAckElicitingInFlight = false;
-        for (std::map<std::uint64_t, SentRecord_>::const_iterator it =
+        for (SwMap<std::uint64_t, SentRecord_>::const_iterator it =
                  space.sentPackets.begin();
              it != space.sentPackets.end(); ++it) {
             if (it->second.ackEliciting) {
@@ -1339,7 +1660,7 @@ private:
     }
 
     bool buildCloseDatagram_(std::uint64_t nowMs,
-                             std::vector<SwByteArray>& outDatagrams,
+                             SwVector<SwByteArray>& outDatagrams,
                              SwString* error) {
         if (!m_closeQueued || m_closeSent) {
             if (error) {
@@ -1359,7 +1680,7 @@ private:
             return false;
         }
 
-        std::vector<SwQuicFrame> frames;
+        SwVector<SwQuicFrame> frames;
         if (m_closeIsApplication && level == Level::Application) {
             frames.push_back(SwQuicFrame::applicationClose(m_closeErrorCode, m_closeReason));
         } else if (m_closeIsApplication) {
@@ -1390,7 +1711,7 @@ private:
 
     bool buildDatagramsForLevel_(Level level,
                                  std::uint64_t nowMs,
-                                 std::vector<SwByteArray>& outDatagrams,
+                                 SwVector<SwByteArray>& outDatagrams,
                                  SwString* error) {
         if (!levelCanSend_(level)) {
             return true;
@@ -1412,8 +1733,11 @@ private:
                          (ackDue || level != Level::Application ||
                           !space.pendingFrames.empty());
 
-        while (!space.pendingFrames.empty() || ackWanted) {
-            std::vector<SwQuicFrame> frames;
+        while ((!space.pendingFrames.empty() || ackWanted) &&
+               (m_maxDatagramsPerBuild == 0 ||
+                outDatagrams.size() < m_maxDatagramsPerBuild) &&
+               (m_pacingRatePerMillisecond == 0 || m_pacingTokens > 0)) {
+            SwVector<SwQuicFrame> frames;
             std::size_t payloadSize = 0;
             bool ackEliciting = false;
 
@@ -1436,6 +1760,7 @@ private:
                     payloadSize += frameEncodedSize_(ackFrame);
                     space.ackTracker.onAckSent();
                     space.hasAckDeadline = false;
+                    space.ackElicitingSinceAck = 0; // RFC 9000 13.2.1 counter reset
                 }
             }
 
@@ -1458,9 +1783,9 @@ private:
                     }
                     ackEliciting = true;
                 }
-                frames.push_back(next);
+                frames.push_back(std::move(space.pendingFrames.front()));
                 payloadSize += nextSize;
-                space.pendingFrames.erase(space.pendingFrames.begin());
+                space.pendingFrames.pop_front();
             }
 
             if (frames.empty()) {
@@ -1481,13 +1806,17 @@ private:
                 // them, and stop this flush.
                 for (std::size_t i = frames.size(); i-- > 0;) {
                     if (isRetransmittableFrame_(frames[i].type())) {
-                        space.pendingFrames.insert(space.pendingFrames.begin(), frames[i]);
+                        space.pendingFrames.push_front(frames[i]);
                     }
                 }
                 break;
             }
-            outDatagrams.push_back(datagram);
-            m_bytesSentThisPath += static_cast<std::uint64_t>(datagram.size());
+            const std::size_t wireSize = datagram.size();
+            outDatagrams.push_back(std::move(datagram));
+            if (m_pacingRatePerMillisecond > 0 && m_pacingTokens > 0) {
+                --m_pacingTokens;
+            }
+            m_bytesSentThisPath += static_cast<std::uint64_t>(wireSize);
 
             // Only the first packet of this flush carries the ACK.
             ackWanted = false;
@@ -1503,7 +1832,7 @@ private:
         return true;
     }
 
-    static bool containsPathFrame_(const std::vector<SwQuicFrame>& frames) {
+    static bool containsPathFrame_(const SwVector<SwQuicFrame>& frames) {
         for (std::size_t i = 0; i < frames.size(); ++i) {
             if (frames[i].type() == SwQuicFrame::Type::PathChallenge ||
                 frames[i].type() == SwQuicFrame::Type::PathResponse) {
@@ -1528,7 +1857,7 @@ private:
     void stageStreamFrames_() {
         Space_& app = space_(Level::Application);
 
-        for (std::map<std::uint64_t, SendStream_>::iterator it = m_sendStreams.begin();
+        for (SwMap<std::uint64_t, SendStream_>::iterator it = m_sendStreams.begin();
              it != m_sendStreams.end(); ++it) {
             SendStream_& stream = it->second;
             if (stream.buffer.isEmpty() && !(stream.finQueued && !stream.finSent)) {
@@ -1612,8 +1941,13 @@ private:
     }
 
     static std::size_t frameEncodedSize_(const SwQuicFrame& frame) {
+        if (frame.type() == SwQuicFrame::Type::Datagram) {
+            return 1 + SwQuicVarIntCodec::encodedSize(
+                           static_cast<std::uint64_t>(frame.data().size())) +
+                   frame.data().size();
+        }
         SwByteArray encoded;
-        std::vector<SwQuicFrame> single;
+        SwVector<SwQuicFrame> single;
         single.push_back(frame);
         SwString ignored;
         if (!SwQuicFrameCodec::encodeFrames(single, encoded, &ignored)) {
@@ -1623,12 +1957,14 @@ private:
     }
 
     bool encodePacket_(Level level,
-                       std::vector<SwQuicFrame>& frames,
+                       SwVector<SwQuicFrame>& frames,
                        bool ackEliciting,
                        std::uint64_t nowMs,
                        SwByteArray& outDatagram,
                        bool& outAmplificationBlocked,
-                       SwString* error) {
+                       SwString* error,
+                       std::uint64_t maxWireBytes = UINT64_MAX,
+                       bool trackGlobalLoss = true) {
         outAmplificationBlocked = false;
         Space_& space = space_(level);
 
@@ -1652,7 +1988,10 @@ private:
         if (level == Level::Application && containsPathFrame_(frames)) {
             const std::size_t target = packetPayloadBudget_(Level::Application);
             while (payload.size() < target) {
-                if (amplificationBlocked_(payload.size() + 64)) {
+                const std::uint64_t estimatedWire =
+                    static_cast<std::uint64_t>(payload.size()) + 64U;
+                if (amplificationBlocked_(payload.size() + 64) ||
+                    estimatedWire > maxWireBytes) {
                     break; // do not exceed 3x received on an unvalidated path
                 }
                 payload.append(static_cast<char>(0));
@@ -1714,7 +2053,8 @@ private:
         // datagram, BEFORE any state is committed. If the path is unvalidated and
         // this datagram would exceed 3x received, withhold it cleanly: the packet
         // number is not consumed and nothing is recorded in flight.
-        if (amplificationBlocked_(packet.size())) {
+        if (amplificationBlocked_(packet.size()) ||
+            static_cast<std::uint64_t>(packet.size()) > maxWireBytes) {
             outAmplificationBlocked = true;
             return true;
         }
@@ -1729,9 +2069,8 @@ private:
         sent.ackEliciting = ackEliciting;
         sent.inFlight = ackEliciting;
         sent.sentBytes = packet.size();
-        space.loss.onPacketSent(sent);
-
-        if (ackEliciting) {
+        if (ackEliciting && trackGlobalLoss) {
+            space.loss.onPacketSent(sent);
             m_congestion.onPacketSent(packet.size());
             space.lastAckElicitingSentMs = nowMs;
             space.hasAckElicitingInFlight = true;
@@ -1741,18 +2080,25 @@ private:
             m_hasNetworkActivity = true;
         }
 
-        SentRecord_ record;
-        record.sentBytes = packet.size();
-        record.sentTimeMs = nowMs;
-        record.ackEliciting = ackEliciting;
+        if (ackEliciting && trackGlobalLoss) {
+            SentRecord_ record;
+            record.sentBytes = packet.size();
+            record.sentTimeMs = nowMs;
+            record.ackEliciting = true;
+            for (std::size_t i = 0; i < frames.size(); ++i) {
+                if (isRetransmittableFrame_(frames[i].type())) {
+                    record.retransmittable.push_back(frames[i]);
+                }
+            }
+            space.sentPackets[packetNumber] = std::move(record);
+        }
+
+        outDatagram = std::move(packet);
         for (std::size_t i = 0; i < frames.size(); ++i) {
-            if (isRetransmittableFrame_(frames[i].type())) {
-                record.retransmittable.push_back(frames[i]);
+            if (frames[i].type() == SwQuicFrame::Type::Datagram) {
+                ++m_encodedDatagramFrames;
             }
         }
-        space.sentPackets[packetNumber] = record;
-
-        outDatagram = packet;
         return true;
     }
 
@@ -1843,20 +2189,29 @@ private:
     Space_ m_spaces[3];
     SwQuicCongestionControl m_congestion;
     SwQuicConnectionFlowControl m_connectionFlow;
-    std::map<std::uint64_t, SwQuicStreamFlowControl> m_streamFlow;
-    std::map<std::uint64_t, std::uint64_t> m_peerStreamMaxData;
+    SwMap<std::uint64_t, SwQuicStreamFlowControl> m_streamFlow;
+    SwMap<std::uint64_t, std::uint64_t> m_peerStreamMaxData;
     std::uint64_t m_peerMaxStreamsBidi;
     std::uint64_t m_peerMaxStreamsUni;
     std::uint64_t m_totalStreamBytesSent = 0;
 
     SwQuicPacketHeader m_lastInitialHeader;
     SwQuicStreamMap m_streams;
-    std::map<std::uint64_t, SendStream_> m_sendStreams;
-    std::map<std::uint64_t, std::uint64_t> m_resetStreams;
-    std::map<std::uint64_t, std::uint64_t> m_streamFinalSize; // established final sizes
-    std::vector<SwByteArray> m_datagrams;
-    std::vector<SwByteArray> m_newTokens;
-    std::map<std::uint64_t, SwByteArray> m_peerIssuedConnectionIds;
+    SwMap<std::uint64_t, SendStream_> m_sendStreams;
+    SwMap<std::uint64_t, std::uint64_t> m_resetStreams;
+    SwMap<std::uint64_t, std::uint64_t> m_streamFinalSize; // established final sizes
+    SwDequeue<SwByteArray> m_datagrams;
+    std::uint64_t m_queuedDatagramFrames = 0;
+    std::uint64_t m_encodedDatagramFrames = 0;
+    std::uint64_t m_receivedDatagramFrames = 0;
+    std::size_t m_maxDatagramsPerBuild = 0;
+    std::size_t m_maxPendingDatagramFrames = 0;
+    std::size_t m_pacingRatePerMillisecond = 0;
+    std::size_t m_pacingMaximumBurst = 0;
+    std::uint64_t m_pacingLastRefillMs = 0;
+    std::size_t m_pacingTokens = 0;
+    SwVector<SwByteArray> m_newTokens;
+    SwMap<std::uint64_t, SwByteArray> m_peerIssuedConnectionIds;
     SwQuicStream m_cryptoReassembly[3];
     SwByteArray m_cryptoAssembled[3];
     SwByteArray m_lastPathChallenge;
@@ -1872,7 +2227,8 @@ private:
     std::uint64_t m_bytesReceivedThisPath = 0;
     std::uint64_t m_bytesSentThisPath = 0;
     std::uint64_t m_nextLocalCidSequence = 1; // sequence 0 = the initial CID
-    std::map<std::uint64_t, SwByteArray> m_issuedConnectionIds;
+    SwMap<std::uint64_t, SwByteArray> m_issuedConnectionIds;
+    PathControlEvents* m_pathControlEventsOut = nullptr; // non-owning, seulement pendant receive
 };
 
 #endif

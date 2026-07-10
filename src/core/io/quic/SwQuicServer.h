@@ -1,6 +1,9 @@
+#include "SwPair.h"
+#include "SwMap.h"
 #ifndef SWQUICSERVER_H
 #define SWQUICSERVER_H
 
+#include "SwVector.h"
 #include "SwObject.h"
 #include "SwString.h"
 #include "SwUdpSocket.h"
@@ -116,7 +119,7 @@ public:
     std::int64_t nextTimeoutMs() const {
         const std::uint64_t now = nowMs_();
         std::int64_t next = -1;
-        for (std::map<std::string, Entry_>::const_iterator it = m_connections.begin();
+        for (SwMap<SwString, Entry_>::const_iterator it = m_connections.begin();
              it != m_connections.end(); ++it) {
             const std::int64_t t = it->second.connection.nextTimeoutMs(now);
             if (t >= 0 && (next < 0 || t < next)) {
@@ -129,7 +132,7 @@ public:
     bool sendInitialPacket(const SwString& host,
                            uint16_t port,
                            const SwQuicPacketHeader& header,
-                           const std::vector<SwQuicFrame>& frames,
+                           const SwVector<SwQuicFrame>& frames,
                            SwString* error = nullptr) {
         if (!isListening()) {
             setError_(error, SwString("QUIC server is not listening"));
@@ -150,7 +153,7 @@ public:
     }
 
     SwQuicConnection* connection(const SwString& host, uint16_t port) {
-        std::map<std::string, Entry_>::iterator it =
+        SwMap<SwString, Entry_>::iterator it =
             m_connections.find(endpointKey_(host, port));
         if (it == m_connections.end()) {
             return nullptr;
@@ -159,7 +162,7 @@ public:
     }
 
     const SwQuicConnection* connection(const SwString& host, uint16_t port) const {
-        std::map<std::string, Entry_>::const_iterator it =
+        SwMap<SwString, Entry_>::const_iterator it =
             m_connections.find(endpointKey_(host, port));
         if (it == m_connections.end()) {
             return nullptr;
@@ -217,8 +220,8 @@ private:
         }
     }
 
-    static std::string endpointKey_(const SwString& host, uint16_t port) {
-        return host.toStdString() + ":" + SwString::number(static_cast<int>(port)).toStdString();
+    static SwString endpointKey_(const SwString& host, uint16_t port) {
+        return host + ":" + SwString::number(static_cast<unsigned int>(port));
     }
 
     static std::uint64_t nowMs_() {
@@ -230,7 +233,7 @@ private:
     // Destination connection ID of the first packet in a datagram: cleartext
     // in both long and short headers, so routing needs no keys.
     bool extractDestinationConnectionId_(const SwByteArray& datagram,
-                                         std::string& outCid) const {
+                                         SwString& outCid) const {
         if (datagram.isEmpty()) {
             return false;
         }
@@ -264,12 +267,12 @@ private:
                           SwString* error) {
         // Route by destination connection ID first (survives address change),
         // then by UDP endpoint, then create a new connection.
-        std::string connectionKey;
-        std::string cid;
+        SwString connectionKey;
+        SwString cid;
         const bool hasCid = extractDestinationConnectionId_(datagram, cid);
 
         if (hasCid) {
-            std::map<std::string, std::string>::const_iterator indexed =
+            SwMap<SwString, SwString>::const_iterator indexed =
                 m_connectionIdIndex.find(cid);
             if (indexed != m_connectionIdIndex.end()) {
                 connectionKey = indexed->second;
@@ -279,10 +282,10 @@ private:
             connectionKey = endpointKey_(sender, senderPort);
         }
 
-        std::map<std::string, Entry_>::iterator it = m_connections.find(connectionKey);
+        SwMap<SwString, Entry_>::iterator it = m_connections.find(connectionKey);
         const bool isNewConnection = (it == m_connections.end());
         if (isNewConnection) {
-            it = m_connections.insert(std::make_pair(connectionKey, Entry_())).first;
+            it = m_connections.insert(SwMakePair(connectionKey, Entry_())).first;
             if (hasCid) {
                 m_connectionIdIndex[cid] = connectionKey;
             }
@@ -314,7 +317,7 @@ private:
 
     void fireExpiredTimers_() {
         const std::uint64_t now = nowMs_();
-        for (std::map<std::string, Entry_>::iterator it = m_connections.begin();
+        for (SwMap<SwString, Entry_>::iterator it = m_connections.begin();
              it != m_connections.end(); ++it) {
             if (it->second.connection.nextTimeoutMs(now) == 0) {
                 it->second.connection.onTimeout(now);
@@ -325,7 +328,7 @@ private:
     }
 
     bool flushConnection_(Entry_& entry, SwString* error) {
-        std::vector<SwByteArray> outgoing;
+        SwVector<SwByteArray> outgoing;
         if (!entry.connection.buildDatagrams(nowMs_(), outgoing, error)) {
             return false;
         }
@@ -367,8 +370,8 @@ private:
 
     SwUdpSocket m_socket;
     SendSink m_sendSink; // si défini : émission via ce canal externe au lieu de m_socket
-    std::map<std::string, Entry_> m_connections;
-    std::map<std::string, std::string> m_connectionIdIndex;
+    SwMap<SwString, Entry_> m_connections;
+    SwMap<SwString, SwString> m_connectionIdIndex;
     std::size_t m_localConnectionIdLength;
 };
 

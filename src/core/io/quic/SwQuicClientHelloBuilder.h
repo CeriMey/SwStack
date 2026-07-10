@@ -10,8 +10,6 @@
 #include "quic/SwTls13KeySchedule.h"
 
 #include <cstdint>
-#include <string>
-
 class SwQuicClientHelloBuilder {
 public:
     // Deterministic probe variant: fixed test X25519 key + deterministic random.
@@ -37,7 +35,7 @@ public:
                               const SwByteArray& random32,
                               SwByteArray& outClientHello,
                               SwString* error = nullptr) {
-        const std::string host = serverName.toStdString();
+        const SwString& host = serverName;
         if (host.empty() || host.size() > 255) {
             setError_(error, "Invalid QUIC TLS server name");
             return false;
@@ -72,7 +70,7 @@ public:
         SwByteArray sniList;
         appendU8_(sniList, 0);
         appendU16_(sniList, static_cast<std::uint16_t>(host.size()));
-        sniList.append(host);
+        sniList.append(host.constData(), host.size());
         appendU16_(sni, static_cast<std::uint16_t>(sniList.size()));
         sni.append(sniList);
         appendExtension_(extensions, 0x0000, sni);
@@ -165,7 +163,7 @@ public:
                                         SwByteArray& outClientHello,
                                         SwQuicInitialKeys& outEarlyKeys,
                                         SwString* error = nullptr) {
-        const std::string host = serverName.toStdString();
+        const SwString& host = serverName;
         if (host.empty() || host.size() > 255) {
             setError_(error, "Invalid QUIC TLS server name");
             return false;
@@ -361,7 +359,7 @@ private:
     // The common ClientHello extensions shared by the fresh and resumption
     // handshakes: SNI, supported_groups, signature_algorithms, ALPN,
     // supported_versions, key_share (x25519), and QUIC transport parameters.
-    static void appendClientExtensions_(const std::string& host,
+    static void appendClientExtensions_(const SwString& host,
                                         const SwQuicConnectionId& initialSourceConnectionId,
                                         const SwByteArray& x25519Public32,
                                         SwByteArray& extensions) {
@@ -369,7 +367,7 @@ private:
         SwByteArray sniList;
         appendU8_(sniList, 0);
         appendU16_(sniList, static_cast<std::uint16_t>(host.size()));
-        sniList.append(host);
+        sniList.append(host.constData(), host.size());
         appendU16_(sni, static_cast<std::uint16_t>(sniList.size()));
         sni.append(sniList);
         appendExtension_(extensions, 0x0000, sni);

@@ -12,7 +12,7 @@
 
 #include <cstdint>
 #include <iostream>
-#include <vector>
+#include "core/types/SwVector.h"
 
 namespace {
 
@@ -31,7 +31,7 @@ bool testLoopbackHandshake() {
     if (!requireTrue(SwQuicEcdsaCredential::createSelfSigned(SwString("loopback.test"),
                                                              credential, &error),
                      "self-signed credential generation failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -44,24 +44,41 @@ bool testLoopbackHandshake() {
     SwQuicHandshakeServer server;
     server.setCredential(credential);
 
+    // RFC 8446 7.5: exporter material is unavailable until the handshake has
+    // authenticated the peer Finished, and failed calls must clear their output.
+    SwByteArray prematureClient("sentinel");
+    SwByteArray prematureServer("sentinel");
+    const bool clientExportedPrematurely = client.exportKeyingMaterial(
+        SwString("EXPORTER-swstack-loopback"), SwByteArray("context"), 48,
+        prematureClient, &error);
+    const bool serverExportedPrematurely = server.exportKeyingMaterial(
+        SwString("EXPORTER-swstack-loopback"), SwByteArray("context"), 48,
+        prematureServer, &error);
+    if (!requireTrue(!clientExportedPrematurely && prematureClient.isEmpty(),
+                     "client exporter was available before handshake completion") ||
+        !requireTrue(!serverExportedPrematurely && prematureServer.isEmpty(),
+                     "server exporter was available before handshake completion")) {
+        return false;
+    }
+
     SwByteArray clientInitial;
     if (!requireTrue(client.start(SwString("loopback.test"), clientInitial, &error),
                      "client.start failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
     // Drive the datagram exchange to completion (bounded number of rounds).
-    std::vector<SwByteArray> clientToServer;
+    SwVector<SwByteArray> clientToServer;
     clientToServer.push_back(clientInitial);
 
     for (int round = 0; round < 8; ++round) {
-        std::vector<SwByteArray> serverToClient;
+        SwVector<SwByteArray> serverToClient;
         for (std::size_t i = 0; i < clientToServer.size(); ++i) {
-            std::vector<SwByteArray> replies;
+            SwVector<SwByteArray> replies;
             if (!requireTrue(server.processIncomingDatagram(clientToServer[i], replies, &error),
                              "server.processIncomingDatagram failed")) {
-                std::cerr << error.toStdString() << std::endl;
+                std::cerr << error << std::endl;
                 return false;
             }
             for (std::size_t j = 0; j < replies.size(); ++j) {
@@ -71,10 +88,10 @@ bool testLoopbackHandshake() {
         clientToServer.clear();
 
         for (std::size_t i = 0; i < serverToClient.size(); ++i) {
-            std::vector<SwByteArray> replies;
+            SwVector<SwByteArray> replies;
             if (!requireTrue(client.processIncomingDatagram(serverToClient[i], replies, &error),
                              "client.processIncomingDatagram failed")) {
-                std::cerr << error.toStdString() << std::endl;
+                std::cerr << error << std::endl;
                 return false;
             }
             for (std::size_t j = 0; j < replies.size(); ++j) {
@@ -89,8 +106,8 @@ bool testLoopbackHandshake() {
 
     if (!requireTrue(client.handshakeComplete(), "client handshake did not complete") ||
         !requireTrue(server.handshakeComplete(), "server handshake did not complete")) {
-        std::cerr << "client_error=" << client.errorString().toStdString()
-                  << " server_error=" << server.errorString().toStdString() << std::endl;
+        std::cerr << "client_error=" << client.errorString()
+                  << " server_error=" << server.errorString() << std::endl;
         return false;
     }
 
@@ -105,8 +122,33 @@ bool testLoopbackHandshake() {
         client.clientHandshakeKeys().key == server.clientHandshakeKeys().key &&
         client.serverHandshakeKeys().key == server.serverHandshakeKeys().key;
 
+    SwByteArray clientExporter;
+    SwByteArray serverExporter;
+    SwByteArray otherContextExporter;
+    const SwString exporterLabel("EXPORTER-swstack-loopback");
+    const SwByteArray exporterContext("authenticated-context");
+    if (!requireTrue(client.exportKeyingMaterial(exporterLabel, exporterContext, 48,
+                                                 clientExporter, &error),
+                     "client exporter derivation failed") ||
+        !requireTrue(server.exportKeyingMaterial(exporterLabel, exporterContext, 48,
+                                                 serverExporter, &error),
+                     "server exporter derivation failed") ||
+        !requireTrue(client.exportKeyingMaterial(exporterLabel,
+                                                 SwByteArray("other-context"), 48,
+                                                 otherContextExporter, &error),
+                     "context-separated exporter derivation failed")) {
+        std::cerr << error << std::endl;
+        return false;
+    }
+
     return requireTrue(handshakeKeysMatch, "handshake keys differ between client and server") &&
            requireTrue(clientKeysMatch, "1-RTT keys differ between client and server") &&
+           requireTrue(clientExporter.size() == 48,
+                       "exporter returned the wrong amount of keying material") &&
+           requireTrue(clientExporter == serverExporter,
+                       "client and server exporters derived different material") &&
+           requireTrue(clientExporter != otherContextExporter,
+                       "exporter context did not separate derived material") &&
            requireTrue(!client.negotiatedAlpn().isEmpty() &&
                            client.negotiatedAlpn() == SwByteArray("h3"),
                        "client did not negotiate ALPN h3") &&
@@ -127,7 +169,7 @@ bool testServerRejectsUnofferedSignatureScheme() {
     if (!requireTrue(SwQuicEcdsaCredential::createSelfSigned(SwString("loopback.test"),
                                                              credential, &error),
                      "self-signed credential generation failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
     // The client offers {0x0403, 0x0804, 0x0805, 0x0401}; force a scheme outside
@@ -144,18 +186,18 @@ bool testServerRejectsUnofferedSignatureScheme() {
     SwByteArray clientInitial;
     if (!requireTrue(client.start(SwString("loopback.test"), clientInitial, &error),
                      "client.start failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
     // Drive the exchange; the server must reject the ClientHello once assembled.
-    std::vector<SwByteArray> clientToServer;
+    SwVector<SwByteArray> clientToServer;
     clientToServer.push_back(clientInitial);
     bool serverRejected = false;
     for (int round = 0; round < 8 && !serverRejected; ++round) {
-        std::vector<SwByteArray> serverToClient;
+        SwVector<SwByteArray> serverToClient;
         for (std::size_t i = 0; i < clientToServer.size(); ++i) {
-            std::vector<SwByteArray> replies;
+            SwVector<SwByteArray> replies;
             if (!server.processIncomingDatagram(clientToServer[i], replies, &error)) {
                 serverRejected = true;
                 break;
@@ -169,7 +211,7 @@ bool testServerRejectsUnofferedSignatureScheme() {
         }
         clientToServer.clear();
         for (std::size_t i = 0; i < serverToClient.size(); ++i) {
-            std::vector<SwByteArray> replies;
+            SwVector<SwByteArray> replies;
             if (!client.processIncomingDatagram(serverToClient[i], replies, &error)) {
                 break; // client-side abort is also acceptable evidence of failure
             }
@@ -194,7 +236,7 @@ bool testClientDiscardsInitialKeys() {
     if (!requireTrue(SwQuicEcdsaCredential::createSelfSigned(SwString("loopback.test"),
                                                              credential, &error),
                      "self-signed credential generation failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -207,7 +249,7 @@ bool testClientDiscardsInitialKeys() {
     SwByteArray clientInitial;
     if (!requireTrue(client.start(SwString("loopback.test"), clientInitial, &error),
                      "client.start failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -217,14 +259,14 @@ bool testClientDiscardsInitialKeys() {
         return false;
     }
 
-    std::vector<SwByteArray> clientToServer;
+    SwVector<SwByteArray> clientToServer;
     clientToServer.push_back(clientInitial);
     SwByteArray firstServerFlight; // the server's Initial (coalesced with Handshake)
 
     for (int round = 0; round < 8; ++round) {
-        std::vector<SwByteArray> serverToClient;
+        SwVector<SwByteArray> serverToClient;
         for (std::size_t i = 0; i < clientToServer.size(); ++i) {
-            std::vector<SwByteArray> replies;
+            SwVector<SwByteArray> replies;
             if (!requireTrue(server.processIncomingDatagram(clientToServer[i], replies, &error),
                              "server.processIncomingDatagram failed")) {
                 return false;
@@ -238,7 +280,7 @@ bool testClientDiscardsInitialKeys() {
         }
         clientToServer.clear();
         for (std::size_t i = 0; i < serverToClient.size(); ++i) {
-            std::vector<SwByteArray> replies;
+            SwVector<SwByteArray> replies;
             if (!requireTrue(client.processIncomingDatagram(serverToClient[i], replies, &error),
                              "client.processIncomingDatagram failed")) {
                 return false;
@@ -267,10 +309,10 @@ bool testClientDiscardsInitialKeys() {
     if (!requireTrue(!firstServerFlight.isEmpty(), "never captured a server Initial flight")) {
         return false;
     }
-    std::vector<SwByteArray> replies;
+    SwVector<SwByteArray> replies;
     if (!requireTrue(client.processIncomingDatagram(firstServerFlight, replies, &error),
                      "client rejected a replayed Initial instead of ignoring it")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
     return requireTrue(replies.empty(),

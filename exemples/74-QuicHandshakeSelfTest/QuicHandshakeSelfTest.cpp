@@ -22,7 +22,7 @@
 #include "core/io/quic/SwTls13Messages.h"
 
 #include <iostream>
-#include <vector>
+#include "core/types/SwVector.h"
 
 namespace {
 
@@ -101,7 +101,7 @@ bool buildLongHeaderPacket(const SwQuicInitialKeys& keys,
                            const SwByteArray& cryptoStream,
                            SwByteArray& outPacket,
                            SwString* error) {
-    std::vector<SwQuicFrame> frames;
+    SwVector<SwQuicFrame> frames;
     frames.push_back(SwQuicFrame::crypto(0, cryptoStream));
     SwByteArray plaintext;
     if (!SwQuicFrameCodec::encodeFrames(frames, plaintext, error)) {
@@ -151,7 +151,7 @@ bool testFullLoopbackHandshake() {
     SwByteArray clientInitial;
     if (!requireTrue(client.start(SwString("example.test"), clientInitial, &error),
                      "client.start failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
     if (!requireTrue(clientInitial.size() >= 1200, "client Initial below 1200 bytes")) {
@@ -168,14 +168,14 @@ bool testFullLoopbackHandshake() {
 
     SwQuicConnectionId dcidId;
     if (!SwQuicConnectionId::fromBytes(originalDcid, dcidId, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
     SwQuicInitialKeys clientInitialKeys;
     SwQuicInitialKeys serverInitialKeys;
     if (!requireTrue(SwQuicInitialSecrets::deriveV1(dcidId, clientInitialKeys, serverInitialKeys, &error),
                      "server initial key derivation failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -184,12 +184,12 @@ bool testFullLoopbackHandshake() {
     if (!requireTrue(SwQuicPacketProtector::unprotectInitial(clientInitialKeys, clientInitial,
                                                             chHeader, chPayload, nullptr, &error),
                      "server failed to unprotect client Initial")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
-    std::vector<SwQuicFrame> chFrames;
+    SwVector<SwQuicFrame> chFrames;
     if (!SwQuicFrameCodec::decodeFrames(chPayload, chFrames, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
     SwByteArray clientHelloMessage;
@@ -210,12 +210,12 @@ bool testFullLoopbackHandshake() {
     SwByteArray serverPub;
     if (!SwQuicRandom::fill(serverPriv, 32, &error) ||
         !SwQuicX25519::derivePublicKey(serverPriv, serverPub, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
     SwByteArray ecdhe;
     if (!SwQuicX25519::computeSharedSecret(serverPriv, clientPublic, ecdhe, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -236,14 +236,14 @@ bool testFullLoopbackHandshake() {
         !SwTls13KeySchedule::handshakeSecret(earlySecret, ecdhe, handshakeSecret, &error) ||
         !SwTls13KeySchedule::serverHandshakeTrafficSecret(handshakeSecret, thChSh, serverHsTrafficSecret, &error) ||
         !SwTls13KeySchedule::clientHandshakeTrafficSecret(handshakeSecret, thChSh, clientHsTrafficSecret, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
     SwQuicInitialKeys serverHsKeys;
     SwQuicInitialKeys clientHsKeys;
     if (!SwQuicPacketKeys::deriveAes128(serverHsTrafficSecret, serverHsKeys, &error) ||
         !SwQuicPacketKeys::deriveAes128(clientHsTrafficSecret, clientHsKeys, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -256,7 +256,7 @@ bool testFullLoopbackHandshake() {
     if (!requireTrue(buildLongHeaderPacket(serverInitialKeys, true, clientScid, serverScid, 0,
                                            serverHelloMessage, serverInitialDatagram, &error),
                      "server Initial build failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -325,7 +325,7 @@ bool testFullLoopbackHandshake() {
     SwByteArray serverVerifyData;
     if (!SwTls13KeySchedule::finishedKey(serverHsTrafficSecret, serverFinishedKey, &error) ||
         !SwTls13KeySchedule::verifyData(serverFinishedKey, thToCv, serverVerifyData, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
     const SwByteArray serverFinished = rawMessage(0x14, serverVerifyData);
@@ -340,15 +340,15 @@ bool testFullLoopbackHandshake() {
     if (!requireTrue(buildLongHeaderPacket(serverHsKeys, false, clientScid, serverScid, 0,
                                            handshakeCryptoStream, serverHandshakeDatagram, &error),
                      "server Handshake build failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
     // 7) Client processes the server Initial then the server Handshake.
-    std::vector<SwByteArray> out1;
+    SwVector<SwByteArray> out1;
     if (!requireTrue(client.processIncomingDatagram(serverInitialDatagram, out1, &error),
                      "client failed on server Initial")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
     if (!requireTrue(client.state() == SwQuicHandshakeClient::State::WaitServerHandshake,
@@ -360,10 +360,10 @@ bool testFullLoopbackHandshake() {
         return false;
     }
 
-    std::vector<SwByteArray> out2;
+    SwVector<SwByteArray> out2;
     if (!requireTrue(client.processIncomingDatagram(serverHandshakeDatagram, out2, &error),
                      "client failed on server Handshake")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -384,12 +384,12 @@ bool testFullLoopbackHandshake() {
     if (!requireTrue(SwQuicPacketProtector::unprotectHandshake(clientHsKeys, out2[0], clientFinHeader,
                                                               clientFinPayload, nullptr, &error),
                      "server failed to unprotect client Handshake")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
-    std::vector<SwQuicFrame> clientFinFrames;
+    SwVector<SwQuicFrame> clientFinFrames;
     if (!SwQuicFrameCodec::decodeFrames(clientFinPayload, clientFinFrames, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
     SwByteArray clientFinishedMessage;
@@ -406,7 +406,7 @@ bool testFullLoopbackHandshake() {
     SwByteArray expectedClientVerifyData;
     if (!SwTls13KeySchedule::finishedKey(clientHsTrafficSecret, clientFinishedKey, &error) ||
         !SwTls13KeySchedule::verifyData(clientFinishedKey, thToServerFinished, expectedClientVerifyData, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
     const SwByteArray expectedClientFinished = rawMessage(0x14, expectedClientVerifyData);
@@ -422,14 +422,14 @@ bool testFullLoopbackHandshake() {
     if (!SwTls13KeySchedule::masterSecret(handshakeSecret, masterSecret, &error) ||
         !SwTls13KeySchedule::serverApplicationTrafficSecret(masterSecret, thToServerFinished, serverAppSecret, &error) ||
         !SwTls13KeySchedule::clientApplicationTrafficSecret(masterSecret, thToServerFinished, clientAppSecret, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
     SwQuicInitialKeys serverAppKeys;
     SwQuicInitialKeys clientAppKeys;
     if (!SwQuicPacketKeys::deriveAes128(serverAppSecret, serverAppKeys, &error) ||
         !SwQuicPacketKeys::deriveAes128(clientAppSecret, clientAppKeys, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 

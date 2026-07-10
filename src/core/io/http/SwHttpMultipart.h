@@ -48,6 +48,7 @@
  ***************************************************************************************************/
 
 #include "http/SwHttpTypes.h"
+#include "SwByteRingBuffer.h"
 #include "SwDir.h"
 #include "SwFile.h"
 #include "platform/SwPlatformSelector.h"
@@ -305,7 +306,7 @@ private:
     SwString m_tempDirectory;
     SwByteArray m_delimiter;      // --boundary
     SwByteArray m_boundaryMarker; // \r\n--boundary
-    SwByteArray m_buffer;
+    SwByteRingBuffer m_buffer;
 
     SwList<SwHttpRequest::MultipartPart> m_parts;
     SwMap<SwString, SwString> m_formFields;
@@ -354,7 +355,7 @@ private:
         changed = false;
 
         if (m_buffer.size() >= 2 && m_buffer[0] == '\r' && m_buffer[1] == '\n') {
-            m_buffer.remove(0, 2);
+            m_buffer.consume(2);
             changed = true;
         }
 
@@ -366,7 +367,7 @@ private:
             return false;
         }
 
-        m_buffer.remove(0, static_cast<int>(m_delimiter.size()));
+        m_buffer.consume(m_delimiter.size());
         changed = true;
 
         if (m_buffer.size() < 2) {
@@ -374,9 +375,9 @@ private:
         }
 
         if (m_buffer[0] == '-' && m_buffer[1] == '-') {
-            m_buffer.remove(0, 2);
+            m_buffer.consume(2);
             if (m_buffer.size() >= 2 && m_buffer[0] == '\r' && m_buffer[1] == '\n') {
-                m_buffer.remove(0, 2);
+                m_buffer.consume(2);
             }
             m_state = State::Done;
             return true;
@@ -387,7 +388,7 @@ private:
             return false;
         }
 
-        m_buffer.remove(0, 2);
+        m_buffer.consume(2);
         m_state = State::NeedPartHeaders;
         return true;
     }
@@ -408,7 +409,7 @@ private:
         if (!swHttpParseMultipartHeaders_(m_buffer.left(headerEnd), m_limits, partHeaders, outError)) {
             return false;
         }
-        m_buffer.remove(0, headerEnd + 4);
+        m_buffer.consume(static_cast<std::size_t>(headerEnd + 4));
 
         if (!partHeaders.contains("content-disposition")) {
             outError = "Missing Content-Disposition in multipart part";
@@ -469,20 +470,22 @@ private:
             }
             if (m_buffer.size() > keep) {
                 const std::size_t flushBytes = m_buffer.size() - keep;
-                if (!appendCurrentData_(m_buffer.constData(), flushBytes, outError)) {
+                const SwByteArray chunk = m_buffer.left(flushBytes);
+                if (!appendCurrentData_(chunk.constData(), chunk.size(), outError)) {
                     return false;
                 }
-                m_buffer.remove(0, static_cast<int>(flushBytes));
+                m_buffer.consume(flushBytes);
                 changed = true;
             }
             return true;
         }
 
         if (markerPos > 0) {
-            if (!appendCurrentData_(m_buffer.constData(), static_cast<std::size_t>(markerPos), outError)) {
+            const SwByteArray chunk = m_buffer.left(static_cast<std::size_t>(markerPos));
+            if (!appendCurrentData_(chunk.constData(), chunk.size(), outError)) {
                 return false;
             }
-            m_buffer.remove(0, markerPos);
+            m_buffer.consume(static_cast<std::size_t>(markerPos));
             changed = true;
         }
 
@@ -490,12 +493,12 @@ private:
             return true;
         }
 
-        m_buffer.remove(0, 2); // consume CRLF before "--boundary"
+        m_buffer.consume(2); // consume CRLF before "--boundary"
         if (!m_buffer.startsWith(m_delimiter)) {
             outError = "Malformed multipart boundary";
             return false;
         }
-        m_buffer.remove(0, static_cast<int>(m_delimiter.size()));
+        m_buffer.consume(m_delimiter.size());
 
         if (m_buffer.size() < 2) {
             return true;
@@ -503,13 +506,13 @@ private:
 
         const bool closingBoundary = (m_buffer[0] == '-' && m_buffer[1] == '-');
         if (closingBoundary) {
-            m_buffer.remove(0, 2);
+            m_buffer.consume(2);
         } else {
             if (m_buffer[0] != '\r' || m_buffer[1] != '\n') {
                 outError = "Malformed multipart boundary delimiter";
                 return false;
             }
-            m_buffer.remove(0, 2);
+            m_buffer.consume(2);
         }
 
         if (!finalizeCurrentPart_(outError)) {
@@ -518,7 +521,7 @@ private:
 
         if (closingBoundary) {
             if (m_buffer.size() >= 2 && m_buffer[0] == '\r' && m_buffer[1] == '\n') {
-                m_buffer.remove(0, 2);
+                m_buffer.consume(2);
             }
             m_state = State::Done;
         } else {

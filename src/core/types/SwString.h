@@ -287,6 +287,8 @@ public:
      * @details This query does not modify the object state.
      */
     bool isEmpty() const { return data_.empty(); }
+    /** STL-compatible spelling kept to ease migration of SwStack consumers. */
+    bool empty() const { return data_.empty(); }
     /**
      * @brief Clears the current object state.
      */
@@ -1182,6 +1184,24 @@ public:
      * @return The requested append.
      */
     SwString& append(char ch) { data_ += ch; return *this; }
+    void push_back(char ch) { data_.push_back(ch); }
+    void pop_back() { data_.pop_back(); }
+    char& back() { return data_.back(); }
+    const char& back() const { return data_.back(); }
+    const char* c_str() const { return data_.c_str(); }
+
+    template<typename InputIt>
+    void assign(InputIt first, InputIt last) {
+        data_.assign(first, last);
+    }
+
+    void assign(const char* data, size_t length) {
+        if (!data) {
+            data_.clear();
+            return;
+        }
+        data_.assign(data, length);
+    }
 
     /**
      * @brief Performs the `prepend` operation.

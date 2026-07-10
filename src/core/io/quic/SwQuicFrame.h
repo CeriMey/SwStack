@@ -1,10 +1,12 @@
 #ifndef SWQUICFRAME_H
 #define SWQUICFRAME_H
 
+#include "SwVector.h"
 #include "SwByteArray.h"
 #include "SwString.h"
 
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 class SwQuicFrame {
@@ -49,7 +51,7 @@ public:
     static SwQuicFrame ack(std::uint64_t largestAcknowledged,
                            std::uint64_t ackDelay,
                            std::uint64_t firstAckRange,
-                           const std::vector<AckRange>& ackRanges = std::vector<AckRange>()) {
+                           const SwVector<AckRange>& ackRanges = SwVector<AckRange>()) {
         SwQuicFrame frame(Type::Ack);
         frame.m_largestAcknowledged = largestAcknowledged;
         frame.m_ackDelay = ackDelay;
@@ -61,7 +63,7 @@ public:
     static SwQuicFrame ackWithEcn(std::uint64_t largestAcknowledged,
                                   std::uint64_t ackDelay,
                                   std::uint64_t firstAckRange,
-                                  const std::vector<AckRange>& ackRanges,
+                                  const SwVector<AckRange>& ackRanges,
                                   std::uint64_t ect0Count,
                                   std::uint64_t ect1Count,
                                   std::uint64_t ecnCeCount) {
@@ -214,12 +216,18 @@ public:
         return frame;
     }
 
+    static SwQuicFrame datagram(SwByteArray&& data) {
+        SwQuicFrame frame(Type::Datagram);
+        frame.m_data = std::move(data);
+        return frame;
+    }
+
     Type type() const { return m_type; }
 
     std::uint64_t largestAcknowledged() const { return m_largestAcknowledged; }
     std::uint64_t ackDelay() const { return m_ackDelay; }
     std::uint64_t firstAckRange() const { return m_firstAckRange; }
-    const std::vector<AckRange>& ackRanges() const { return m_ackRanges; }
+    const SwVector<AckRange>& ackRanges() const { return m_ackRanges; }
     bool hasEcn() const { return m_hasEcn; }
     std::uint64_t ect0Count() const { return m_ect0Count; }
     std::uint64_t ect1Count() const { return m_ect1Count; }
@@ -228,6 +236,7 @@ public:
     std::uint64_t streamId() const { return m_streamId; }
     std::uint64_t offset() const { return m_offset; }
     const SwByteArray& data() const { return m_data; }
+    SwByteArray takeData() { return std::move(m_data); }
     bool fin() const { return m_fin; }
 
     std::uint64_t finalSize() const { return m_finalSize; }
@@ -271,7 +280,7 @@ private:
     std::uint64_t m_largestAcknowledged;
     std::uint64_t m_ackDelay;
     std::uint64_t m_firstAckRange;
-    std::vector<AckRange> m_ackRanges;
+    SwVector<AckRange> m_ackRanges;
     bool m_hasEcn;
     std::uint64_t m_ect0Count;
     std::uint64_t m_ect1Count;

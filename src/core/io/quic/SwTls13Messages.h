@@ -1,6 +1,7 @@
 #ifndef SWTLS13MESSAGES_H
 #define SWTLS13MESSAGES_H
 
+#include "SwVector.h"
 #include "SwByteArray.h"
 #include "SwString.h"
 
@@ -42,7 +43,7 @@ public:
 
     // Walk a CRYPTO stream splitting it into TLS handshake messages.
     static bool splitMessages(const SwByteArray& cryptoStream,
-                              std::vector<HandshakeMessage>& out,
+                              SwVector<HandshakeMessage>& out,
                               SwString* error = nullptr) {
         out.clear();
         const std::size_t total = cryptoStream.size();
@@ -80,11 +81,11 @@ public:
         SwByteArray clientX25519Public;  // client key_share for group x25519
         SwByteArray transportParameters; // extension 0x0039 body
         SwByteArray serverName;          // SNI host, if present
-        std::vector<SwByteArray> alpnProtocols; // offered ALPN protocols
+        SwVector<SwByteArray> alpnProtocols; // offered ALPN protocols
         SwByteArray pskIdentity;         // first pre_shared_key identity (ticket)
         SwByteArray pskBinder;           // first PSK binder
         std::size_t pskBindersTotalLength; // tail bytes to strip for binder calc
-        std::vector<std::uint16_t> signatureSchemes; // signature_algorithms (0x000d)
+        SwVector<std::uint16_t> signatureSchemes; // signature_algorithms (0x000d)
         bool offersAes128GcmSha256;      // cipher suite 0x1301 offered
         bool offersX25519;               // supported group 0x001d offered
         bool hasTransportParameters;
@@ -625,7 +626,7 @@ public:
 
     // Extract every certificate DER of the Certificate message, leaf first.
     static bool extractCertificateChain(const SwByteArray& certificateBody,
-                                        std::vector<SwByteArray>& outChain,
+                                        SwVector<SwByteArray>& outChain,
                                         SwString* error = nullptr) {
         outChain.clear();
         const std::size_t total = certificateBody.size();
@@ -754,7 +755,7 @@ private:
     static void parseSignatureAlgorithmsExtension_(const SwByteArray& data,
                                                    std::size_t start,
                                                    std::uint16_t length,
-                                                   std::vector<std::uint16_t>& outSchemes) {
+                                                   SwVector<std::uint16_t>& outSchemes) {
         if (length < 2) {
             return;
         }
@@ -823,7 +824,7 @@ private:
     static void parseAlpnOfferExtension_(const SwByteArray& data,
                                          std::size_t start,
                                          std::uint16_t length,
-                                         std::vector<SwByteArray>& outProtocols) {
+                                         SwVector<SwByteArray>& outProtocols) {
         if (length < 2) {
             return;
         }

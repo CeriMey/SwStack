@@ -1,12 +1,14 @@
 #ifndef SWQUICCERTIFICATEVERIFIER_H
 #define SWQUICCERTIFICATEVERIFIER_H
 
+#include "SwVector.h"
 #include "SwByteArray.h"
 #include "SwString.h"
 
 #include <cstddef>
 #include <cstdint>
-#include <vector>
+#include <cstring>
+#include <limits>
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -36,8 +38,139 @@
 // the set current HTTP/3 servers actually negotiate.
 class SwQuicCertificateVerifier {
 public:
+    // Extract the canonical DER SubjectPublicKeyInfo carried by one strict DER
+    // X.509 certificate. This is X.509/SPKI pinning support: it does not mean
+    // that RFC 7250 RawPublicKey was negotiated on the TLS wire.
+    static bool extractSubjectPublicKeyInfo(const SwByteArray& certificateDer,
+                                            SwByteArray& outSpkiDer,
+                                            SwString* error = nullptr) {
+        outSpkiDer.clear();
+        if (certificateDer.isEmpty() || !certificateDer.constData()) {
+            setError_(error, "Cannot extract SPKI from an empty certificate");
+            return false;
+        }
+        if (!isStrictDerCertificate_(certificateDer)) {
+            setError_(error, "Certificate is not a single strict DER X.509 value");
+            return false;
+        }
+
+#if defined(_WIN32)
+        if (certificateDer.size() > static_cast<std::size_t>((std::numeric_limits<DWORD>::max)())) {
+            setError_(error, "Certificate DER is too large for CryptoAPI");
+            return false;
+        }
+        PCCERT_CONTEXT certificate = CertCreateCertificateContext(
+            X509_ASN_ENCODING,
+            reinterpret_cast<const BYTE*>(certificateDer.constData()),
+            static_cast<DWORD>(certificateDer.size()));
+        if (!certificate || !certificate->pCertInfo) {
+            if (certificate) {
+                CertFreeCertificateContext(certificate);
+            }
+            setError_(error, "Certificate is malformed X.509 DER");
+            return false;
+        }
+
+        DWORD encodedLength = 0;
+        const BOOL sized = CryptEncodeObjectEx(
+            X509_ASN_ENCODING,
+            X509_PUBLIC_KEY_INFO,
+            &certificate->pCertInfo->SubjectPublicKeyInfo,
+            0,
+            nullptr,
+            nullptr,
+            &encodedLength);
+        if (!sized || encodedLength == 0) {
+            CertFreeCertificateContext(certificate);
+            setError_(error, "CryptoAPI could not encode the certificate SPKI");
+            return false;
+        }
+
+        SwVector<unsigned char> encoded(static_cast<std::size_t>(encodedLength), 0);
+        DWORD written = encodedLength;
+        const BOOL encodedOk = CryptEncodeObjectEx(
+            X509_ASN_ENCODING,
+            X509_PUBLIC_KEY_INFO,
+            &certificate->pCertInfo->SubjectPublicKeyInfo,
+            0,
+            nullptr,
+            encoded.data(),
+            &written);
+        CertFreeCertificateContext(certificate);
+        if (!encodedOk || written == 0 || written != encodedLength) {
+            setError_(error, "CryptoAPI could not extract a canonical certificate SPKI");
+            return false;
+        }
+        outSpkiDer = SwByteArray(reinterpret_cast<const char*>(encoded.data()),
+                                 static_cast<std::size_t>(written));
+#else
+        if (certificateDer.size() >
+            static_cast<std::size_t>((std::numeric_limits<long>::max)())) {
+            setError_(error, "Certificate DER is too large for OpenSSL");
+            return false;
+        }
+        const unsigned char* input =
+            reinterpret_cast<const unsigned char*>(certificateDer.constData());
+        const unsigned char* cursor = input;
+        X509* certificate = d2i_X509(nullptr, &cursor, static_cast<long>(certificateDer.size()));
+        if (!certificate || cursor != input + certificateDer.size()) {
+            if (certificate) {
+                X509_free(certificate);
+            }
+            setError_(error, "Certificate is malformed X.509 DER");
+            return false;
+        }
+
+        // d2i accepts a wider BER-like input surface on some OpenSSL versions.
+        // Round-trip the whole certificate and demand byte equality so callers
+        // cannot pin two encodings of the same parsed object.
+        const int canonicalCertificateLength = i2d_X509(certificate, nullptr);
+        if (canonicalCertificateLength <= 0 ||
+            static_cast<std::size_t>(canonicalCertificateLength) != certificateDer.size()) {
+            X509_free(certificate);
+            setError_(error, "Certificate input is not canonical DER");
+            return false;
+        }
+        SwVector<unsigned char> canonicalCertificate(
+            static_cast<std::size_t>(canonicalCertificateLength), 0);
+        unsigned char* canonicalCursor = canonicalCertificate.data();
+        const int canonicalWritten = i2d_X509(certificate, &canonicalCursor);
+        if (canonicalWritten != canonicalCertificateLength ||
+            std::memcmp(canonicalCertificate.data(), input, certificateDer.size()) != 0) {
+            X509_free(certificate);
+            setError_(error, "Certificate input is not canonical DER");
+            return false;
+        }
+
+        X509_PUBKEY* publicKeyInfo = X509_get_X509_PUBKEY(certificate);
+        const int spkiLength = publicKeyInfo ? i2d_X509_PUBKEY(publicKeyInfo, nullptr) : -1;
+        if (spkiLength <= 0) {
+            X509_free(certificate);
+            setError_(error, "OpenSSL could not extract the certificate SPKI");
+            return false;
+        }
+        SwVector<unsigned char> encoded(static_cast<std::size_t>(spkiLength), 0);
+        unsigned char* encodedCursor = encoded.data();
+        const int spkiWritten = i2d_X509_PUBKEY(publicKeyInfo, &encodedCursor);
+        X509_free(certificate);
+        if (spkiWritten != spkiLength) {
+            setError_(error, "OpenSSL could not encode a canonical certificate SPKI");
+            return false;
+        }
+        outSpkiDer = SwByteArray(reinterpret_cast<const char*>(encoded.data()),
+                                 static_cast<std::size_t>(spkiWritten));
+#endif
+
+        if (outSpkiDer.isEmpty()) {
+            setError_(error, "Certificate SPKI extraction returned an empty value");
+            return false;
+        }
+        clearError_(error);
+        return true;
+    }
+
     // Validate the server certificate chain (leaf first) for `hostName`.
-    static bool verifyServerChain(const std::vector<SwByteArray>& chainDer,
+    static bool verifyServerChain(const SwVector<SwByteArray>& chainDer,
                                   const SwString& hostName,
                                   SwString* error = nullptr) {
 #if defined(_WIN32)
@@ -92,7 +225,7 @@ public:
                 break;
             }
 
-            std::vector<wchar_t> wideHost = toWide_(hostName);
+            SwVector<wchar_t> wideHost = toWide_(hostName);
 
             SSL_EXTRA_CERT_CHAIN_POLICY_PARA sslPara;
             memset(&sslPara, 0, sizeof(sslPara));
@@ -307,6 +440,139 @@ public:
     }
 
 private:
+    static bool isStrictDerCertificate_(const SwByteArray& der) noexcept {
+        if (der.isEmpty() || !der.constData() ||
+            static_cast<unsigned char>(der.constData()[0]) != 0x30U) {
+            return false;
+        }
+        std::size_t consumed = 0;
+        return readStrictDerElement_(
+                   reinterpret_cast<const unsigned char*>(der.constData()),
+                   der.size(), 0, consumed) &&
+               consumed == der.size();
+    }
+
+    // Validate the structural DER rules needed at this trust boundary: one
+    // definite-length TLV tree, minimal tag/length encodings, canonical basic
+    // primitive encodings, bounded nesting, and no trailing bytes.
+    static bool readStrictDerElement_(const unsigned char* data,
+                                      std::size_t available,
+                                      std::size_t depth,
+                                      std::size_t& consumed) noexcept {
+        consumed = 0;
+        if (!data || available < 2 || depth > 64) {
+            return false;
+        }
+
+        std::size_t pos = 0;
+        const unsigned char tag = data[pos++];
+        if ((tag & 0x1fU) == 0x1fU) {
+            if (pos >= available || (data[pos] & 0x7fU) == 0) {
+                return false;
+            }
+            std::size_t tagNumber = 0;
+            unsigned char part = 0;
+            do {
+                if (pos >= available ||
+                    tagNumber > (static_cast<std::size_t>(-1) >> 7)) {
+                    return false;
+                }
+                part = data[pos++];
+                tagNumber = (tagNumber << 7) | (part & 0x7fU);
+            } while ((part & 0x80U) != 0);
+            if (tagNumber < 31) {
+                return false;
+            }
+        }
+
+        if (pos >= available) {
+            return false;
+        }
+        const unsigned char firstLength = data[pos++];
+        std::size_t contentLength = 0;
+        if ((firstLength & 0x80U) == 0) {
+            contentLength = firstLength;
+        } else {
+            const std::size_t lengthBytes = firstLength & 0x7fU;
+            if (lengthBytes == 0 || lengthBytes > sizeof(std::size_t) ||
+                pos + lengthBytes > available || data[pos] == 0) {
+                return false;
+            }
+            for (std::size_t i = 0; i < lengthBytes; ++i) {
+                if (contentLength > (static_cast<std::size_t>(-1) >> 8)) {
+                    return false;
+                }
+                contentLength = (contentLength << 8) | data[pos++];
+            }
+            if (contentLength < 128) {
+                return false;
+            }
+        }
+        if (contentLength > available - pos) {
+            return false;
+        }
+
+        const std::size_t contentStart = pos;
+        const std::size_t contentEnd = contentStart + contentLength;
+        // DER permits constructed encodings here only for the universal
+        // SEQUENCE and SET types used by X.509. In particular, BER's
+        // constructed BIT STRING/OCTET STRING forms (0x23/0x24) are rejected.
+        if ((tag & 0xc0U) == 0 && (tag & 0x20U) != 0 &&
+            tag != 0x30U && tag != 0x31U) {
+            return false;
+        }
+        if ((tag == 0x10U || tag == 0x11U)) {
+            return false;
+        }
+        if ((tag & 0x20U) != 0) {
+            while (pos < contentEnd) {
+                std::size_t childLength = 0;
+                if (!readStrictDerElement_(data + pos, contentEnd - pos,
+                                           depth + 1, childLength) ||
+                    childLength == 0) {
+                    return false;
+                }
+                pos += childLength;
+            }
+        } else {
+            // Canonical DER forms for primitives that occur at the certificate
+            // boundary. Opaque OCTET STRING payloads remain opaque by design.
+            if (tag == 0x01U &&
+                (contentLength != 1 || (data[contentStart] != 0x00U &&
+                                        data[contentStart] != 0xffU))) {
+                return false;
+            }
+            if (tag == 0x02U) {
+                if (contentLength == 0 ||
+                    (contentLength > 1 && data[contentStart] == 0x00U &&
+                     (data[contentStart + 1] & 0x80U) == 0) ||
+                    (contentLength > 1 && data[contentStart] == 0xffU &&
+                     (data[contentStart + 1] & 0x80U) != 0)) {
+                    return false;
+                }
+            }
+            if (tag == 0x03U) {
+                if (contentLength == 0 || data[contentStart] > 7 ||
+                    (contentLength == 1 && data[contentStart] != 0) ||
+                    (contentLength > 1 && data[contentStart] != 0 &&
+                     (data[contentEnd - 1] &
+                      static_cast<unsigned char>((1U << data[contentStart]) - 1U)) != 0)) {
+                    return false;
+                }
+            }
+            if (tag == 0x05U && contentLength != 0) {
+                return false;
+            }
+            pos = contentEnd;
+        }
+
+        if (pos != contentEnd) {
+            return false;
+        }
+        consumed = contentEnd;
+        return true;
+    }
+
     static void setError_(SwString* error, const char* message) {
         if (error) {
             *error = SwString(message);
@@ -320,13 +586,12 @@ private:
     }
 
 #if defined(_WIN32)
-    static std::vector<wchar_t> toWide_(const SwString& text) {
-        const std::string utf8 = text.toStdString();
-        std::vector<wchar_t> wide;
-        const int needed = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
+    static SwVector<wchar_t> toWide_(const SwString& text) {
+        SwVector<wchar_t> wide;
+        const int needed = MultiByteToWideChar(CP_UTF8, 0, text.constData(), -1, nullptr, 0);
         wide.resize(needed > 0 ? static_cast<std::size_t>(needed) : 1, L'\0');
         if (needed > 0) {
-            MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, wide.data(), needed);
+            MultiByteToWideChar(CP_UTF8, 0, text.constData(), -1, wide.data(), needed);
         }
         return wide;
     }
@@ -364,7 +629,7 @@ private:
             return false;
         }
 
-        std::vector<unsigned char> digest(digestLength, 0);
+        SwVector<unsigned char> digest(digestLength, 0);
         const NTSTATUS status = BCryptHash(provider,
                                            nullptr,
                                            0,

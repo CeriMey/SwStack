@@ -48,6 +48,7 @@
 
 #include <map>
 #include "SwList.h" // Inclusion de SwList
+#include "SwPair.h"
 
 template<typename Key, typename T>
 class SwMap {
@@ -400,6 +401,22 @@ public:
         m_map.insert(pair);
     }
 
+    SwPair<iterator, bool> insert(const SwPair<Key, T>& pair) {
+        const auto result = m_map.emplace(pair.first, pair.second);
+        return SwPair<iterator, bool>(iterator(result.first), result.second);
+    }
+
+    SwPair<iterator, bool> insert(SwPair<Key, T>&& pair) {
+        const auto result = m_map.emplace(std::move(pair.first), std::move(pair.second));
+        return SwPair<iterator, bool>(iterator(result.first), result.second);
+    }
+
+    template<typename... Args>
+    SwPair<iterator, bool> emplace(Args&&... args) {
+        const auto result = m_map.emplace(std::forward<Args>(args)...);
+        return SwPair<iterator, bool>(iterator(result.first), result.second);
+    }
+
     template<typename InputIterator>
     /**
      * @brief Performs the `insert` operation.
@@ -426,6 +443,10 @@ public:
      */
     iterator erase(iterator pos) {
         return iterator(m_map.erase(pos.base()));
+    }
+
+    size_t erase(const Key& key) {
+        return m_map.erase(key);
     }
 
     // Queries
@@ -553,6 +574,20 @@ public:
     const_iterator find(const Key& key) const {
         return const_iterator(m_map.find(key));
     }
+
+    /** Returns the first element whose key is not less than `key`. */
+    iterator lowerBound(const Key& key) {
+        return iterator(m_map.lower_bound(key));
+    }
+
+    /** Returns the first element whose key is not less than `key`. */
+    const_iterator lowerBound(const Key& key) const {
+        return const_iterator(m_map.lower_bound(key));
+    }
+
+    // STL-compatible spelling kept for SwStack consumers migrating ordered hotpaths.
+    iterator lower_bound(const Key& key) { return lowerBound(key); }
+    const_iterator lower_bound(const Key& key) const { return lowerBound(key); }
 
     /**
      * @brief Performs the `constFind` operation.

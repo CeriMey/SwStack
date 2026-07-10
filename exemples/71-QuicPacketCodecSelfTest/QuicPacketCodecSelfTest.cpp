@@ -11,10 +11,10 @@
 #include "core/io/quic/SwQuicStream.h"
 #include "core/io/quic/SwQuicStreamMap.h"
 #include "core/io/quic/SwQuicVarIntCodec.h"
+#include "core/types/SwVector.h"
 
 #include <cstdint>
 #include <iostream>
-#include <vector>
 
 namespace {
 
@@ -31,7 +31,7 @@ bool checkVarIntRoundTrip(std::uint64_t value, std::size_t expectedSize) {
     SwString error;
     if (!requireTrue(SwQuicVarIntCodec::encode(value, encoded, &error),
                      "varint encode failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -43,7 +43,7 @@ bool checkVarIntRoundTrip(std::uint64_t value, std::size_t expectedSize) {
     std::uint64_t decoded = 0;
     if (!requireTrue(SwQuicVarIntCodec::decode(encoded, offset, decoded, &error),
                      "varint decode failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -68,7 +68,7 @@ bool testConnectionIdValidation() {
     SwQuicConnectionId id;
     if (!requireTrue(SwQuicConnectionId::fromBytes(maxId, id, &error),
                      "20-byte connection ID should be accepted")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -83,7 +83,7 @@ bool testInitialPacketRoundTrip() {
     SwQuicConnectionId scid;
     if (!SwQuicConnectionId::fromBytes(SwByteArray("client01"), dcid, &error) ||
         !SwQuicConnectionId::fromBytes(SwByteArray("server01"), scid, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -92,7 +92,7 @@ bool testInitialPacketRoundTrip() {
     header.setToken(SwByteArray("tok"));
     if (!header.setPacketNumberLength(2, &error) ||
         !header.setPacketNumber(0x1234, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -100,7 +100,7 @@ bool testInitialPacketRoundTrip() {
     SwByteArray encoded;
     if (!requireTrue(SwQuicPacketCodec::encodeInitialPacket(header, payload, encoded, &error),
                      "Initial packet encode failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -119,7 +119,7 @@ bool testInitialPacketRoundTrip() {
                                                             decodedPayload,
                                                             &error),
                      "Initial packet decode failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -143,11 +143,11 @@ bool testInitialPacketRoundTrip() {
 }
 
 bool testFrameRoundTrip() {
-    std::vector<SwQuicFrame::AckRange> ackRanges;
+    SwVector<SwQuicFrame::AckRange> ackRanges;
     SwQuicFrame::AckRange range = {1, 3};
     ackRanges.push_back(range);
 
-    std::vector<SwQuicFrame> frames;
+    SwVector<SwQuicFrame> frames;
     frames.push_back(SwQuicFrame::ping());
     frames.push_back(SwQuicFrame::ack(12, 4, 2, ackRanges));
     frames.push_back(SwQuicFrame::crypto(0, SwByteArray("client-hello")));
@@ -159,14 +159,14 @@ bool testFrameRoundTrip() {
     SwByteArray payload;
     if (!requireTrue(SwQuicFrameCodec::encodeFrames(frames, payload, &error),
                      "frame encode failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
-    std::vector<SwQuicFrame> decoded;
+    SwVector<SwQuicFrame> decoded;
     if (!requireTrue(SwQuicFrameCodec::decodeFrames(payload, decoded, &error),
                      "frame decode failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -211,31 +211,31 @@ bool testInitialPacketWithFramesRoundTrip() {
     SwQuicConnectionId scid;
     if (!SwQuicConnectionId::fromBytes(SwByteArray("client02"), dcid, &error) ||
         !SwQuicConnectionId::fromBytes(SwByteArray("server02"), scid, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
-    std::vector<SwQuicFrame> frames;
+    SwVector<SwQuicFrame> frames;
     frames.push_back(SwQuicFrame::crypto(0, SwByteArray("tls-handshake-bytes")));
     frames.push_back(SwQuicFrame::ping());
 
     SwByteArray payload;
     if (!SwQuicFrameCodec::encodeFrames(frames, payload, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
     SwQuicPacketHeader header = SwQuicPacketHeader::makeInitial(dcid, scid);
     if (!header.setPacketNumberLength(1, &error) ||
         !header.setPacketNumber(7, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
     SwByteArray packet;
     if (!requireTrue(SwQuicPacketCodec::encodeInitialPacket(header, payload, packet, &error),
                      "Initial packet with frames encode failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -246,14 +246,14 @@ bool testInitialPacketWithFramesRoundTrip() {
                                                             decodedPayload,
                                                             &error),
                      "Initial packet with frames decode failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
-    std::vector<SwQuicFrame> decodedFrames;
+    SwVector<SwQuicFrame> decodedFrames;
     if (!requireTrue(SwQuicFrameCodec::decodeFrames(decodedPayload, decodedFrames, &error),
                      "Initial packet decoded frames failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -279,7 +279,7 @@ bool testAckTrackerBuildsRanges() {
     SwString error;
     SwQuicFrame ack = SwQuicFrame::ping();
     if (!requireTrue(tracker.buildAckFrame(ack, 5, &error), "ACK frame build failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -300,7 +300,7 @@ bool testStreamReassembly() {
     if (!requireTrue(stream.receiveFrame(SwQuicFrame::stream(4, 6, SwByteArray("world"), true),
                                          &error),
                      "stream receive tail failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
     if (!requireTrue(!stream.hasReadableData(), "stream should wait for offset zero")) {
@@ -310,7 +310,7 @@ bool testStreamReassembly() {
     if (!requireTrue(stream.receiveFrame(SwQuicFrame::stream(4, 0, SwByteArray("hello "), false),
                                          &error),
                      "stream receive head failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -326,7 +326,7 @@ bool testStreamReassembly() {
     if (!requireTrue(stream.receiveFrame(SwQuicFrame::stream(4, 3, SwByteArray("lo "), false),
                                          &error),
                      "stream duplicate receive failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
     if (!requireTrue(stream.readContiguous().size() == 0,
@@ -347,19 +347,19 @@ bool testStreamMapMultiplexing() {
     if (!requireTrue(streams.receiveFrame(SwQuicFrame::stream(8, 4, SwByteArray("-b"), true),
                                           &error),
                      "stream map receive stream 8 tail failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
     if (!requireTrue(streams.receiveFrame(SwQuicFrame::stream(4, 0, SwByteArray("alpha"), true),
                                           &error),
                      "stream map receive stream 4 failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
     if (!requireTrue(streams.receiveFrame(SwQuicFrame::stream(8, 0, SwByteArray("beta"), false),
                                           &error),
                      "stream map receive stream 8 head failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -383,11 +383,11 @@ bool testConnectionReceivesInitialPacket() {
     SwQuicConnectionId scid;
     if (!SwQuicConnectionId::fromBytes(SwByteArray("client03"), dcid, &error) ||
         !SwQuicConnectionId::fromBytes(SwByteArray("server03"), scid, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
-    std::vector<SwQuicFrame> frames;
+    SwVector<SwQuicFrame> frames;
     frames.push_back(SwQuicFrame::crypto(0, SwByteArray("crypto")));
     frames.push_back(SwQuicFrame::ping());
     frames.push_back(SwQuicFrame::stream(0, 0, SwByteArray("hello"), true));
@@ -395,34 +395,34 @@ bool testConnectionReceivesInitialPacket() {
 
     SwByteArray payload;
     if (!SwQuicFrameCodec::encodeFrames(frames, payload, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
     SwQuicPacketHeader header = SwQuicPacketHeader::makeInitial(dcid, scid);
     if (!header.setPacketNumberLength(1, &error) ||
         !header.setPacketNumber(9, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
     SwByteArray packet;
     if (!SwQuicPacketCodec::encodeInitialPacket(header, payload, packet, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
     SwQuicConnection connection;
     if (!requireTrue(connection.receiveInitialPacket(packet, &error),
                      "connection receive Initial packet failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
     SwQuicFrame ack = SwQuicFrame::ping();
     if (!requireTrue(connection.buildAckFrame(ack, 0, &error),
                      "connection ACK frame build failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -456,12 +456,12 @@ bool testUdpLoopbackServerReceivesInitialPacket() {
 
     if (!requireTrue(server.listen(SwString("127.0.0.1"), 0, &error),
                      "loopback server listen failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
     if (!requireTrue(client.listen(SwString("127.0.0.1"), 0, &error),
                      "loopback client listen failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -469,18 +469,18 @@ bool testUdpLoopbackServerReceivesInitialPacket() {
     SwQuicConnectionId scid;
     if (!SwQuicConnectionId::fromBytes(SwByteArray("udpclient"), dcid, &error) ||
         !SwQuicConnectionId::fromBytes(SwByteArray("udpserver"), scid, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
     SwQuicPacketHeader header = SwQuicPacketHeader::makeInitial(dcid, scid);
     if (!header.setPacketNumberLength(1, &error) ||
         !header.setPacketNumber(3, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
-    std::vector<SwQuicFrame> frames;
+    SwVector<SwQuicFrame> frames;
     frames.push_back(SwQuicFrame::crypto(0, SwByteArray("udp-crypto")));
     frames.push_back(SwQuicFrame::stream(0, 0, SwByteArray("udp-stream"), true));
     frames.push_back(SwQuicFrame::datagram(SwByteArray("udp-datagram")));
@@ -491,7 +491,7 @@ bool testUdpLoopbackServerReceivesInitialPacket() {
                                               frames,
                                               &error),
                      "loopback client send failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -499,7 +499,7 @@ bool testUdpLoopbackServerReceivesInitialPacket() {
     for (int attempt = 0; attempt < 50 && processed == 0; ++attempt) {
         processed = server.poll(10, &error);
         if (processed < 0) {
-            std::cerr << error.toStdString() << std::endl;
+            std::cerr << error << std::endl;
             return false;
         }
     }
@@ -513,7 +513,7 @@ bool testUdpLoopbackServerReceivesInitialPacket() {
     SwQuicFrame ack = SwQuicFrame::ping();
     if (!requireTrue(connection->buildAckFrame(ack, 0, &error),
                      "loopback ACK build failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -539,7 +539,7 @@ bool testInitialSecretDerivationMatchesRfc9001() {
             SwByteArray::fromHex(SwByteArray("8394c8f03e515708")),
             dcid,
             &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -547,7 +547,7 @@ bool testInitialSecretDerivationMatchesRfc9001() {
     SwQuicInitialKeys serverKeys;
     if (!requireTrue(SwQuicInitialSecrets::deriveV1(dcid, clientKeys, serverKeys, &error),
                      "initial secret derivation failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -586,7 +586,7 @@ bool testInitialPacketProtectionMatchesRfc9001() {
             SwByteArray::fromHex(SwByteArray("8394c8f03e515708")),
             dcid,
             &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -594,7 +594,7 @@ bool testInitialPacketProtectionMatchesRfc9001() {
     SwQuicInitialKeys serverKeys;
     if (!requireTrue(SwQuicInitialSecrets::deriveV1(dcid, clientKeys, serverKeys, &error),
                      "initial secret derivation failed for protection test")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -624,7 +624,7 @@ bool testInitialPacketProtectionMatchesRfc9001() {
                                                                  protectedPacket,
                                                                  &error),
                      "RFC 9001 client Initial protection failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -646,7 +646,7 @@ bool testServerInitialUnprotectionMatchesRfc9001() {
             SwByteArray::fromHex(SwByteArray("8394c8f03e515708")),
             dcid,
             &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -654,7 +654,7 @@ bool testServerInitialUnprotectionMatchesRfc9001() {
     SwQuicInitialKeys serverKeys;
     if (!requireTrue(SwQuicInitialSecrets::deriveV1(dcid, clientKeys, serverKeys, &error),
                      "initial secret derivation failed for server unprotection test")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -680,14 +680,14 @@ bool testServerInitialUnprotectionMatchesRfc9001() {
                                                              &consumed,
                                                              &error),
                      "RFC 9001 server Initial unprotection failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
-    std::vector<SwQuicFrame> frames;
+    SwVector<SwQuicFrame> frames;
     if (!requireTrue(SwQuicFrameCodec::decodeFrames(plaintext, frames, &error),
                      "RFC 9001 server Initial frames decode failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -718,7 +718,7 @@ bool testClientHelloBuilderForHttp3() {
     SwString error;
     SwQuicConnectionId scid;
     if (!SwQuicConnectionId::fromBytes(SwByteArray("swclnt01"), scid, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -728,7 +728,7 @@ bool testClientHelloBuilderForHttp3() {
                                                              clientHello,
                                                              &error),
                      "ClientHello build failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -749,7 +749,7 @@ bool testProtectedClientInitialBuilder() {
     SwQuicConnectionId scid;
     if (!SwQuicConnectionId::fromBytes(SwByteArray("swcf0001"), dcid, &error) ||
         !SwQuicConnectionId::fromBytes(SwByteArray("swclnt01"), scid, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -762,7 +762,7 @@ bool testProtectedClientInitialBuilder() {
     SwByteArray packet;
     if (!requireTrue(SwQuicClientInitialBuilder::buildHttp3Initial(options, packet, &error),
                      "protected Initial build failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -786,7 +786,7 @@ bool testMalformedPacketRejection() {
 bool testAllFrameTypesRoundTrip() {
     SwString error;
 
-    std::vector<SwQuicFrame::AckRange> ackRanges;
+    SwVector<SwQuicFrame::AckRange> ackRanges;
     SwQuicFrame::AckRange range = {2, 5};
     ackRanges.push_back(range);
 
@@ -794,7 +794,7 @@ bool testAllFrameTypesRoundTrip() {
     SwByteArray resetToken(16, 'r');
     SwByteArray pathData("pathpath");
 
-    std::vector<SwQuicFrame> frames;
+    SwVector<SwQuicFrame> frames;
     frames.push_back(SwQuicFrame::padding());
     frames.push_back(SwQuicFrame::ping());
     frames.push_back(SwQuicFrame::ackWithEcn(20, 3, 4, ackRanges, 11, 12, 13));
@@ -820,14 +820,14 @@ bool testAllFrameTypesRoundTrip() {
     SwByteArray payload;
     if (!requireTrue(SwQuicFrameCodec::encodeFrames(frames, payload, &error),
                      "all-frame encode failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
-    std::vector<SwQuicFrame> decoded;
+    SwVector<SwQuicFrame> decoded;
     if (!requireTrue(SwQuicFrameCodec::decodeFrames(payload, decoded, &error),
                      "all-frame decode failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -910,7 +910,7 @@ bool testUnknownFrameTypeRejected() {
     SwString error;
     SwByteArray payload;
     payload.append(static_cast<char>(0x40));  // 0x40 is not an assigned frame type.
-    std::vector<SwQuicFrame> frames;
+    SwVector<SwQuicFrame> frames;
     return requireTrue(!SwQuicFrameCodec::decodeFrames(payload, frames, &error),
                        "unknown frame type should be rejected");
 }
@@ -919,7 +919,7 @@ bool testShortHeader1RttRoundTrip() {
     SwString error;
     SwQuicConnectionId dcid;
     if (!SwQuicConnectionId::fromBytes(SwByteArray("8394c8f03e515708"), dcid, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -930,13 +930,13 @@ bool testShortHeader1RttRoundTrip() {
     SwQuicInitialKeys serverKeys;
     if (!requireTrue(SwQuicInitialSecrets::deriveV1(dcid, clientKeys, serverKeys, &error),
                      "1-RTT key derivation failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
     SwQuicConnectionId connectionId;
     if (!SwQuicConnectionId::fromBytes(SwByteArray("rtt-dcid"), connectionId, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -952,7 +952,7 @@ bool testShortHeader1RttRoundTrip() {
                                                                   protectedPacket,
                                                                   &error),
                      "short header protection failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -972,7 +972,7 @@ bool testShortHeader1RttRoundTrip() {
                                                                     recovered,
                                                                     &error),
                      "short header unprotection failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -987,31 +987,31 @@ bool testCoalescedInitialPackets() {
     SwQuicConnectionId scid;
     if (!SwQuicConnectionId::fromBytes(SwByteArray("coalesc1"), dcid, &error) ||
         !SwQuicConnectionId::fromBytes(SwByteArray("coalesc2"), scid, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
     SwByteArray datagram;
     for (int i = 0; i < 2; ++i) {
-        std::vector<SwQuicFrame> frames;
+        SwVector<SwQuicFrame> frames;
         frames.push_back(SwQuicFrame::crypto(0, SwByteArray(i == 0 ? "first" : "second")));
 
         SwByteArray payload;
         if (!SwQuicFrameCodec::encodeFrames(frames, payload, &error)) {
-            std::cerr << error.toStdString() << std::endl;
+            std::cerr << error << std::endl;
             return false;
         }
 
         SwQuicPacketHeader header = SwQuicPacketHeader::makeInitial(dcid, scid);
         if (!header.setPacketNumberLength(1, &error) ||
             !header.setPacketNumber(static_cast<std::uint64_t>(i), &error)) {
-            std::cerr << error.toStdString() << std::endl;
+            std::cerr << error << std::endl;
             return false;
         }
 
         SwByteArray packet;
         if (!SwQuicPacketCodec::encodeInitialPacket(header, payload, packet, &error)) {
-            std::cerr << error.toStdString() << std::endl;
+            std::cerr << error << std::endl;
             return false;
         }
         datagram.append(packet);
@@ -1029,7 +1029,7 @@ bool testCoalescedInitialPackets() {
         if (!requireTrue(SwQuicPacketCodec::decodeInitialPacket(remaining, header, payload,
                                                                &consumed, &error),
                          "coalesced Initial decode failed")) {
-            std::cerr << error.toStdString() << std::endl;
+            std::cerr << error << std::endl;
             return false;
         }
         if (!requireTrue(consumed > 0, "coalesced decode consumed zero bytes")) {
@@ -1067,7 +1067,7 @@ bool testSansIoConnectionLoopback() {
     SwQuicConnectionId serverCid;
     if (!SwQuicConnectionId::fromBytes(SwByteArray("cli-cid1"), clientCid, &error) ||
         !SwQuicConnectionId::fromBytes(SwByteArray("srv-cid1"), serverCid, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -1076,7 +1076,7 @@ bool testSansIoConnectionLoopback() {
     SwQuicInitialKeys clientKeys;
     SwQuicInitialKeys serverKeys;
     if (!SwQuicInitialSecrets::deriveV1(serverCid, clientKeys, serverKeys, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -1096,22 +1096,22 @@ bool testSansIoConnectionLoopback() {
                      "sans-io sendStreamData failed") ||
         !requireTrue(client.queueDatagramFrame(SwByteArray("dgram"), &error),
                      "sans-io queueDatagramFrame failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
-    std::vector<SwByteArray> wire;
+    SwVector<SwByteArray> wire;
     if (!requireTrue(client.buildDatagrams(now, wire, &error),
                      "sans-io client buildDatagrams failed") ||
         !requireTrue(!wire.empty(), "sans-io client produced no datagrams")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
     for (std::size_t i = 0; i < wire.size(); ++i) {
         if (!requireTrue(server.receiveDatagram(wire[i], now + 5, &error),
                          "sans-io server receiveDatagram failed")) {
-            std::cerr << error.toStdString() << std::endl;
+            std::cerr << error << std::endl;
             return false;
         }
     }
@@ -1130,18 +1130,18 @@ bool testSansIoConnectionLoopback() {
 
     // Server flushes its delayed ACK (application space max_ack_delay).
     now += 100;
-    std::vector<SwByteArray> ackWire;
+    SwVector<SwByteArray> ackWire;
     if (!requireTrue(server.buildDatagrams(now, ackWire, &error),
                      "sans-io server buildDatagrams failed") ||
         !requireTrue(!ackWire.empty(), "sans-io server produced no ACK datagram")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
     for (std::size_t i = 0; i < ackWire.size(); ++i) {
         if (!requireTrue(client.receiveDatagram(ackWire[i], now + 5, &error),
                          "sans-io client receiveDatagram(ACK) failed")) {
-            std::cerr << error.toStdString() << std::endl;
+            std::cerr << error << std::endl;
             return false;
         }
     }
@@ -1158,16 +1158,16 @@ bool testSansIoConnectionLoopback() {
 
     // Graceful close: client sends CONNECTION_CLOSE, server drains.
     client.close(0, SwString("bye"));
-    std::vector<SwByteArray> closeWire;
+    SwVector<SwByteArray> closeWire;
     if (!requireTrue(client.buildDatagrams(now + 10, closeWire, &error),
                      "sans-io client close buildDatagrams failed") ||
         !requireTrue(closeWire.size() == 1, "sans-io close datagram count mismatch")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
     if (!requireTrue(server.receiveDatagram(closeWire[0], now + 15, &error),
                      "sans-io server receive close failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -1187,14 +1187,14 @@ bool testConnectionMigrationPathValidation() {
     SwQuicConnectionId serverCid;
     if (!SwQuicConnectionId::fromBytes(SwByteArray("migclint"), clientCid, &error) ||
         !SwQuicConnectionId::fromBytes(SwByteArray("migsrvr1"), serverCid, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
     SwQuicInitialKeys clientKeys;
     SwQuicInitialKeys serverKeys;
     if (!SwQuicInitialSecrets::deriveV1(serverCid, clientKeys, serverKeys, &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -1212,10 +1212,10 @@ bool testConnectionMigrationPathValidation() {
     // Establish traffic on the original path.
     if (!requireTrue(client.sendStreamData(0, SwByteArray("on wifi"), false, &error),
                      "migration initial send failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
-    std::vector<SwByteArray> wire;
+    SwVector<SwByteArray> wire;
     if (!requireTrue(client.buildDatagrams(now, wire, &error), "migration build 1 failed")) {
         return false;
     }
@@ -1233,7 +1233,7 @@ bool testConnectionMigrationPathValidation() {
     now += 50;
     if (!requireTrue(server.onPeerAddressChanged(now, 1200, &error),
                      "onPeerAddressChanged failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
     if (!requireTrue(!server.pathValidated(), "path must be unvalidated after migration") ||
@@ -1243,7 +1243,7 @@ bool testConnectionMigrationPathValidation() {
     }
 
     // The server emits a PATH_CHALLENGE toward the new path.
-    std::vector<SwByteArray> challengeWire;
+    SwVector<SwByteArray> challengeWire;
     if (!requireTrue(server.buildDatagrams(now, challengeWire, &error),
                      "migration challenge build failed") ||
         !requireTrue(!challengeWire.empty(), "server did not emit a PATH_CHALLENGE")) {
@@ -1257,7 +1257,7 @@ bool testConnectionMigrationPathValidation() {
             return false;
         }
     }
-    std::vector<SwByteArray> responseWire;
+    SwVector<SwByteArray> responseWire;
     if (!requireTrue(client.buildDatagrams(now, responseWire, &error),
                      "migration response build failed") ||
         !requireTrue(!responseWire.empty(), "client did not emit a PATH_RESPONSE")) {
@@ -1305,7 +1305,7 @@ bool setupAppPair(SwQuicConnection& client, SwQuicConnection& server,
 }
 
 bool pumpTo(SwQuicConnection& from, SwQuicConnection& to, std::uint64_t nowMs, SwString* error) {
-    std::vector<SwByteArray> wire;
+    SwVector<SwByteArray> wire;
     if (!from.buildDatagrams(nowMs, wire, error)) {
         return false;
     }
@@ -1327,20 +1327,20 @@ bool testResetStreamFinalSizeAccounting() {
     SwQuicConnection client(SwQuicConnection::Role::Client);
     SwQuicConnection server(SwQuicConnection::Role::Server);
     if (!setupAppPair(client, server, SwByteArray("rstclin1"), SwByteArray("rstsrvr1"), &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
     const std::uint64_t now = 3000;
     if (!requireTrue(client.sendStreamData(0, SwByteArray("hello"), false, &error),
                      "reset test stream send failed") ||
         !requireTrue(pumpTo(client, server, now, &error), "reset test stream deliver failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
     client.queueFrame(SwQuicConnection::Level::Application,
                       SwQuicFrame::resetStream(0, 0x0, 10)); // final size 10 > 5 delivered
     if (!requireTrue(pumpTo(client, server, now, &error), "reset frame deliver failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
     const bool accounted = server.connectionFlowControl().bytesReceived() >= 10;
@@ -1358,7 +1358,7 @@ bool testResetStreamFinalSizeAccounting() {
     }
     client2.queueFrame(SwQuicConnection::Level::Application,
                        SwQuicFrame::resetStream(0, 0x0, 3)); // final size 3 < 5 received
-    std::vector<SwByteArray> wire;
+    SwVector<SwByteArray> wire;
     if (!requireTrue(client2.buildDatagrams(now, wire, &error), "reset test 2 build failed")) {
         return false;
     }
@@ -1382,7 +1382,7 @@ bool testPersistentCongestionCollapsesWindow() {
     SwQuicConnection client(SwQuicConnection::Role::Client);
     SwQuicConnection server(SwQuicConnection::Role::Server);
     if (!setupAppPair(client, server, SwByteArray("pcclint1"), SwByteArray("pcsrvr01"), &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -1393,7 +1393,7 @@ bool testPersistentCongestionCollapsesWindow() {
         !requireTrue(pumpTo(client, server, now, &error), "pc rtt deliver failed")) {
         return false;
     }
-    std::vector<SwByteArray> ack;
+    SwVector<SwByteArray> ack;
     if (!requireTrue(server.buildDatagrams(now + 10, ack, &error), "pc server ack build failed")) {
         return false;
     }
@@ -1407,7 +1407,7 @@ bool testPersistentCongestionCollapsesWindow() {
     // 2) Send three ack-eliciting packets spanning > the persistent-congestion
     //    duration; DROP the first two, deliver only the last.
     auto sendDropped = [&](std::uint64_t streamId, std::uint64_t at) -> bool {
-        std::vector<SwByteArray> wire;
+        SwVector<SwByteArray> wire;
         return client.sendStreamData(streamId, SwByteArray("d"), false, &error) &&
                client.buildDatagrams(at, wire, &error); // built (advances pn) but not delivered
     };
@@ -1420,7 +1420,7 @@ bool testPersistentCongestionCollapsesWindow() {
                      "pc send3 failed")) {
         return false;
     }
-    std::vector<SwByteArray> third;
+    SwVector<SwByteArray> third;
     if (!requireTrue(client.buildDatagrams(2400, third, &error), "pc build3 failed")) {
         return false;
     }
@@ -1429,7 +1429,7 @@ bool testPersistentCongestionCollapsesWindow() {
             return false;
         }
     }
-    std::vector<SwByteArray> ack3;
+    SwVector<SwByteArray> ack3;
     if (!requireTrue(server.buildDatagrams(2400, ack3, &error), "pc ack3 build failed")) {
         return false;
     }
@@ -1453,7 +1453,7 @@ bool testAmplificationWithheldNoPhantomBytes() {
     SwQuicConnection client(SwQuicConnection::Role::Client);
     SwQuicConnection server(SwQuicConnection::Role::Server);
     if (!setupAppPair(client, server, SwByteArray("phantcl1"), SwByteArray("phantsv1"), &error)) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -1473,7 +1473,7 @@ bool testAmplificationWithheldNoPhantomBytes() {
     }
 
     const std::uint64_t before = client.congestionControl().bytesInFlight();
-    std::vector<SwByteArray> out;
+    SwVector<SwByteArray> out;
     if (!requireTrue(client.buildDatagrams(now, out, &error), "phantom build failed")) {
         return false;
     }
@@ -1501,7 +1501,7 @@ bool testAmplificationWithheldNoPhantomBytes() {
                                     "phantom deliver challenge failed")) {
         return false;
     }
-    std::vector<SwByteArray> resp;
+    SwVector<SwByteArray> resp;
     if (!requireTrue(server.buildDatagrams(now, resp, &error), "phantom resp build failed")) {
         return false;
     }
@@ -1513,7 +1513,7 @@ bool testAmplificationWithheldNoPhantomBytes() {
     if (!requireTrue(client.pathValidated(), "path not validated after PATH_RESPONSE")) {
         return false;
     }
-    std::vector<SwByteArray> rest;
+    SwVector<SwByteArray> rest;
     if (!requireTrue(client.buildDatagrams(now, rest, &error), "phantom rest build failed")) {
         return false;
     }

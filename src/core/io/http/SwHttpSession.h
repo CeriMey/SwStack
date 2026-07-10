@@ -223,9 +223,10 @@ private slots:
             return;
         }
 
+        char readBuffer[kSwTcpDefaultReadChunkSize];
         while (true) {
-            SwString chunk(m_socket->read().toStdString());
-            if (chunk.isEmpty()) {
+            const int64_t bytesRead = m_socket->readInto(readBuffer, sizeof(readBuffer));
+            if (bytesRead <= 0) {
                 break;
             }
 
@@ -235,9 +236,9 @@ private slots:
             }
             m_lastReadAt = now;
 
-            SwByteArray bytes(chunk.data(), chunk.size());
             SwList<SwHttpRequest> parsedRequests;
-            SwHttpParser::FeedStatus status = m_parser.feed(bytes, parsedRequests);
+            SwHttpParser::FeedStatus status =
+                m_parser.feed(readBuffer, static_cast<std::size_t>(bytesRead), parsedRequests);
             if (status == SwHttpParser::FeedStatus::Error) {
                 int parseStatus = m_parser.errorStatus();
                 if (parseStatus <= 0) {

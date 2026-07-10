@@ -50,6 +50,7 @@
 #include "SwTcpSocket.h"
 #include "SwString.h"
 #include "SwByteArray.h"
+#include "SwByteRingBuffer.h"
 #include "SwList.h"
 #include "SwMap.h"
 #include "SwCrypto.h"
@@ -1584,7 +1585,7 @@ private:
         return frame;
     }
 
-    static bool parseOneFrame(SwByteArray& buffer,
+    static bool parseOneFrame(SwByteRingBuffer& buffer,
                               uint8_t& outOpcode,
                               bool& outFin,
                               bool& outRsv1,
@@ -1601,9 +1602,8 @@ private:
             return false;
         }
 
-        const unsigned char* data = reinterpret_cast<const unsigned char*>(buffer.constData());
-        const uint8_t b0 = data[0];
-        const uint8_t b1 = data[1];
+        const uint8_t b0 = static_cast<uint8_t>(static_cast<unsigned char>(buffer[0]));
+        const uint8_t b1 = static_cast<uint8_t>(static_cast<unsigned char>(buffer[1]));
 
         outFin = (b0 & 0x80) != 0;
         outRsv1 = (b0 & 0x40) != 0;
@@ -1628,21 +1628,22 @@ private:
                 outNeedMoreData = true;
                 return false;
             }
-            payloadLen = (static_cast<uint64_t>(data[pos]) << 8) |
-                         (static_cast<uint64_t>(data[pos + 1]));
+            payloadLen = (static_cast<uint64_t>(static_cast<unsigned char>(buffer[pos])) << 8) |
+                         static_cast<uint64_t>(static_cast<unsigned char>(buffer[pos + 1]));
             pos += 2;
         } else if (payloadLen == 127) {
             if (buffer.size() < pos + 8) {
                 outNeedMoreData = true;
                 return false;
             }
-            if ((data[pos] & 0x80) != 0) {
+            if ((static_cast<unsigned char>(buffer[pos]) & 0x80) != 0) {
                 // Most significant bit MUST be 0 (length is 63-bit unsigned).
                 return false;
             }
             payloadLen = 0;
             for (int i = 0; i < 8; ++i) {
-                payloadLen = (payloadLen << 8) | static_cast<uint64_t>(data[pos + i]);
+                payloadLen = (payloadLen << 8) |
+                             static_cast<uint64_t>(static_cast<unsigned char>(buffer[pos + static_cast<size_t>(i)]));
             }
             pos += 8;
         }
@@ -1661,10 +1662,10 @@ private:
                 outNeedMoreData = true;
                 return false;
             }
-            maskKey[0] = data[pos + 0];
-            maskKey[1] = data[pos + 1];
-            maskKey[2] = data[pos + 2];
-            maskKey[3] = data[pos + 3];
+            maskKey[0] = static_cast<unsigned char>(buffer[pos + 0]);
+            maskKey[1] = static_cast<unsigned char>(buffer[pos + 1]);
+            maskKey[2] = static_cast<unsigned char>(buffer[pos + 2]);
+            maskKey[3] = static_cast<unsigned char>(buffer[pos + 3]);
             pos += 4;
         }
 
@@ -1674,12 +1675,11 @@ private:
         }
 
         if (payloadLen > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
-            // SwByteArray::mid and remove use int indices.
             return false;
         }
 
         if (payloadLen > 0) {
-            outPayload = buffer.mid(static_cast<int>(pos), static_cast<int>(payloadLen));
+            outPayload = buffer.mid(pos, static_cast<size_t>(payloadLen));
             if (masked) {
                 for (size_t i = 0; i < outPayload.size(); ++i) {
                     outPayload[i] = static_cast<char>(
@@ -1690,7 +1690,7 @@ private:
             outPayload.clear();
         }
 
-        buffer.remove(0, static_cast<int>(pos + payloadLen));
+        buffer.consume(pos + static_cast<size_t>(payloadLen));
         return true;
     }
 
@@ -2050,12 +2050,13 @@ private slots:
             return;
         }
 
+        char readBuffer[kSwTcpDefaultReadChunkSize];
         while (true) {
-            SwString chunk(m_socket->read().toStdString());
-            if (chunk.isEmpty()) {
+            const int64_t bytesRead = m_socket->readInto(readBuffer, sizeof(readBuffer));
+            if (bytesRead <= 0) {
                 break;
             }
-            m_buffer.append(chunk.data(), chunk.size());
+            m_buffer.append(readBuffer, static_cast<size_t>(bytesRead));
         }
 
         if (m_handshakeStage == StageProxyHandshake) {
@@ -2065,7 +2066,7 @@ private slots:
             }
 
             SwByteArray headerBytes = m_buffer.left(boundary);
-            m_buffer.remove(0, boundary + 4);
+            m_buffer.consume(static_cast<size_t>(boundary + 4));
 
             int statusCode = 0;
             SwMap<SwString, SwString> headerMap;
@@ -2108,7 +2109,7 @@ private slots:
             }
 
             SwByteArray headerBytes = m_buffer.left(boundary);
-            m_buffer.remove(0, boundary + 4);
+            m_buffer.consume(static_cast<size_t>(boundary + 4));
             const SwString headerText(headerBytes);
 
             if (m_role == ServerRole) {
@@ -2615,7 +2616,7 @@ private:
 
     SwAbstractSocket::SocketState m_state = SwAbstractSocket::UnconnectedState;
 
-    SwByteArray m_buffer;
+    SwByteRingBuffer m_buffer;
     bool m_handshakeDone = false;
     SwString m_clientKeyBase64;
     SwString m_expectedAccept;

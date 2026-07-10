@@ -55,6 +55,7 @@
  **************************************************************************************************/
 
 #include "SwByteArray.h"
+#include "SwByteRingBuffer.h"
 #include "SwAbstractSocket.h"
 #include "SwDebug.h"
 #include "SwMap.h"
@@ -298,12 +299,13 @@ private slots:
             return;
         }
 
+        char readBuffer[kSwTcpDefaultReadChunkSize];
         while (true) {
-            SwString chunk(m_socket->read().toStdString());
-            if (chunk.isEmpty()) {
+            const int64_t bytesRead = m_socket->readInto(readBuffer, sizeof(readBuffer));
+            if (bytesRead <= 0) {
                 break;
             }
-            m_buffer.append(chunk.data(), static_cast<size_t>(chunk.size()));
+            m_buffer.append(readBuffer, static_cast<size_t>(bytesRead));
         }
 
         processBuffer_();
@@ -323,8 +325,7 @@ private slots:
      */
     void onDisconnected_() {
         if (m_headersReceived && !m_finishedEmitted && !m_chunked && m_contentLength < 0) {
-            m_responseBody.append(m_buffer.constData(), m_buffer.size());
-            m_buffer.clear();
+            m_buffer.readTo(m_responseBody, m_buffer.size());
             finishRequest_();
         }
     }
@@ -432,7 +433,7 @@ private:
             }
             const int headerBytes = sep + 4;
             const SwByteArray headersPart = m_buffer.left(headerBytes);
-            m_buffer.remove(0, headerBytes);
+            m_buffer.consume(static_cast<size_t>(headerBytes));
             m_responseHeaders = SwString(headersPart);
             parseHeaders_(m_responseHeaders);
             m_headersReceived = true;
@@ -454,8 +455,7 @@ private:
                 if (take <= 0) {
                     break;
                 }
-                m_responseBody.append(m_buffer.constData(), static_cast<size_t>(take));
-                m_buffer.remove(0, static_cast<int>(take));
+                m_buffer.readTo(m_responseBody, static_cast<size_t>(take));
                 m_bytesReceived += take;
             }
             if (m_bytesReceived >= m_contentLength) {
@@ -465,9 +465,9 @@ private:
         }
 
         if (!m_buffer.isEmpty()) {
-            m_responseBody.append(m_buffer.constData(), m_buffer.size());
-            m_bytesReceived += static_cast<std::int64_t>(m_buffer.size());
-            m_buffer.clear();
+            const size_t buffered = m_buffer.size();
+            m_buffer.readTo(m_responseBody, buffered);
+            m_bytesReceived += static_cast<std::int64_t>(buffered);
         }
     }
 
@@ -480,7 +480,7 @@ private:
                 }
 
                 SwByteArray line = m_buffer.left(lineEnd).trimmed();
-                m_buffer.remove(0, lineEnd + 2);
+                m_buffer.consume(static_cast<size_t>(lineEnd + 2));
 
                 const int semi = line.indexOf(';');
                 if (semi != SwByteArray::npos) {
@@ -512,12 +512,11 @@ private:
                 return;
             }
 
-            m_responseBody.append(m_buffer.constData(), static_cast<size_t>(m_chunkBytesRemaining));
-            m_buffer.remove(0, static_cast<int>(m_chunkBytesRemaining));
+            m_buffer.readTo(m_responseBody, static_cast<size_t>(m_chunkBytesRemaining));
             m_bytesReceived += m_chunkBytesRemaining;
 
             if (m_buffer.size() >= 2 && m_buffer[0] == '\r' && m_buffer[1] == '\n') {
-                m_buffer.remove(0, 2);
+                m_buffer.consume(2);
             } else {
                 swCError(kSwLogCategory_FireBDHttpClient) << "Missing CRLF after chunk.";
                 cleanupSocket_();
@@ -638,7 +637,7 @@ private:
     SwByteArray m_requestBody;
     SwString m_requestContentType;
 
-    SwByteArray m_buffer;
+    SwByteRingBuffer m_buffer;
     SwByteArray m_responseBody;
     SwString m_responseHeaders;
     bool m_headersReceived{false};

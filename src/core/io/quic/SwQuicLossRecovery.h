@@ -1,6 +1,9 @@
+#include "SwPair.h"
+#include "SwMap.h"
 #ifndef SWQUICLOSSRECOVERY_H
 #define SWQUICLOSSRECOVERY_H
 
+#include "SwVector.h"
 #include "SwString.h"
 
 #include <cstdint>
@@ -36,8 +39,8 @@ public:
     };
 
     struct AckResult {
-        std::vector<std::uint64_t> newlyAcked;
-        std::vector<std::uint64_t> lost;
+        SwVector<std::uint64_t> newlyAcked;
+        SwVector<std::uint64_t> lost;
     };
 
     // RFC 9002 constants.
@@ -80,30 +83,43 @@ public:
     // largestAcked is provided separately and is always treated as acked.
     bool onAckReceived(std::uint64_t largestAcked,
                        std::uint64_t ackDelayMs,
-                       const std::vector<std::pair<std::uint64_t, std::uint64_t> >& ackedRangesInclusive,
+                       const SwVector<SwPair<std::uint64_t, std::uint64_t> >& ackedRangesInclusive,
                        std::uint64_t nowMs,
                        AckResult& out,
                        SwString* error = nullptr) {
         out.newlyAcked.clear();
         out.lost.clear();
 
-        // 1) Determine the set of newly acknowledged, tracked packets.
+        // 1) Determine whether the largest ACK is new and whether this ACK covers at least one
+        // ack-eliciting tracked packet. Ordered range seeks avoid scanning packets newer than the
+        // ACK, which is critical when the event loop receives a delayed ACK behind a large send queue.
         bool largestNewlyAcked = false;
         bool anyAckElicitingAcked = false;
-        std::vector<std::uint64_t> ackedKeys;
-
-        for (std::map<std::uint64_t, SentPacket>::iterator it = m_sent.begin();
-             it != m_sent.end(); ++it) {
-            const std::uint64_t pn = it->first;
-            if (!isAcked_(pn, largestAcked, ackedRangesInclusive)) {
-                continue;
-            }
-            ackedKeys.push_back(pn);
-            if (it->second.ackEliciting) {
-                anyAckElicitingAcked = true;
-            }
-            if (pn == largestAcked) {
-                largestNewlyAcked = true;
+        std::uint64_t largestSentTime = 0;
+        SwMap<std::uint64_t, SentPacket>::iterator largestIt = m_sent.find(largestAcked);
+        if (largestIt != m_sent.end()) {
+            largestNewlyAcked = true;
+            largestSentTime = largestIt->second.sentTimeMs;
+            anyAckElicitingAcked = largestIt->second.ackEliciting;
+        }
+        if (largestNewlyAcked && !anyAckElicitingAcked) {
+            for (std::size_t rangeIndex = 0;
+                 rangeIndex < ackedRangesInclusive.size() && !anyAckElicitingAcked;
+                 ++rangeIndex) {
+                std::uint64_t low = ackedRangesInclusive[rangeIndex].first;
+                std::uint64_t high = ackedRangesInclusive[rangeIndex].second;
+                if (low > high) {
+                    const std::uint64_t tmp = low;
+                    low = high;
+                    high = tmp;
+                }
+                for (SwMap<std::uint64_t, SentPacket>::iterator it = m_sent.lowerBound(low);
+                     it != m_sent.end() && it->first <= high; ++it) {
+                    if (it->second.ackEliciting) {
+                        anyAckElicitingAcked = true;
+                        break;
+                    }
+                }
             }
         }
 
@@ -111,19 +127,35 @@ public:
         //    and at least one newly acked packet was ack-eliciting
         //    (RFC 9002 section 5.1).
         if (largestNewlyAcked && anyAckElicitingAcked) {
-            const std::uint64_t sentTime = m_sent[largestAcked].sentTimeMs;
-            if (nowMs < sentTime) {
+            if (nowMs < largestSentTime) {
                 setError_(error, "QUIC ACK time precedes packet send time");
                 return false;
             }
-            const double latestRtt = static_cast<double>(nowMs - sentTime);
+            const double latestRtt = static_cast<double>(nowMs - largestSentTime);
             updateRtt_(latestRtt, static_cast<double>(ackDelayMs));
         }
 
-        // 3) Commit the newly acked packets to the output and drop them.
-        for (std::size_t i = 0; i < ackedKeys.size(); ++i) {
-            out.newlyAcked.push_back(ackedKeys[i]);
-            m_sent.erase(ackedKeys[i]);
+        // 3) Commit newly acked packets directly from each ordered range. ACK ranges arrive from
+        // the wire highest-first, so walking them backwards preserves ascending packet order.
+        for (std::size_t rangeIndex = ackedRangesInclusive.size(); rangeIndex-- > 0;) {
+            std::uint64_t low = ackedRangesInclusive[rangeIndex].first;
+            std::uint64_t high = ackedRangesInclusive[rangeIndex].second;
+            if (low > high) {
+                const std::uint64_t tmp = low;
+                low = high;
+                high = tmp;
+            }
+            SwMap<std::uint64_t, SentPacket>::iterator it = m_sent.lowerBound(low);
+            while (it != m_sent.end() && it->first <= high) {
+                out.newlyAcked.push_back(it->first);
+                it = m_sent.erase(it);
+            }
+        }
+        // The API contract treats largestAcked as acknowledged even if callers omit it from ranges.
+        largestIt = m_sent.find(largestAcked);
+        if (largestIt != m_sent.end()) {
+            out.newlyAcked.push_back(largestAcked);
+            m_sent.erase(largestIt);
         }
 
         // 4) Track the highest largest-acked value seen so far.
@@ -135,27 +167,20 @@ public:
         // 5) Loss detection (RFC 9002 section 6.1) over remaining packets that
         //    were sent before the largest acknowledged packet.
         const double timeThreshold = lossTimeThresholdMs_();
-        std::vector<std::uint64_t> lostKeys;
-        for (std::map<std::uint64_t, SentPacket>::iterator it = m_sent.begin();
-             it != m_sent.end(); ++it) {
+        SwMap<std::uint64_t, SentPacket>::iterator it = m_sent.begin();
+        while (it != m_sent.end() && it->first < largestAcked) {
             const std::uint64_t pn = it->first;
-            if (pn >= largestAcked) {
-                continue; // cannot be declared lost relative to this ACK
-            }
-
             const bool packetOrderLost = (largestAcked - pn) >= kPacketThreshold();
             const double elapsed = static_cast<double>(nowMs) -
                                    static_cast<double>(it->second.sentTimeMs);
             const bool timeLost = elapsed >= timeThreshold;
 
             if (packetOrderLost || timeLost) {
-                lostKeys.push_back(pn);
+                out.lost.push_back(pn);
+                it = m_sent.erase(it);
+            } else {
+                ++it;
             }
-        }
-
-        for (std::size_t i = 0; i < lostKeys.size(); ++i) {
-            out.lost.push_back(lostKeys[i]);
-            m_sent.erase(lostKeys[i]);
         }
 
         if (error) {
@@ -193,7 +218,7 @@ private:
 
     static bool isAcked_(std::uint64_t pn,
                          std::uint64_t largestAcked,
-                         const std::vector<std::pair<std::uint64_t, std::uint64_t> >& ranges) {
+                         const SwVector<SwPair<std::uint64_t, std::uint64_t> >& ranges) {
         if (pn == largestAcked) {
             return true;
         }
@@ -261,7 +286,7 @@ private:
     std::uint64_t m_largestAckedPacket;
     bool m_haveLargestAcked;
 
-    std::map<std::uint64_t, SentPacket> m_sent;
+    SwMap<std::uint64_t, SentPacket> m_sent;
 };
 
 #endif

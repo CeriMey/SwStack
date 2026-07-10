@@ -88,6 +88,22 @@ public:
         return m_tlsPhase == TlsPhase::Encrypted;
     }
 
+    int64_t readInto(char* data, int64_t maxSize) override {
+        if (m_tlsPhase == TlsPhase::Disabled) {
+            return SwTcpSocket::readInto(data, maxSize);
+        }
+        if (!data || maxSize <= 0 || state() != ConnectedState || m_tlsDecryptedBuffer.isEmpty()) {
+            return 0;
+        }
+
+        const size_t toRead =
+            (maxSize < static_cast<int64_t>(m_tlsDecryptedBuffer.size())) ? static_cast<size_t>(maxSize)
+                                                                          : m_tlsDecryptedBuffer.size();
+        const size_t bytes = m_tlsDecryptedBuffer.readInto(data, toRead);
+        closeIfRemoteClosedAndIdle_();
+        return static_cast<int64_t>(bytes);
+    }
+
     SwByteArray read(int64_t maxSize = 0) override {
         if (m_tlsPhase == TlsPhase::Disabled) {
             return SwTcpSocket::read(maxSize);
@@ -102,8 +118,7 @@ public:
         const size_t toRead =
             (maxSize > 0 && maxSize < static_cast<int64_t>(m_tlsDecryptedBuffer.size())) ? static_cast<size_t>(maxSize)
                                                                                           : m_tlsDecryptedBuffer.size();
-        SwByteArray result(m_tlsDecryptedBuffer.constData(), toRead);
-        m_tlsDecryptedBuffer.remove(0, static_cast<int>(toRead));
+        SwByteArray result = m_tlsDecryptedBuffer.read(toRead);
         closeIfRemoteClosedAndIdle_();
         return result;
     }
@@ -122,7 +137,7 @@ public:
         if (data.isEmpty()) {
             return true;
         }
-        m_writeBuffer.append(data.constData(), data.size());
+        m_writeBuffer.append(data);
         scheduleTlsService_();
         return true;
     }
@@ -310,7 +325,7 @@ private:
     bool m_serviceScheduled = false;
     bool m_serviceRunning = false;
     bool m_serviceAgain = false;
-    SwByteArray m_tlsDecryptedBuffer;
+    SwByteRingBuffer m_tlsDecryptedBuffer;
 
     bool beginClientEncryption_() {
         if (!m_sslBackend) {
@@ -526,12 +541,18 @@ private:
         }
 
         while (!m_writeBuffer.isEmpty()) {
-            const int toWrite = static_cast<int>(std::min<size_t>(m_writeBuffer.size(), 16 * 1024));
+            const char* data = m_writeBuffer.contiguousData();
+            const size_t available = m_writeBuffer.contiguousSize();
+            if (!data || available == 0) {
+                break;
+            }
+
+            const int toWrite = static_cast<int>(std::min<size_t>(available, 16 * 1024));
             int written = 0;
-            const auto result = m_sslBackend->write(m_writeBuffer.data(), toWrite, written);
+            const auto result = m_sslBackend->write(data, toWrite, written);
             if (result == SwBackendSsl::IoResult::Ok && written > 0) {
                 incrementTotalSentBytes_(static_cast<size_t>(written));
-                m_writeBuffer.remove(0, written);
+                m_writeBuffer.consume(static_cast<size_t>(written));
                 continue;
             }
             if (result == SwBackendSsl::IoResult::WantRead) {

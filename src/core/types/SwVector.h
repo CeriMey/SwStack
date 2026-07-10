@@ -49,6 +49,7 @@
 #include <vector>
 #include <initializer_list>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 
 template<typename T>
@@ -83,6 +84,8 @@ public:
      * @details The instance is initialized and prepared for immediate use.
      */
     SwVector(SwVector&&) noexcept = default;
+    SwVector(const container_type& values) : m_data(values) {}
+    SwVector(container_type&& values) noexcept : m_data(std::move(values)) {}
     /**
      * @brief Constructs a `SwVector` instance.
      * @param init Value passed to the method.
@@ -99,7 +102,8 @@ public:
      */
     explicit SwVector(size_type count, const T& value = T()) : m_data(count, value) {}
 
-    template<typename InputIt>
+    template<typename InputIt,
+             typename std::enable_if<!std::is_integral<InputIt>::value, int>::type = 0>
     /**
      * @brief Constructs a `SwVector` instance.
      * @param first Value passed to the method.
@@ -126,6 +130,14 @@ public:
      * @return The requested operator =.
      */
     SwVector& operator=(SwVector&&) noexcept = default;
+    SwVector& operator=(const container_type& values) {
+        m_data = values;
+        return *this;
+    }
+    SwVector& operator=(container_type&& values) noexcept {
+        m_data = std::move(values);
+        return *this;
+    }
     /**
      * @brief Performs the `operator=` operation.
      * @param init Value passed to the method.
@@ -134,6 +146,18 @@ public:
     SwVector& operator=(std::initializer_list<T> init) {
         m_data = init;
         return *this;
+    }
+
+    bool operator==(const SwVector& other) const noexcept {
+        return m_data == other.m_data;
+    }
+
+    bool operator!=(const SwVector& other) const noexcept {
+        return m_data != other.m_data;
+    }
+
+    bool operator<(const SwVector& other) const noexcept {
+        return m_data < other.m_data;
     }
 
     /**
@@ -231,6 +255,8 @@ public:
      * @details This query does not modify the object state.
      */
     bool isEmpty() const noexcept { return m_data.empty(); }
+    /** STL-compatible spelling kept to ease migration of SwStack consumers. */
+    bool empty() const noexcept { return m_data.empty(); }
     /**
      * @brief Performs the `size` operation.
      * @return The current size value.
@@ -276,6 +302,12 @@ public:
 
     void assign(size_type count, const T& value) { m_data.assign(count, value); }
 
+    template<typename InputIt,
+             typename std::enable_if<!std::is_integral<InputIt>::value, int>::type = 0>
+    void assign(InputIt first, InputIt last) {
+        m_data.assign(first, last);
+    }
+
     template<typename... Args>
     /**
      * @brief Performs the `emplace_back` operation.
@@ -289,6 +321,12 @@ public:
 
     iterator insert(iterator pos, const T& value) { return m_data.insert(pos, value); }
     iterator insert(iterator pos, T&& value) { return m_data.insert(pos, std::move(value)); }
+
+    template<typename InputIt,
+             typename std::enable_if<!std::is_integral<InputIt>::value, int>::type = 0>
+    iterator insert(iterator pos, InputIt first, InputIt last) {
+        return m_data.insert(pos, first, last);
+    }
 
     /**
      * @brief Performs the `erase` operation.

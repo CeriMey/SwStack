@@ -61,6 +61,10 @@
 #include <string>
 #include <vector>
 
+#if defined(_WIN32)
+#include "platform/win/SwWindows.h"
+#endif
+
 #include "SwCrypto.h"
 #include "SwList.h"
 
@@ -423,6 +427,28 @@ public:
      * @brief Clears the current object state.
      */
     void clear();
+    /**
+     * @brief Overwrites a writable memory range with zeroes without allowing
+     *        the compiler to remove the stores as dead writes.
+     * @param memory Start of the writable range. A null pointer is a no-op.
+     * @param length Number of bytes to overwrite.
+     *
+     * @details Windows uses SecureZeroMemory. Other targets use writes through
+     * a volatile byte pointer, which provides the portable fallback when no
+     * platform explicit-zero primitive is available. Only this memory range
+     * is scrubbed; independent copies remain the caller's responsibility.
+     */
+    static void secureZero(void* memory, size_t length) noexcept;
+    /**
+     * @brief Securely overwrites the array's live storage, then makes it empty.
+     *
+     * @details Unlike clear(), this method overwrites every constructed vector
+     * element (`buffer_.size()`), including bytes that this class retains after
+     * a logical resize to a smaller size, before reducing the array to its
+     * normal one-byte empty representation. Unused vector capacity and
+     * independent copies are outside the writable range and are not scrubbed.
+     */
+    void secureClear() noexcept;
     /**
      * @brief Performs the `reserve` operation.
      * @param capacity Value passed to the method.
@@ -1057,7 +1083,9 @@ inline SwByteArray::SwByteArray(SwByteArray&& other) noexcept
     buffer_[static_cast<std::ptrdiff_t>(size_)] = '\0';
     other.size_ = 0;
     other.null_ = true;
-    other.buffer_.assign(1, '\0');
+    // Un objet deplace reste un tableau nul valide. Garder son vector vide evite une allocation
+    // minuscule sur chaque move du hotpath; ensureNotNull() le materialisera s'il est reutilise.
+    other.buffer_.clear();
 }
 
 inline SwByteArray& SwByteArray::operator=(const SwByteArray& other) {
@@ -1093,7 +1121,7 @@ inline SwByteArray& SwByteArray::operator=(SwByteArray&& other) noexcept {
     buffer_[static_cast<std::ptrdiff_t>(size_)] = '\0';
     other.size_ = 0;
     other.null_ = true;
-    other.buffer_.assign(1, '\0');
+    other.buffer_.clear();
     return *this;
 }
 
@@ -1244,6 +1272,34 @@ inline void SwByteArray::clear() {
     buffer_.resize(1);
     buffer_[0] = '\0';
     size_ = 0;
+}
+
+inline void SwByteArray::secureZero(void* memory, size_t length) noexcept {
+    if (!memory || length == 0) {
+        return;
+    }
+#if defined(_WIN32)
+    ::SecureZeroMemory(memory, length);
+#else
+    volatile unsigned char* bytes = static_cast<volatile unsigned char*>(memory);
+    while (length > 0) {
+        *bytes++ = 0;
+        --length;
+    }
+#endif
+}
+
+inline void SwByteArray::secureClear() noexcept {
+    if (buffer_.empty()) {
+        size_ = 0;
+        null_ = true;
+        return;
+    }
+    secureZero(buffer_.data(), buffer_.size());
+    buffer_.resize(1);
+    buffer_[0] = '\0';
+    size_ = 0;
+    null_ = false;
 }
 
 inline void SwByteArray::reserve(size_t capacity) {

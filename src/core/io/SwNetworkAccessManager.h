@@ -47,6 +47,7 @@
 
 #include "SwObject.h"
 #include "SwAbstractSocket.h"
+#include "SwByteRingBuffer.h"
 #include "SwSslSocket.h"
 #include "SwTcpSocket.h"
 #include "SwString.h"
@@ -226,14 +227,15 @@ private slots:
 
         swCDebug(kSwLogCategory_SwNetworkAccessManager) << "[SwNetworkAccessManager] readyRead";
         bool received = false;
+        char readBuffer[kSwTcpDefaultReadChunkSize];
         while (true) {
-            SwString chunk(m_socket->read().toStdString());
-            if (chunk.isEmpty()) {
+            const int64_t bytesRead = m_socket->readInto(readBuffer, sizeof(readBuffer));
+            if (bytesRead <= 0) {
                 break;
             }
 
-            swCDebug(kSwLogCategory_SwNetworkAccessManager) << "[SwNetworkAccessManager] chunk size=" << chunk.size();
-            m_buffer.append(chunk.data(), chunk.size());
+            swCDebug(kSwLogCategory_SwNetworkAccessManager) << "[SwNetworkAccessManager] chunk size=" << bytesRead;
+            m_buffer.append(readBuffer, static_cast<size_t>(bytesRead));
             swCDebug(kSwLogCategory_SwNetworkAccessManager) << "[SwNetworkAccessManager] buffer size after append=" << m_buffer.size();
             received = true;
         }
@@ -245,9 +247,9 @@ private slots:
         if (m_socket && m_socket->isRemoteClosed()) {
             if (!m_headersReceived || m_contentLength < 0) {
                 if (!m_buffer.isEmpty()) {
-                    m_responseBody.append(m_buffer.constData(), m_buffer.size());
-                    m_bytesReceived += static_cast<int64_t>(m_buffer.size());
-                    m_buffer.clear();
+                    const size_t buffered = m_buffer.size();
+                    m_buffer.readTo(m_responseBody, buffered);
+                    m_bytesReceived += static_cast<int64_t>(buffered);
                 }
                 finishRequest();
             } else if (m_bytesReceived >= m_contentLength) {
@@ -361,15 +363,15 @@ private slots:
         if (!m_headersReceived) {
             int boundary = m_buffer.indexOf("\r\n\r\n");
             if (boundary < 0) {
-                std::string preview(m_buffer.constData(),
-                                    m_buffer.constData() + std::min<size_t>(m_buffer.size(), 80));
+                const SwByteArray previewBytes = m_buffer.left(std::min<size_t>(m_buffer.size(), 80));
+                std::string preview(previewBytes.constData(), previewBytes.constData() + previewBytes.size());
                 swCDebug(kSwLogCategory_SwNetworkAccessManager) << "[SwNetworkAccessManager] waiting headers, buffer preview=\""
                           << preview << "\" size=" << m_buffer.size();
                 return;
             }
 
             SwByteArray headerBytes = m_buffer.left(boundary);
-            m_buffer.remove(0, boundary + 4);
+            m_buffer.consume(static_cast<size_t>(boundary + 4));
             m_headersReceived = true;
             parseHeaders(SwString(headerBytes));
             swCDebug(kSwLogCategory_SwNetworkAccessManager) << "[SwNetworkAccessManager] parsed headers, remaining buffer=" << m_buffer.size()
@@ -387,8 +389,7 @@ private slots:
                 if (chunk == 0) {
                     break;
                 }
-                m_responseBody.append(m_buffer.constData(), chunk);
-                m_buffer.remove(0, static_cast<int>(chunk));
+                m_buffer.readTo(m_responseBody, chunk);
                 m_bytesReceived += static_cast<int64_t>(chunk);
                 swCDebug(kSwLogCategory_SwNetworkAccessManager) << "[SwNetworkAccessManager] appended chunk=" << chunk
                           << " total=" << m_bytesReceived;
@@ -398,9 +399,9 @@ private slots:
                 finishRequest();
             }
         } else if (!m_buffer.isEmpty()) {
-            m_responseBody.append(m_buffer.constData(), m_buffer.size());
-            m_bytesReceived += static_cast<int64_t>(m_buffer.size());
-            m_buffer.clear();
+            const size_t buffered = m_buffer.size();
+            m_buffer.readTo(m_responseBody, buffered);
+            m_bytesReceived += static_cast<int64_t>(buffered);
         }
     }
 
@@ -443,9 +444,9 @@ private slots:
             if (m_contentLength >= 0 && m_bytesReceived >= m_contentLength) {
                 m_buffer.clear(); // ignore surplus beyond declared length
             } else {
-                m_responseBody.append(m_buffer.constData(), m_buffer.size());
-                m_bytesReceived += static_cast<int64_t>(m_buffer.size());
-                m_buffer.clear();
+                const size_t buffered = m_buffer.size();
+                m_buffer.readTo(m_responseBody, buffered);
+                m_bytesReceived += static_cast<int64_t>(buffered);
             }
         }
 
@@ -531,7 +532,7 @@ private slots:
 
     SwMap<SwString, SwString> m_headerMap;
 
-    SwByteArray m_buffer;
+    SwByteRingBuffer m_buffer;
     SwByteArray m_responseBody;
     SwString m_responseHeaders;
     SwByteArray m_lastResponseBody;

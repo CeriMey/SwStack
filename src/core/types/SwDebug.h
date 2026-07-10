@@ -654,6 +654,7 @@ private:
     std::string formatJsonLine_(const SwDebugContext& ctx,
                                 const std::string& cleanedMsg,
                                 const std::string& timePrefix) const {
+        (void)timePrefix;
         std::string json = "{";
         json += "\"type\":\"log\"";
         json += ",\"level\":\"" + levelToString_(ctx.level) + "\"";

@@ -1,6 +1,9 @@
 #ifndef SWQUICHANDSHAKESERVER_H
 #define SWQUICHANDSHAKESERVER_H
 
+#include "SwHash.h"
+#include "SwMap.h"
+#include "SwVector.h"
 #include "SwByteArray.h"
 #include "SwString.h"
 #include "quic/SwQuicClientHelloBuilder.h"
@@ -21,8 +24,6 @@
 #include "quic/SwTls13Messages.h"
 
 #include <cstdint>
-#include <set>
-#include <vector>
 
 // Server-side driver for the QUIC v1 + TLS 1.3 handshake (RFC 9000 / 9001 /
 // 8446), cipher suite TLS_AES_128_GCM_SHA256, ALPN "h3". Transport agnostic:
@@ -78,6 +79,24 @@ public:
     bool hasPeerTransportParameters() const { return m_hasPeerParams; }
     const SwQuicTransportParameters& peerTransportParameters() const { return m_peerParams; }
 
+    // RFC 8446 section 7.5. Keep exporter_master_secret private and expose
+    // only labelled derivation after the peer Finished has authenticated.
+    bool exportKeyingMaterial(const SwString& label,
+                              const SwByteArray& context,
+                              std::size_t length,
+                              SwByteArray& out,
+                              SwString* error = nullptr) const {
+        if (!m_handshakeComplete || m_exporterMasterSecret.size() != 32) {
+            out.clear();
+            if (error) {
+                *error = SwString("TLS exporter is unavailable before handshake completion");
+            }
+            return false;
+        }
+        return SwTls13KeySchedule::exportKeyingMaterial(
+            m_exporterMasterSecret, label, context, length, out, error);
+    }
+
     SwQuicTransportParameters& localTransportParameters() { return m_localParams; }
 
     // Install the certificate + signing credential the server presents.
@@ -93,10 +112,10 @@ public:
     const SwByteArray& receivedEarlyData() const { return m_receivedEarlyData; }
     // The 0-RTT STREAM frames, preserved so a driver can replay them into the
     // established connection (RFC 9001 4.6: early data resumes on 1-RTT streams).
-    const std::vector<SwQuicFrame>& earlyStreamFrames() const { return m_earlyStreamFrames; }
+    const SwVector<SwQuicFrame>& earlyStreamFrames() const { return m_earlyStreamFrames; }
 
     bool processIncomingDatagram(const SwByteArray& datagram,
-                                 std::vector<SwByteArray>& outDatagrams,
+                                 SwVector<SwByteArray>& outDatagrams,
                                  SwString* error = nullptr) {
         if (m_state == State::Failed) {
             setError_(error, "QUIC handshake server is in the failed state");
@@ -173,6 +192,7 @@ public:
             if (!emitHandshakeConfirmation_(outDatagrams, error)) {
                 return fail_(error);
             }
+            discardCompletedHandshakeSecrets_();
             m_state = State::Complete;
         }
 
@@ -181,6 +201,17 @@ public:
     }
 
 private:
+    class SecretGuard_ {
+    public:
+        explicit SecretGuard_(SwByteArray& secret) : m_secret(secret) {}
+        ~SecretGuard_() { m_secret.secureClear(); }
+
+    private:
+        SecretGuard_(const SecretGuard_&) = delete;
+        SecretGuard_& operator=(const SecretGuard_&) = delete;
+        SwByteArray& m_secret;
+    };
+
     static void setError_(SwString* error, const char* message) {
         if (error) {
             *error = SwString(message);
@@ -192,11 +223,43 @@ private:
         }
     }
     bool fail_(SwString* error) {
+        discardFailedSecrets_();
         m_state = State::Failed;
         if (error && !error->isEmpty()) {
             m_error = *error;
         }
         return false;
+    }
+
+    static void secureClearKeys_(SwQuicInitialKeys& keys) noexcept {
+        keys.secret.secureClear();
+        keys.key.secureClear();
+        keys.iv.secureClear();
+        keys.headerProtectionKey.secureClear();
+    }
+
+    void discardCompletedHandshakeSecrets_() noexcept {
+        m_handshakeSecret.secureClear();
+        m_clientHandshakeTrafficSecret.secureClear();
+        m_serverHandshakeTrafficSecret.secureClear();
+        m_masterSecret.secureClear();
+        m_resumptionPsk.secureClear();
+        secureClearKeys_(m_clientInitialKeys);
+        secureClearKeys_(m_serverInitialKeys);
+        secureClearKeys_(m_earlyKeys);
+        m_hasEarlyKeys = false;
+    }
+
+    void discardFailedSecrets_() noexcept {
+        discardCompletedHandshakeSecrets_();
+        m_exporterMasterSecret.secureClear();
+        m_resumptionMasterSecret.secureClear();
+        m_clientApplicationTrafficSecret.secureClear();
+        m_serverApplicationTrafficSecret.secureClear();
+        secureClearKeys_(m_clientHandshakeKeys);
+        secureClearKeys_(m_serverHandshakeKeys);
+        secureClearKeys_(m_clientApplicationKeys);
+        secureClearKeys_(m_serverApplicationKeys);
     }
 
     static SwByteArray rawMessage_(std::uint8_t type, const SwByteArray& body) {
@@ -256,7 +319,7 @@ private:
         }
         recordClientInitialPn_(header.packetNumber());
 
-        std::vector<SwQuicFrame> frames;
+        SwVector<SwQuicFrame> frames;
         if (!SwQuicFrameCodec::decodeFrames(payload, frames, error)) {
             return false;
         }
@@ -296,17 +359,17 @@ private:
         // Discard a duplicate 0-RTT packet (RFC 9000 12.3 / RFC 9001 9.2): a
         // replayed packet must not be re-counted or re-processed, else a
         // replay flood could trip the max_early_data_size abort (DoS).
-        if (m_clientEarlyPns.find(header.packetNumber()) != m_clientEarlyPns.end()) {
+        if (m_clientEarlyPns.contains(header.packetNumber())) {
             clearError_(error);
             return true;
         }
-        m_clientEarlyPns.insert(header.packetNumber());
+        m_clientEarlyPns.insert(header.packetNumber(), true);
         if (!m_haveClientEarlyLargest || header.packetNumber() > m_clientEarlyLargest) {
             m_clientEarlyLargest = header.packetNumber();
             m_haveClientEarlyLargest = true;
         }
 
-        std::vector<SwQuicFrame> frames;
+        SwVector<SwQuicFrame> frames;
         if (!SwQuicFrameCodec::decodeFrames(payload, frames, error)) {
             return false;
         }
@@ -359,7 +422,7 @@ private:
             return true; // already parsed
         }
 
-        std::vector<SwTls13Messages::HandshakeMessage> messages;
+        SwVector<SwTls13Messages::HandshakeMessage> messages;
         if (!SwTls13Messages::splitMessages(m_clientInitialCrypto, messages, error)) {
             clearError_(error);
             return true; // wait for more CRYPTO
@@ -422,6 +485,7 @@ private:
                 m_ticketStore->lookup(clientHello.pskIdentity);
             if (entry.found) {
                 SwByteArray expectedBinder;
+                SecretGuard_ expectedBinderGuard(expectedBinder);
                 if (SwQuicClientHelloBuilder::computeExpectedBinder(
                         m_clientHelloMessage, entry.resumptionPsk, expectedBinder, nullptr,
                         clientHello.pskBindersTotalLength) &&
@@ -472,7 +536,7 @@ private:
         return true;
     }
 
-    static bool offersProtocol_(const std::vector<SwByteArray>& protocols, const char* name) {
+    static bool offersProtocol_(const SwVector<SwByteArray>& protocols, const char* name) {
         const SwByteArray target(name);
         for (std::size_t i = 0; i < protocols.size(); ++i) {
             if (protocols[i] == target) {
@@ -484,9 +548,10 @@ private:
 
     // ---------------------------------------------------- server flight ---
 
-    bool emitServerFlight_(std::vector<SwByteArray>& outDatagrams, SwString* error) {
+    bool emitServerFlight_(SwVector<SwByteArray>& outDatagrams, SwString* error) {
         // Server ephemeral key + ECDHE.
         SwByteArray serverPrivate;
+        SecretGuard_ serverPrivateGuard(serverPrivate);
         if (!SwQuicRandom::fill(serverPrivate, 32, error) ||
             !SwQuicRandom::fill(m_serverRandom, 32, error)) {
             return false;
@@ -496,9 +561,11 @@ private:
             return false;
         }
         SwByteArray ecdhe;
+        SecretGuard_ ecdheGuard(ecdhe);
         if (!SwQuicX25519::computeSharedSecret(serverPrivate, m_clientX25519Public, ecdhe, error)) {
             return false;
         }
+        serverPrivate.secureClear();
 
         // The server chooses its own connection ID (the client's future DCID).
         SwByteArray scidBytes;
@@ -521,6 +588,7 @@ private:
         // When resuming, seed the Early-Secret with the resumption PSK so the
         // whole schedule matches the client's (RFC 8446 7.1).
         SwByteArray earlySecret;
+        SecretGuard_ earlySecretGuard(earlySecret);
         const bool earlyOk = m_resuming
             ? SwTls13KeySchedule::earlySecretWithPsk(m_resumptionPsk, earlySecret, error)
             : SwTls13KeySchedule::earlySecret(earlySecret, error);
@@ -578,6 +646,7 @@ private:
             SwTls13KeySchedule::transcriptHash(transcriptToCertVerify);
 
         SwByteArray serverFinishedKey;
+        SecretGuard_ serverFinishedKeyGuard(serverFinishedKey);
         SwByteArray serverVerifyData;
         if (!SwTls13KeySchedule::finishedKey(m_serverHandshakeTrafficSecret, serverFinishedKey, error) ||
             !SwTls13KeySchedule::verifyData(serverFinishedKey, thToCertVerify, serverVerifyData, error)) {
@@ -595,7 +664,10 @@ private:
         m_transcriptToServerFinished = transcriptToServerFinished;
 
         SwByteArray masterSecret;
+        SecretGuard_ masterSecretGuard(masterSecret);
         if (!SwTls13KeySchedule::masterSecret(m_handshakeSecret, masterSecret, error) ||
+            !SwTls13KeySchedule::exporterMasterSecret(masterSecret, thToServerFinished,
+                                                      m_exporterMasterSecret, error) ||
             !SwTls13KeySchedule::clientApplicationTrafficSecret(masterSecret, thToServerFinished,
                                                                m_clientApplicationTrafficSecret, error) ||
             !SwTls13KeySchedule::serverApplicationTrafficSecret(masterSecret, thToServerFinished,
@@ -618,7 +690,7 @@ private:
             handshakeCrypto.append(certificateVerify); // omitted on PSK resumption
         }
         handshakeCrypto.append(serverFinished);
-        std::vector<SwByteArray> handshakePackets;
+        SwVector<SwByteArray> handshakePackets;
         if (!buildServerHandshakePackets_(handshakeCrypto, handshakePackets, error)) {
             return false;
         }
@@ -639,7 +711,7 @@ private:
 
         // Datagram 1: Initial + first Handshake packet. Further Handshake
         // packets go in their own datagrams (each already < 1200 bytes).
-        std::vector<SwByteArray> datagrams;
+        SwVector<SwByteArray> datagrams;
         SwByteArray first = initialPacket;
         if (!handshakePackets.empty()) {
             first.append(handshakePackets[0]);
@@ -780,7 +852,7 @@ private:
                                    std::size_t minPlaintextSize,
                                    SwByteArray& outPacket,
                                    SwString* error) {
-        std::vector<SwQuicFrame> frames;
+        SwVector<SwQuicFrame> frames;
         if (m_pendingClientInitialAck && !m_clientInitialPns.empty()) {
             frames.push_back(buildAckFrame_(m_clientInitialPns));
             m_pendingClientInitialAck = false;
@@ -819,7 +891,7 @@ private:
     // certificate chain stays under the path MTU (RFC 9000 19.6). The peer
     // reassembles out-of-order/multi-packet CRYPTO via SwQuicStream.
     bool buildServerHandshakePackets_(const SwByteArray& handshakeCrypto,
-                                      std::vector<SwByteArray>& outPackets,
+                                      SwVector<SwByteArray>& outPackets,
                                       SwString* error) {
         outPackets.clear();
         const std::size_t chunkBytes = 1000; // leaves room for header + tag < 1200
@@ -832,7 +904,7 @@ private:
             const SwByteArray chunk =
                 handshakeCrypto.mid(static_cast<int>(offset), static_cast<int>(take));
 
-            std::vector<SwQuicFrame> frames;
+            SwVector<SwQuicFrame> frames;
             frames.push_back(SwQuicFrame::crypto(offset, chunk));
             SwByteArray plaintext;
             if (!SwQuicFrameCodec::encodeFrames(frames, plaintext, error)) {
@@ -910,7 +982,7 @@ private:
         }
         recordClientHandshakePn_(header.packetNumber());
 
-        std::vector<SwQuicFrame> frames;
+        SwVector<SwQuicFrame> frames;
         if (!SwQuicFrameCodec::decodeFrames(payload, frames, error)) {
             return false;
         }
@@ -931,7 +1003,7 @@ private:
     }
 
     bool tryVerifyClientFinished_(SwString* error) {
-        std::vector<SwTls13Messages::HandshakeMessage> messages;
+        SwVector<SwTls13Messages::HandshakeMessage> messages;
         if (!SwTls13Messages::splitMessages(m_clientHandshakeCrypto, messages, error)) {
             clearError_(error);
             return true; // wait for more
@@ -956,6 +1028,7 @@ private:
         }
 
         SwByteArray clientFinishedKey;
+        SecretGuard_ clientFinishedKeyGuard(clientFinishedKey);
         SwByteArray expected;
         if (!SwTls13KeySchedule::finishedKey(m_clientHandshakeTrafficSecret, clientFinishedKey, error) ||
             !SwTls13KeySchedule::verifyData(clientFinishedKey, m_transcriptHashServerFinished,
@@ -999,6 +1072,7 @@ public:
                                SwByteArray& outNewSessionTicketBody,
                                SwString* error = nullptr) {
         SwByteArray psk;
+        SecretGuard_ pskGuard(psk);
         if (!SwTls13KeySchedule::resumptionPsk(m_resumptionMasterSecret, ticketNonce, psk, error)) {
             return false;
         }
@@ -1020,7 +1094,7 @@ public:
 private:
 
     // Handshake-space ACK of the client Finished + a 1-RTT HANDSHAKE_DONE.
-    bool emitHandshakeConfirmation_(std::vector<SwByteArray>& outDatagrams, SwString* error) {
+    bool emitHandshakeConfirmation_(SwVector<SwByteArray>& outDatagrams, SwString* error) {
         if (m_confirmationSent) {
             clearError_(error);
             return true;
@@ -1031,7 +1105,7 @@ private:
         // Acknowledge the client's Handshake packet(s) (RFC 9000 13.2.1) so the
         // client stops its PTO retransmissions.
         if (!m_clientHandshakePns.empty()) {
-            std::vector<SwQuicFrame> ackFrames;
+            SwVector<SwQuicFrame> ackFrames;
             ackFrames.push_back(buildAckFrame_(m_clientHandshakePns));
             SwByteArray ackPlaintext;
             if (!SwQuicFrameCodec::encodeFrames(ackFrames, ackPlaintext, error)) {
@@ -1054,7 +1128,7 @@ private:
         }
 
         // HANDSHAKE_DONE in a 1-RTT short-header packet (RFC 9000 19.20).
-        std::vector<SwQuicFrame> appFrames;
+        SwVector<SwQuicFrame> appFrames;
         appFrames.push_back(SwQuicFrame::handshakeDone());
         SwByteArray appPlaintext;
         if (!SwQuicFrameCodec::encodeFrames(appFrames, appPlaintext, error)) {
@@ -1106,17 +1180,19 @@ private:
         return SwQuicConnectionId::fromBytes(dcidBytes, outDcid, error);
     }
 
-    SwQuicFrame buildAckFrame_(const std::set<std::uint64_t>& received) {
-        const std::uint64_t largest = *received.rbegin();
+    SwQuicFrame buildAckFrame_(const SwMap<std::uint64_t, bool>& received) {
+        SwMap<std::uint64_t, bool>::const_iterator largestIt = received.end();
+        --largestIt;
+        const std::uint64_t largest = largestIt.key();
         std::uint64_t low = largest;
-        while (low > 0 && received.find(low - 1) != received.end()) {
+        while (low > 0 && received.contains(low - 1)) {
             --low;
         }
         return SwQuicFrame::ack(largest, 0, largest - low);
     }
 
     void recordClientInitialPn_(std::uint64_t pn) {
-        m_clientInitialPns.insert(pn);
+        m_clientInitialPns.insert(pn, true);
         m_pendingClientInitialAck = true;
         if (!m_haveClientInitialLargest || pn > m_clientInitialLargest) {
             m_clientInitialLargest = pn;
@@ -1125,7 +1201,7 @@ private:
     }
 
     void recordClientHandshakePn_(std::uint64_t pn) {
-        m_clientHandshakePns.insert(pn);
+        m_clientHandshakePns.insert(pn, true);
         if (!m_haveClientHandshakeLargest || pn > m_clientHandshakeLargest) {
             m_clientHandshakeLargest = pn;
             m_haveClientHandshakeLargest = true;
@@ -1166,19 +1242,20 @@ private:
     SwByteArray m_serverHandshakeTrafficSecret;
     SwByteArray m_clientApplicationTrafficSecret;
     SwByteArray m_serverApplicationTrafficSecret;
+    SwByteArray m_exporterMasterSecret;
     SwByteArray m_transcriptHashServerFinished;
     SwByteArray m_negotiatedAlpn;
 
     std::uint64_t m_serverInitialPacketNumber;
     std::uint64_t m_serverHandshakePacketNumber;
-    std::set<std::uint64_t> m_clientInitialPns;
+    SwMap<std::uint64_t, bool> m_clientInitialPns;
     bool m_handshakeComplete;
     bool m_pendingClientInitialAck;
     std::uint64_t m_clientInitialLargest = 0;
     bool m_haveClientInitialLargest = false;
     std::uint64_t m_clientHandshakeLargest = 0;
     bool m_haveClientHandshakeLargest = false;
-    std::set<std::uint64_t> m_clientHandshakePns;
+    SwMap<std::uint64_t, bool> m_clientHandshakePns;
     std::uint64_t m_serverApplicationPacketNumber = 0;
     bool m_confirmationSent = false;
     std::uint64_t m_bytesReceivedFromClient = 0;
@@ -1195,12 +1272,26 @@ private:
     SwQuicInitialKeys m_earlyKeys;
     bool m_hasEarlyKeys = false;
     SwByteArray m_receivedEarlyData;
-    std::vector<SwQuicFrame> m_earlyStreamFrames;
+    SwVector<SwQuicFrame> m_earlyStreamFrames;
     std::uint64_t m_maxEarlyDataSize = 0;
     std::uint64_t m_earlyDataBytesReceived = 0;
     std::uint64_t m_clientEarlyLargest = 0;
     bool m_haveClientEarlyLargest = false;
-    std::set<std::uint64_t> m_clientEarlyPns; // 0-RTT replay dedup
+    SwHash<std::uint64_t, bool> m_clientEarlyPns; // 0-RTT replay dedup
+
+#if defined(SW_QUIC_ENABLE_SECRET_LIFETIME_TEST_HOOKS)
+public:
+    bool transientSecretsDiscardedForTest() const {
+        return m_handshakeSecret.isEmpty() &&
+               m_clientHandshakeTrafficSecret.isEmpty() &&
+               m_serverHandshakeTrafficSecret.isEmpty() &&
+               m_masterSecret.isEmpty() &&
+               m_resumptionPsk.isEmpty() &&
+               m_clientInitialKeys.secret.isEmpty() &&
+               m_serverInitialKeys.secret.isEmpty() &&
+               m_earlyKeys.secret.isEmpty();
+    }
+#endif
 };
 
 #endif

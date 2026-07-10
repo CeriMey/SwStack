@@ -1,6 +1,7 @@
 #ifndef SWQUICCLIENTINITIALBUILDER_H
 #define SWQUICCLIENTINITIALBUILDER_H
 
+#include "SwVector.h"
 #include "SwByteArray.h"
 #include "SwString.h"
 #include "quic/SwQuicClientHelloBuilder.h"
@@ -59,7 +60,7 @@ public:
             return false;
         }
 
-        std::vector<SwQuicFrame> frames;
+        SwVector<SwQuicFrame> frames;
         frames.push_back(SwQuicFrame::crypto(0, clientHello));
 
         SwByteArray plaintext;

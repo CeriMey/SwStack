@@ -58,6 +58,9 @@
 #include "SwString.h"
 #include "SwByteArray.h"
 
+#include <algorithm>
+#include <cstring>
+
 class SwIODevice : public SwObject {
     SW_OBJECT(SwIODevice, SwObject)
 public:
@@ -120,6 +123,21 @@ public:
     virtual SwByteArray read(int64_t maxSize = 0) {
         SW_UNUSED(maxSize)
         return SwByteArray();
+    }
+
+    virtual int64_t readInto(char* data, int64_t maxSize) {
+        if (!data || maxSize <= 0) {
+            return 0;
+        }
+
+        SwByteArray bytes = read(maxSize);
+        if (bytes.isEmpty()) {
+            return 0;
+        }
+
+        const size_t toCopy = std::min<size_t>(bytes.size(), static_cast<size_t>(maxSize));
+        std::memcpy(data, bytes.constData(), toCopy);
+        return static_cast<int64_t>(toCopy);
     }
 
     /**

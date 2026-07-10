@@ -48,6 +48,7 @@
 
 #include "http/SwHttpTypes.h"
 #include "http/SwHttpMultipart.h"
+#include "SwByteRingBuffer.h"
 
 class SwHttpParser {
 public:
@@ -99,19 +100,23 @@ public:
      * @return The requested feed.
      */
     FeedStatus feed(const SwByteArray& data, SwList<SwHttpRequest>& outRequests) {
+        return feed(data.constData(), data.size(), outRequests);
+    }
+
+    FeedStatus feed(const char* data, std::size_t size, SwList<SwHttpRequest>& outRequests) {
         bool progressed = false;
-        if (data.isEmpty()) {
+        if (!data || size == 0) {
             return drainAvailable_(outRequests, progressed);
         }
 
         std::size_t offset = 0;
-        while (offset < data.size()) {
-            std::size_t take = data.size() - offset;
+        while (offset < size) {
+            std::size_t take = size - offset;
             const std::size_t maxAppend = maxFeedAppendBytes_();
             if (take > maxAppend) {
                 take = maxAppend;
             }
-            m_buffer.append(data.constData() + offset, take);
+            m_buffer.append(data + offset, take);
             offset += take;
 
             const FeedStatus status = drainAvailable_(outRequests, progressed);
@@ -205,7 +210,7 @@ private:
     };
 
     SwHttpLimits m_limits;
-    SwByteArray m_buffer;
+    SwByteRingBuffer m_buffer;
     State m_state = State::RequestLine;
 
     SwHttpRequest m_currentRequest;
@@ -305,7 +310,7 @@ private:
             return false;
         }
         SwByteArray line = m_buffer.left(eol);
-        m_buffer.remove(0, eol + 2);
+        m_buffer.consume(static_cast<std::size_t>(eol + 2));
         outLine = SwString(line.toStdString());
         return true;
     }
@@ -511,9 +516,11 @@ private:
                     return false;
                 }
             } else {
-                m_currentRequest.body.append(m_buffer.constData(), take);
+                m_buffer.readTo(m_currentRequest.body, take);
             }
-            m_buffer.remove(0, static_cast<int>(take));
+            if (m_multipartStreamingActive) {
+                m_buffer.consume(take);
+            }
             m_contentLengthRemaining -= take;
         }
 
@@ -587,9 +594,11 @@ private:
                 return false;
             }
         } else {
-            m_currentRequest.body.append(m_buffer.constData(), take);
+            m_buffer.readTo(m_currentRequest.body, take);
         }
-        m_buffer.remove(0, static_cast<int>(take));
+        if (m_multipartStreamingActive) {
+            m_buffer.consume(take);
+        }
         m_chunkBytesRemaining -= take;
 
         if (m_chunkBytesRemaining == 0) {
@@ -607,7 +616,7 @@ private:
             setError_(400, "Malformed chunk delimiter");
             return false;
         }
-        m_buffer.remove(0, 2);
+        m_buffer.consume(2);
         m_state = State::ChunkSize;
         return true;
     }

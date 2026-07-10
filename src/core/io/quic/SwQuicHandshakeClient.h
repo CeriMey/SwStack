@@ -1,6 +1,8 @@
 #ifndef SWQUICHANDSHAKECLIENT_H
 #define SWQUICHANDSHAKECLIENT_H
 
+#include "SwMap.h"
+#include "SwVector.h"
 #include "SwByteArray.h"
 #include "SwString.h"
 #include "quic/SwQuicCertificateVerifier.h"
@@ -26,8 +28,6 @@
 #include "quic/SwTls13Messages.h"
 
 #include <cstdint>
-#include <set>
-#include <vector>
 
 // Client-side driver for the QUIC v1 + TLS 1.3 handshake (RFC 9000 / RFC 9001 /
 // RFC 8446), cipher suite TLS_AES_128_GCM_SHA256, ALPN "h3". It is transport
@@ -64,7 +64,7 @@ public:
     bool handshakeComplete() const { return m_handshakeComplete; }
     const SwString& errorString() const { return m_error; }
     const SwByteArray& serverCertificateDer() const { return m_serverCertificateDer; }
-    const std::vector<SwByteArray>& serverCertificateChain() const {
+    const SwVector<SwByteArray>& serverCertificateChain() const {
         return m_serverCertificateChain;
     }
 
@@ -79,20 +79,33 @@ public:
     void setVerifyCertificateChain(bool verify) { m_verifyChain = verify; }
     bool verifyCertificateChain() const { return m_verifyChain; }
 
-    // Confiance déléguée par clé (RFC 7250 / politique applicative) : si un vérificateur est installé,
-    // la décision de confiance sur le certificat/clé publique du serveur lui est déléguée (p. ex.
-    // « cette clé est-elle un membre connu ? ») AU LIEU de la validation de chaîne X.509. La preuve de
-    // possession (CertificateVerify) reste exigée. Cette pile ne connaît pas la politique : elle
-    // fournit les octets présentés (serverCertificateDer) et honore la décision retournée.
-    void setRawPublicKeyVerifier(std::function<bool(const SwByteArray& certificateOrSpki)> verifier) {
-        m_rawPublicKeyVerifier = std::move(verifier);
+    // Transitional X.509/SPKI delegated trust. The peer still sends an X.509
+    // Certificate message; SwQuic strictly extracts and canonically re-encodes
+    // its SubjectPublicKeyInfo, then gives ONLY that SPKI DER to the decision
+    // callback instead of validating the X.509 chain. CertificateVerify still
+    // proves possession. This is SPKI pinning, not RFC 7250 RawPublicKey wire
+    // negotiation. A callback exception rejects the handshake.
+    void setSubjectPublicKeyInfoVerifier(
+            std::function<bool(const SwByteArray& spkiDer)> verifier) {
+        m_subjectPublicKeyInfoVerifier = std::move(verifier);
     }
-    bool hasRawPublicKeyVerifier() const { return static_cast<bool>(m_rawPublicKeyVerifier); }
+    bool hasSubjectPublicKeyInfoVerifier() const {
+        return static_cast<bool>(m_subjectPublicKeyInfoVerifier);
+    }
+
+    // Compatibility aliases for callers using the former seam name. They have
+    // the exact SPKI-only semantics above and do not imply RFC 7250 support.
+    void setRawPublicKeyVerifier(std::function<bool(const SwByteArray& spkiDer)> verifier) {
+        setSubjectPublicKeyInfoVerifier(std::move(verifier));
+    }
+    bool hasRawPublicKeyVerifier() const { return hasSubjectPublicKeyInfoVerifier(); }
 
     // Enable 0-RTT resumption: the next start() sends a resumption ClientHello
     // for this ticket and, if earlyData is non-empty, a 0-RTT packet carrying
     // it (typically an HTTP/3 request on stream 0). The caller must not resume
-    // with a ticket whose allowsEarlyData() is false.
+    // with a ticket whose allowsEarlyData() is false. start() rejects resumption
+    // while an SPKI verifier is installed because tickets are not yet bound to
+    // the authenticated peer identity.
     void setResumption(const SwQuicSessionTicket& ticket,
                        const SwByteArray& earlyData = SwByteArray()) {
         m_resuming = true;
@@ -127,6 +140,24 @@ public:
     const SwQuicConnectionId& destinationConnectionId() const { return m_serverConnectionId; }
     const SwQuicConnectionId& sourceConnectionId() const { return m_sourceConnectionId; }
 
+    // RFC 8446 section 7.5. The exporter master secret never leaves the
+    // handshake driver; callers can only derive labelled keying material.
+    bool exportKeyingMaterial(const SwString& label,
+                              const SwByteArray& context,
+                              std::size_t length,
+                              SwByteArray& out,
+                              SwString* error = nullptr) const {
+        if (!m_handshakeComplete || m_exporterMasterSecret.size() != 32) {
+            out.clear();
+            if (error) {
+                *error = SwString("TLS exporter is unavailable before handshake completion");
+            }
+            return false;
+        }
+        return SwTls13KeySchedule::exportKeyingMaterial(
+            m_exporterMasterSecret, label, context, length, out, error);
+    }
+
     // Generates the ephemeral key material and connection IDs, builds the TLS
     // ClientHello and the protected QUIC Initial datagram to send first.
     bool start(const SwString& serverName,
@@ -134,7 +165,15 @@ public:
                SwString* error = nullptr) {
         m_serverName = serverName;
 
+        if (m_resuming && m_subjectPublicKeyInfoVerifier) {
+            outInitialDatagram.clear();
+            setError_(error,
+                      "TLS resumption is disabled with SPKI pinning until tickets are identity-bound");
+            return fail_(error);
+        }
+
         SwByteArray privateScalar;
+        SecretGuard_ privateScalarGuard(privateScalar);
         if (!SwQuicRandom::fill(privateScalar, 32, error) ||
             !SwQuicRandom::fill(m_clientRandom, 32, error)) {
             return fail_(error);
@@ -216,7 +255,7 @@ public:
     // Consumes one received UDP datagram (which may coalesce several QUIC packets)
     // and appends any datagrams that should be sent in response.
     bool processIncomingDatagram(const SwByteArray& datagram,
-                                 std::vector<SwByteArray>& outDatagrams,
+                                 SwVector<SwByteArray>& outDatagrams,
                                  SwString* error = nullptr) {
         if (m_state == State::Failed) {
             setError_(error, "QUIC handshake client is in the failed state");
@@ -303,6 +342,17 @@ public:
     }
 
 private:
+    class SecretGuard_ {
+    public:
+        explicit SecretGuard_(SwByteArray& secret) : m_secret(secret) {}
+        ~SecretGuard_() { m_secret.secureClear(); }
+
+    private:
+        SecretGuard_(const SecretGuard_&) = delete;
+        SecretGuard_& operator=(const SecretGuard_&) = delete;
+        SwByteArray& m_secret;
+    };
+
     static void setError_(SwString* error, const char* message) {
         if (error) {
             *error = SwString(message);
@@ -314,11 +364,43 @@ private:
         }
     }
     bool fail_(SwString* error) {
+        discardFailedSecrets_();
         m_state = State::Failed;
         if (error && !error->isEmpty()) {
             m_error = *error;
         }
         return false;
+    }
+
+    static void secureClearKeys_(SwQuicInitialKeys& keys) noexcept {
+        keys.secret.secureClear();
+        keys.key.secureClear();
+        keys.iv.secureClear();
+        keys.headerProtectionKey.secureClear();
+    }
+
+    void discardHandshakeSecrets_() noexcept {
+        m_clientPrivateKey.secureClear();
+        m_handshakeSecret.secureClear();
+        m_clientHandshakeTrafficSecret.secureClear();
+        m_serverHandshakeTrafficSecret.secureClear();
+        secureClearKeys_(m_earlyKeys);
+        m_hasEarlyKeys = false;
+        m_resumptionTicket.resumptionPsk.secureClear();
+    }
+
+    void discardFailedSecrets_() noexcept {
+        discardHandshakeSecrets_();
+        m_exporterMasterSecret.secureClear();
+        m_resumptionMasterSecret.secureClear();
+        m_clientApplicationTrafficSecret.secureClear();
+        m_serverApplicationTrafficSecret.secureClear();
+        secureClearKeys_(m_clientInitialKeys);
+        secureClearKeys_(m_serverInitialKeys);
+        secureClearKeys_(m_clientHandshakeKeys);
+        secureClearKeys_(m_serverHandshakeKeys);
+        secureClearKeys_(m_clientApplicationKeys);
+        secureClearKeys_(m_serverApplicationKeys);
     }
 
     static SwByteArray rawMessage_(std::uint8_t type, const SwByteArray& body) {
@@ -346,10 +428,10 @@ private:
         if (!header.sourceConnectionId().isEmpty()) {
             m_serverConnectionId = header.sourceConnectionId();
         }
-        m_receivedInitialPacketNumbers.insert(header.packetNumber());
+        m_receivedInitialPacketNumbers.insert(header.packetNumber(), true);
         m_pendingInitialAck = true;
 
-        std::vector<SwQuicFrame> frames;
+        SwVector<SwQuicFrame> frames;
         if (!SwQuicFrameCodec::decodeFrames(payload, frames, error)) {
             return false;
         }
@@ -373,7 +455,7 @@ private:
             return true;  // already processed
         }
 
-        std::vector<SwTls13Messages::HandshakeMessage> messages;
+        SwVector<SwTls13Messages::HandshakeMessage> messages;
         if (!SwTls13Messages::splitMessages(m_serverInitialCrypto, messages, error)) {
             // Not enough bytes yet is reported as truncation; treat as "wait".
             clearError_(error);
@@ -412,10 +494,12 @@ private:
 
         // ECDHE and the handshake key schedule (transcript = ClientHello || ServerHello).
         SwByteArray ecdhe;
+        SecretGuard_ ecdheGuard(ecdhe);
         if (!SwQuicX25519::computeSharedSecret(m_clientPrivateKey, serverHello.serverX25519Public,
                                                ecdhe, error)) {
             return false;
         }
+        m_clientPrivateKey.secureClear();
 
         m_serverHelloMessage = rawMessage_(0x02, messages[0].body);
         SwByteArray transcriptChSh;
@@ -427,6 +511,7 @@ private:
         // selected it; otherwise the server ran a full handshake and we must
         // match with a zero Early-Secret (RFC 8446 7.1 / 2.2).
         SwByteArray earlySecret;
+        SecretGuard_ earlySecretGuard(earlySecret);
         const bool earlyOk = m_pskAccepted
             ? SwTls13KeySchedule::earlySecretWithPsk(m_resumptionTicket.resumptionPsk,
                                                      earlySecret, error)
@@ -453,10 +538,12 @@ private:
     bool handleServerHandshake_(const SwByteArray& packet,
                                 std::size_t& consumed,
                                 SwString* error) {
-        if (m_serverHandshakeTrafficSecret.isEmpty()) {
+        if (m_serverHandshakeKeys.key.isEmpty()) {
             // Handshake packet arrived (coalesced) before we processed the
             // ServerHello in this same datagram is impossible because Initial
-            // precedes Handshake; if keys are missing we simply cannot read it yet.
+            // precedes Handshake; if packet keys are missing we cannot read it yet.
+            // Do not use the traffic secret as this readiness flag: that secret
+            // is securely discarded once all required packet keys are derived.
             setError_(error, "Handshake packet received before handshake keys were installed");
             return false;
         }
@@ -467,10 +554,10 @@ private:
                                                        &consumed, error)) {
             return false;
         }
-        m_receivedHandshakePacketNumbers.insert(header.packetNumber());
+        m_receivedHandshakePacketNumbers.insert(header.packetNumber(), true);
         m_pendingHandshakeAck = true;
 
-        std::vector<SwQuicFrame> frames;
+        SwVector<SwQuicFrame> frames;
         if (!SwQuicFrameCodec::decodeFrames(payload, frames, error)) {
             return false;
         }
@@ -537,7 +624,7 @@ private:
     bool buildZeroRttPacket_(const SwByteArray& earlyData,
                              SwByteArray& outPacket,
                              SwString* error) {
-        std::vector<SwQuicFrame> frames;
+        SwVector<SwQuicFrame> frames;
         frames.push_back(SwQuicFrame::stream(0, 0, earlyData, true));
         SwByteArray payload;
         if (!SwQuicFrameCodec::encodeFrames(frames, payload, error)) {
@@ -578,8 +665,8 @@ private:
         return true;
     }
 
-    bool tryCompleteHandshake_(std::vector<SwByteArray>& outDatagrams, SwString* error) {
-        std::vector<SwTls13Messages::HandshakeMessage> messages;
+    bool tryCompleteHandshake_(SwVector<SwByteArray>& outDatagrams, SwString* error) {
+        SwVector<SwTls13Messages::HandshakeMessage> messages;
         if (!SwTls13Messages::splitMessages(m_serverHandshakeCrypto, messages, error)) {
             clearError_(error);
             return true;  // wait for more Handshake CRYPTO
@@ -633,6 +720,14 @@ private:
         const SwByteArray thToCertVerify =
             SwTls13KeySchedule::transcriptHash(transcriptToCertVerify);
 
+        // Also cover a verifier installed after start(): an already offered
+        // PSK must never turn into an authentication bypass for SPKI policy.
+        if (m_pskAccepted && m_subjectPublicKeyInfoVerifier) {
+            setError_(error,
+                      "Server selected PSK resumption while SPKI pinning is active");
+            return false;
+        }
+
         // Server authentication (PKI): chain to a trusted root with hostname
         // match, then the CertificateVerify signature over the transcript. On
         // PSK resumption the server authenticates via the PSK and sends no
@@ -643,11 +738,19 @@ private:
                 setError_(error, "Server did not send a certificate chain to verify");
                 return false;
             }
-            if (m_rawPublicKeyVerifier) {
-                // Confiance déléguée : la clé/cert présentée doit être acceptée (ex. appartenance
-                // netmap). La chaîne PKI n'est PAS validée ; la preuve de possession l'est ci-dessous.
-                if (!m_rawPublicKeyVerifier(m_serverCertificateDer)) {
-                    setError_(error, "Server public key rejected by raw-public-key verifier");
+            if (m_subjectPublicKeyInfoVerifier) {
+                SwByteArray spkiDer;
+                try {
+                    if (!SwQuicCertificateVerifier::extractSubjectPublicKeyInfo(
+                            m_serverCertificateDer, spkiDer, error)) {
+                        return false;
+                    }
+                    if (!m_subjectPublicKeyInfoVerifier(spkiDer)) {
+                        setError_(error, "Server SPKI rejected by delegated trust verifier");
+                        return false;
+                    }
+                } catch (...) {
+                    setError_(error, "Server SPKI verifier raised an exception");
                     return false;
                 }
             } else if (m_verifyChain &&
@@ -694,6 +797,7 @@ private:
             return false;
         }
         SwByteArray serverFinishedKey;
+        SecretGuard_ serverFinishedKeyGuard(serverFinishedKey);
         SwByteArray expectedServerVerifyData;
         if (!SwTls13KeySchedule::finishedKey(m_serverHandshakeTrafficSecret, serverFinishedKey, error) ||
             !SwTls13KeySchedule::verifyData(serverFinishedKey, thToCertVerify,
@@ -715,7 +819,10 @@ private:
 
         // 1-RTT application keys.
         SwByteArray masterSecret;
+        SecretGuard_ masterSecretGuard(masterSecret);
         if (!SwTls13KeySchedule::masterSecret(m_handshakeSecret, masterSecret, error) ||
+            !SwTls13KeySchedule::exporterMasterSecret(masterSecret, thToServerFinished,
+                                                      m_exporterMasterSecret, error) ||
             !SwTls13KeySchedule::clientApplicationTrafficSecret(masterSecret, thToServerFinished,
                                                                m_clientApplicationTrafficSecret, error) ||
             !SwTls13KeySchedule::serverApplicationTrafficSecret(masterSecret, thToServerFinished,
@@ -727,6 +834,7 @@ private:
 
         // Build the client Finished and send it in a Handshake packet.
         SwByteArray clientFinishedKey;
+        SecretGuard_ clientFinishedKeyGuard(clientFinishedKey);
         SwByteArray clientVerifyData;
         if (!SwTls13KeySchedule::finishedKey(m_clientHandshakeTrafficSecret, clientFinishedKey, error) ||
             !SwTls13KeySchedule::verifyData(clientFinishedKey, thToServerFinished,
@@ -756,6 +864,7 @@ private:
         // first sends a Handshake packet (this flight). Drop the key material and
         // any pending Initial ACK so no further Initial packet is emitted or read.
         discardInitialKeys_();
+        discardHandshakeSecrets_();
 
         m_handshakeComplete = true;
         m_state = State::Complete;
@@ -767,8 +876,8 @@ private:
     // activity. After this, received Initial packets are ignored.
     void discardInitialKeys_() {
         m_initialKeysDiscarded = true;
-        m_clientInitialKeys = SwQuicInitialKeys();
-        m_serverInitialKeys = SwQuicInitialKeys();
+        secureClearKeys_(m_clientInitialKeys);
+        secureClearKeys_(m_serverInitialKeys);
         m_pendingInitialAck = false;
         m_receivedInitialPacketNumbers.clear();
     }
@@ -797,6 +906,7 @@ public:
             return false;
         }
         SwByteArray psk;
+        SecretGuard_ pskGuard(psk);
         if (!SwTls13KeySchedule::resumptionPsk(m_resumptionMasterSecret, nst.ticketNonce,
                                                psk, error)) {
             return false;
@@ -821,9 +931,12 @@ private:
     bool buildClientHandshakeFlight_(const SwByteArray& clientFinishedMessage,
                                      SwByteArray& outDatagram,
                                      SwString* error) {
-        std::vector<SwQuicFrame> frames;
+        SwVector<SwQuicFrame> frames;
         if (!m_receivedHandshakePacketNumbers.empty()) {
-            const std::uint64_t largest = *m_receivedHandshakePacketNumbers.rbegin();
+            SwMap<std::uint64_t, bool>::const_iterator largestIt =
+                m_receivedHandshakePacketNumbers.end();
+            --largestIt;
+            const std::uint64_t largest = largestIt.key();
             frames.push_back(SwQuicFrame::ack(largest, 0, 0));
         }
         frames.push_back(SwQuicFrame::crypto(0, clientFinishedMessage));
@@ -861,15 +974,17 @@ private:
     bool buildAckOnlyDatagram_(bool handshakeLevel,
                                const SwQuicInitialKeys& keys,
                                std::uint64_t& packetNumberCounter,
-                               const std::set<std::uint64_t>& received,
+                               const SwMap<std::uint64_t, bool>& received,
                                SwByteArray& outDatagram,
                                SwString* error) {
-        const std::uint64_t largest = *received.rbegin();
+        SwMap<std::uint64_t, bool>::const_iterator largestIt = received.end();
+        --largestIt;
+        const std::uint64_t largest = largestIt.key();
         std::uint64_t low = largest;
-        while (received.find(low - 1) != received.end() && low > 0) {
+        while (low > 0 && received.contains(low - 1)) {
             --low;
         }
-        std::vector<SwQuicFrame> frames;
+        SwVector<SwQuicFrame> frames;
         frames.push_back(SwQuicFrame::ack(largest, 0, largest - low));
 
         SwByteArray plaintext;
@@ -997,7 +1112,8 @@ private:
 
     bool m_verifyPeer;
     bool m_verifyChain;
-    std::function<bool(const SwByteArray&)> m_rawPublicKeyVerifier;
+    std::function<bool(const SwByteArray&)> m_subjectPublicKeyInfoVerifier;
+    SwByteArray m_exporterMasterSecret;
     SwByteArray m_resumptionMasterSecret;
 
     // 0-RTT resumption state.
@@ -1013,7 +1129,7 @@ private:
     SwQuicTransportParameters m_peerTransportParameters;
     bool m_hasPeerTransportParameters;
     SwByteArray m_negotiatedAlpn;
-    std::vector<SwByteArray> m_serverCertificateChain;
+    SwVector<SwByteArray> m_serverCertificateChain;
 
     SwByteArray m_handshakeSecret;
     SwByteArray m_clientHandshakeTrafficSecret;
@@ -1024,8 +1140,8 @@ private:
 
     std::uint64_t m_clientInitialPacketNumber;
     std::uint64_t m_clientHandshakePacketNumber;
-    std::set<std::uint64_t> m_receivedInitialPacketNumbers;
-    std::set<std::uint64_t> m_receivedHandshakePacketNumbers;
+    SwMap<std::uint64_t, bool> m_receivedInitialPacketNumbers;
+    SwMap<std::uint64_t, bool> m_receivedHandshakePacketNumbers;
     bool m_pendingInitialAck = false;
     bool m_pendingHandshakeAck = false;
     bool m_initialKeysDiscarded = false;
@@ -1036,6 +1152,20 @@ public:
     // RFC 9001 4.9.1: a client discards its Initial keys as soon as it first sends
     // a Handshake packet. Exposed for tests validating that invariant.
     bool initialKeysDiscarded() const { return m_initialKeysDiscarded; }
+#if defined(SW_QUIC_ENABLE_SECRET_LIFETIME_TEST_HOOKS)
+    bool transientSecretsDiscardedForTest() const {
+        return m_clientPrivateKey.isEmpty() &&
+               m_handshakeSecret.isEmpty() &&
+               m_clientHandshakeTrafficSecret.isEmpty() &&
+               m_serverHandshakeTrafficSecret.isEmpty() &&
+               m_earlyKeys.secret.isEmpty() &&
+               m_earlyKeys.key.isEmpty() &&
+               m_earlyKeys.iv.isEmpty() &&
+               m_earlyKeys.headerProtectionKey.isEmpty() &&
+               !m_hasEarlyKeys &&
+               m_resumptionTicket.resumptionPsk.isEmpty();
+    }
+#endif
 };
 
 #endif

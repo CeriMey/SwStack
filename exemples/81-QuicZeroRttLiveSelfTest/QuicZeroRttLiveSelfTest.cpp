@@ -14,7 +14,7 @@
 
 #include <cstdint>
 #include <iostream>
-#include <vector>
+#include "core/types/SwVector.h"
 
 namespace {
 
@@ -28,13 +28,13 @@ bool requireTrue(bool condition, const char* message) {
 
 bool driveToCompletion(SwQuicHandshakeClient& client, SwQuicHandshakeServer& server,
                        const SwByteArray& firstClientDatagram, SwString* error) {
-    std::vector<SwByteArray> clientToServer;
+    SwVector<SwByteArray> clientToServer;
     clientToServer.push_back(firstClientDatagram);
 
     for (int round = 0; round < 8; ++round) {
-        std::vector<SwByteArray> serverToClient;
+        SwVector<SwByteArray> serverToClient;
         for (std::size_t i = 0; i < clientToServer.size(); ++i) {
-            std::vector<SwByteArray> replies;
+            SwVector<SwByteArray> replies;
             if (!server.processIncomingDatagram(clientToServer[i], replies, error)) {
                 return false;
             }
@@ -44,7 +44,7 @@ bool driveToCompletion(SwQuicHandshakeClient& client, SwQuicHandshakeServer& ser
         }
         clientToServer.clear();
         for (std::size_t i = 0; i < serverToClient.size(); ++i) {
-            std::vector<SwByteArray> replies;
+            SwVector<SwByteArray> replies;
             if (!client.processIncomingDatagram(serverToClient[i], replies, error)) {
                 return false;
             }
@@ -66,7 +66,7 @@ bool testLiveZeroRtt() {
     if (!requireTrue(SwQuicEcdsaCredential::createSelfSigned(SwString("resume.test"),
                                                              credential, &error),
                      "credential generation failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
     SwQuicTicketStore store;
@@ -83,13 +83,13 @@ bool testLiveZeroRtt() {
         SwByteArray initial;
         if (!requireTrue(client.start(SwString("resume.test"), initial, &error),
                          "connection 1 start failed")) {
-            std::cerr << error.toStdString() << std::endl;
+            std::cerr << error << std::endl;
             return false;
         }
         if (!requireTrue(driveToCompletion(client, server, initial, &error),
                          "connection 1 handshake failed")) {
-            std::cerr << "c=" << client.errorString().toStdString()
-                      << " s=" << server.errorString().toStdString() << std::endl;
+            std::cerr << "c=" << client.errorString()
+                      << " s=" << server.errorString() << std::endl;
             return false;
         }
 
@@ -97,7 +97,7 @@ bool testLiveZeroRtt() {
         SwByteArray ticketNonce;
         if (!SwQuicRandom::fill(ticketBytes, 24, &error) ||
             !SwQuicRandom::fill(ticketNonce, 8, &error)) {
-            std::cerr << error.toStdString() << std::endl;
+            std::cerr << error << std::endl;
             return false;
         }
         SwByteArray nstBody;
@@ -106,7 +106,7 @@ bool testLiveZeroRtt() {
                          "ticket issuance failed") ||
             !requireTrue(client.processNewSessionTicket(nstBody, SwByteArray(), ticket, &error),
                          "client NST processing failed")) {
-            std::cerr << error.toStdString() << std::endl;
+            std::cerr << error << std::endl;
             return false;
         }
         if (!requireTrue(ticket.allowsEarlyData(), "ticket does not allow early data")) {
@@ -129,7 +129,7 @@ bool testLiveZeroRtt() {
     SwByteArray resumptionInitial;
     if (!requireTrue(client2.start(SwString("resume.test"), resumptionInitial, &error),
                      "resumption start failed")) {
-        std::cerr << error.toStdString() << std::endl;
+        std::cerr << error << std::endl;
         return false;
     }
     if (!requireTrue(client2.hasEarlyKeys(), "client did not derive early keys")) {
@@ -138,8 +138,24 @@ bool testLiveZeroRtt() {
 
     if (!requireTrue(driveToCompletion(client2, server2, resumptionInitial, &error),
                      "resumption handshake failed")) {
-        std::cerr << "c=" << client2.errorString().toStdString()
-                  << " s=" << server2.errorString().toStdString() << std::endl;
+        std::cerr << "c=" << client2.errorString()
+                  << " s=" << server2.errorString() << std::endl;
+        return false;
+    }
+
+    // Exporters remain symmetric after a PSK resumption and never expose the
+    // underlying exporter_master_secret itself.
+    SwByteArray clientExporter;
+    SwByteArray serverExporter;
+    const SwString exporterLabel("EXPORTER-swstack-resumption");
+    const SwByteArray exporterContext("0-rtt-session");
+    if (!requireTrue(client2.exportKeyingMaterial(exporterLabel, exporterContext, 32,
+                                                  clientExporter, &error),
+                     "resumed client exporter derivation failed") ||
+        !requireTrue(server2.exportKeyingMaterial(exporterLabel, exporterContext, 32,
+                                                  serverExporter, &error),
+                     "resumed server exporter derivation failed")) {
+        std::cerr << error << std::endl;
         return false;
     }
 
@@ -151,6 +167,8 @@ bool testLiveZeroRtt() {
                        "server did not recover the 0-RTT early data") &&
            requireTrue(client2.earlyDataAccepted(),
                        "client was not told early data was accepted") &&
+           requireTrue(clientExporter.size() == 32 && clientExporter == serverExporter,
+                       "resumed client/server exporters differ") &&
            requireTrue(client2.clientApplicationKeys().key == server2.clientApplicationKeys().key &&
                            client2.serverApplicationKeys().key == server2.serverApplicationKeys().key,
                        "resumed 1-RTT keys differ between client and server");

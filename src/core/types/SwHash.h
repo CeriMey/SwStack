@@ -51,6 +51,7 @@
 #include <utility>
 
 #include "SwList.h"
+#include "SwPair.h"
 
 template<typename Key, typename T, typename Hash = std::hash<Key>, typename KeyEqual = std::equal_to<Key>>
 class SwHash {
@@ -369,6 +370,12 @@ public:
         m_hash.insert(std::move(value));
     }
 
+    template<typename... Args>
+    SwPair<iterator, bool> emplace(Args&&... args) {
+        const auto result = m_hash.emplace(std::forward<Args>(args)...);
+        return SwPair<iterator, bool>(result.first, result.second);
+    }
+
     template<typename InputIt>
     /**
      * @brief Performs the `insert` operation.
@@ -423,6 +430,18 @@ public:
         m_hash.erase(key);
     }
 
+    size_type erase(const key_type& key) {
+        return m_hash.erase(key);
+    }
+
+    iterator erase(iterator pos) {
+        return m_hash.erase(pos);
+    }
+
+    iterator erase(iterator first, iterator last) {
+        return m_hash.erase(first, last);
+    }
+
     /**
      * @brief Returns whether the object reports empty.
      * @return `true` when the object reports empty; otherwise `false`.
@@ -430,6 +449,9 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     bool isEmpty() const {
+        return m_hash.empty();
+    }
+    bool empty() const {
         return m_hash.empty();
     }
 

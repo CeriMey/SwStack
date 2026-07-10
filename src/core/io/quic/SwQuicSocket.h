@@ -1,19 +1,27 @@
+#include "SwPair.h"
 #ifndef SWQUICSOCKET_H
 #define SWQUICSOCKET_H
 
 // SwQuicSocket — a real UDP socket + the generic SwQuicEndpoint engine + a dynamic
 // DEMUX registry + the EVENT LOOP wiring, all in one SwObject.
 //
-// It owns a SwUdpSocket and a SwQuicEndpoint. The endpoint's send-sink is wired to
-// m_socket.writeDatagram, so the engine emits real datagrams without knowing about
-// sockets. On the receive side the socket is drained on the readyRead signal (NO
-// manual pump loop): each datagram is matched against a registry of registered
-// byte-prefix handlers (onPrefix); an unmatched datagram is fed to the QUIC engine
-// (onUdpPacket). A periodic SwTimer drives the engine's connection timers (onTick).
+// It owns a SwUdpSocket and a SwQuicEndpoint (both SwObjects). The endpoint's
+// send-sink is wired to m_socket.writeDatagram, so the engine emits real datagrams
+// without knowing about sockets. On the receive side the socket is drained on the
+// readyRead SIGNAL (NO manual pump loop): each datagram is matched against a
+// registry of registered byte-prefix handlers (onPrefix); an unmatched datagram is
+// fed to the QUIC engine (onUdpPacket). A periodic SwTimer drives the engine's
+// connection timers (onTick).
+//
+// Everything above the wire is SIGNAL-DRIVEN: "data on the UDP -> a signal climbs
+// the layers". The caller reaches the engine through endpoint() to call
+// connect()/listen() and to connect slots to its connectionAccepted signal, then
+// to each connection's established/datagramReceived/streamData signals.
 //
 // The class is 100% generic: prefixes and their handlers are supplied by the
 // caller as lambdas — there is no VIGIL/mesh knowledge and no hard-coded byte.
 
+#include "SwVector.h"
 #include "SwObject.h"
 #include "SwString.h"
 #include "SwByteArray.h"
@@ -90,7 +98,7 @@ public:
     // Register a demux prefix: when an inbound datagram starts with these exact
     // bytes, its handler is invoked instead of the QUIC engine. First match wins.
     void onPrefix(const SwByteArray& prefix, PrefixHandler handler) {
-        m_prefixes.push_back(std::make_pair(prefix, std::move(handler)));
+        m_prefixes.push_back(SwMakePair(prefix, std::move(handler)));
     }
 
     // The generic engine, for connect()/listen()/setCallbacks from the caller.
@@ -154,7 +162,7 @@ private:
 
     SwUdpSocket m_socket;
     SwQuicEndpoint m_endpoint;
-    std::vector<std::pair<SwByteArray, PrefixHandler>> m_prefixes;
+    SwVector<SwPair<SwByteArray, PrefixHandler>> m_prefixes;
     SwTimer* m_tickTimer = nullptr;
 };
 
