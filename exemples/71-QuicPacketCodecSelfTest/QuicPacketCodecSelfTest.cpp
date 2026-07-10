@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <iostream>
+#include <limits>
 
 namespace {
 
@@ -338,6 +339,83 @@ bool testStreamReassembly() {
     return requireTrue(!other.receiveFrame(SwQuicFrame::stream(9, 0, SwByteArray("x"), false),
                                            &error),
                        "stream should reject another stream id");
+}
+
+bool testPaddingRunIsAggregated() {
+    SwString error;
+    SwVector<SwQuicFrame> frames;
+    frames.push_back(SwQuicFrame::padding(4096));
+    frames.push_back(SwQuicFrame::ping());
+
+    SwByteArray encoded;
+    if (!requireTrue(SwQuicFrameCodec::encodeFrames(frames, encoded, &error),
+                     "padding run encode failed") ||
+        !requireTrue(encoded.size() == 4097, "padding run wire length mismatch")) {
+        return false;
+    }
+
+    SwVector<SwQuicFrame> decoded;
+    if (!requireTrue(SwQuicFrameCodec::decodeFrames(encoded, decoded, &error),
+                     "padding run decode failed")) {
+        return false;
+    }
+    SwByteArray reencoded;
+    return requireTrue(decoded.size() == 2,
+                       "padding bytes should decode to one aggregate frame") &&
+           requireTrue(decoded[0].type() == SwQuicFrame::Type::Padding,
+                       "aggregate padding frame type mismatch") &&
+           requireTrue(decoded[0].paddingLength() == 4096,
+                       "aggregate padding length mismatch") &&
+           requireTrue(SwQuicFrameCodec::encodeFrames(decoded, reencoded, &error),
+                       "aggregate padding re-encode failed") &&
+           requireTrue(reencoded == encoded,
+                       "aggregate padding did not preserve the wire image");
+}
+
+bool testStreamOverlapAndReassemblyBudgets() {
+    SwString error;
+    SwQuicStream stream(4, 64, 4);
+    if (!requireTrue(stream.receive(4, SwByteArray("efgh"), false, &error),
+                     "overlap tail receive failed") ||
+        !requireTrue(stream.receive(0, SwByteArray("abcdef"), false, &error),
+                     "matching overlap receive failed") ||
+        !requireTrue(stream.receive(8, SwByteArray(), true, &error),
+                     "matching overlap FIN receive failed") ||
+        !requireTrue(stream.bufferedBytes() == 8,
+                     "matching overlap retained duplicate bytes")) {
+        return false;
+    }
+
+    if (!requireTrue(!stream.receive(2, SwByteArray("cX"), false, &error),
+                     "conflicting overlap should be rejected") ||
+        !requireTrue(stream.readContiguous() == SwByteArray("abcdefgh"),
+                     "matching overlap reassembly mismatch") ||
+        !requireTrue(stream.isReceiveComplete(),
+                     "matching overlap FIN was not preserved")) {
+        return false;
+    }
+
+    SwQuicStream byteLimited(8, 4, 4);
+    if (!requireTrue(byteLimited.receive(0, SwByteArray("abcd"), false, &error),
+                     "byte budget setup failed") ||
+        !requireTrue(!byteLimited.receive(4, SwByteArray("e"), true, &error),
+                     "byte budget overflow should be rejected") ||
+        !requireTrue(byteLimited.readContiguous() == SwByteArray("abcd"),
+                     "byte budget rejection mutated retained data") ||
+        !requireTrue(!byteLimited.isReceiveComplete(),
+                     "rejected fragment incorrectly committed FIN")) {
+        return false;
+    }
+
+    SwQuicStream fragmentLimited(12, 64, 2);
+    return requireTrue(fragmentLimited.receive(2, SwByteArray("a"), false, &error),
+                       "fragment budget setup 1 failed") &&
+           requireTrue(fragmentLimited.receive(4, SwByteArray("b"), false, &error),
+                       "fragment budget setup 2 failed") &&
+           requireTrue(!fragmentLimited.receive(6, SwByteArray("c"), false, &error),
+                       "fragment budget overflow should be rejected") &&
+           requireTrue(fragmentLimited.fragmentCount() == 2,
+                       "fragment budget rejection mutated the fragment map");
 }
 
 bool testStreamMapMultiplexing() {
@@ -1317,6 +1395,222 @@ bool pumpTo(SwQuicConnection& from, SwQuicConnection& to, std::uint64_t nowMs, S
     return true;
 }
 
+bool testDriverManagedPathValidationTupleBinding() {
+    SwString error;
+    SwQuicConnection client(SwQuicConnection::Role::Client);
+    SwQuicConnection server(SwQuicConnection::Role::Server);
+    if (!setupAppPair(client, server, SwByteArray("drvcli01"), SwByteArray("drvsrv01"),
+                      &error)) {
+        return false;
+    }
+
+    SwByteArray challenge;
+    const std::uint64_t now = 2600;
+    if (!server.beginPathValidation(now, challenge, &error)) {
+        return false;
+    }
+    if (!requireTrue(server.pathValidated() && server.awaitingPathResponse(),
+                     "driver-managed validation redirected the active path too early")) {
+        return false;
+    }
+
+    SwByteArray challengePacket;
+    if (!server.buildPathControlDatagram(
+            false, challenge, now,
+            (std::numeric_limits<std::uint64_t>::max)(), challengePacket, &error) ||
+        !requireTrue(!challengePacket.isEmpty(), "targeted PATH_CHALLENGE was not built")) {
+        return false;
+    }
+    SwQuicConnection::PathControlEvents clientEvents;
+    bool authenticated = false;
+    if (!client.receiveDatagramWithPathEvents(challengePacket, now, clientEvents,
+                                              &error, &authenticated) ||
+        !requireTrue(authenticated && clientEvents.challenges.size() == 1 &&
+                         clientEvents.challenges[0] == challenge,
+                     "targeted PATH_CHALLENGE was not authenticated/extracted")) {
+        return false;
+    }
+
+    SwByteArray wrongTupleResponse;
+    if (!client.buildPathControlDatagram(
+            true, challenge, now,
+            (std::numeric_limits<std::uint64_t>::max)(), wrongTupleResponse, &error)) {
+        return false;
+    }
+    SwQuicConnection::PathControlEvents serverEvents;
+    if (!server.receiveDatagramWithPathEvents(wrongTupleResponse, now, serverEvents,
+                                              &error, &authenticated) ||
+        !requireTrue(authenticated && serverEvents.responses.size() == 1 &&
+                         server.matchesPathResponse(serverEvents.responses[0]),
+                     "matching PATH_RESPONSE was not extracted")) {
+        return false;
+    }
+    // The driver labels the first response as coming from the old tuple and deliberately
+    // does not commit it. Cryptographic equality alone must not mutate the active path.
+    if (!requireTrue(server.awaitingPathResponse() && server.pathValidated(),
+                     "PATH_RESPONSE committed without driver tuple authorization")) {
+        return false;
+    }
+
+    SwByteArray candidateTupleResponse;
+    if (!client.buildPathControlDatagram(
+            true, challenge, now + 1,
+            (std::numeric_limits<std::uint64_t>::max)(), candidateTupleResponse, &error)) {
+        return false;
+    }
+    serverEvents.clear();
+    if (!server.receiveDatagramWithPathEvents(candidateTupleResponse, now + 1, serverEvents,
+                                              &error, &authenticated) ||
+        serverEvents.responses.empty() ||
+        !server.matchesPathResponse(serverEvents.responses[0])) {
+        return false;
+    }
+    server.commitPathMigration();
+    return requireTrue(server.pathValidated() && !server.awaitingPathResponse(),
+                       "authorized candidate PATH_RESPONSE did not commit migration");
+}
+
+bool testUnopenedLocalStreamIsRejected() {
+    SwString error;
+    SwQuicConnection client(SwQuicConnection::Role::Client);
+    SwQuicConnection server(SwQuicConnection::Role::Server);
+    if (!setupAppPair(client, server, SwByteArray("opencli1"), SwByteArray("opensrv1"),
+                      &error)) {
+        return false;
+    }
+    if (!requireTrue(!server.sendStreamData(0, SwByteArray("premature"), false, &error),
+                     "application send before peer stream open should be rejected")) {
+        return false;
+    }
+    server.queueFrame(SwQuicConnection::Level::Application,
+                      SwQuicFrame::stream(0, 0, SwByteArray("forged"), false));
+
+    SwVector<SwByteArray> wire;
+    if (!requireTrue(server.buildDatagrams(2500, wire, &error),
+                     "unopened-stream packet build failed") ||
+        !requireTrue(!wire.empty(), "unopened-stream packet was not emitted")) {
+        return false;
+    }
+    bool rejected = false;
+    for (std::size_t i = 0; i < wire.size(); ++i) {
+        SwString receiveError;
+        if (!client.receiveDatagram(wire[i], 2500, &receiveError)) rejected = true;
+    }
+    return requireTrue(rejected,
+                       "peer data on a never-opened local stream should be rejected");
+}
+
+bool testStreamSendBackpressureBound() {
+    SwString error;
+    SwQuicConnection connection(SwQuicConnection::Role::Client);
+    connection.setMaxBufferedStreamSendBytes(4);
+    return requireTrue(!connection.sendStreamData(0, SwByteArray("12345"), false, &error),
+                       "stream send buffer accepted data beyond its bound") &&
+           requireTrue(connection.sendStreamData(0, SwByteArray("1234"), true, &error),
+                       "stream send buffer rejected data at its exact bound");
+}
+
+bool testDatagramNegotiationAndQueueBounds() {
+    SwString error;
+    SwQuicConnection sender(SwQuicConnection::Role::Client);
+    SwQuicTransportParameters peer;
+    peer.maxDatagramFrameSize = 0;
+    sender.applyPeerTransportParameters(peer);
+    if (!requireTrue(!sender.queueDatagramFrame(SwByteArray("disabled"), &error),
+                     "DATAGRAM should be rejected when the peer did not negotiate it")) {
+        return false;
+    }
+
+    peer.maxDatagramFrameSize = 64;
+    sender.applyPeerTransportParameters(peer);
+    sender.setMaxPendingDatagramFrames(2);
+    if (!requireTrue(sender.queueDatagramFrame(SwByteArray("one"), &error),
+                     "negotiated DATAGRAM 1 was rejected") ||
+        !requireTrue(sender.queueDatagramFrame(SwByteArray("two"), &error),
+                     "negotiated DATAGRAM 2 was rejected") ||
+        !requireTrue(!sender.queueDatagramFrame(SwByteArray("three"), &error),
+                     "DATAGRAM queue bound was not enforced") ||
+        !requireTrue(!SwQuicConnection(SwQuicConnection::Role::Client)
+                          .queueDatagramFrame(SwByteArray(1200, 'x'), &error),
+                     "oversized DATAGRAM should not fit one QUIC packet")) {
+        return false;
+    }
+
+    // The receive side must enforce its own advertised value as well; a peer
+    // cannot bypass negotiation by putting the extension frame on the wire.
+    SwQuicConnection client(SwQuicConnection::Role::Client);
+    SwQuicConnection server(SwQuicConnection::Role::Server);
+    if (!setupAppPair(client, server, SwByteArray("dgramcl1"), SwByteArray("dgramsv1"),
+                      &error)) {
+        return false;
+    }
+    server.localTransportParameters().maxDatagramFrameSize = 0;
+    if (!requireTrue(client.queueDatagramFrame(SwByteArray("not-negotiated"), &error),
+                     "receive DATAGRAM setup failed")) {
+        return false;
+    }
+    SwVector<SwByteArray> wire;
+    if (!requireTrue(client.buildDatagrams(2600, wire, &error),
+                     "receive DATAGRAM packet build failed")) {
+        return false;
+    }
+    bool rejected = false;
+    for (std::size_t i = 0; i < wire.size(); ++i) {
+        SwString receiveError;
+        if (!server.receiveDatagram(wire[i], 2600, &receiveError)) rejected = true;
+    }
+    return requireTrue(rejected,
+                       "unnegotiated incoming DATAGRAM frame should be rejected");
+}
+
+bool testDatagramReceiveBackpressureAndConnectionIdLimit() {
+    SwString error;
+    SwQuicConnection client(SwQuicConnection::Role::Client);
+    SwQuicConnection server(SwQuicConnection::Role::Server);
+    if (!setupAppPair(client, server, SwByteArray("boundcl1"), SwByteArray("boundsv1"),
+                      &error)) return false;
+
+    server.setMaxReceivedDatagrams(1, 16);
+    if (!requireTrue(client.queueDatagramFrame(SwByteArray("first"), &error) &&
+                         pumpTo(client, server, 2700, &error),
+                     "bounded receive DATAGRAM 1 failed") ||
+        !requireTrue(client.queueDatagramFrame(SwByteArray("second"), &error) &&
+                         pumpTo(client, server, 2701, &error),
+                     "bounded receive DATAGRAM 2 failed") ||
+        !requireTrue(server.pendingDatagramCount() == 1 &&
+                         server.takeDatagram() == SwByteArray("first"),
+                     "DATAGRAM receive backpressure did not drop the excess frame") ||
+        !requireTrue(server.diagnosticStats(SwQuicConnection::Level::Application, 2701)
+                             .droppedReceivedDatagrams == 1,
+                     "DATAGRAM receive drop was not accounted")) {
+        return false;
+    }
+
+    SwQuicConnection cidSender(SwQuicConnection::Role::Client);
+    SwQuicConnection cidReceiver(SwQuicConnection::Role::Server);
+    if (!setupAppPair(cidSender, cidReceiver, SwByteArray("cidclnt1"),
+                      SwByteArray("cidsrvr1"), &error)) return false;
+    const SwByteArray token(16, 't');
+    cidSender.queueFrame(SwQuicConnection::Level::Application,
+                         SwQuicFrame::newConnectionId(
+                             1, 0, SwByteArray("newcid01"), token));
+    if (!requireTrue(pumpTo(cidSender, cidReceiver, 2800, &error),
+                     "first peer connection ID was rejected")) return false;
+    cidSender.queueFrame(SwQuicConnection::Level::Application,
+                         SwQuicFrame::newConnectionId(
+                             2, 0, SwByteArray("newcid02"), token));
+    SwVector<SwByteArray> wire;
+    if (!requireTrue(cidSender.buildDatagrams(2801, wire, &error),
+                     "connection-ID limit packet build failed")) return false;
+    bool rejected = false;
+    for (std::size_t i = 0; i < wire.size(); ++i) {
+        SwString receiveError;
+        if (!cidReceiver.receiveDatagram(wire[i], 2801, &receiveError)) rejected = true;
+    }
+    return requireTrue(rejected,
+                       "peer exceeded active_connection_id_limit without rejection");
+}
+
 // RFC 9000 4.5: a received RESET_STREAM's Final Size is accounted in connection
 // flow control, and a Final Size below already-received data is a FINAL_SIZE_ERROR.
 bool testResetStreamFinalSizeAccounting() {
@@ -1530,6 +1824,8 @@ int main() {
         !testInitialPacketWithFramesRoundTrip() ||
         !testAckTrackerBuildsRanges() ||
         !testStreamReassembly() ||
+        !testPaddingRunIsAggregated() ||
+        !testStreamOverlapAndReassemblyBudgets() ||
         !testStreamMapMultiplexing() ||
         !testConnectionReceivesInitialPacket() ||
         !testUdpLoopbackServerReceivesInitialPacket() ||
@@ -1546,6 +1842,11 @@ int main() {
         !testPacketNumberExpansion() ||
         !testSansIoConnectionLoopback() ||
         !testConnectionMigrationPathValidation() ||
+        !testDriverManagedPathValidationTupleBinding() ||
+        !testUnopenedLocalStreamIsRejected() ||
+        !testStreamSendBackpressureBound() ||
+        !testDatagramNegotiationAndQueueBounds() ||
+        !testDatagramReceiveBackpressureAndConnectionIdLimit() ||
         !testResetStreamFinalSizeAccounting() ||
         !testPersistentCongestionCollapsesWindow() ||
         !testAmplificationWithheldNoPhantomBytes()) {

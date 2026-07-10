@@ -174,7 +174,7 @@ public:
      * @param singleShot If `true`, the timer fires only once and must be manually removed after execution.
      */
     _T(std::function<void()> callback,
-       int interval,
+       std::int64_t interval,
        bool singleShot = false,
        SwFiberLane lane = SwFiberLane::Normal)
         : callback(callback),
@@ -183,7 +183,9 @@ public:
         lane(lane),
         dispatchPending(false),
         cancelled(false),
-        lastExecutionTime(std::chrono::steady_clock::now())
+        nextDeadline(std::chrono::steady_clock::now() +
+                     std::chrono::microseconds(interval > 0 ? interval : 0)),
+        scheduleGeneration(1)
     {}
 
     /**
@@ -191,15 +193,15 @@ public:
      * @return `true` if the timer is ready, otherwise `false`.
      */
     bool isReady() const {
-        auto now = std::chrono::steady_clock::now();
-        return std::chrono::duration_cast<std::chrono::microseconds>(now - lastExecutionTime).count() >= interval;
+        return std::chrono::steady_clock::now() >= nextDeadline;
     }
 
     /**
      * @brief Executes the timer's callback and updates the last execution time.
      */
     void execute() {
-        lastExecutionTime = std::chrono::steady_clock::now();
+        nextDeadline = std::chrono::steady_clock::now() +
+                       std::chrono::microseconds(interval > 0 ? interval : 0);
         callback();
     }
 
@@ -207,10 +209,14 @@ public:
      * @brief Calculates the time remaining until the timer is ready.
      * @return The time in microseconds until the timer is ready, or `0` if the timer is already ready.
      */
-    int timeUntilReady() const {
+    std::int64_t timeUntilReady() const {
         auto now = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - lastExecutionTime).count();
-        return (std::max)(0, interval - static_cast<int>(elapsed));
+        if (now >= nextDeadline) {
+            return 0;
+        }
+        const auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(
+            nextDeadline - now).count();
+        return static_cast<std::int64_t>(remaining);
     }
 
 private:
@@ -219,21 +225,17 @@ private:
             backoffUs = 1000;
         }
 
-        const auto now = std::chrono::steady_clock::now();
-        if (interval > backoffUs) {
-            lastExecutionTime = now - std::chrono::microseconds(interval - backoffUs);
-        } else {
-            lastExecutionTime = now + std::chrono::microseconds(backoffUs - interval);
-        }
+        nextDeadline = std::chrono::steady_clock::now() + std::chrono::microseconds(backoffUs);
     }
 
     std::function<void()> callback; ///< The function to execute when the timer fires.
-    int interval; ///< Interval in microseconds between timer executions.
+    std::int64_t interval; ///< Interval in microseconds between timer executions.
     bool singleShot; ///< Indicates if the timer is single-shot (`true`) or recurring (`false`).
     SwFiberLane lane; ///< Scheduling lane used when the timer callback is dispatched.
     bool dispatchPending; ///< Prevents a ready timer from being enqueued multiple times before execution.
     bool cancelled; ///< Marks a timer removed while a dispatch is still pending.
-    std::chrono::steady_clock::time_point lastExecutionTime; ///< The last time the timer was executed.
+    std::chrono::steady_clock::time_point nextDeadline; ///< Absolute monotonic deadline.
+    std::uint64_t scheduleGeneration; ///< Invalidates stale heap entries after rescheduling.
 };
 
 
@@ -303,6 +305,30 @@ class SwCoreApplication {
     friend class SwEventLoop;
 
 private:
+    struct TimerDeadlineEntry_ {
+        std::chrono::steady_clock::time_point deadline;
+        int timerId;
+        std::uint64_t generation;
+
+        TimerDeadlineEntry_()
+            : timerId(-1), generation(0) {}
+
+        TimerDeadlineEntry_(const std::chrono::steady_clock::time_point& deadlineValue,
+                            int id,
+                            std::uint64_t generationValue)
+            : deadline(deadlineValue), timerId(id), generation(generationValue) {}
+    };
+
+    struct TimerDeadlineLater_ {
+        bool operator()(const TimerDeadlineEntry_& lhs,
+                        const TimerDeadlineEntry_& rhs) const {
+            if (lhs.deadline != rhs.deadline) {
+                return lhs.deadline > rhs.deadline;
+            }
+            return lhs.timerId > rhs.timerId;
+        }
+    };
+
     struct RegistryMutex_ {
 #if defined(_WIN32)
         RegistryMutex_() {
@@ -420,6 +446,13 @@ private:
         SwObject* receiver{nullptr};
         std::unique_ptr<SwEvent> event;
         int priority{0};
+    };
+
+    struct ReliableEvent_ {
+        std::function<void()> callback;
+        SwFiberLane lane;
+
+        ReliableEvent_() : lane(SwFiberLane::Control) {}
     };
 
 protected:
@@ -1013,10 +1046,31 @@ public:
         postEventOnLaneImpl_(std::move(event), lane, true);
     }
 
+    /**
+     * @brief Attempts to enqueue an event and reports backpressure to the caller.
+     *
+     * Unlike postEvent(), this API does not hide a saturated fiber lane.  It is
+     * intended for level-triggered I/O dispatchers and other producers that can
+     * keep their readiness state armed and retry later without losing work.
+     */
+    bool tryPostEvent(std::function<void()> event) {
+        return tryPostEventOnLane(std::move(event), SwFiberLane::Normal);
+    }
+
+    bool tryPostEventOnLane(std::function<void()> event, SwFiberLane lane) {
+        return postEventOnLaneImpl_(std::move(event), lane, true);
+    }
+
+    bool postEventOnLaneReliable(std::function<void()> event,
+                                 SwFiberLane lane = SwFiberLane::Control) {
+        return postEventOnLaneImpl_(std::move(event), lane, true, true);
+    }
+
 private:
     bool postEventOnLaneImpl_(std::function<void()> event,
                               SwFiberLane lane,
-                              bool emitPostedTiming) {
+                              bool emitPostedTiming,
+                              bool queueOnBackpressure = false) {
         std::function<void()> dispatchedEvent = std::move(event);
         const SwList<std::shared_ptr<SwRuntimeProfilerSession>> autoProfilerSessions =
             emitPostedTiming ? autoRuntimeProfilerSessionsSnapshot_() : SwList<std::shared_ptr<SwRuntimeProfilerSession>>();
@@ -1037,15 +1091,124 @@ private:
         bool rejectedByBackpressure = false;
         const bool accepted = fiberPool_.enqueueTask(std::move(dispatchedEvent), lane, &rejectedByBackpressure);
         if (!accepted && rejectedByBackpressure) {
+            if (queueOnBackpressure) {
+                {
+                    RegistryLock_ lock(eventQueueMutex);
+                    if (reliableEventQueue_.size() >= kReliableEventQueueLimit_) {
+                        logFiberPoolBackpressure_(lane);
+                        return false;
+                    }
+                    ReliableEvent_ pending;
+                    pending.callback = std::move(dispatchedEvent);
+                    pending.lane = lane;
+                    reliableEventQueue_.push_back(std::move(pending));
+                    reliableDrainBlocked_.store(false, std::memory_order_release);
+                    fiberWorkBlocked_.store(false, std::memory_order_release);
+                }
+                cv.notify_one();
+                signalWakeup_();
+                return true;
+            }
             logFiberPoolBackpressure_(lane);
             return false;
         }
         if (!accepted) {
             return false;
         }
+        fiberWorkBlocked_.store(false, std::memory_order_release);
         cv.notify_one();
         signalWakeup_();
         return true;
+    }
+
+    void drainReliableEventsLocked_() {
+        std::size_t budget = 64;
+        std::size_t toInspect = reliableEventQueue_.size();
+        bool acceptedAny = false;
+        bool rejectedAny = false;
+        while (budget > 0 && toInspect > 0 && !reliableEventQueue_.empty()) {
+            ReliableEvent_ pending = std::move(reliableEventQueue_.front());
+            reliableEventQueue_.pop_front();
+            --toInspect;
+            bool rejectedByBackpressure = false;
+            if (!fiberPool_.enqueueTask(std::move(pending.callback), pending.lane,
+                                        &rejectedByBackpressure)) {
+                reliableEventQueue_.push_back(std::move(pending));
+                rejectedAny = true;
+                continue;
+            }
+            acceptedAny = true;
+            --budget;
+        }
+        reliableDrainBlocked_.store(rejectedAny && !acceptedAny,
+                                    std::memory_order_release);
+    }
+
+    void queueTimerDeadlineLocked_(int timerId, _T* timer, bool bumpGeneration) {
+        if (!timer || timer->cancelled || timer->dispatchPending) {
+            return;
+        }
+        if (bumpGeneration) {
+            ++timer->scheduleGeneration;
+        }
+        timerDeadlines_.push(TimerDeadlineEntry_{
+            timer->nextDeadline,
+            timerId,
+            timer->scheduleGeneration
+        });
+    }
+
+    void pruneTimerDeadlinesLocked_() {
+        while (!timerDeadlines_.empty()) {
+            const TimerDeadlineEntry_& entry = timerDeadlines_.top();
+            auto it = timers.find(entry.timerId);
+            if (it == timers.end() || !it->second || it->second->cancelled ||
+                it->second->dispatchPending ||
+                it->second->scheduleGeneration != entry.generation) {
+                timerDeadlines_.pop();
+                continue;
+            }
+            break;
+        }
+    }
+
+    void compactTimerDeadlinesLocked_() {
+        const std::size_t liveCount = static_cast<std::size_t>(timers.size());
+        if (timerDeadlines_.size() <= liveCount * 2 + 1024) {
+            return;
+        }
+        decltype(timerDeadlines_) compacted;
+        for (auto it = timers.begin(); it != timers.end(); ++it) {
+            _T* timer = it->second;
+            if (!timer || timer->cancelled || timer->dispatchPending) {
+                continue;
+            }
+            compacted.push(TimerDeadlineEntry_{
+                timer->nextDeadline,
+                it.key(),
+                timer->scheduleGeneration
+            });
+        }
+        timerDeadlines_.swap(compacted);
+    }
+
+    void cleanupPendingTimerDeletesLocked_() {
+        if (processingTimersDepth_ != 0 || pendingTimerDeletes_.isEmpty()) {
+            return;
+        }
+        SwList<_T*> stillPendingDeletes;
+        for (size_t i = 0; i < pendingTimerDeletes_.size(); ++i) {
+            _T* pendingDelete = pendingTimerDeletes_[i];
+            if (!pendingDelete) {
+                continue;
+            }
+            if (pendingDelete->dispatchPending) {
+                stillPendingDeletes.push_back(pendingDelete);
+            } else {
+                delete pendingDelete;
+            }
+        }
+        pendingTimerDeletes_ = std::move(stillPendingDeletes);
     }
 
     void cleanupTimerStorage_() {
@@ -1073,6 +1236,7 @@ private:
                 appendUniqueTimer(pendingTimerDeletes_[i]);
             }
             pendingTimerDeletes_.clear();
+            timerDeadlines_ = decltype(timerDeadlines_)();
             processingTimersDepth_ = 0;
         }
 
@@ -1248,14 +1412,20 @@ public:
      * @return The identifier of the created timer.
      */
     int addTimer(std::function<void()> callback,
-                 int interval,
+                 std::int64_t interval,
                  bool singleShot = false,
                  SwFiberLane lane = SwFiberLane::Normal) {
+        static const std::int64_t kMaximumTimerIntervalUs =
+            100LL * 366LL * 24LL * 60LL * 60LL * 1000000LL;
+        interval = (std::max)(static_cast<std::int64_t>(1),
+                              (std::min)(interval, kMaximumTimerIntervalUs));
         int timerId;
         {
             RegistryLock_ lock(eventQueueMutex);
             timerId = nextTimerId++;
-            timers.insert(timerId, new _T(callback, interval, singleShot, lane));
+            _T* timer = new _T(std::move(callback), interval, singleShot, lane);
+            timers.insert(timerId, timer);
+            queueTimerDeadlineLocked_(timerId, timer, false);
         }
         signalWakeup_();
         return timerId;
@@ -1290,6 +1460,7 @@ public:
                     delete toDelete;
                 }
             }
+            compactTimerDeadlinesLocked_();
         }
         signalWakeup_();
     }
@@ -1335,7 +1506,7 @@ public:
             busyElapsedIteration = 0;
 
             const auto busyStart = std::chrono::steady_clock::now();
-            int sleepDuration = processEvent();
+            std::int64_t sleepDuration = processEvent();
             const auto busyEnd = std::chrono::steady_clock::now();
             busyElapsedIteration = static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::microseconds>(busyEnd - busyStart).count());
@@ -1437,7 +1608,7 @@ public:
      * @remarks This function is designed to be called repeatedly within the main event loop of the
      *          application to drive the event and timer system.
      */
-    int processEvent(bool waitForEvent = false) {
+    std::int64_t processEvent(bool waitForEvent = false) {
 #if !defined(_WIN32)
          if (unixTerminateRequested_().load(std::memory_order_relaxed)) {
              (void)SwCoreApplication::requestQuitAllInstances();
@@ -1447,16 +1618,19 @@ public:
          }
 #endif
          RegistryLock_ lock(eventQueueMutex);
+        drainReliableEventsLocked_();
 
         // Wait for an event if the queue is empty and waiting is allowed
         if (priorityPostedEventQueue_.empty() &&
             postedEventQueue_.empty() &&
+            reliableEventQueue_.empty() &&
             timers.empty() &&
             !fiberPool_.hasWork() &&
             waitForEvent) {
             cv.wait(lock, [this]() {
                 return !priorityPostedEventQueue_.empty() ||
                        !postedEventQueue_.empty() ||
+                       !reliableEventQueue_.empty() ||
                        !timers.empty() ||
                        fiberPool_.hasWork();
             });
@@ -1480,12 +1654,13 @@ public:
 
         lock.unlock();
 
-        int minTimeUntilNext = processTimers();
+        std::int64_t minTimeUntilNext = processTimers();
         if (runFiberPoolWork_()) {
             return 0;
         }
 
         lock.lock();
+        drainReliableEventsLocked_();
 
         if (fiberPool_.hasNonControlWork()) {
             lock.unlock();
@@ -1507,15 +1682,19 @@ public:
         {
             RegistryLock_ queueLock(eventQueueMutex);
             if (!priorityPostedEventQueue_.empty() ||
-                !postedEventQueue_.empty()) {
+                !postedEventQueue_.empty() ||
+                (!reliableEventQueue_.empty() &&
+                 !reliableDrainBlocked_.load(std::memory_order_acquire))) {
                 return 0;
             }
         }
-        if (fiberPool_.hasWork()) {
+        if (fiberPool_.hasWork() && !fiberWorkBlocked_.load(std::memory_order_acquire)) {
             return 0;
         }
         // No pending work: wait indefinitely unless a timer is scheduled.
-        return minTimeUntilNext != (std::numeric_limits<int>::max)() ? minTimeUntilNext : -1;
+        return minTimeUntilNext != (std::numeric_limits<std::int64_t>::max)()
+                   ? minTimeUntilNext
+                   : -1;
     }
 
     /**
@@ -1526,6 +1705,7 @@ public:
         RegistryLock_ lock(eventQueueMutex);
         return !priorityPostedEventQueue_.empty() ||
                !postedEventQueue_.empty() ||
+               !reliableEventQueue_.empty() ||
                !timers.empty() ||
                fiberPool_.hasWork();
     }
@@ -1705,7 +1885,12 @@ protected:
 private:
     bool runFiberPoolWork_() {
         (void)profilerSessionsForCurrentThread_();
-        return fiberPool_.runNextWorkItem();
+        const bool ran = fiberPool_.runNextWorkItem();
+        fiberWorkBlocked_.store(!ran && fiberPool_.hasWork(), std::memory_order_release);
+        if (ran) {
+            reliableDrainBlocked_.store(false, std::memory_order_release);
+        }
+        return ran;
     }
 
     void logFiberPoolBackpressure_(SwFiberLane lane) {
@@ -1741,6 +1926,8 @@ private:
     static bool routeYieldWakeAcrossInstances_(int id, SwFiberLane lane) {
         SwCoreApplication* tlsInstance = SwCoreApplication::instance(false);
         if (tlsInstance && tlsInstance->fiberPool_.unYield(id, lane)) {
+            tlsInstance->fiberWorkBlocked_.store(false, std::memory_order_release);
+            tlsInstance->reliableDrainBlocked_.store(false, std::memory_order_release);
             tlsInstance->signalWakeup_();
             return true;
         }
@@ -1752,6 +1939,8 @@ private:
                 continue;
             }
             if (app->fiberPool_.unYield(id, lane)) {
+                app->fiberWorkBlocked_.store(false, std::memory_order_release);
+                app->reliableDrainBlocked_.store(false, std::memory_order_release);
                 app->signalWakeup_();
                 return true;
             }
@@ -1841,7 +2030,7 @@ protected:
      * @brief Performs the `waitForWork` operation.
      * @param timeoutUs Value passed to the method.
      */
-    void waitForWork(int timeoutUs) { waitForWork_(timeoutUs); }
+    void waitForWork(std::int64_t timeoutUs) { waitForWork_(timeoutUs); }
 
 #if defined(_WIN32)
     // Windows GUI-friendly wait: wakes on either waitables OR pending Win32 messages.
@@ -1849,7 +2038,7 @@ protected:
      * @brief Performs the `waitForWorkGui` operation.
      * @param timeoutUs Value passed to the method.
      */
-    void waitForWorkGui(int timeoutUs) {
+    void waitForWorkGui(std::int64_t timeoutUs) {
         if (!running) return;
 
         std::vector<HANDLE> handles;
@@ -1857,48 +2046,29 @@ protected:
 
         handles.push_back(wakeEvent_);
 
-        HANDLE timeoutTimer = NULL;
         DWORD timeoutMs = INFINITE;
         if (timeoutUs >= 0) {
-            timeoutMs = static_cast<DWORD>((timeoutUs + 999) / 1000);
+            const std::int64_t timeoutMs64 = (timeoutUs + 999) / 1000;
+            timeoutMs = timeoutMs64 > static_cast<std::int64_t>((std::numeric_limits<DWORD>::max)() - 1)
+                            ? ((std::numeric_limits<DWORD>::max)() - 1)
+                            : static_cast<DWORD>(timeoutMs64);
 
-            timeoutTimer = ::CreateWaitableTimerExW(NULL,
-                                                    NULL,
-                                                    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
-                                                    TIMER_ALL_ACCESS);
-            if (!timeoutTimer) {
-                timeoutTimer = ::CreateWaitableTimerW(NULL, TRUE, NULL);
-            }
-
-            if (timeoutTimer) {
+            if (waitTimer_) {
                 LARGE_INTEGER dueTime;
                 const LONGLONG clampedTimeoutUs = timeoutUs > 0 ? static_cast<LONGLONG>(timeoutUs) : 1LL;
                 dueTime.QuadPart = -(clampedTimeoutUs * 10LL);
-                if (::SetWaitableTimer(timeoutTimer, &dueTime, 0, NULL, NULL, FALSE)) {
-                    handles.push_back(timeoutTimer);
+                if (::SetWaitableTimer(waitTimer_, &dueTime, 0, NULL, NULL, FALSE)) {
+                    handles.push_back(waitTimer_);
                     timeoutMs = INFINITE;
-                } else {
-                    ::CloseHandle(timeoutTimer);
-                    timeoutTimer = NULL;
                 }
             }
         }
 
-        auto closeTimeoutTimer = [&]() {
-            if (timeoutTimer) {
-                ::CancelWaitableTimer(timeoutTimer);
-                ::CloseHandle(timeoutTimer);
-                timeoutTimer = NULL;
-            }
-        };
-
         if (handles.empty()) {
-            closeTimeoutTimer();
             return;
         }
         if (handles.size() > MAXIMUM_WAIT_OBJECTS) {
             if (timeoutUs > 0) std::this_thread::sleep_for(std::chrono::microseconds(timeoutUs));
-            closeTimeoutTimer();
             return;
         }
 
@@ -1909,7 +2079,6 @@ protected:
                                                     QS_ALLINPUT);
         // WAIT_OBJECT_0 + handles.size() means: messages are pending; let the GUI pump them.
         (void)r;
-        closeTimeoutTimer();
         return;
     }
 #endif
@@ -2516,54 +2685,51 @@ protected:
      * @return The time in microseconds until the next timer is ready, or the maximum possible integer
      *         if no timers are active.
      */
-    int processTimers() {
-        ++processingTimersDepth_;
-
-        // Timer callbacks can start/stop other timers, which mutates `timers`.
-        // Build a snapshot of ready timers under a single lock, then execute
-        // callbacks outside the lock to avoid holding it during user code.
+    std::int64_t processTimers() {
         struct ReadyTimer {
             int timerId;
             _T* timer;
             bool singleShot;
         };
         std::vector<ReadyTimer> readyTimers;
-        int minTimeUntilNext = (std::numeric_limits<int>::max)();
+        std::int64_t minTimeUntilNext = (std::numeric_limits<std::int64_t>::max)();
 
         {
             RegistryLock_ lock(eventQueueMutex);
-            for (auto it = timers.begin(); it != timers.end(); ) {
-                const int currentTimerId = it.key();
-                _T* currentTimer = it->second;
-                if (!currentTimer) {
-                    ++it;
+            ++processingTimersDepth_;
+            const auto now = std::chrono::steady_clock::now();
+            pruneTimerDeadlinesLocked_();
+            while (!timerDeadlines_.empty() && timerDeadlines_.top().deadline <= now) {
+                const TimerDeadlineEntry_ entry = timerDeadlines_.top();
+                timerDeadlines_.pop();
+
+                auto it = timers.find(entry.timerId);
+                if (it == timers.end() || !it->second) {
+                    pruneTimerDeadlinesLocked_();
                     continue;
                 }
-                if (currentTimer->isReady()) {
-                    if (currentTimer->dispatchPending) {
-                        ++it;
-                        continue;
-                    }
-                    currentTimer->dispatchPending = true;
-                    bool isSingleShot = currentTimer->singleShot;
-                    readyTimers.push_back({currentTimerId, currentTimer, isSingleShot});
-                    if (isSingleShot) {
-                        it = timers.erase(it);
-                        continue;
-                    }
+                _T* currentTimer = it->second;
+                if (currentTimer->cancelled || currentTimer->dispatchPending ||
+                    currentTimer->scheduleGeneration != entry.generation) {
+                    pruneTimerDeadlinesLocked_();
+                    continue;
                 }
-                ++it;
+
+                currentTimer->dispatchPending = true;
+                const bool isSingleShot = currentTimer->singleShot;
+                readyTimers.push_back({entry.timerId, currentTimer, isSingleShot});
+                pruneTimerDeadlinesLocked_();
             }
         }
 
-        // Execute callbacks outside the lock.
         for (auto& rt : readyTimers) {
             const SwFiberLane timerLane = rt.timer->lane;
             const SwList<std::shared_ptr<SwRuntimeProfilerSession>> timerProfilerSessions =
                 autoRuntimeProfilerSessionsSnapshot_();
             if (rt.singleShot) {
                 _T* toDelete = rt.timer;
-                std::function<void()> timerEvent = [this, toDelete, timerProfilerSessions, timerLane]() {
+                const int timerId = rt.timerId;
+                std::function<void()> timerEvent = [this, timerId, toDelete, timerProfilerSessions, timerLane]() {
                     bindTelemetrySessionsToCurrentThread_();
                     bindProfilerSessionsToCurrentThread_(timerProfilerSessions);
                     MultiRuntimeScopedSpan_ timerScope(timerProfilerSessions,
@@ -2571,9 +2737,25 @@ protected:
                                                        "timer",
                                                        timerLane,
                                                        true);
-                    toDelete->dispatchPending = false;
-                    if (!toDelete->cancelled) {
-                        toDelete->execute();
+                    bool ownsTimer = false;
+                    bool shouldExecute = false;
+                    {
+                        RegistryLock_ lock(eventQueueMutex);
+                        toDelete->dispatchPending = false;
+                        auto it = timers.find(timerId);
+                        if (it != timers.end() && it->second == toDelete) {
+                            timers.erase(it);
+                            ownsTimer = true;
+                            shouldExecute = !toDelete->cancelled;
+                        } else {
+                            cleanupPendingTimerDeletesLocked_();
+                        }
+                    }
+                    if (!ownsTimer) {
+                        return;
+                    }
+                    if (shouldExecute) {
+                        executeCallbackSafely_([toDelete]() { toDelete->execute(); });
                     }
                     delete toDelete;
                 };
@@ -2582,10 +2764,12 @@ protected:
                     toDelete->deferAfterRejectedDispatch();
                     toDelete->dispatchPending = false;
                     timers.insert(rt.timerId, toDelete);
+                    queueTimerDeadlineLocked_(rt.timerId, toDelete, true);
                 }
             } else {
                 _T* t = rt.timer;
-                std::function<void()> timerEvent = [this, t, timerProfilerSessions, timerLane]() {
+                const int timerId = rt.timerId;
+                std::function<void()> timerEvent = [this, timerId, t, timerProfilerSessions, timerLane]() {
                     bindTelemetrySessionsToCurrentThread_();
                     bindProfilerSessionsToCurrentThread_(timerProfilerSessions);
                     MultiRuntimeScopedSpan_ timerScope(timerProfilerSessions,
@@ -2593,48 +2777,52 @@ protected:
                                                        "timer",
                                                        timerLane,
                                                        true);
-                    t->dispatchPending = false;
-                    if (!t->cancelled) {
-                        t->execute();
+                    bool shouldExecute = false;
+                    {
+                        RegistryLock_ lock(eventQueueMutex);
+                        auto it = timers.find(timerId);
+                        shouldExecute = it != timers.end() && it->second == t && !t->cancelled;
                     }
+                    if (shouldExecute) {
+                        executeCallbackSafely_([t]() { t->execute(); });
+                    }
+
+                    {
+                        RegistryLock_ lock(eventQueueMutex);
+                        t->dispatchPending = false;
+                        auto it = timers.find(timerId);
+                        if (it != timers.end() && it->second == t && !t->cancelled) {
+                            queueTimerDeadlineLocked_(timerId, t, true);
+                        }
+                        cleanupPendingTimerDeletesLocked_();
+                    }
+                    signalWakeup_();
                 };
                 if (!postEventOnLaneImpl_(std::move(timerEvent), timerLane, false)) {
                     RegistryLock_ lock(eventQueueMutex);
                     t->deferAfterRejectedDispatch();
                     t->dispatchPending = false;
+                    queueTimerDeadlineLocked_(rt.timerId, t, true);
                 }
             }
         }
 
-        // Compute next wake-up under a single lock.
         {
             RegistryLock_ lock(eventQueueMutex);
-            for (const auto& kv : timers) {
-                _T* currentTimer = kv.second;
-                if (!currentTimer) {
-                    continue;
-                }
-                const int timeUntilNext = currentTimer->timeUntilReady();
-                if (timeUntilNext < minTimeUntilNext) {
-                    minTimeUntilNext = timeUntilNext;
+            --processingTimersDepth_;
+            cleanupPendingTimerDeletesLocked_();
+            pruneTimerDeadlinesLocked_();
+            if (!timerDeadlines_.empty()) {
+                const auto now = std::chrono::steady_clock::now();
+                if (timerDeadlines_.top().deadline <= now) {
+                    minTimeUntilNext = 0;
+                } else {
+                    const auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(
+                        timerDeadlines_.top().deadline - now).count();
+                    minTimeUntilNext = static_cast<std::int64_t>(remaining);
                 }
             }
-
-            if (--processingTimersDepth_ == 0 && !pendingTimerDeletes_.isEmpty()) {
-                SwList<_T*> stillPendingDeletes;
-                for (size_t i = 0; i < pendingTimerDeletes_.size(); ++i) {
-                    _T* pendingDelete = pendingTimerDeletes_[i];
-                    if (!pendingDelete) {
-                        continue;
-                    }
-                    if (pendingDelete->dispatchPending) {
-                        stillPendingDeletes.push_back(pendingDelete);
-                    } else {
-                        delete pendingDelete;
-                    }
-                }
-                pendingTimerDeletes_ = stillPendingDeletes;
-            }
+            compactTimerDeadlinesLocked_();
         }
 
         return minTimeUntilNext;
@@ -2671,6 +2859,8 @@ protected:
     SwFiberPool fiberPool_;
     std::atomic<long long> lastFiberPoolBackpressureLogMs_{0};
     std::atomic<long long> suppressedFiberPoolBackpressureLogs_{0};
+    std::atomic<bool> reliableDrainBlocked_{false};
+    std::atomic<bool> fiberWorkBlocked_{false};
 
     /**
      * @brief Returns the current function<void.
@@ -2680,6 +2870,8 @@ protected:
      */
     std::queue<std::function<void()>> eventQueue; ///< Queue of events to process.
     std::deque<PostedObjectEvent_> postedEventQueue_; ///< Object-event queue.
+    enum { kReliableEventQueueLimit_ = 65536 };
+    std::deque<ReliableEvent_> reliableEventQueue_; ///< Bounded non-droppable control completions.
     /**
      * @brief Returns the current function<void.
      * @return The current function<void.
@@ -2711,6 +2903,9 @@ protected:
 
     int nextTimerId = 0; ///< Identifier for the next timer to be created.
     SwMap<int, _T*> timers; ///< Map associating timer IDs with their respective _T objects.
+    std::priority_queue<TimerDeadlineEntry_,
+                        std::vector<TimerDeadlineEntry_>,
+                        TimerDeadlineLater_> timerDeadlines_; ///< O(log N) deadline scheduler.
 
     int processingTimersDepth_ = 0;
     SwList<_T*> pendingTimerDeletes_;
@@ -2732,8 +2927,16 @@ private:
     void initWakeup_() {
 #if defined(_WIN32)
         wakeEvent_ = ::CreateEventA(NULL, FALSE, FALSE, NULL);
+        waitTimer_ = ::CreateWaitableTimerExW(NULL,
+                                              NULL,
+                                              CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                              TIMER_ALL_ACCESS);
+        if (!waitTimer_) {
+            waitTimer_ = ::CreateWaitableTimerW(NULL, TRUE, NULL);
+        }
 #else
         wakeEventFd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+        waitTimerFd_ = ::timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
 #endif
     }
 
@@ -2743,10 +2946,18 @@ private:
             ::CloseHandle(wakeEvent_);
             wakeEvent_ = NULL;
         }
+        if (waitTimer_) {
+            ::CloseHandle(waitTimer_);
+            waitTimer_ = NULL;
+        }
 #else
         if (wakeEventFd_ >= 0) {
             ::close(wakeEventFd_);
             wakeEventFd_ = -1;
+        }
+        if (waitTimerFd_ >= 0) {
+            ::close(waitTimerFd_);
+            waitTimerFd_ = -1;
         }
 #endif
     }
@@ -2763,7 +2974,7 @@ private:
 #endif
     }
 
-    void waitForWork_(int timeoutUs) {
+    void waitForWork_(std::int64_t timeoutUs) {
         if (!running) return;
 
 #if defined(_WIN32)
@@ -2772,29 +2983,20 @@ private:
 
         handles.push_back(wakeEvent_);
 
-        HANDLE timeoutTimer = NULL;
         DWORD timeoutMs = INFINITE;
         if (timeoutUs >= 0) {
-            timeoutMs = static_cast<DWORD>((timeoutUs + 999) / 1000);
+            const std::int64_t timeoutMs64 = (timeoutUs + 999) / 1000;
+            timeoutMs = timeoutMs64 > static_cast<std::int64_t>((std::numeric_limits<DWORD>::max)() - 1)
+                            ? ((std::numeric_limits<DWORD>::max)() - 1)
+                            : static_cast<DWORD>(timeoutMs64);
 
-            timeoutTimer = ::CreateWaitableTimerExW(NULL,
-                                                    NULL,
-                                                    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
-                                                    TIMER_ALL_ACCESS);
-            if (!timeoutTimer) {
-                timeoutTimer = ::CreateWaitableTimerW(NULL, TRUE, NULL);
-            }
-
-            if (timeoutTimer) {
+            if (waitTimer_) {
                 LARGE_INTEGER dueTime;
                 const LONGLONG clampedTimeoutUs = timeoutUs > 0 ? static_cast<LONGLONG>(timeoutUs) : 1LL;
                 dueTime.QuadPart = -(clampedTimeoutUs * 10LL);
-                if (::SetWaitableTimer(timeoutTimer, &dueTime, 0, NULL, NULL, FALSE)) {
-                    handles.push_back(timeoutTimer);
+                if (::SetWaitableTimer(waitTimer_, &dueTime, 0, NULL, NULL, FALSE)) {
+                    handles.push_back(waitTimer_);
                     timeoutMs = INFINITE;
-                } else {
-                    ::CloseHandle(timeoutTimer);
-                    timeoutTimer = NULL;
                 }
             }
         }
@@ -2812,10 +3014,6 @@ private:
                                                  FALSE,
                                                  timeoutMs);
         (void)r;
-        if (timeoutTimer) {
-            ::CancelWaitableTimer(timeoutTimer);
-            ::CloseHandle(timeoutTimer);
-        }
         return;
 #else
         std::vector<pollfd> fds;
@@ -2840,8 +3038,12 @@ private:
         // Use timerfd for high-resolution sleep (hrtimer, ~1ms granularity)
         // instead of poll() timeout which depends on CONFIG_HZ (often 10ms).
         int timerFd = -1;
-        if (timeoutUs >= 0) {
-            timerFd = ::timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+        if (timeoutUs >= 0 && waitTimerFd_ >= 0) {
+            timerFd = waitTimerFd_;
+            uint64_t staleExpirations = 0;
+            while (::read(timerFd, &staleExpirations, sizeof(staleExpirations)) ==
+                   static_cast<ssize_t>(sizeof(staleExpirations))) {
+            }
             if (timerFd >= 0) {
                 struct itimerspec its{};
                 its.it_value.tv_sec  = timeoutUs / 1000000;
@@ -2859,13 +3061,13 @@ private:
 
         // If timerfd was created, poll indefinitely (timerfd handles the timeout).
         // Otherwise fall back to poll() timeout (lower resolution but functional).
+        const std::int64_t pollTimeoutMs = timeoutUs < 0 ? -1 : (timeoutUs + 999) / 1000;
         const int pollTimeout = (timerFd >= 0) ? -1
-                              : (timeoutUs < 0) ? -1
-                              : static_cast<int>((timeoutUs + 999) / 1000);
+                              : (pollTimeoutMs < 0) ? -1
+                              : (pollTimeoutMs > (std::numeric_limits<int>::max)())
+                                    ? (std::numeric_limits<int>::max)()
+                                    : static_cast<int>(pollTimeoutMs);
         const int r = ::poll(fds.data(), static_cast<nfds_t>(fds.size()), pollTimeout);
-
-        // Close the one-shot timerfd now that poll() has returned.
-        if (timerFd >= 0) ::close(timerFd);
 
         if (r <= 0) return;
 
@@ -2895,14 +3097,20 @@ private:
             }
             base = 2;
         }
+        if (timerFd >= 0 && base < fds.size() && (fds[base].revents & POLLIN)) {
+            uint64_t expirations = 0;
+            (void)::read(timerFd, &expirations, sizeof(expirations));
+        }
         (void)base;
 #endif
     }
 
 #if defined(_WIN32)
     HANDLE wakeEvent_{NULL};
+    HANDLE waitTimer_{NULL};
 #else
     int wakeEventFd_{-1};
+    int waitTimerFd_{-1};
 #endif
     SwIoDispatcher ioDispatcher_;
 };

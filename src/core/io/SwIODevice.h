@@ -160,6 +160,20 @@ public:
     }
 
     /**
+     * @brief Queues an arbitrary byte span without forcing callers through a
+     *        temporary SwString.
+     */
+    virtual bool write(const char* data, std::size_t size) {
+        if (size == 0) {
+            return true;
+        }
+        if (!data) {
+            return false;
+        }
+        return write(SwByteArray(data, size));
+    }
+
+    /**
      * @brief Returns whether the object reports open.
      * @return The current open.
      *

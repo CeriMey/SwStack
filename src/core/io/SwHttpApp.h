@@ -49,6 +49,8 @@
 #include "SwHttpServer.h"
 #include "SwMailService.h"
 #include "SwWebSocket.h"
+
+#include <utility>
 #include "auth/SwHttpAuthService.h"
 #include "http/SwHttpContext.h"
 
@@ -932,7 +934,7 @@ public:
             const SwList<SwString> supportedSubprotocols = options.supportedSubprotocols;
             const bool enablePerMessageDeflate = options.enablePerMessageDeflate;
 
-            context.switchToRawSocket([this, requestCopy, handler, supportedSubprotocols, enablePerMessageDeflate](SwAbstractSocket* socket) {
+            context.switchToRawSocket([this, requestCopy, handler, supportedSubprotocols, enablePerMessageDeflate](SwAbstractSocket* socket, SwByteArray initialData) {
                 SwWebSocket* ws = new SwWebSocket(SwWebSocket::ServerRole, &m_server);
                 ws->setSupportedSubprotocols(supportedSubprotocols);
                 ws->setPerMessageDeflateEnabled(enablePerMessageDeflate);
@@ -940,7 +942,11 @@ public:
                     ws->deleteLater();
                 });
 
-                if (!ws->acceptHttpUpgrade(socket, requestCopy.path, requestCopy.headers, requestCopy.isTls)) {
+                if (!ws->acceptHttpUpgrade(socket,
+                                           requestCopy.path,
+                                           requestCopy.headers,
+                                           requestCopy.isTls,
+                                           std::move(initialData))) {
                     ws->deleteLater();
                     return;
                 }

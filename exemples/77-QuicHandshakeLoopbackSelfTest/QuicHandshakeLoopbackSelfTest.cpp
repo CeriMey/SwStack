@@ -8,6 +8,7 @@
 
 #include "core/io/quic/SwQuicHandshakeClient.h"
 #include "core/io/quic/SwQuicHandshakeServer.h"
+#include "core/io/quic/SwQuicCertificateVerifier.h"
 #include "core/io/quic/SwQuicServerCredential.h"
 
 #include <cstdint>
@@ -22,6 +23,36 @@ bool requireTrue(bool condition, const char* message) {
         return false;
     }
     return true;
+}
+
+bool driveHandshake(SwQuicHandshakeClient& client,
+                    SwQuicHandshakeServer& server,
+                    const SwString& serverName,
+                    SwString* error) {
+    SwByteArray initial;
+    if (!client.start(serverName, initial, error)) return false;
+    SwVector<SwByteArray> clientToServer;
+    clientToServer.push_back(initial);
+    for (int round = 0; round < 16; ++round) {
+        SwVector<SwByteArray> serverToClient;
+        for (std::size_t i = 0; i < clientToServer.size(); ++i) {
+            SwVector<SwByteArray> replies;
+            if (!server.processIncomingDatagram(clientToServer[i], replies, error)) return false;
+            for (std::size_t j = 0; j < replies.size(); ++j) {
+                serverToClient.push_back(replies[j]);
+            }
+        }
+        clientToServer.clear();
+        for (std::size_t i = 0; i < serverToClient.size(); ++i) {
+            SwVector<SwByteArray> replies;
+            if (!client.processIncomingDatagram(serverToClient[i], replies, error)) return false;
+            for (std::size_t j = 0; j < replies.size(); ++j) {
+                clientToServer.push_back(replies[j]);
+            }
+        }
+        if (client.handshakeComplete() && server.handshakeComplete()) return true;
+    }
+    return false;
 }
 
 bool testLoopbackHandshake() {
@@ -156,6 +187,59 @@ bool testLoopbackHandshake() {
                        "client did not receive server transport parameters") &&
            requireTrue(server.hasPeerTransportParameters(),
                        "server did not receive client transport parameters");
+}
+
+bool testMutualAuthenticationAndCustomAlpn() {
+    SwString error;
+    SwQuicServerCredential serverCredential;
+    SwQuicServerCredential clientCredential;
+    if (!requireTrue(SwQuicEcdsaCredential::createSelfSigned(
+                         SwString("mtls-server.test"), serverCredential, &error),
+                     "mTLS server credential generation failed") ||
+        !requireTrue(SwQuicEcdsaCredential::createSelfSigned(
+                         SwString("mtls-client.test"), clientCredential, &error),
+                     "mTLS client credential generation failed")) {
+        return false;
+    }
+
+    SwQuicHandshakeClient client;
+    client.setVerifyPeer(true);
+    client.setVerifyCertificateChain(false);
+    client.setCredential(clientCredential);
+    const SwByteArray alpn("swstack-test");
+    if (!requireTrue(client.setApplicationProtocol(alpn),
+                     "client custom ALPN setup failed")) return false;
+
+    SwByteArray policySpki;
+    SwQuicHandshakeServer server;
+    server.setCredential(serverCredential);
+    server.setRequireClientAuthentication(true);
+    server.setClientSubjectPublicKeyInfoVerifier(
+        [&](const SwByteArray& spki) -> bool {
+            policySpki = spki;
+            return !spki.isEmpty();
+        });
+    if (!requireTrue(server.setApplicationProtocol(alpn),
+                     "server custom ALPN setup failed") ||
+        !requireTrue(client.authenticatedServerSubjectPublicKeyInfo().isEmpty() &&
+                         server.authenticatedClientSubjectPublicKeyInfo().isEmpty(),
+                     "authenticated identity leaked before Finished")) {
+        return false;
+    }
+
+    if (!requireTrue(driveHandshake(client, server, SwString("mtls-server.test"), &error),
+                     "mutually authenticated custom-ALPN handshake failed")) {
+        std::cerr << error << std::endl;
+        return false;
+    }
+
+    return requireTrue(client.negotiatedAlpn() == alpn && server.negotiatedAlpn() == alpn,
+                       "custom ALPN was not negotiated end-to-end") &&
+           requireTrue(!client.authenticatedServerSubjectPublicKeyInfo().isEmpty(),
+                       "client did not publish authenticated server identity") &&
+           requireTrue(!policySpki.isEmpty() &&
+                           server.authenticatedClientSubjectPublicKeyInfo() == policySpki,
+                       "server did not publish the policy-approved client identity");
 }
 
 // RFC 8446 4.4.2.2: the server MUST NOT sign CertificateVerify with a scheme the
@@ -325,6 +409,7 @@ bool testClientDiscardsInitialKeys() {
 
 int main() {
     if (!testLoopbackHandshake() ||
+        !testMutualAuthenticationAndCustomAlpn() ||
         !testServerRejectsUnofferedSignatureScheme() ||
         !testClientDiscardsInitialKeys()) {
         return 1;

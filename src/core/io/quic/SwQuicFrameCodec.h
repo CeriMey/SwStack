@@ -19,7 +19,9 @@ public:
                             SwString* error = nullptr) {
         switch (frame.type()) {
         case SwQuicFrame::Type::Padding:
-            appendByte_(outPayload, 0x00);
+            for (std::size_t i = 0; i < frame.paddingLength(); ++i) {
+                appendByte_(outPayload, 0x00);
+            }
             break;
         case SwQuicFrame::Type::Ping:
             appendByte_(outPayload, 0x01);
@@ -227,6 +229,18 @@ public:
         outFrames.clear();
         std::size_t offset = 0;
         while (offset < payload.size()) {
+            // PADDING is commonly hundreds of consecutive zero bytes in a
+            // 1200-byte Initial. Preserve its exact wire length in one frame
+            // instead of allocating one heavyweight SwQuicFrame per byte.
+            if (static_cast<std::uint8_t>(payload.constData()[offset]) == 0) {
+                const std::size_t start = offset;
+                do {
+                    ++offset;
+                } while (offset < payload.size() &&
+                         static_cast<std::uint8_t>(payload.constData()[offset]) == 0);
+                outFrames.push_back(SwQuicFrame::padding(offset - start));
+                continue;
+            }
             SwQuicFrame frame = SwQuicFrame::padding();
             if (!decodeFrame(payload, offset, frame, error)) {
                 return false;

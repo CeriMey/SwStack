@@ -55,6 +55,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 
 class SwAbstractSocket;
 
@@ -65,13 +66,15 @@ struct SwHttpLimits {
     std::size_t maxBodyBytes = 8 * 1024 * 1024;
     std::size_t maxChunkSize = 2 * 1024 * 1024;
     std::size_t maxPipelinedRequests = 16;
-    std::size_t maxConnections = 0;
-    std::size_t maxInFlightRequests = 0;
-    std::size_t maxThreadPoolQueuedDispatches = 0;
+    std::size_t maxPendingRequestBytes = 16 * 1024 * 1024;
+    std::size_t maxPendingRequestBytesGlobal = 256 * 1024 * 1024;
+    std::size_t maxConnections = 4096;
+    std::size_t maxInFlightRequests = 1024;
+    std::size_t maxThreadPoolQueuedDispatches = 1024;
     std::size_t maxMultipartParts = 256;
     std::size_t maxMultipartPartHeadersBytes = 16 * 1024;
     std::size_t maxMultipartFieldBytes = 2 * 1024 * 1024;
-    bool enableMultipartFileStreaming = false;
+    bool enableMultipartFileStreaming = true;
     SwString multipartTempDirectory = "http_multipart_tmp";
 };
 
@@ -80,6 +83,7 @@ struct SwHttpTimeouts {
     int bodyReadTimeoutMs = 30 * 1000;
     int keepAliveIdleTimeoutMs = 15 * 1000;
     int writeTimeoutMs = 30 * 1000;
+    int routeTimeoutMs = 30 * 1000;
 };
 
 struct SwHttpStaticOptions {
@@ -165,6 +169,11 @@ struct SwHttpResponse {
      * @return The requested function<void.
      */
     std::function<void(SwAbstractSocket*)> onSwitchToRawSocket;
+    // Preferred handover hook for upgraded protocols. Bytes already read past
+    // the HTTP request are transferred with the socket so a coalesced first
+    // WebSocket/tunnel frame is not dropped. The legacy hook above remains
+    // available for source compatibility.
+    std::function<void(SwAbstractSocket*, SwByteArray)> onSwitchToRawSocketWithInitialData;
 };
 
 inline SwString swHttpStatusReason(int status) {
@@ -178,6 +187,7 @@ inline SwString swHttpStatusReason(int status) {
     case 302: return "Found";
     case 304: return "Not Modified";
     case 400: return "Bad Request";
+    case 417: return "Expectation Failed";
     case 403: return "Forbidden";
     case 404: return "Not Found";
     case 405: return "Method Not Allowed";
@@ -237,6 +247,7 @@ inline bool swHttpParseHexSize(const SwString& text, std::size_t& outValue) {
     }
 
     std::size_t i = 0;
+    bool sawDigit = false;
     for (; i < trimmed.size(); ++i) {
         char c = trimmed[i];
         if (c == ';') {
@@ -246,13 +257,14 @@ inline bool swHttpParseHexSize(const SwString& text, std::size_t& outValue) {
         if (hex < 0) {
             return false;
         }
-        std::size_t next = outValue * 16u + static_cast<std::size_t>(hex);
-        if (next < outValue) {
+        const std::size_t digit = static_cast<std::size_t>(hex);
+        if (outValue > ((std::numeric_limits<std::size_t>::max)() - digit) / 16u) {
             return false;
         }
-        outValue = next;
+        outValue = outValue * 16u + digit;
+        sawDigit = true;
     }
-    return true;
+    return sawDigit;
 }
 
 inline bool swHttpPercentDecode(const SwString& input, SwString& output, bool plusAsSpace) {

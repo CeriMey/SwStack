@@ -5,6 +5,7 @@
 #include "SwByteArray.h"
 #include "SwString.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <utility>
 #include <vector>
@@ -40,8 +41,10 @@ public:
         std::uint64_t rangeLength;
     };
 
-    static SwQuicFrame padding() {
-        return SwQuicFrame(Type::Padding);
+    static SwQuicFrame padding(std::size_t length = 1) {
+        SwQuicFrame frame(Type::Padding);
+        frame.m_paddingLength = length == 0 ? 1 : length;
+        return frame;
     }
 
     static SwQuicFrame ping() {
@@ -113,6 +116,18 @@ public:
         frame.m_streamId = streamId;
         frame.m_offset = offset;
         frame.m_data = data;
+        frame.m_fin = fin;
+        return frame;
+    }
+
+    static SwQuicFrame stream(std::uint64_t streamId,
+                              std::uint64_t offset,
+                              SwByteArray&& data,
+                              bool fin) {
+        SwQuicFrame frame(Type::Stream);
+        frame.m_streamId = streamId;
+        frame.m_offset = offset;
+        frame.m_data = std::move(data);
         frame.m_fin = fin;
         return frame;
     }
@@ -223,6 +238,7 @@ public:
     }
 
     Type type() const { return m_type; }
+    std::size_t paddingLength() const { return m_paddingLength; }
 
     std::uint64_t largestAcknowledged() const { return m_largestAcknowledged; }
     std::uint64_t ackDelay() const { return m_ackDelay; }
@@ -256,6 +272,7 @@ public:
 private:
     explicit SwQuicFrame(Type type)
         : m_type(type),
+          m_paddingLength(1),
           m_largestAcknowledged(0),
           m_ackDelay(0),
           m_firstAckRange(0),
@@ -277,6 +294,7 @@ private:
     }
 
     Type m_type;
+    std::size_t m_paddingLength;
     std::uint64_t m_largestAcknowledged;
     std::uint64_t m_ackDelay;
     std::uint64_t m_firstAckRange;

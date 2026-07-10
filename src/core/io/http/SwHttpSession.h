@@ -53,6 +53,7 @@
 #include "SwTimer.h"
 #include "SwFile.h"
 #include "SwDebug.h"
+#include "SwDequeue.h"
 
 #include "http/SwHttpTypes.h"
 #include "http/SwHttpParser.h"
@@ -60,8 +61,12 @@
 #include "http/SwHttpMultipart.h"
 
 #include <chrono>
+#include <atomic>
 #include <cstdio>
 #include <functional>
+#include <limits>
+#include <memory>
+#include <utility>
 
 static constexpr const char* kSwLogCategory_SwHttpSession = "sw.core.io.swhttpsession";
 
@@ -69,7 +74,7 @@ class SwHttpSession : public SwObject {
     SW_OBJECT(SwHttpSession, SwObject)
 
 public:
-    using SwHttpResponseCallback = std::function<void(const SwHttpResponse&)>;
+    using SwHttpResponseCallback = std::function<void(SwHttpResponse)>;
     using SwHttpRequestHandler = std::function<void(const SwHttpRequest&, const SwHttpResponseCallback&)>;
 
     /**
@@ -108,16 +113,18 @@ public:
         connect(m_socket, &SwAbstractSocket::disconnected, this, &SwHttpSession::onDisconnected_);
         connect(m_socket, &SwAbstractSocket::errorOccurred, this, &SwHttpSession::onError_);
         connect(m_socket, &SwAbstractSocket::writeFinished, this, &SwHttpSession::onWriteFinished_);
-
-        m_timeoutWatch = new SwTimer(200, this);
-        connect(m_timeoutWatch, &SwTimer::timeout, this, &SwHttpSession::onTimeoutWatch_);
-        m_timeoutWatch->start();
+        connect(m_socket, &SwIODevice::readyWrite, this, &SwHttpSession::onReadyWrite_);
 
         auto now = std::chrono::steady_clock::now();
         m_lastReadAt = now;
         m_requestStartedAt = now;
         m_waitingResponseAt = now;
         m_writeStartedAt = now;
+
+        m_timeoutWatch = new SwTimer(this);
+        m_timeoutWatch->setSingleShot(true);
+        connect(m_timeoutWatch, &SwTimer::timeout, this, &SwHttpSession::onTimeoutWatch_);
+        scheduleTimeout_();
     }
 
     /**
@@ -157,6 +164,13 @@ public:
         m_requestHandler = handler;
     }
 
+    void setPendingBytesBudgetCallbacks(
+        const std::function<bool(std::size_t)>& reserve,
+        const std::function<void(std::size_t)>& release) {
+        m_reservePendingBytes = reserve;
+        m_releasePendingBytes = release;
+    }
+
     /**
      * @brief Closes the session handled by the object.
      *
@@ -173,6 +187,7 @@ public:
 private:
     enum class SendState {
         Idle,
+        SendingBody,
         SendingFile,
         SendingChunked
     };
@@ -184,7 +199,10 @@ private:
     SwHttpTimeouts m_timeouts;
     SwTimer* m_timeoutWatch = nullptr;
 
-    SwList<SwHttpRequest> m_pendingRequests;
+    SwDequeue<SwHttpRequest> m_pendingRequests;
+    SwDequeue<std::size_t> m_pendingRequestSizes;
+    std::size_t m_pendingRequestBytes = 0;
+    std::size_t m_activeRequestReservedBytes = 0;
     bool m_handlingResponse = false;
     bool m_waitingAsyncResponse = false;
     bool m_closeAfterWrite = false;
@@ -193,20 +211,30 @@ private:
     bool m_inSocketWrite = false;
     bool m_writeFinishedDeferred = false;
     bool m_deferredWriteScheduled = false;
+    bool m_readContinuationScheduled = false;
+    bool m_readBackpressured = false;
     bool m_handoverAfterWrite = false;
+    bool m_expectContinuePending = false;
 
     SendState m_sendState = SendState::Idle;
     SwFile* m_streamFile = nullptr;
     std::size_t m_streamBytesRemaining = 0;
     std::size_t m_streamChunkBytes = 64 * 1024;
-    SwList<SwByteArray> m_chunkParts;
-    std::size_t m_chunkPartIndex = 0;
+    SwDequeue<SwByteArray> m_chunkParts;
     bool m_chunkTerminatorSent = false;
+    SwByteArray m_bodyPayload;
+    std::size_t m_bodyOffset = 0;
+    SwByteArray m_deferredSocketWrite;
+    bool m_waitingSocketWritable = false;
     SwList<SwString> m_requestTempFiles;
     SwHttpRequest m_activeRequest;
     std::function<void(SwAbstractSocket*)> m_socketHandoverCallback;
+    std::function<void(SwAbstractSocket*, SwByteArray)> m_socketHandoverWithDataCallback;
+    SwByteArray m_handoverInitialData;
 
     SwHttpRequestHandler m_requestHandler;
+    std::function<bool(std::size_t)> m_reservePendingBytes;
+    std::function<void(std::size_t)> m_releasePendingBytes;
     std::function<void(SwHttpSession*)> m_onFinished;
     SwList<std::function<void()>> m_cleanupHooks;
     bool m_isTls = false;
@@ -216,19 +244,38 @@ private:
     std::chrono::steady_clock::time_point m_requestStartedAt;
     std::chrono::steady_clock::time_point m_waitingResponseAt;
     std::chrono::steady_clock::time_point m_writeStartedAt;
+    std::chrono::steady_clock::time_point m_timeoutDeadline;
+    bool m_timeoutArmed = false;
 
 private slots:
     void onReadyRead_() {
+        m_readContinuationScheduled = false;
         if (!m_socket || m_cleaned) {
             return;
         }
 
+        if (readBackpressureRequired_()) {
+            m_readBackpressured = true;
+            return;
+        }
+        m_readBackpressured = false;
+
         char readBuffer[kSwTcpDefaultReadChunkSize];
-        while (true) {
-            const int64_t bytesRead = m_socket->readInto(readBuffer, sizeof(readBuffer));
+        static const std::size_t kReadBudgetBytes = 256 * 1024;
+        static const std::size_t kReadBudgetOperations = 32;
+        std::size_t bytesThisTurn = 0;
+        std::size_t operationsThisTurn = 0;
+        while (bytesThisTurn < kReadBudgetBytes &&
+               operationsThisTurn < kReadBudgetOperations &&
+               !readBackpressureRequired_()) {
+            const std::size_t remainingBudget = kReadBudgetBytes - bytesThisTurn;
+            const std::size_t readCapacity = (std::min)(sizeof(readBuffer), remainingBudget);
+            const int64_t bytesRead = m_socket->readInto(readBuffer, readCapacity);
+            ++operationsThisTurn;
             if (bytesRead <= 0) {
                 break;
             }
+            bytesThisTurn += static_cast<std::size_t>(bytesRead);
 
             auto now = std::chrono::steady_clock::now();
             if (!m_parser.hasPartialRequest()) {
@@ -240,12 +287,18 @@ private slots:
             SwHttpParser::FeedStatus status =
                 m_parser.feed(readBuffer, static_cast<std::size_t>(bytesRead), parsedRequests);
             if (status == SwHttpParser::FeedStatus::Error) {
+                for (std::size_t i = 0; i < parsedRequests.size(); ++i) {
+                    cleanupTempFilesForRequest_(parsedRequests[i]);
+                }
                 int parseStatus = m_parser.errorStatus();
                 if (parseStatus <= 0) {
                     parseStatus = 400;
                 }
                 sendErrorAndClose_(parseStatus, m_parser.errorMessage());
                 return;
+            }
+            if (m_parser.takeContinueNeeded()) {
+                m_expectContinuePending = true;
             }
 
             SwTcpSocket* tcpSocket = dynamic_cast<SwTcpSocket*>(m_socket);
@@ -256,8 +309,32 @@ private slots:
                 parsedRequests[i].localPort = m_localPort;
                 parsedRequests[i].peerAddress = peerAddress;
                 parsedRequests[i].peerPort = peerPort;
-                m_pendingRequests.append(parsedRequests[i]);
-                if (m_pendingRequests.size() > m_limits.maxPipelinedRequests) {
+
+                const std::size_t requestBytes = requestBufferedBytes_(parsedRequests[i]);
+                if (m_limits.maxPendingRequestBytes > 0 &&
+                    (requestBytes > m_limits.maxPendingRequestBytes ||
+                     m_pendingRequestBytes > m_limits.maxPendingRequestBytes - requestBytes)) {
+                    for (std::size_t j = i; j < parsedRequests.size(); ++j) {
+                        cleanupTempFilesForRequest_(parsedRequests[j]);
+                    }
+                    sendErrorAndClose_(429, "Too much pipelined request data");
+                    return;
+                }
+                if (m_reservePendingBytes && !m_reservePendingBytes(requestBytes)) {
+                    for (std::size_t j = i; j < parsedRequests.size(); ++j) {
+                        cleanupTempFilesForRequest_(parsedRequests[j]);
+                    }
+                    sendErrorAndClose_(503, "Global request memory budget exhausted");
+                    return;
+                }
+                m_pendingRequests.append(std::move(parsedRequests[i]));
+                m_pendingRequestSizes.append(requestBytes);
+                m_pendingRequestBytes += requestBytes;
+                if (m_limits.maxPipelinedRequests > 0 &&
+                    m_pendingRequests.size() > m_limits.maxPipelinedRequests) {
+                    for (std::size_t j = i + 1; j < parsedRequests.size(); ++j) {
+                        cleanupTempFilesForRequest_(parsedRequests[j]);
+                    }
                     sendErrorAndClose_(400, "Too many pipelined requests");
                     return;
                 }
@@ -267,6 +344,27 @@ private slots:
         if (!m_handlingResponse && !m_waitingAsyncResponse) {
             processNextRequest_();
         }
+        if (!m_handlingResponse && !m_waitingAsyncResponse &&
+            m_pendingRequests.isEmpty()) {
+            sendPendingContinue_();
+        }
+        if (readBackpressureRequired_()) {
+            m_readBackpressured = true;
+        } else if (bytesThisTurn >= kReadBudgetBytes ||
+                   operationsThisTurn >= kReadBudgetOperations) {
+            scheduleReadContinuation_();
+        }
+        if (!m_readBackpressured) {
+            SwTcpSocket* tcp = dynamic_cast<SwTcpSocket*>(m_socket);
+            if (tcp && !tcp->readNotificationsEnabled()) {
+                SwPointer<SwHttpSession> self(this);
+                tcp->resumeReadNotifications();
+                if (!self) {
+                    return;
+                }
+            }
+        }
+        scheduleTimeout_();
     }
 
     void onWriteFinished_() {
@@ -280,6 +378,10 @@ private slots:
 
         m_writeStartedAt = std::chrono::steady_clock::now();
 
+        if (m_sendState == SendState::SendingBody) {
+            sendNextBodyChunk_();
+            return;
+        }
         if (m_sendState == SendState::SendingFile) {
             sendNextFileChunk_();
             return;
@@ -291,6 +393,34 @@ private slots:
 
         if (m_handlingResponse && m_responsePayloadDone) {
             finalizeResponse_();
+        }
+    }
+
+    void onReadyWrite_() {
+        if (!m_socket || m_cleaned || !m_waitingSocketWritable ||
+            m_deferredSocketWrite.isEmpty()) {
+            return;
+        }
+
+        m_inSocketWrite = true;
+        const bool accepted = m_socket->write(m_deferredSocketWrite.constData(),
+                                               m_deferredSocketWrite.size());
+        m_inSocketWrite = false;
+        if (!accepted) {
+            SwTcpSocket* tcp = dynamic_cast<SwTcpSocket*>(m_socket);
+            if (!tcp || tcp->lastWriteResult() != SwTcpSocket::WriteResult::WouldBlock) {
+                cleanup_();
+            }
+            return;
+        }
+
+        m_waitingSocketWritable = false;
+        m_deferredSocketWrite = SwByteArray();
+        m_writeStartedAt = std::chrono::steady_clock::now();
+        scheduleTimeout_();
+        if (m_writeFinishedDeferred) {
+            m_writeFinishedDeferred = false;
+            scheduleDeferredWriteFinished_();
         }
     }
 
@@ -314,32 +444,37 @@ private slots:
         if (!m_socket || m_cleaned) {
             return;
         }
+        m_timeoutArmed = false;
         auto now = std::chrono::steady_clock::now();
 
         if (m_handlingResponse) {
             if (m_timeouts.writeTimeoutMs > 0) {
                 auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_writeStartedAt).count();
-                if (elapsed > m_timeouts.writeTimeoutMs) {
+                if (elapsed >= m_timeouts.writeTimeoutMs) {
                     swCWarning(kSwLogCategory_SwHttpSession) << "[SwHttpSession] write timeout, closing";
                     cleanup_();
+                    return;
                 }
             }
+            scheduleTimeout_();
             return;
         }
 
         if (m_waitingAsyncResponse) {
-            if (m_timeouts.bodyReadTimeoutMs > 0) {
+            if (m_timeouts.routeTimeoutMs > 0) {
                 auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_waitingResponseAt).count();
-                if (elapsed > m_timeouts.bodyReadTimeoutMs) {
+                if (elapsed >= m_timeouts.routeTimeoutMs) {
                     sendErrorAndClose_(504, "Route async timeout");
+                    return;
                 }
             }
+            scheduleTimeout_();
             return;
         }
 
-        if (m_parser.isAwaitingHeaders() && m_timeouts.headerReadTimeoutMs > 0) {
+        if (m_parser.hasPartialRequest() && m_parser.isAwaitingHeaders() && m_timeouts.headerReadTimeoutMs > 0) {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_requestStartedAt).count();
-            if (elapsed > m_timeouts.headerReadTimeoutMs) {
+            if (elapsed >= m_timeouts.headerReadTimeoutMs) {
                 sendErrorAndClose_(408, "Request Timeout");
                 return;
             }
@@ -347,7 +482,7 @@ private slots:
 
         if (m_parser.isAwaitingBody() && m_timeouts.bodyReadTimeoutMs > 0) {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_requestStartedAt).count();
-            if (elapsed > m_timeouts.bodyReadTimeoutMs) {
+            if (elapsed >= m_timeouts.bodyReadTimeoutMs) {
                 sendErrorAndClose_(408, "Request Timeout");
                 return;
             }
@@ -355,13 +490,132 @@ private slots:
 
         if (!m_parser.hasPartialRequest() && m_pendingRequests.isEmpty() && m_timeouts.keepAliveIdleTimeoutMs > 0) {
             auto idle = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_lastReadAt).count();
-            if (idle > m_timeouts.keepAliveIdleTimeoutMs) {
+            if (idle >= m_timeouts.keepAliveIdleTimeoutMs) {
                 cleanup_();
+                return;
             }
         }
+        scheduleTimeout_();
     }
 
 private:
+    static void addBufferedBytes_(std::size_t& total, std::size_t value) {
+        const std::size_t maximum = (std::numeric_limits<std::size_t>::max)();
+        total = value > maximum - total ? maximum : total + value;
+    }
+
+    static std::size_t requestBufferedBytes_(const SwHttpRequest& request) {
+        std::size_t bytes = 0;
+        addBufferedBytes_(bytes, request.method.size());
+        addBufferedBytes_(bytes, request.target.size());
+        addBufferedBytes_(bytes, request.path.size());
+        addBufferedBytes_(bytes, request.queryString.size());
+        addBufferedBytes_(bytes, request.protocol.size());
+        addBufferedBytes_(bytes, request.body.size());
+        for (SwMap<SwString, SwString>::const_iterator it = request.headers.begin();
+             it != request.headers.end(); ++it) {
+            addBufferedBytes_(bytes, it.key().size());
+            addBufferedBytes_(bytes, it.value().size());
+        }
+        for (std::size_t i = 0; i < request.multipartParts.size(); ++i) {
+            const SwHttpRequest::MultipartPart& part = request.multipartParts[i];
+            addBufferedBytes_(bytes, part.name.size());
+            addBufferedBytes_(bytes, part.fileName.size());
+            addBufferedBytes_(bytes, part.contentType.size());
+            addBufferedBytes_(bytes, part.tempFilePath.size());
+            addBufferedBytes_(bytes, part.data.size());
+        }
+        return bytes;
+    }
+
+    bool readBackpressureRequired_() const {
+        return m_limits.maxPendingRequestBytes > 0 &&
+               m_pendingRequestBytes >= m_limits.maxPendingRequestBytes;
+    }
+
+    void scheduleReadContinuation_() {
+        if (m_readContinuationScheduled || !m_socket || m_cleaned ||
+            readBackpressureRequired_()) {
+            return;
+        }
+        m_readContinuationScheduled = true;
+        SwPointer<SwHttpSession> self(this);
+        ThreadHandle* affinity = threadHandle();
+        if (affinity && affinity->postTaskOnLaneReliable([self]() {
+                if (self) {
+                    self->onReadyRead_();
+                }
+            }, SwFiberLane::Control)) {
+            return;
+        }
+
+        m_readContinuationScheduled = false;
+        SwTimer::singleShot(0, this, &SwHttpSession::onReadyRead_);
+    }
+
+    void scheduleTimeout_() {
+        if (!m_timeoutWatch || !m_socket || m_cleaned) {
+            return;
+        }
+
+        using Clock = std::chrono::steady_clock;
+        Clock::time_point next = Clock::time_point::max();
+        auto consider = [&next](const Clock::time_point& base, int timeoutMs) {
+            if (timeoutMs <= 0) {
+                return;
+            }
+            const Clock::time_point candidate = base + std::chrono::milliseconds(timeoutMs);
+            if (candidate < next) {
+                next = candidate;
+            }
+        };
+
+        if (m_handlingResponse) {
+            consider(m_writeStartedAt, m_timeouts.writeTimeoutMs);
+        } else if (m_waitingAsyncResponse) {
+            consider(m_waitingResponseAt, m_timeouts.routeTimeoutMs);
+        } else {
+            if (m_parser.hasPartialRequest() && m_parser.isAwaitingHeaders()) {
+                consider(m_requestStartedAt, m_timeouts.headerReadTimeoutMs);
+            }
+            if (m_parser.isAwaitingBody()) {
+                consider(m_requestStartedAt, m_timeouts.bodyReadTimeoutMs);
+            }
+            if (!m_parser.hasPartialRequest() && m_pendingRequests.isEmpty()) {
+                consider(m_lastReadAt, m_timeouts.keepAliveIdleTimeoutMs);
+            }
+        }
+
+        if (next == Clock::time_point::max()) {
+            if (m_timeoutWatch->isActive()) {
+                m_timeoutWatch->stop();
+            }
+            m_timeoutArmed = false;
+            return;
+        }
+        if (m_timeoutArmed && next == m_timeoutDeadline && m_timeoutWatch->isActive()) {
+            return;
+        }
+
+        if (m_timeoutWatch->isActive()) {
+            m_timeoutWatch->stop();
+        }
+        const auto now = Clock::now();
+        const auto remainingUs = next > now
+                                     ? std::chrono::duration_cast<std::chrono::microseconds>(next - now).count()
+                                     : 0;
+        long long delayMs = (remainingUs + 999) / 1000;
+        if (delayMs < 1) {
+            delayMs = 1;
+        }
+        if (delayMs > (std::numeric_limits<int>::max)()) {
+            delayMs = (std::numeric_limits<int>::max)();
+        }
+        m_timeoutDeadline = next;
+        m_timeoutArmed = true;
+        m_timeoutWatch->start(static_cast<int>(delayMs));
+    }
+
     void scheduleDeferredWriteFinished_() {
         if (m_deferredWriteScheduled || !m_socket || m_cleaned) {
             return;
@@ -369,31 +623,74 @@ private:
 
         m_deferredWriteScheduled = true;
         SwPointer<SwHttpSession> self(this);
-        if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
-            app->postEventOnLane([self]() {
+        ThreadHandle* affinity = threadHandle();
+        if (affinity && affinity->postTaskOnLaneReliable([self]() {
                 if (self) {
                     self->onDeferredWriteFinished_();
                 }
-            }, SwFiberLane::Normal);
+            }, SwFiberLane::Control)) {
             return;
         }
 
         SwTimer::singleShot(0, this, &SwHttpSession::onDeferredWriteFinished_);
     }
 
-    void writeSocket_(const SwString& data) {
-        if (!m_socket || data.isEmpty()) {
-            return;
+    bool writeSocket_(const char* data, std::size_t size) {
+        if (!m_socket || (!data && size > 0)) {
+            return false;
+        }
+        if (size == 0) {
+            return true;
+        }
+        if (m_waitingSocketWritable) {
+            return false;
         }
         m_inSocketWrite = true;
-        m_socket->write(data);
+        const bool accepted = m_socket->write(data, size);
         m_inSocketWrite = false;
         m_writeStartedAt = std::chrono::steady_clock::now();
+        scheduleTimeout_();
+
+        if (!accepted) {
+            SwTcpSocket* tcp = dynamic_cast<SwTcpSocket*>(m_socket);
+            if (!tcp || tcp->lastWriteResult() != SwTcpSocket::WriteResult::WouldBlock) {
+                cleanup_();
+                return false;
+            }
+            m_deferredSocketWrite = SwByteArray(data, size);
+            m_waitingSocketWritable = true;
+            return true;
+        }
 
         if (m_writeFinishedDeferred) {
             m_writeFinishedDeferred = false;
             scheduleDeferredWriteFinished_();
         }
+        return true;
+    }
+
+    bool writeSocket_(const SwString& data) {
+        return writeSocket_(data.data(), data.size());
+    }
+
+    bool writeSocket_(const SwByteArray& data) {
+        return writeSocket_(data.constData(), data.size());
+    }
+
+    bool sendPendingContinue_() {
+        if (!m_expectContinuePending) {
+            return true;
+        }
+        if (!m_socket || m_cleaned || m_handlingResponse || m_waitingAsyncResponse ||
+            !m_pendingRequests.isEmpty()) {
+            return false;
+        }
+        static const char kContinue[] = "HTTP/1.1 100 Continue\r\n\r\n";
+        if (!writeSocket_(kContinue, sizeof(kContinue) - 1)) {
+            return false;
+        }
+        m_expectContinuePending = false;
+        return true;
     }
 
     static SwString toHex_(std::size_t value) {
@@ -413,20 +710,69 @@ private:
         return out;
     }
 
-    void sendChunkedPart_(const SwByteArray& part) {
-        if (!m_socket) {
-            return;
+    static bool validHeaderName_(const SwString& name) {
+        if (name.isEmpty()) {
+            return false;
         }
-
-        SwString payload = toHex_(part.size()) + "\r\n";
-        if (!part.isEmpty()) {
-            payload.append(SwString(part.toStdString()));
+        for (std::size_t i = 0; i < name.size(); ++i) {
+            const unsigned char c = static_cast<unsigned char>(name[i]);
+            const bool alphaNumeric = (c >= '0' && c <= '9') ||
+                                      (c >= 'A' && c <= 'Z') ||
+                                      (c >= 'a' && c <= 'z');
+            if (!alphaNumeric && c != '!' && c != '#' && c != '$' && c != '%' &&
+                c != '&' && c != '\'' && c != '*' && c != '+' && c != '-' &&
+                c != '.' && c != '^' && c != '_' && c != '`' && c != '|' && c != '~') {
+                return false;
+            }
         }
-        payload.append("\r\n");
-        writeSocket_(payload);
+        return true;
     }
 
-    void sendResponseHeaders_(const SwHttpResponse& response) {
+    bool sendChunkedPart_(const SwByteArray& part) {
+        if (!m_socket) {
+            return false;
+        }
+        if (part.isEmpty()) {
+            return true;
+        }
+
+        const SwString prefix = toHex_(part.size()) + "\r\n";
+        SwByteArray payload;
+        payload.reserve(prefix.size() + part.size() + 2);
+        payload.append(prefix.data(), prefix.size());
+        if (!part.isEmpty()) {
+            payload.append(part.constData(), part.size());
+        }
+        payload.append("\r\n", 2);
+        return writeSocket_(payload);
+    }
+
+    static bool statusForbidsResponseBody_(int status) {
+        return (status >= 100 && status < 200) || status == 204 ||
+               status == 205 || status == 304;
+    }
+
+    static std::size_t responseRepresentationLength_(const SwHttpResponse& response) {
+        if (response.hasFile) {
+            return response.fileLength;
+        }
+        if (response.useChunkedTransfer) {
+            std::size_t total = 0;
+            for (std::size_t i = 0; i < response.chunkedParts.size(); ++i) {
+                addBufferedBytes_(total, response.chunkedParts[i].size());
+            }
+            if (response.chunkedParts.isEmpty()) {
+                addBufferedBytes_(total, response.body.size());
+            }
+            return total;
+        }
+        return response.body.size();
+    }
+
+    bool sendResponseHeaders_(const SwHttpResponse& response,
+                              bool suppressBody,
+                              bool statusForbidsBody,
+                              std::size_t representationLength) {
         SwString raw;
         raw += "HTTP/1.1 ";
         raw += SwString::number(response.status);
@@ -434,30 +780,36 @@ private:
         raw += response.reason.isEmpty() ? swHttpStatusReason(response.status) : response.reason;
         raw += "\r\n";
 
-        bool hasContentLength = false;
-        bool hasTransferEncoding = false;
         bool hasConnection = false;
 
         for (auto it = response.headers.begin(); it != response.headers.end(); ++it) {
             SwString key = it.key().trimmed().toLower();
-            if (key.isEmpty()) {
+            if (!validHeaderName_(key) || it.value().contains("\r") ||
+                it.value().contains("\n")) {
                 continue;
             }
-            if (key == "content-length") hasContentLength = true;
-            if (key == "transfer-encoding") hasTransferEncoding = true;
-            if (key == "connection") hasConnection = true;
+            // Wire framing is generated from the payload actually selected below.  Never forward
+            // caller-provided CL/TE values: a stale Content-Length or CL+TE combination would make
+            // the persistent connection ambiguous to the next request parser.
+            if (key == "content-length" || key == "transfer-encoding") {
+                continue;
+            }
+            if (key == "connection") {
+                if (!response.switchToRawSocket) {
+                    continue;
+                }
+                hasConnection = true;
+            }
             raw += key + ": " + it.value() + "\r\n";
         }
 
-        if (response.useChunkedTransfer) {
-            if (!hasTransferEncoding) {
+        if (!statusForbidsBody) {
+            if (!suppressBody && response.useChunkedTransfer) {
                 raw += "transfer-encoding: chunked\r\n";
-            }
-        } else if (!hasContentLength) {
-            if (response.hasFile) {
-                raw += "content-length: " + SwString::number(static_cast<long long>(response.fileLength)) + "\r\n";
             } else {
-                raw += "content-length: " + SwString::number(static_cast<long long>(response.body.size())) + "\r\n";
+                raw += "content-length: " +
+                       SwString::number(static_cast<unsigned long long>(representationLength)) +
+                       "\r\n";
             }
         }
 
@@ -466,17 +818,26 @@ private:
         }
         raw += "\r\n";
 
-        writeSocket_(raw);
+        return writeSocket_(raw);
     }
 
-    void beginResponse_(const SwHttpRequest& request, const SwHttpResponse& sourceResponse) {
+    void beginResponse_(const SwHttpRequest& request, SwHttpResponse response) {
         if (!m_socket) {
             cleanup_();
             return;
         }
 
-        SwHttpResponse response = sourceResponse;
-        if (response.reason.isEmpty()) {
+        if (response.status < 100 || response.status > 599) {
+            response.status = 500;
+            response.reason = "Internal Server Error";
+            response.body = SwByteArray("Invalid response status");
+            response.hasFile = false;
+            response.useChunkedTransfer = false;
+            response.chunkedParts.clear();
+            response.closeConnection = true;
+        }
+        if (response.reason.isEmpty() || response.reason.contains("\r") ||
+            response.reason.contains("\n")) {
             response.reason = swHttpStatusReason(response.status);
         }
 
@@ -484,17 +845,23 @@ private:
         m_waitingAsyncResponse = false;
         m_responsePayloadDone = false;
         m_sendState = SendState::Idle;
-        m_chunkPartIndex = 0;
         m_chunkTerminatorSent = false;
         m_chunkParts.clear();
+        m_bodyPayload = SwByteArray();
+        m_bodyOffset = 0;
         cleanupStreamFile_();
         m_handoverAfterWrite = false;
         m_socketHandoverCallback = nullptr;
+        m_socketHandoverWithDataCallback = nullptr;
+        m_handoverInitialData = SwByteArray();
 
         m_closeAfterWrite = response.closeConnection || !request.keepAlive;
-        if (response.switchToRawSocket && response.onSwitchToRawSocket) {
+        if (response.switchToRawSocket &&
+            (response.onSwitchToRawSocket || response.onSwitchToRawSocketWithInitialData)) {
             m_handoverAfterWrite = true;
             m_socketHandoverCallback = response.onSwitchToRawSocket;
+            m_socketHandoverWithDataCallback = response.onSwitchToRawSocketWithInitialData;
+            m_handoverInitialData = m_parser.takeBufferedData();
             m_closeAfterWrite = false;
             if (response.switchToRawSocketWithoutHttpResponse) {
                 response.headOnly = true;
@@ -518,9 +885,18 @@ private:
             response.headOnly = true;
         }
 
-        sendResponseHeaders_(response);
+        const bool statusForbidsBody = statusForbidsResponseBody_(response.status);
+        const bool suppressBody = response.headOnly || statusForbidsBody;
+        const std::size_t representationLength = responseRepresentationLength_(response);
 
-        if (response.headOnly) {
+        if (!sendResponseHeaders_(response,
+                                  suppressBody,
+                                  statusForbidsBody,
+                                  representationLength)) {
+            return;
+        }
+
+        if (suppressBody) {
             m_responsePayloadDone = true;
             return;
         }
@@ -542,24 +918,57 @@ private:
             if (m_streamChunkBytes < 4096) {
                 m_streamChunkBytes = 4096;
             }
+            if (m_streamChunkBytes > 64 * 1024) {
+                m_streamChunkBytes = 64 * 1024;
+            }
             m_sendState = SendState::SendingFile;
             return;
         }
 
         if (response.useChunkedTransfer) {
             if (!response.chunkedParts.isEmpty()) {
-                m_chunkParts = response.chunkedParts;
+                for (std::size_t i = 0; i < response.chunkedParts.size(); ++i) {
+                    if (!response.chunkedParts[i].isEmpty()) {
+                        m_chunkParts.append(std::move(response.chunkedParts[i]));
+                    }
+                }
             } else if (!response.body.isEmpty()) {
-                m_chunkParts.append(response.body);
+                m_chunkParts.append(std::move(response.body));
             }
             m_sendState = SendState::SendingChunked;
             return;
         }
 
         if (!response.body.isEmpty()) {
-            writeSocket_(SwString(response.body.toStdString()));
+            m_bodyPayload = std::move(response.body);
+            m_bodyOffset = 0;
+            m_sendState = SendState::SendingBody;
+            return;
         }
         m_responsePayloadDone = true;
+    }
+
+    void sendNextBodyChunk_() {
+        if (!m_socket) {
+            cleanup_();
+            return;
+        }
+        if (m_bodyOffset >= m_bodyPayload.size()) {
+            m_bodyPayload = SwByteArray();
+            m_bodyOffset = 0;
+            m_sendState = SendState::Idle;
+            m_responsePayloadDone = true;
+            finalizeResponse_();
+            return;
+        }
+
+        constexpr std::size_t kBodyWriteChunk = 64 * 1024;
+        const std::size_t remaining = m_bodyPayload.size() - m_bodyOffset;
+        const std::size_t chunk = (std::min)(remaining, kBodyWriteChunk);
+        if (!writeSocket_(m_bodyPayload.constData() + m_bodyOffset, chunk)) {
+            return;
+        }
+        m_bodyOffset += chunk;
     }
 
     void sendNextFileChunk_() {
@@ -591,7 +1000,9 @@ private:
             return;
         }
 
-        writeSocket_(chunk);
+        if (!writeSocket_(chunk)) {
+            return;
+        }
 
         if (chunk.size() > m_streamBytesRemaining) {
             m_streamBytesRemaining = 0;
@@ -606,14 +1017,19 @@ private:
             return;
         }
 
-        if (m_chunkPartIndex < m_chunkParts.size()) {
-            sendChunkedPart_(m_chunkParts[m_chunkPartIndex]);
-            ++m_chunkPartIndex;
+        while (!m_chunkParts.isEmpty()) {
+            SwByteArray part = m_chunkParts.takeFirst();
+            if (part.isEmpty()) {
+                continue;
+            }
+            sendChunkedPart_(part);
             return;
         }
 
         if (!m_chunkTerminatorSent) {
-            writeSocket_("0\r\n\r\n");
+            if (!writeSocket_("0\r\n\r\n")) {
+                return;
+            }
             m_chunkTerminatorSent = true;
             return;
         }
@@ -628,8 +1044,18 @@ private:
             return;
         }
 
-        m_activeRequest = m_pendingRequests.first();
-        m_pendingRequests.removeFirst();
+        m_activeRequest = m_pendingRequests.takeFirst();
+        if (!m_pendingRequestSizes.isEmpty()) {
+            const std::size_t requestBytes = m_pendingRequestSizes.takeFirst();
+            m_pendingRequestBytes = requestBytes > m_pendingRequestBytes
+                                        ? 0
+                                        : m_pendingRequestBytes - requestBytes;
+            m_activeRequestReservedBytes = requestBytes;
+        }
+        if (m_readBackpressured && !readBackpressureRequired_()) {
+            m_readBackpressured = false;
+            scheduleReadContinuation_();
+        }
         m_requestStartedAt = std::chrono::steady_clock::now();
         m_requestTempFiles.clear();
 
@@ -643,20 +1069,35 @@ private:
         if (m_requestHandler) {
             m_waitingAsyncResponse = true;
             m_waitingResponseAt = std::chrono::steady_clock::now();
+            scheduleTimeout_();
             ThreadHandle* affinity = threadHandle();
-            m_requestHandler(m_activeRequest, [this, affinity](const SwHttpResponse& response) {
-                auto deliver = [this, response]() {
-                    if (m_cleaned || !m_socket || !m_waitingAsyncResponse || m_handlingResponse) {
+            SwPointer<SwHttpSession> self(this);
+            m_requestHandler(m_activeRequest, [self, affinity](SwHttpResponse response) mutable {
+                if (!affinity || ThreadHandle::currentThread() == affinity) {
+                    if (!self || self->m_cleaned || !self->m_socket ||
+                        !self->m_waitingAsyncResponse || self->m_handlingResponse) {
                         return;
                     }
-                    m_waitingAsyncResponse = false;
-                    beginResponse_(m_activeRequest, response);
-                };
+                    self->m_waitingAsyncResponse = false;
+                    self->beginResponse_(self->m_activeRequest, std::move(response));
+                    return;
+                }
 
-                if (affinity && ThreadHandle::currentThread() != affinity) {
-                    affinity->postTaskOnLane(deliver, SwFiberLane::Control);
-                } else {
-                    deliver();
+                std::shared_ptr<SwHttpResponse> responseState(
+                    new SwHttpResponse(std::move(response)));
+                if (!affinity->postTaskOnLaneReliable([self, responseState]() mutable {
+                        if (!self || self->m_cleaned || !self->m_socket ||
+                            !self->m_waitingAsyncResponse || self->m_handlingResponse) {
+                            return;
+                        }
+                        self->m_waitingAsyncResponse = false;
+                        self->beginResponse_(self->m_activeRequest,
+                                             std::move(*responseState));
+                    }, SwFiberLane::Control)) {
+                    // The bounded reliable queue is exhausted. Keep the
+                    // session waiting so its exact route deadline returns
+                    // a deterministic 504 instead of running cross-thread.
+                    return;
                 }
             });
             return;
@@ -668,7 +1109,7 @@ private:
             response = swHttpTextResponse(404, "Not Found");
             response.closeConnection = !m_activeRequest.keepAlive;
         }
-        beginResponse_(m_activeRequest, response);
+        beginResponse_(m_activeRequest, std::move(response));
     }
 
     void finishDetached_() {
@@ -677,18 +1118,27 @@ private:
         }
         m_cleaned = true;
 
+        SwPointer<SwHttpSession> self(this);
         for (std::size_t i = 0; i < m_cleanupHooks.size(); ++i) {
-            m_cleanupHooks[i]();
+            const std::function<void()> hook = m_cleanupHooks[i];
+            if (hook) {
+                hook();
+            }
+            if (!self) {
+                return;
+            }
         }
         m_cleanupHooks.clear();
 
         cleanupStreamFile_();
         cleanupRequestTempFiles_();
+        releaseBufferedState_();
         m_waitingAsyncResponse = false;
 
         if (m_timeoutWatch) {
             m_timeoutWatch->stop();
         }
+        m_timeoutArmed = false;
 
         std::function<void(SwHttpSession*)> done = m_onFinished;
         m_onFinished = nullptr;
@@ -711,17 +1161,25 @@ private:
         rawSocket->setParent(nullptr);
 
         std::function<void(SwAbstractSocket*)> handover = m_socketHandoverCallback;
+        std::function<void(SwAbstractSocket*, SwByteArray)> handoverWithData =
+            m_socketHandoverWithDataCallback;
+        SwByteArray initialData = std::move(m_handoverInitialData);
         m_socketHandoverCallback = nullptr;
+        m_socketHandoverWithDataCallback = nullptr;
         m_handoverAfterWrite = false;
 
-        if (handover) {
+        // Finalize the HTTP session before invoking arbitrary protocol code. The callback may
+        // synchronously delete its former session; all data needed below is owned by locals.
+        finishDetached_();
+
+        if (handoverWithData) {
+            handoverWithData(rawSocket, std::move(initialData));
+        } else if (handover) {
             handover(rawSocket);
         } else {
-            rawSocket->close();
-            rawSocket->deleteLater();
+            disposeSocketAfterClose_(rawSocket);
         }
 
-        finishDetached_();
     }
 
     void finalizeResponse_() {
@@ -733,10 +1191,16 @@ private:
             cleanupRequestTempFiles_();
             m_sendState = SendState::Idle;
             m_chunkParts.clear();
-            m_chunkPartIndex = 0;
             m_chunkTerminatorSent = false;
+            m_bodyPayload = SwByteArray();
+            m_bodyOffset = 0;
             m_responsePayloadDone = false;
             m_waitingAsyncResponse = false;
+            if (m_activeRequestReservedBytes > 0 && m_releasePendingBytes) {
+                m_releasePendingBytes(m_activeRequestReservedBytes);
+            }
+            m_activeRequestReservedBytes = 0;
+            m_activeRequest = SwHttpRequest();
 
             if (m_handoverAfterWrite) {
                 handoverSocket_();
@@ -750,6 +1214,10 @@ private:
 
             if (!m_pendingRequests.isEmpty()) {
                 processNextRequest_();
+            } else {
+                sendPendingContinue_();
+                m_lastReadAt = std::chrono::steady_clock::now();
+                scheduleTimeout_();
             }
         }
     }
@@ -763,6 +1231,9 @@ private:
         m_waitingAsyncResponse = false;
         m_handoverAfterWrite = false;
         m_socketHandoverCallback = nullptr;
+        m_socketHandoverWithDataCallback = nullptr;
+        m_handoverInitialData = SwByteArray();
+        m_expectContinuePending = false;
 
         if (m_handlingResponse) {
             cleanup_();
@@ -775,7 +1246,7 @@ private:
 
         SwHttpResponse response = swHttpTextResponse(status > 0 ? status : 400, message.isEmpty() ? "Bad Request" : message);
         response.closeConnection = true;
-        beginResponse_(syntheticRequest, response);
+        beginResponse_(syntheticRequest, std::move(response));
     }
 
     void cleanupStreamFile_() {
@@ -787,32 +1258,119 @@ private:
         m_streamBytesRemaining = 0;
     }
 
+    static void disposeSocketAfterClose_(SwAbstractSocket* socket) {
+        if (!socket) {
+            return;
+        }
+        socket->disconnectAllSlots();
+        socket->setParent(nullptr);
+        SwPointer<SwAbstractSocket> guard(socket);
+        std::shared_ptr<std::atomic<bool>> deletionScheduled(
+            new std::atomic<bool>(false));
+        SwObject::connect(socket, &SwAbstractSocket::disconnected, socket,
+                          [guard, deletionScheduled]() {
+            if (guard && !deletionScheduled->exchange(true, std::memory_order_acq_rel)) {
+                guard->deleteLater();
+            }
+        });
+
+        SwTimer* deadline = new SwTimer(6000, socket);
+        deadline->setSingleShot(true);
+        SwObject::connect(deadline, &SwTimer::timeout, socket,
+                          [guard, deletionScheduled]() {
+            if (!guard) {
+                return;
+            }
+            if (SwTcpSocket* tcp = dynamic_cast<SwTcpSocket*>(guard.data())) {
+                tcp->abort();
+            } else {
+                guard->close();
+            }
+            if (guard && !deletionScheduled->exchange(true, std::memory_order_acq_rel)) {
+                guard->deleteLater();
+            }
+        });
+
+        socket->close();
+        if (!guard) {
+            return;
+        }
+        if (guard->state() == SwAbstractSocket::UnconnectedState) {
+            if (!deletionScheduled->exchange(true, std::memory_order_acq_rel)) {
+                guard->deleteLater();
+            }
+        } else {
+            deadline->start();
+        }
+    }
+
+    void releaseBufferedState_() {
+        m_parser.reset(true);
+        cleanupTempFilesForRequest_(m_activeRequest);
+        for (SwDequeue<SwHttpRequest>::const_iterator it = m_pendingRequests.begin();
+             it != m_pendingRequests.end();
+             ++it) {
+            cleanupTempFilesForRequest_(*it);
+        }
+        const std::size_t reservedBytes =
+            m_pendingRequestBytes > (std::numeric_limits<std::size_t>::max)() -
+                                        m_activeRequestReservedBytes
+                ? (std::numeric_limits<std::size_t>::max)()
+                : m_pendingRequestBytes + m_activeRequestReservedBytes;
+        if (reservedBytes > 0 && m_releasePendingBytes) {
+            m_releasePendingBytes(reservedBytes);
+        }
+        m_pendingRequests.clear();
+        m_pendingRequestSizes.clear();
+        m_pendingRequestBytes = 0;
+        m_activeRequestReservedBytes = 0;
+        m_activeRequest = SwHttpRequest();
+        m_chunkParts.clear();
+        m_bodyPayload = SwByteArray();
+        m_bodyOffset = 0;
+        m_deferredSocketWrite = SwByteArray();
+        m_waitingSocketWritable = false;
+        m_readBackpressured = false;
+        m_readContinuationScheduled = false;
+        m_expectContinuePending = false;
+    }
+
     void cleanup_() {
         if (m_cleaned) {
             return;
         }
         m_cleaned = true;
 
+        SwPointer<SwHttpSession> self(this);
         for (std::size_t i = 0; i < m_cleanupHooks.size(); ++i) {
-            m_cleanupHooks[i]();
+            const std::function<void()> hook = m_cleanupHooks[i];
+            if (hook) {
+                hook();
+            }
+            if (!self) {
+                return;
+            }
         }
         m_cleanupHooks.clear();
 
         cleanupStreamFile_();
         cleanupRequestTempFiles_();
+        releaseBufferedState_();
         m_waitingAsyncResponse = false;
         m_handoverAfterWrite = false;
         m_socketHandoverCallback = nullptr;
+        m_socketHandoverWithDataCallback = nullptr;
+        m_handoverInitialData = SwByteArray();
 
         if (m_timeoutWatch) {
             m_timeoutWatch->stop();
         }
+        m_timeoutArmed = false;
 
         if (m_socket) {
-            m_socket->disconnectAllSlots();
-            m_socket->close();
-            m_socket->deleteLater();
+            SwAbstractSocket* socket = m_socket;
             m_socket = nullptr;
+            disposeSocketAfterClose_(socket);
         }
 
         std::function<void(SwHttpSession*)> done = m_onFinished;
@@ -845,6 +1403,15 @@ private:
 #else
         (void)std::remove(filePath.toStdString().c_str());
 #endif
+    }
+
+    static void cleanupTempFilesForRequest_(const SwHttpRequest& request) {
+        for (std::size_t i = 0; i < request.multipartParts.size(); ++i) {
+            const SwHttpRequest::MultipartPart& part = request.multipartParts[i];
+            if (part.storedOnDisk && !part.tempFilePath.isEmpty()) {
+                removeFile_(part.tempFilePath);
+            }
+        }
     }
 
     void cleanupRequestTempFiles_() {

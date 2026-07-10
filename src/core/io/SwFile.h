@@ -60,7 +60,18 @@
 #include <ctime>
 #include <memory>
 #include <algorithm>
+#include <cstddef>
+#include <cstdio>
+#include <limits>
 #include <sstream>
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#include <share.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 static constexpr const char* kSwLogCategory_SwFile = "sw.core.io.swfile";
 
 
@@ -208,6 +219,43 @@ public:
         return fileStream_.is_open();
     }
 
+    /** Creates a new binary file atomically and fails if the path already exists. */
+    bool openBinaryExclusive() {
+        if (filePath_.isEmpty()) {
+            return false;
+        }
+        close();
+
+        int descriptor = -1;
+#if defined(_WIN32)
+        const std::wstring path = filePath_.toStdWString();
+        if (_wsopen_s(&descriptor,
+                      path.c_str(),
+                      _O_BINARY | _O_WRONLY | _O_CREAT | _O_EXCL,
+                      _SH_DENYNO,
+                      _S_IREAD | _S_IWRITE) != 0) {
+            return false;
+        }
+        m_exclusiveStream = _wfdopen(descriptor, L"wb");
+        if (!m_exclusiveStream) {
+            _close(descriptor);
+            return false;
+        }
+#else
+        descriptor = ::open(filePath_.toStdString().c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+        if (descriptor < 0) {
+            return false;
+        }
+        m_exclusiveStream = ::fdopen(descriptor, "wb");
+        if (!m_exclusiveStream) {
+            ::close(descriptor);
+            return false;
+        }
+#endif
+        currentMode_ = Write;
+        return true;
+    }
+
     // Fermer le fichier
     /**
      * @brief Closes the underlying resource and stops active work.
@@ -215,6 +263,10 @@ public:
      * @details The call affects the runtime state associated with the underlying resource or service.
      */
     void close() override {
+        if (m_exclusiveStream) {
+            std::fclose(m_exclusiveStream);
+            m_exclusiveStream = nullptr;
+        }
         if (fileStream_.is_open()) {
             fileStream_.close();
         }
@@ -231,9 +283,7 @@ public:
         if (currentMode_ != Write && currentMode_ != Append) {
             swCError(kSwLogCategory_SwFile) << "Fichier non ouvert en mode écriture.";
         }
-        fileStream_ << data;
-        fileStream_.flush();
-        return fileStream_.good();
+        return write(data.data(), data.size());
     }
 
     /**
@@ -245,14 +295,41 @@ public:
         if (currentMode_ != Write && currentMode_ != Append) {
             swCError(kSwLogCategory_SwFile) << "Fichier non ouvert en mode ecriture.";
         }
-        if (data.size() == 0) {
-            return fileStream_.good();
+        return write(data.constData(), data.size());
+    }
+
+    bool write(const char* data, std::size_t size) override {
+        if (!writeBuffered(data, size)) {
+            return false;
         }
-        const char* bytes = data.constData();
-        if (!bytes) {
-            return fileStream_.good();
+        return flush();
+    }
+
+    /** Write bytes without forcing a userspace/kernel flush for every chunk. */
+    bool writeBuffered(const char* data, std::size_t size) {
+        if (currentMode_ != Write && currentMode_ != Append) {
+            return false;
         }
-        fileStream_.write(bytes, static_cast<std::streamsize>(data.size()));
+        if (size == 0) {
+            return m_exclusiveStream ? std::ferror(m_exclusiveStream) == 0 : fileStream_.good();
+        }
+        if (!data || size > static_cast<std::size_t>((std::numeric_limits<std::streamsize>::max)())) {
+            return false;
+        }
+        if (m_exclusiveStream) {
+            return std::fwrite(data, 1, size, m_exclusiveStream) == size;
+        }
+        fileStream_.write(data, static_cast<std::streamsize>(size));
+        return fileStream_.good();
+    }
+
+    bool flush() {
+        if (m_exclusiveStream) {
+            return std::fflush(m_exclusiveStream) == 0;
+        }
+        if (!fileStream_.is_open()) {
+            return false;
+        }
         fileStream_.flush();
         return fileStream_.good();
     }
@@ -304,7 +381,7 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     bool isOpen() const override {
-        return fileStream_.is_open();
+        return m_exclusiveStream || fileStream_.is_open();
     }
 
     /**
@@ -746,6 +823,7 @@ signals:
 
 private:
     std::fstream fileStream_;
+    std::FILE* m_exclusiveStream = nullptr;
     OpenMode currentMode_;
 
 };

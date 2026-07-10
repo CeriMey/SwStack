@@ -82,18 +82,38 @@ private:
     std::atomic<SwObject*> object_{nullptr};
 };
 
-inline std::mutex& swPointerRegistryMutex_() {
-    static std::mutex m;
-    return m;
+class SwPointerRegistryMutex_ {
+public:
+#if defined(_WIN32)
+    SwPointerRegistryMutex_() { InitializeCriticalSection(&section_); }
+    ~SwPointerRegistryMutex_() { DeleteCriticalSection(&section_); }
+    void lock() { EnterCriticalSection(&section_); }
+    void unlock() { LeaveCriticalSection(&section_); }
+
+private:
+    CRITICAL_SECTION section_;
+#else
+    void lock() { mutex_.lock(); }
+    void unlock() { mutex_.unlock(); }
+
+private:
+    std::mutex mutex_;
+#endif
+};
+
+inline SwPointerRegistryMutex_& swPointerRegistryMutex_() {
+    static SwPointerRegistryMutex_* mutex = new SwPointerRegistryMutex_();
+    return *mutex;
 }
 
 inline std::map<SwObject*, std::shared_ptr<SwPointerControl>>& swPointerRegistry_() {
-    static std::map<SwObject*, std::shared_ptr<SwPointerControl>> map;
-    return map;
+    static std::map<SwObject*, std::shared_ptr<SwPointerControl>>* map =
+        new std::map<SwObject*, std::shared_ptr<SwPointerControl>>();
+    return *map;
 }
 
 inline void swPointerRegistryErase_(SwObject* object) {
-    std::lock_guard<std::mutex> lk(swPointerRegistryMutex_());
+    std::lock_guard<SwPointerRegistryMutex_> lk(swPointerRegistryMutex_());
     auto& map = swPointerRegistry_();
     auto it = map.find(object);
     if (it != map.end()) {
@@ -108,7 +128,7 @@ inline std::shared_ptr<SwPointerControl> swPointerControlFor_(SwObject* object) 
 
     std::shared_ptr<SwPointerControl> ctrl;
     {
-        std::lock_guard<std::mutex> lk(swPointerRegistryMutex_());
+        std::lock_guard<SwPointerRegistryMutex_> lk(swPointerRegistryMutex_());
         auto& map = swPointerRegistry_();
         auto it = map.find(object);
         if (it != map.end()) {

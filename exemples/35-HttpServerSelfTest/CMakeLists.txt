@@ -31,5 +31,5 @@ target_include_directories(HttpServerSelfTest PRIVATE
 )
 
 if(WIN32)
-    target_link_libraries(HttpServerSelfTest PRIVATE ws2_32)
+    target_link_libraries(HttpServerSelfTest PRIVATE ws2_32 crypt32)
 endif()

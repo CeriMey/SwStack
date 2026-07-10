@@ -3,6 +3,7 @@
 
 #include "SwByteArray.h"
 #include "SwString.h"
+#include "SwVector.h"
 #include "http/SwHttpTypes.h"
 #include "http3/SwHttp3FrameCodec.h"
 #include "http3/SwQpackDecoder.h"
@@ -71,11 +72,21 @@ public:
             setError_(error, "HTTP/3 server has no QUIC connection");
             return false;
         }
+        return pumpStreams(m_connection->streams().streamIds(), error);
+    }
+
+    // Hot-path variant for drivers that already know which streams the latest
+    // datagram touched. It avoids scanning every historical stream per packet.
+    bool pumpStreams(const SwVector<std::uint64_t>& ids,
+                     SwString* error = nullptr) {
+        if (!m_connection) {
+            setError_(error, "HTTP/3 server has no QUIC connection");
+            return false;
+        }
         if (!ensureControlStream_(error)) {
             return false;
         }
 
-        const std::vector<std::uint64_t> ids = m_connection->streams().streamIds();
         for (std::size_t i = 0; i < ids.size(); ++i) {
             const std::uint64_t streamId = ids[i];
             const SwByteArray chunk = m_connection->readStream(streamId);

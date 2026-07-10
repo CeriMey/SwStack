@@ -36,8 +36,14 @@
 // placeholder signature: it is meant for a peer that verifies the
 // CertificateVerify signature but does not require the chain to reach a trusted
 // root (SwQuicHandshakeClient::setVerifyCertificateChain(false)).
+enum class SwQuicCertificateType : std::uint8_t {
+    X509 = 0,
+    RawPublicKey = 2
+};
+
 struct SwQuicServerCredential {
     SwVector<SwByteArray> certificateChain; // leaf first, DER
+    SwQuicCertificateType certificateType;
     std::uint16_t signatureScheme;             // TLS SignatureScheme
     // Signs the fully assembled CertificateVerify content and returns the
     // signature exactly as it must appear on the wire (DER for ECDSA).
@@ -45,9 +51,17 @@ struct SwQuicServerCredential {
                        SwByteArray& outSignature,
                        SwString* error)> sign;
 
-    SwQuicServerCredential() : signatureScheme(0) {}
+    SwQuicServerCredential()
+        : certificateType(SwQuicCertificateType::X509), signatureScheme(0) {}
 
-    bool isValid() const { return !certificateChain.empty() && sign != nullptr; }
+    bool isValid() const {
+        if (certificateChain.empty() || sign == nullptr || signatureScheme == 0) return false;
+        if (certificateType == SwQuicCertificateType::RawPublicKey) {
+            // RFC 8446 section 4.4.2: an RPK Certificate carries one SPKI.
+            return certificateChain.size() == 1 && !certificateChain.front().isEmpty();
+        }
+        return true;
+    }
 };
 
 class SwQuicEcdsaCredential {
@@ -77,6 +91,7 @@ public:
 
         outCredential.certificateChain.clear();
         outCredential.certificateChain.push_back(certificate);
+        outCredential.certificateType = SwQuicCertificateType::X509;
         outCredential.signatureScheme = 0x0403; // ecdsa_secp256r1_sha256
 
         std::shared_ptr<KeyState_> capturedKey = keyState;

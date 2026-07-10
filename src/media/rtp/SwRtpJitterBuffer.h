@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <utility>
 
 class SwRtpJitterBuffer {
 public:
@@ -87,7 +88,7 @@ public:
     }
 
     InsertResult enqueue(uint16_t sequenceNumber,
-                         const SwByteArray& datagram,
+                         SwByteArray datagram,
                          const std::chrono::steady_clock::time_point& arrivalTime) {
         if (!m_expectedValid) {
             m_expectedSequence = sequenceNumber;
@@ -98,16 +99,17 @@ public:
             ++m_latePackets;
             return InsertResult::Late;
         }
-        Entry entry;
-        entry.datagram = datagram;
-        entry.arrivalTime = arrivalTime;
-        auto inserted = m_buffer.emplace(sequenceNumber, entry);
-        if (!inserted.second) {
-            inserted.first->second.arrivalTime = arrivalTime;
-            inserted.first->second.datagram = datagram;
+        auto existing = m_buffer.find(sequenceNumber);
+        if (existing != m_buffer.end()) {
+            existing->second.arrivalTime = arrivalTime;
+            existing->second.datagram = std::move(datagram);
             ++m_duplicatePackets;
             return InsertResult::Duplicate;
         }
+        Entry entry;
+        entry.datagram = std::move(datagram);
+        entry.arrivalTime = arrivalTime;
+        m_buffer.emplace(sequenceNumber, std::move(entry));
         if (m_buffer.size() > m_queueHighWatermark) {
             m_queueHighWatermark = m_buffer.size();
         }
@@ -139,7 +141,7 @@ public:
             if (exactIt != m_buffer.end()) {
                 result.ready = true;
                 result.actualSequence = exactIt->first;
-                result.datagram = exactIt->second.datagram;
+                result.datagram = std::move(exactIt->second.datagram);
                 result.queuedPackets = m_buffer.size();
                 m_buffer.erase(exactIt);
                 ++m_exactPops;
@@ -181,7 +183,7 @@ public:
             result.queuedPackets = m_buffer.size();
             result.waitAgeMs = ageMs;
             result.gapDistance = gapDistance;
-            result.datagram = nextIt->second.datagram;
+            result.datagram = std::move(nextIt->second.datagram);
             m_buffer.erase(nextIt);
             if (result.advanceReason == AdvanceReason::BufferLimit) {
                 ++m_gapAdvanceBySize;

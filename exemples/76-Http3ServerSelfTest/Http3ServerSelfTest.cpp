@@ -12,6 +12,7 @@
 #include "core/io/quic/SwQuicConnection.h"
 #include "core/io/quic/SwQuicConnectionId.h"
 #include "core/io/quic/SwQuicInitialSecrets.h"
+#include "core/types/SwVector.h"
 
 #include <cstdint>
 #include <iostream>
@@ -30,7 +31,7 @@ bool requireTrue(bool condition, const char* message) {
 // Move every datagram the sender produced into the receiver.
 bool transfer(SwQuicConnection& from, SwQuicConnection& to, std::uint64_t nowMs,
               SwString* error) {
-    std::vector<SwByteArray> datagrams;
+    SwVector<SwByteArray> datagrams;
     if (!from.buildDatagrams(nowMs, datagrams, error)) {
         return false;
     }

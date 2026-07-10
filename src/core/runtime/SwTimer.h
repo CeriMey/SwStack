@@ -46,6 +46,7 @@
  ***************************************************************************************************/
 
 #include "SwObject.h"
+#include "SwPointer.h"
 #include "SwCoreApplication.h"
 #include <chrono>
 #include <limits>
@@ -77,7 +78,7 @@ public:
      */
     SwTimer(int ms, SwObject *parent = nullptr)
         : SwObject(parent)
-        , m_interval(ms*1000) // interval stocké en microsecondes
+        , m_interval((std::max)(1LL, static_cast<long long>(ms) * 1000LL)) // microseconds
         , m_running(false)
         , m_timerId(-1)
         , m_singleShot(false)
@@ -104,10 +105,17 @@ public:
      * @brief Destructor to clean up the SwTimer resources.
      */
     virtual ~SwTimer() {
-        stop();
         if (m_timerId != -1) {
-            SwCoreApplication::instance()->removeTimer(m_timerId);
+            SwCoreApplication* scheduler = m_schedulerApp
+                                                ? m_schedulerApp
+                                                : SwCoreApplication::instance(false);
+            if (scheduler) {
+                scheduler->removeTimer(m_timerId);
+            }
+            m_timerId = -1;
         }
+        m_running = false;
+        m_schedulerApp = nullptr;
     }
 
     /**
@@ -157,13 +165,16 @@ public:
     void start() {
         // ✅ si on n'est pas dans le thread d'affinité du timer, on forward
         if (threadHandle() && ThreadHandle::currentThread() != threadHandle()) {
-            auto self = this;
-            threadHandle()->postTask([self]() {
-                if (!SwObject::isLive(self)) {
+            SwPointer<SwTimer> self(this);
+            if (!threadHandle()->postTaskOnLaneReliable([self]() {
+                if (!self) {
                     return;
                 }
                 self->start();
-            });
+            }, SwFiberLane::Control)) {
+                swCError("sw.core.runtime.swtimer")
+                    << "Unable to enqueue cross-thread timer start: reliable queue saturated";
+            }
             return;
         }
 
@@ -176,18 +187,20 @@ public:
              if (intervalUs < 1) {
                  intervalUs = 1;
              }
-             if (intervalUs > static_cast<long long>((std::numeric_limits<int>::max)())) {
-                 intervalUs = static_cast<long long>((std::numeric_limits<int>::max)());
-             }
-
-             m_timerId = SwCoreApplication::instance()->addTimer([self]() {
+             m_schedulerApp = SwCoreApplication::instance();
+             m_timerId = m_schedulerApp->addTimer([self]() {
                  if (!SwObject::isLive(self)) {
                      return;
                  }
                  // Update internal state before emitting: slots may delete this timer.
                  self->m_startTime = std::chrono::steady_clock::now();
+                 if (self->m_singleShot) {
+                     self->m_running = false;
+                     self->m_timerId = -1;
+                     self->m_schedulerApp = nullptr;
+                 }
                  self->timeout();
-             }, static_cast<int>(intervalUs), m_singleShot);
+             }, intervalUs, m_singleShot);
          }
      }
 
@@ -196,13 +209,16 @@ public:
      */
     void start(int ms) {
         if (threadHandle() && ThreadHandle::currentThread() != threadHandle()) {
-            auto self = this;
-            threadHandle()->postTask([self, ms]() {
-                if (!SwObject::isLive(self)) {
+            SwPointer<SwTimer> self(this);
+            if (!threadHandle()->postTaskOnLaneReliable([self, ms]() {
+                if (!self) {
                     return;
                 }
                 self->start(ms);
-            });
+            }, SwFiberLane::Control)) {
+                swCError("sw.core.runtime.swtimer")
+                    << "Unable to enqueue cross-thread timer start: reliable queue saturated";
+            }
             return;
         }
         setInterval(ms);
@@ -215,13 +231,16 @@ public:
     void stop() {
         // ✅ stop doit aussi s'exécuter dans le thread du timer
         if (threadHandle() && ThreadHandle::currentThread() != threadHandle()) {
-            auto self = this;
-            threadHandle()->postTask([self]() {
-                if (!SwObject::isLive(self)) {
+            SwPointer<SwTimer> self(this);
+            if (!threadHandle()->postTaskOnLaneReliable([self]() {
+                if (!self) {
                     return;
                 }
                 self->stop();
-            });
+            }, SwFiberLane::Control)) {
+                swCError("sw.core.runtime.swtimer")
+                    << "Unable to enqueue cross-thread timer stop: reliable queue saturated";
+            }
             return;
         }
 
@@ -230,8 +249,14 @@ public:
             if (m_timerId != -1) {
                 const int id = m_timerId;
                 // ici on est déjà dans le bon thread => remove direct ou postEvent local
-                SwCoreApplication::instance()->removeTimer(id);
+                SwCoreApplication* scheduler = m_schedulerApp
+                                                    ? m_schedulerApp
+                                                    : SwCoreApplication::instance(false);
+                if (scheduler) {
+                    scheduler->removeTimer(id);
+                }
                 m_timerId = -1;
+                m_schedulerApp = nullptr;
             }
         }
     }
@@ -293,10 +318,12 @@ public:
         SwTimer* tempTimer = new SwTimer(ms);
 
         tempTimer->setSingleShot(true);
-        tempTimer->connect(tempTimer, &SwTimer::timeout, [callback, tempTimer]() {
+        SwPointer<SwTimer> timerGuard(tempTimer);
+        tempTimer->connect(tempTimer, &SwTimer::timeout, [callback, timerGuard]() {
             callback();
-            tempTimer->stop();
-            tempTimer->deleteLater();
+            if (timerGuard) {
+                timerGuard->deleteLater();
+            }
         });
 
         tempTimer->start();
@@ -310,13 +337,22 @@ public:
      * @return The requested single Shot.
      */
     static void singleShot(int ms, T* obj, void (T::*func)()) {
-        SwTimer* tempTimer = new SwTimer(ms);
+        if (!obj) {
+            return;
+        }
+        SwTimer* tempTimer = new SwTimer(ms, obj);
 
         tempTimer->setSingleShot(true);
-        tempTimer->connect(tempTimer, &SwTimer::timeout, [obj, func, tempTimer]() {
-            (obj->*func)();
-            tempTimer->stop();
-            tempTimer->deleteLater();
+        SwPointer<T> objectGuard(obj);
+        SwPointer<SwTimer> timerGuard(tempTimer);
+        tempTimer->connect(tempTimer, &SwTimer::timeout, obj,
+                           [objectGuard, func, timerGuard]() {
+            if (objectGuard) {
+                (objectGuard.data()->*func)();
+            }
+            if (timerGuard) {
+                timerGuard->deleteLater();
+            }
         });
 
         tempTimer->start();
@@ -333,5 +369,6 @@ private:
     int m_timerId;         ///< The unique identifier for the timer in the SwCoreApplication instance.
     bool m_singleShot;     ///< Indicates if the timer is single-shot.
     TimerType m_timerType; ///< The type of the timer.
+    SwCoreApplication* m_schedulerApp = nullptr;
     std::chrono::steady_clock::time_point m_startTime; ///< Keeps track of when the timer started.
 };

@@ -1,4 +1,5 @@
 #include "SwMap.h"
+#include "SwVector.h"
 #ifndef SWQUICSTREAM_H
 #define SWQUICSTREAM_H
 
@@ -7,20 +8,29 @@
 #include "quic/SwQuicFrame.h"
 
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <map>
+#include <utility>
 
 class SwQuicStream {
 public:
-    explicit SwQuicStream(std::uint64_t streamId = 0)
+    explicit SwQuicStream(std::uint64_t streamId = 0,
+                          std::size_t maxBufferedBytes = 1024 * 1024,
+                          std::size_t maxFragments = 1024)
         : m_streamId(streamId),
           m_readOffset(0),
           m_finReceived(false),
-          m_finalOffset(0) {
+          m_finalOffset(0),
+          m_bufferedBytes(0),
+          m_maxBufferedBytes(maxBufferedBytes),
+          m_maxFragments(maxFragments) {
     }
 
     std::uint64_t streamId() const { return m_streamId; }
     std::uint64_t readOffset() const { return m_readOffset; }
+    std::size_t bufferedBytes() const { return m_bufferedBytes; }
+    std::size_t fragmentCount() const { return m_fragments.size(); }
 
     bool receive(std::uint64_t offset,
                  const SwByteArray& data,
@@ -38,8 +48,20 @@ public:
                 setError_(error, "QUIC stream received conflicting final offsets");
                 return false;
             }
-            m_finReceived = true;
-            m_finalOffset = endOffset;
+            if (endOffset < m_readOffset) {
+                setError_(error, "QUIC stream final offset precedes consumed data");
+                return false;
+            }
+            if (!m_finReceived && !m_fragments.empty()) {
+                SwMap<std::uint64_t, SwByteArray>::const_iterator last = m_fragments.end();
+                --last;
+                const std::uint64_t retainedEnd =
+                    last->first + static_cast<std::uint64_t>(last->second.size());
+                if (retainedEnd > endOffset) {
+                    setError_(error, "QUIC stream final offset precedes received data");
+                    return false;
+                }
+            }
         }
 
         if (m_finReceived && endOffset > m_finalOffset) {
@@ -48,6 +70,10 @@ public:
         }
 
         if (endOffset <= m_readOffset) {
+            if (fin) {
+                m_finReceived = true;
+                m_finalOffset = endOffset;
+            }
             if (error) {
                 *error = SwString();
             }
@@ -67,11 +93,101 @@ public:
         }
 
         if (fragment.size() > 0) {
-            SwMap<std::uint64_t, SwByteArray>::iterator existing =
-                m_fragments.find(fragmentOffset);
-            if (existing == m_fragments.end() || existing->second.size() < fragment.size()) {
-                m_fragments[fragmentOffset] = fragment;
+            if (fragment.size() >
+                static_cast<std::size_t>((std::numeric_limits<int>::max)())) {
+                setError_(error, "QUIC stream fragment exceeds SwByteArray slice limits");
+                return false;
             }
+            const std::uint64_t fragmentEnd =
+                fragmentOffset + static_cast<std::uint64_t>(fragment.size());
+            struct PendingFragment_ {
+                std::uint64_t offset;
+                SwByteArray data;
+            };
+            SwVector<PendingFragment_> additions;
+            std::uint64_t cursor = fragmentOffset;
+            std::size_t addedBytes = 0;
+
+            // Retain disjoint intervals without repeatedly concatenating the
+            // whole reassembly buffer. Incremental out-of-order delivery is
+            // therefore O(total bytes), not O(total bytes squared). Only the
+            // uncovered portions of this frame are copied into new fragments.
+            for (SwMap<std::uint64_t, SwByteArray>::const_iterator it = m_fragments.begin();
+                 it != m_fragments.end(); ++it) {
+                const std::uint64_t existingStart = it->first;
+                const std::uint64_t existingEnd =
+                    existingStart + static_cast<std::uint64_t>(it->second.size());
+                if (existingEnd <= fragmentOffset) continue;
+                if (existingStart >= fragmentEnd) break;
+
+                if (existingStart > cursor) {
+                    const std::uint64_t uncoveredEnd =
+                        existingStart < fragmentEnd ? existingStart : fragmentEnd;
+                    const std::size_t uncoveredLength =
+                        static_cast<std::size_t>(uncoveredEnd - cursor);
+                    PendingFragment_ pending;
+                    pending.offset = cursor;
+                    pending.data = fragment.mid(
+                        static_cast<int>(cursor - fragmentOffset),
+                        static_cast<int>(uncoveredLength));
+                    additions.push_back(std::move(pending));
+                    addedBytes += uncoveredLength;
+                }
+
+                const std::uint64_t overlapStart =
+                    existingStart > fragmentOffset ? existingStart : fragmentOffset;
+                const std::uint64_t overlapEnd =
+                    existingEnd < fragmentEnd ? existingEnd : fragmentEnd;
+                if (overlapStart < overlapEnd) {
+                    const std::size_t existingIndex =
+                        static_cast<std::size_t>(overlapStart - existingStart);
+                    const std::size_t fragmentIndex =
+                        static_cast<std::size_t>(overlapStart - fragmentOffset);
+                    const std::size_t overlapLength =
+                        static_cast<std::size_t>(overlapEnd - overlapStart);
+                    if (std::memcmp(it->second.constData() + existingIndex,
+                                    fragment.constData() + fragmentIndex,
+                                    overlapLength) != 0) {
+                        setError_(error, "QUIC stream received conflicting overlapping data");
+                        return false;
+                    }
+                }
+                if (existingEnd > cursor) cursor = existingEnd;
+            }
+
+            if (cursor < fragmentEnd) {
+                const std::size_t uncoveredLength =
+                    static_cast<std::size_t>(fragmentEnd - cursor);
+                PendingFragment_ pending;
+                pending.offset = cursor;
+                if (cursor == fragmentOffset && uncoveredLength == fragment.size()) {
+                    pending.data = std::move(fragment);
+                } else {
+                    pending.data = fragment.mid(
+                        static_cast<int>(cursor - fragmentOffset),
+                        static_cast<int>(uncoveredLength));
+                }
+                additions.push_back(std::move(pending));
+                addedBytes += uncoveredLength;
+            }
+
+            if (m_bufferedBytes > m_maxBufferedBytes ||
+                addedBytes > m_maxBufferedBytes - m_bufferedBytes ||
+                m_fragments.size() > m_maxFragments ||
+                additions.size() > m_maxFragments - m_fragments.size()) {
+                setError_(error, "QUIC stream reassembly budget exceeded");
+                return false;
+            }
+
+            for (std::size_t i = 0; i < additions.size(); ++i) {
+                m_fragments[additions[i].offset] = std::move(additions[i].data);
+            }
+            m_bufferedBytes += addedBytes;
+        }
+
+        if (fin) {
+            m_finReceived = true;
+            m_finalOffset = endOffset;
         }
 
         if (error) {
@@ -119,6 +235,7 @@ public:
             const std::uint64_t end = start + size;
 
             if (end <= m_readOffset) {
+                m_bufferedBytes -= static_cast<std::size_t>(it->second.size());
                 m_fragments.erase(it);
                 continue;
             }
@@ -132,10 +249,15 @@ public:
                 break;
             }
 
-            const SwByteArray slice = it->second.mid(static_cast<int>(trim),
-                                                     static_cast<int>(readable));
-            out.append(slice);
+            if (out.isEmpty() && trim == 0) {
+                out = std::move(it->second);
+            } else {
+                const SwByteArray slice = it->second.mid(static_cast<int>(trim),
+                                                         static_cast<int>(readable));
+                out.append(slice);
+            }
             m_readOffset += readable;
+            m_bufferedBytes -= static_cast<std::size_t>(size);
             m_fragments.erase(it);
         }
 
@@ -169,6 +291,9 @@ private:
     std::uint64_t m_readOffset;
     bool m_finReceived;
     std::uint64_t m_finalOffset;
+    std::size_t m_bufferedBytes;
+    std::size_t m_maxBufferedBytes;
+    std::size_t m_maxFragments;
     SwMap<std::uint64_t, SwByteArray> m_fragments;
 };
 

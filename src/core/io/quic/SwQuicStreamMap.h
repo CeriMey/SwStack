@@ -17,6 +17,13 @@
 class SwQuicStreamMap {
 public:
     bool receiveFrame(const SwQuicFrame& frame, SwString* error = nullptr) {
+        return receiveFrame(frame, 1024 * 1024, 1024, error);
+    }
+
+    bool receiveFrame(const SwQuicFrame& frame,
+                      std::size_t maxBufferedBytes,
+                      std::size_t maxFragments,
+                      SwString* error = nullptr) {
         if (frame.type() != SwQuicFrame::Type::Stream) {
             setError_(error, "QUIC stream map can only receive STREAM frames");
             return false;
@@ -25,7 +32,8 @@ public:
         SwMap<std::uint64_t, SwQuicStream>::iterator it = m_streams.find(frame.streamId());
         if (it == m_streams.end()) {
             it = m_streams.insert(SwMakePair(frame.streamId(),
-                                                 SwQuicStream(frame.streamId()))).first;
+                                             SwQuicStream(frame.streamId(), maxBufferedBytes,
+                                                          maxFragments))).first;
         }
 
         return it->second.receiveFrame(frame, error);

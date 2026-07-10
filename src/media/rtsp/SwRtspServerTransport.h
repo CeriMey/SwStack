@@ -143,8 +143,7 @@ public:
                     }
                     const int64_t sent = client->rtpSocket->writeDatagram(datagram.constData(),
                                                                           static_cast<int64_t>(datagram.size()),
-                                                                          SwString(client->destinationAddress),
-                                                                          client->clientRtpPort);
+                                                                          client->destinationTarget);
                     if (sent != static_cast<int64_t>(datagram.size())) {
                         sentAll = false;
                         break;
@@ -202,6 +201,7 @@ private:
         uint16_t serverRtcpPort{0};
         std::shared_ptr<SwUdpSocket> rtpSocket{};
         std::shared_ptr<SwUdpSocket> rtcpSocket{};
+        SwUdpSocket::ResolvedAddress destinationTarget{};
         bool tcpInterleaved{false};
         uint8_t interleavedRtpChannel{0};
         uint8_t interleavedRtcpChannel{1};
@@ -579,6 +579,16 @@ private:
                 session->clientRtpPort = tcpInterleaved ? 0 : (multicast ? session->serverRtpPort : clientRtp);
                 session->clientRtcpPort = tcpInterleaved ? 0 : (multicast ? session->serverRtcpPort : clientRtcp);
                 session->destinationAddress = destination;
+                if (!tcpInterleaved &&
+                    !session->rtpSocket->resolveHostAddress(SwString(destination),
+                                                            session->clientRtpPort,
+                                                            session->destinationTarget)) {
+                    session->rtpSocket->close();
+                    session->rtcpSocket->close();
+                    opened = false;
+                }
+            }
+            if (opened) {
                 session->setup = true;
                 if (session->sessionId.empty()) {
                     std::ostringstream id;
@@ -630,6 +640,16 @@ private:
         }
         session->rtpSocket.reset(new SwUdpSocket());
         session->rtcpSocket.reset(new SwUdpSocket());
+        session->rtpSocket->setReadNotificationsEnabled(false);
+        session->rtpSocket->setMaxDatagramSize(
+            std::max<std::size_t>(2048U, static_cast<std::size_t>(config().mtuBytes)));
+        session->rtpSocket->setMaxPendingDatagrams(1U);
+        session->rtpSocket->setMaxPendingBytes(
+            std::max<std::size_t>(2048U, static_cast<std::size_t>(config().mtuBytes)));
+        session->rtcpSocket->setReadNotificationsEnabled(false);
+        session->rtcpSocket->setMaxDatagramSize(4096U);
+        session->rtcpSocket->setMaxPendingDatagrams(1U);
+        session->rtcpSocket->setMaxPendingBytes(4096U);
         const SwString bindAddress = rtpBindAddress_();
         const SwUdpSocket::BindMode bindMode =
             SwUdpSocket::ShareAddress | SwUdpSocket::ReuseAddressHint;

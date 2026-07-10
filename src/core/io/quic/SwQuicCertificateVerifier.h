@@ -17,11 +17,14 @@
 #include <windows.h>
 #include <bcrypt.h>
 #include <wincrypt.h>
-#else
+#endif
+
+// VIGIL links OpenSSL on every supported platform. Windows CryptoAPI remains
+// the X.509 verifier; OpenSSL supplies Ed25519 because CNG exposes no stable
+// Ed25519 CertificateVerify primitive in the supported SDK baseline.
 #include <openssl/evp.h>
 #include <openssl/x509.h>
 #include <openssl/rsa.h>
-#endif
 
 // Server authentication for the QUIC TLS 1.3 handshake (RFC 8446 sections
 // 4.4.2/4.4.3), delegated entirely to the Windows platform crypto:
@@ -33,11 +36,102 @@
 //   * verifyCertificateVerify()-- the CertificateVerify signature over the
 //                                 handshake transcript, via CNG (bcrypt).
 //
-// Supported signature schemes: rsa_pss_rsae_sha256/384/512 (0x0804..0x0806)
-// and ecdsa_secp256r1_sha256 / ecdsa_secp384r1_sha384 (0x0403, 0x0503) --
-// the set current HTTP/3 servers actually negotiate.
+// X.509 supports RSA-PSS and ECDSA as before. RFC 7250 raw public keys use
+// Ed25519 (0x0807) and are parsed/verified by the dedicated methods below.
 class SwQuicCertificateVerifier {
 public:
+    // Parse one canonical RFC 8410 Ed25519 SubjectPublicKeyInfo and return the
+    // exact 32-byte raw public key. Parameters, BER aliases and trailing data
+    // are rejected by a byte-identical DER round-trip.
+    static bool extractEd25519RawPublicKey(const SwByteArray& spkiDer,
+                                           SwByteArray& outRawPublicKey,
+                                           SwString* error = nullptr) {
+        outRawPublicKey.clear();
+        if (spkiDer.isEmpty() || !spkiDer.constData() ||
+            spkiDer.size() > static_cast<std::size_t>((std::numeric_limits<long>::max)())) {
+            setError_(error, "Ed25519 SPKI is empty or too large");
+            return false;
+        }
+        const unsigned char* input =
+            reinterpret_cast<const unsigned char*>(spkiDer.constData());
+        const unsigned char* cursor = input;
+        EVP_PKEY* key = d2i_PUBKEY(nullptr, &cursor, static_cast<long>(spkiDer.size()));
+        if (!key || cursor != input + spkiDer.size() ||
+            EVP_PKEY_base_id(key) != EVP_PKEY_ED25519) {
+            if (key) EVP_PKEY_free(key);
+            setError_(error, "Raw public key is not one canonical Ed25519 SPKI");
+            return false;
+        }
+        const int encodedLength = i2d_PUBKEY(key, nullptr);
+        SwVector<unsigned char> encoded(
+            encodedLength > 0 ? static_cast<std::size_t>(encodedLength) : 0, 0);
+        unsigned char* encodedCursor = encoded.empty() ? nullptr : encoded.data();
+        const int encodedWritten = encodedCursor ? i2d_PUBKEY(key, &encodedCursor) : -1;
+        unsigned char raw[32]{};
+        std::size_t rawLength = sizeof(raw);
+        const bool canonical = encodedLength == static_cast<int>(spkiDer.size()) &&
+            encodedWritten == encodedLength &&
+            std::memcmp(encoded.data(), input, spkiDer.size()) == 0 &&
+            EVP_PKEY_get_raw_public_key(key, raw, &rawLength) == 1 &&
+            rawLength == sizeof(raw);
+        EVP_PKEY_free(key);
+        if (!canonical) {
+            setError_(error, "Ed25519 SPKI is not canonical RFC 8410 DER");
+            return false;
+        }
+        outRawPublicKey = SwByteArray(
+            reinterpret_cast<const char*>(raw), sizeof(raw));
+        clearError_(error);
+        return true;
+    }
+
+    static bool verifyRawPublicKeyCertificateVerify(
+            const SwByteArray& spkiDer,
+            std::uint16_t signatureScheme,
+            const SwByteArray& signature,
+            const SwByteArray& transcriptHash,
+            SwString* error = nullptr,
+            bool serverContext = true) {
+        if (signatureScheme != 0x0807 || signature.size() != 64) {
+            setError_(error, "RPK CertificateVerify must use ed25519 (0x0807)");
+            return false;
+        }
+        SwByteArray raw;
+        if (!extractEd25519RawPublicKey(spkiDer, raw, error)) return false;
+
+        const unsigned char* cursor =
+            reinterpret_cast<const unsigned char*>(spkiDer.constData());
+        EVP_PKEY* key = d2i_PUBKEY(nullptr, &cursor, static_cast<long>(spkiDer.size()));
+        if (!key) {
+            setError_(error, "Cannot import Ed25519 raw public key");
+            return false;
+        }
+        SwByteArray content;
+        for (int i = 0; i < 64; ++i) content.append(static_cast<char>(0x20));
+        content.append(serverContext ? "TLS 1.3, server CertificateVerify"
+                                     : "TLS 1.3, client CertificateVerify");
+        content.append(static_cast<char>(0));
+        content.append(transcriptHash);
+
+        EVP_MD_CTX* context = EVP_MD_CTX_new();
+        bool ok = context &&
+            EVP_DigestVerifyInit(context, nullptr, nullptr, nullptr, key) == 1 &&
+            EVP_DigestVerify(
+                context,
+                reinterpret_cast<const unsigned char*>(signature.constData()),
+                static_cast<std::size_t>(signature.size()),
+                reinterpret_cast<const unsigned char*>(content.constData()),
+                static_cast<std::size_t>(content.size())) == 1;
+        if (context) EVP_MD_CTX_free(context);
+        EVP_PKEY_free(key);
+        if (!ok) {
+            setError_(error, "Ed25519 RPK CertificateVerify signature check failed");
+            return false;
+        }
+        clearError_(error);
+        return true;
+    }
+
     // Extract the canonical DER SubjectPublicKeyInfo carried by one strict DER
     // X.509 certificate. This is X.509/SPKI pinning support: it does not mean
     // that RFC 7250 RawPublicKey was negotiated on the TLS wire.
@@ -283,13 +377,15 @@ public:
                                         std::uint16_t signatureScheme,
                                         const SwByteArray& signature,
                                         const SwByteArray& transcriptHash,
-                                        SwString* error = nullptr) {
+                                        SwString* error = nullptr,
+                                        bool serverContext = true) {
 #if defined(_WIN32)
         SwByteArray content;
         for (int i = 0; i < 64; ++i) {
             content.append(static_cast<char>(0x20));
         }
-        content.append("TLS 1.3, server CertificateVerify");
+        content.append(serverContext ? "TLS 1.3, server CertificateVerify"
+                                     : "TLS 1.3, client CertificateVerify");
         content.append(static_cast<char>(0));
         content.append(transcriptHash);
 
@@ -382,7 +478,8 @@ public:
         // Contenu signé RFC 8446 §4.4.3 : 64 espaces ‖ "TLS 1.3, server CertificateVerify" ‖ 0x00 ‖ hash.
         SwByteArray content;
         for (int i = 0; i < 64; ++i) content.append(static_cast<char>(0x20));
-        content.append("TLS 1.3, server CertificateVerify");
+        content.append(serverContext ? "TLS 1.3, server CertificateVerify"
+                                     : "TLS 1.3, client CertificateVerify");
         content.append(static_cast<char>(0));
         content.append(transcriptHash);
 

@@ -13,5 +13,5 @@ target_include_directories(SslSocketSelfTest PRIVATE
 )
 
 if(WIN32)
-    target_link_libraries(SslSocketSelfTest PRIVATE ws2_32 secur32)
+    target_link_libraries(SslSocketSelfTest PRIVATE ws2_32 secur32 crypt32)
 endif()

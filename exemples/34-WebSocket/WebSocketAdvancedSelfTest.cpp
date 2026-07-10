@@ -192,6 +192,7 @@ int main(int argc, char* argv[]) {
 
     // WebSocket echo server (server-side SwWebSocketServer + SwWebSocket).
     SwWebSocketServer wsServer;
+    wsServer.setPerMessageDeflateEnabled(true);
     uint16_t wsPort = 0;
     for (uint16_t p = 19100; p < 19200; ++p) {
         if (wsServer.listen(p)) {
@@ -319,6 +320,10 @@ int main(int argc, char* argv[]) {
         if (testName == "done") {
             app.exit(0);
             return;
+        }
+
+        if (testName == "permessage-deflate") {
+            ws->setPerMessageDeflateEnabled(true);
         }
 
         const SwString url = (testIndex == 0)

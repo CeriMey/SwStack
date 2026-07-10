@@ -3,6 +3,9 @@
 #include "SwGuiApplication.h"
 #include "SwWidgetPlatformAdapter.h"
 
+#include <cstdint>
+#include <limits>
+
 class SwQtBindingEventPump {
 public:
     explicit SwQtBindingEventPump(SwGuiApplication* application = nullptr)
@@ -23,7 +26,7 @@ public:
             return -1;
         }
 
-        int nextDelayUs = -1;
+        std::int64_t nextDelayUs = -1;
         for (int iteration = 0; iteration < maxIterations; ++iteration) {
             nextDelayUs = app->processEvent(false);
             if (nextDelayUs != 0) {
@@ -34,7 +37,12 @@ public:
         if (flushDamage) {
             SwWidgetPlatformAdapter::flushDamage();
         }
-        return nextDelayUs;
+        if (nextDelayUs < 0) {
+            return -1;
+        }
+        return nextDelayUs > (std::numeric_limits<int>::max)()
+                   ? (std::numeric_limits<int>::max)()
+                   : static_cast<int>(nextDelayUs);
     }
 
 private:

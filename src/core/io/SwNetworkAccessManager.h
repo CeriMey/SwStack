@@ -54,8 +54,9 @@
 #include "SwByteArray.h"
 #include "SwMap.h"
 #include "SwDebug.h"
+#include "SwHttpClient.h"
 #include <iostream>
-#include <fstream>
+#include <utility>
 static constexpr const char* kSwLogCategory_SwNetworkAccessManager = "sw.core.io.swnetworkaccessmanager";
 
 
@@ -79,6 +80,11 @@ public:
      */
     SwNetworkAccessManager(SwObject* parent = nullptr)
         : SwObject(parent) {
+        m_client = new SwHttpClient(this);
+        connect(m_client, &SwHttpClient::finished, this,
+                [this](const SwByteArray& body) { emit finished(body); });
+        connect(m_client, &SwHttpClient::errorOccurred, this,
+                [this](int error) { emit errorOccurred(error); });
     }
 
     /**
@@ -97,7 +103,7 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     const SwByteArray& responseBody() const {
-        return m_lastResponseBody;
+        return m_client->responseBody();
     }
 
     /**
@@ -107,7 +113,7 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     SwString responseBodyAsString() const {
-        return SwString(m_lastResponseBody);
+        return m_client->responseBodyAsString();
     }
 
     /**
@@ -117,7 +123,7 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     const SwString& responseHeaders() const {
-        return m_lastResponseHeaders;
+        return m_client->responseHeaders();
     }
 
     /**
@@ -126,11 +132,12 @@ public:
      * Headers persist between requests.
      */
     void setRawHeader(const SwString& key, const SwString& value) {
-        m_headerMap[key] = value;
+        m_client->setRawHeader(key, value);
     }
 
     void setTrustedCaFile(const SwString& path) {
         m_trustedCaFile = path;
+        m_client->setTrustedCaFile(path);
     }
 
     /**
@@ -139,6 +146,8 @@ public:
      * The request result is delivered through the `finished` or `errorOccurred` signals.
      */
     bool get(const SwString& url) {
+        return m_client->get(url);
+#if 0
         SwString scheme;
         SwString host;
         uint16_t port = 0;
@@ -191,13 +200,16 @@ public:
         }
 
         return true;
+#endif
     }
 
     /**
      * @brief Cancels the current request, if any.
      */
     void abort() {
-        cleanupSocket();
+        if (m_client) {
+            m_client->abort();
+        }
     }
 
 signals:
@@ -450,18 +462,10 @@ private slots:
             }
         }
 
-        m_lastResponseHeaders = m_responseHeaders;
-        m_lastResponseBody = m_responseBody;
+        m_lastResponseHeaders = std::move(m_responseHeaders);
+        m_lastResponseBody = std::move(m_responseBody);
 
         cleanupSocket();
-
-        {
-            std::ofstream debugRaw("SwNetworkAccessManager_raw.bin", std::ios::binary | std::ios::trunc);
-            if (debugRaw && !m_lastResponseBody.isEmpty()) {
-                debugRaw.write(m_lastResponseBody.constData(),
-                               static_cast<std::streamsize>(m_lastResponseBody.size()));
-            }
-        }
 
         emit finished(m_lastResponseBody);
     }
@@ -522,7 +526,8 @@ private slots:
         return !host.isEmpty();
     }
 
-    SwAbstractSocket* m_socket = nullptr;
+    SwHttpClient* m_client = nullptr;
+    SwAbstractSocket* m_socket = nullptr; // Legacy implementation state; no longer connected.
     SwString m_scheme;
     SwString m_host;
     SwString m_path;

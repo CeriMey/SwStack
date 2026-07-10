@@ -96,6 +96,9 @@ class SwBackendSsl {
         void* defaultCtx = nullptr;
         std::vector<void*> contexts;
         std::map<std::string, void*> namedContexts;
+        // Server preference order.  ALPN identifiers are opaque byte strings;
+        // the callback only ever returns an exact identifier offered by the peer.
+        std::vector<std::string> applicationProtocols;
     };
 
 public:
@@ -168,10 +171,16 @@ public:
         return createServerContextSet(configs, outError);
     }
 
-    static void* createServerContextSet(const std::vector<ServerCertificateConfig>& configs,
-                                        std::string& outError) {
+    static void* createServerContextSet(
+        const std::vector<ServerCertificateConfig>& configs,
+        std::string& outError,
+        const std::vector<std::string>& applicationProtocols = std::vector<std::string>(),
+        bool tls13Only = false) {
         if (configs.empty()) {
             outError = "No TLS certificate configured";
+            return nullptr;
+        }
+        if (!validateApplicationProtocols_(applicationProtocols, outError)) {
             return nullptr;
         }
 
@@ -189,6 +198,13 @@ public:
         std::unique_ptr<ServerContextBundle> bundle(new ServerContextBundle());
         bundle->loader = loader;
         bundle->refCount.store(1);
+        bundle->applicationProtocols = applicationProtocols;
+
+        if (!bundle->applicationProtocols.empty() &&
+            !loader->SSL_CTX_set_alpn_select_cb) {
+            outError = "OpenSSL ALPN server API is not available";
+            return nullptr;
+        }
 
         for (std::size_t i = 0; i < configs.size(); ++i) {
             const ServerCertificateConfig& config = configs[i];
@@ -200,6 +216,24 @@ public:
             if (!ctx) {
                 releaseServerContextBundle_(bundle.release());
                 return nullptr;
+            }
+
+            if (tls13Only) {
+                if (!loader->SSL_CTX_ctrl ||
+                    loader->SSL_CTX_ctrl(ctx, kSslCtrlSetMinProtoVersion,
+                                         kTls13Version, nullptr) != 1 ||
+                    loader->SSL_CTX_ctrl(ctx, kSslCtrlSetMaxProtoVersion,
+                                         kTls13Version, nullptr) != 1) {
+                    outError = "Unable to enforce TLS 1.3 on server context";
+                    loader->SSL_CTX_free(ctx);
+                    releaseServerContextBundle_(bundle.release());
+                    return nullptr;
+                }
+            }
+
+            if (!bundle->applicationProtocols.empty()) {
+                loader->SSL_CTX_set_alpn_select_cb(
+                    ctx, &SwBackendSsl::serverAlpnSelectCallback_, bundle.get());
             }
 
             bundle->contexts.push_back(ctx);
@@ -299,6 +333,22 @@ public:
             return false;
         }
         m_loader->SSL_set_accept_state(m_ssl);
+        m_handshakeComplete = false;
+        return true;
+    }
+
+    /** Configure the client ALPN offer before init(). */
+    bool setApplicationProtocols(const std::vector<std::string>& protocols) {
+        if (m_ssl || m_ctx) {
+            m_lastError = "ALPN must be configured before TLS initialization";
+            return false;
+        }
+        std::string error;
+        if (!validateApplicationProtocols_(protocols, error)) {
+            m_lastError = error;
+            return false;
+        }
+        m_clientApplicationProtocols = protocols;
         return true;
     }
 
@@ -366,6 +416,24 @@ public:
             return false;
         }
 
+        if (!m_clientApplicationProtocols.empty()) {
+            if (!m_loader->SSL_set_alpn_protos) {
+                m_lastError = "OpenSSL ALPN client API is not available";
+                return false;
+            }
+            std::vector<unsigned char> wire;
+            if (!encodeApplicationProtocols_(m_clientApplicationProtocols, wire)) {
+                m_lastError = "Invalid TLS ALPN protocol list";
+                return false;
+            }
+            // OpenSSL returns zero on success for SSL_set_alpn_protos().
+            if (m_loader->SSL_set_alpn_protos(
+                    m_ssl, wire.data(), static_cast<unsigned int>(wire.size())) != 0) {
+                m_lastError = "Unable to configure TLS ALPN offer";
+                return false;
+            }
+        }
+
         if (m_loader->SSL_set1_host) {
             m_loader->SSL_set1_host(m_ssl, host.c_str());
         }
@@ -373,6 +441,7 @@ public:
             m_loader->SSL_ctrl(m_ssl, 55 /*SSL_CTRL_SET_TLSEXT_HOSTNAME*/, 0, (void*)host.c_str());
         }
         m_loader->SSL_set_connect_state(m_ssl);
+        m_handshakeComplete = false;
         return true;
     }
 
@@ -387,7 +456,59 @@ public:
             return IoResult::Error;
         }
         int ret = m_loader->SSL_do_handshake(m_ssl);
+        if (ret == 1) {
+            m_handshakeComplete = true;
+        }
         return mapResult(ret);
+    }
+
+    /** Exact ALPN selected by TLS. Empty before handshake or when none was negotiated. */
+    std::string negotiatedApplicationProtocol() const {
+        if (!m_handshakeComplete || !m_ssl || !m_loader ||
+            !m_loader->SSL_get0_alpn_selected) {
+            return std::string();
+        }
+        const unsigned char* selected = nullptr;
+        unsigned int selectedBytes = 0;
+        m_loader->SSL_get0_alpn_selected(m_ssl, &selected, &selectedBytes);
+        if (!selected || selectedBytes == 0) {
+            return std::string();
+        }
+        return std::string(reinterpret_cast<const char*>(selected), selectedBytes);
+    }
+
+    /** TLS 1.3 is required for RFC 8446 exporters used by VIGIL admission. */
+    bool isTls13() const {
+        return m_handshakeComplete && m_ssl && m_loader && m_loader->SSL_version &&
+               m_loader->SSL_version(m_ssl) == kTls13Version;
+    }
+
+    /**
+     * RFC 8446 section 7.5 exporter.  It deliberately fails before the
+     * handshake, on TLS <= 1.2, or when the backend cannot provide the native
+     * exporter API; callers must never substitute unauthenticated bytes.
+     */
+    bool exportKeyingMaterial(const std::string& label,
+                              const unsigned char* context,
+                              std::size_t contextBytes,
+                              bool useContext,
+                              std::size_t outputBytes,
+                              std::vector<unsigned char>& out) const {
+        out.clear();
+        if (!isTls13() || !m_loader->SSL_export_keying_material || label.empty() ||
+            outputBytes == 0 || outputBytes > kMaxExporterBytes ||
+            (contextBytes != 0 && !context)) {
+            return false;
+        }
+        out.resize(outputBytes);
+        if (m_loader->SSL_export_keying_material(
+                m_ssl, out.data(), out.size(), label.data(), label.size(),
+                context, contextBytes, useContext ? 1 : 0) != 1) {
+            std::fill(out.begin(), out.end(), static_cast<unsigned char>(0));
+            out.clear();
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -431,12 +552,44 @@ public:
     }
 
     /**
-     * @brief Performs the `shutdown` operation.
+     * @brief Advances a non-blocking TLS close-notify exchange.
+     * @param complete Set when both peers' close-notify alerts have been exchanged.
+     * @return The dispatcher condition needed before the operation can continue.
+     *
+     * A zero return from SSL_shutdown means that our close-notify was sent but the
+     * peer alert has not arrived yet.  It is not an error and, importantly, the SSL
+     * object must remain alive until the next readable event.
+     */
+    IoResult shutdownStep(bool& complete) {
+        complete = false;
+        if (!m_ssl || !m_loader) {
+            complete = true;
+            return IoResult::Ok;
+        }
+
+        const int ret = m_loader->SSL_shutdown(m_ssl);
+        if (ret == 1) {
+            complete = true;
+            return IoResult::Ok;
+        }
+        if (ret == 0) {
+            return IoResult::WantRead;
+        }
+        return mapResult(ret);
+    }
+
+    /**
+     * @brief Best-effort immediate shutdown used while destroying/aborting a socket.
      */
     void shutdown() {
         if (m_ssl && m_loader) {
             m_loader->SSL_shutdown(m_ssl);
         }
+        cleanup();
+    }
+
+    /** Releases TLS resources without attempting network I/O. */
+    void abort() {
         cleanup();
     }
 
@@ -451,6 +604,81 @@ public:
     }
 
 private:
+    static bool validateApplicationProtocols_(const std::vector<std::string>& protocols,
+                                              std::string& outError) {
+        std::size_t wireBytes = 0;
+        for (std::size_t i = 0; i < protocols.size(); ++i) {
+            const std::string& protocol = protocols[i];
+            if (protocol.empty() || protocol.size() > 255) {
+                outError = "TLS ALPN identifiers must contain 1..255 bytes";
+                return false;
+            }
+            if (wireBytes > 65535u - 1u - protocol.size()) {
+                outError = "TLS ALPN protocol list is too large";
+                return false;
+            }
+            for (std::size_t j = 0; j < i; ++j) {
+                if (protocols[j] == protocol) {
+                    outError = "TLS ALPN protocol list contains a duplicate";
+                    return false;
+                }
+            }
+            wireBytes += 1u + protocol.size();
+        }
+        return true;
+    }
+
+    static bool encodeApplicationProtocols_(const std::vector<std::string>& protocols,
+                                            std::vector<unsigned char>& out) {
+        std::string error;
+        if (!validateApplicationProtocols_(protocols, error)) {
+            out.clear();
+            return false;
+        }
+        std::size_t total = 0;
+        for (const std::string& protocol : protocols) {
+            total += 1u + protocol.size();
+        }
+        out.clear();
+        out.reserve(total);
+        for (const std::string& protocol : protocols) {
+            out.push_back(static_cast<unsigned char>(protocol.size()));
+            out.insert(out.end(), protocol.begin(), protocol.end());
+        }
+        return true;
+    }
+
+    static int serverAlpnSelectCallback_(void*, const unsigned char** out,
+                                         unsigned char* outLen,
+                                         const unsigned char* offered,
+                                         unsigned int offeredBytes,
+                                         void* argument) {
+        ServerContextBundle* bundle = static_cast<ServerContextBundle*>(argument);
+        if (!bundle || !out || !outLen || !offered || offeredBytes == 0) {
+            return kSslTlsextErrAlertFatal;
+        }
+
+        // Server preference order, exact opaque match.  Return a view into the
+        // ClientHello buffer as required by SSL_CTX_set_alpn_select_cb().
+        for (const std::string& wanted : bundle->applicationProtocols) {
+            unsigned int offset = 0;
+            while (offset < offeredBytes) {
+                const unsigned int length = offered[offset++];
+                if (length == 0 || length > offeredBytes - offset) {
+                    return kSslTlsextErrAlertFatal;
+                }
+                if (length == wanted.size() &&
+                    std::memcmp(offered + offset, wanted.data(), length) == 0) {
+                    *out = offered + offset;
+                    *outLen = static_cast<unsigned char>(length);
+                    return kSslTlsextErrOk;
+                }
+                offset += length;
+            }
+        }
+        return kSslTlsextErrAlertFatal;
+    }
+
     bool configureClientTrust_(const std::string& caFilePath) {
         if (!caFilePath.empty()) {
             if (!pathIsFile_(caFilePath)) {
@@ -1012,6 +1240,15 @@ private:
         using FnX509Free = void (*)(void*);
         using FnSSLGetServername = const char* (*)(const void*, int);
         using FnSSLSetSSLCTX = void* (*)(void*, void*);
+        using FnCTXSetAlpnSelectCb = void (*)(
+            void*, int (*)(void*, const unsigned char**, unsigned char*,
+                           const unsigned char*, unsigned int, void*), void*);
+        using FnSetAlpnProtos = int (*)(void*, const unsigned char*, unsigned int);
+        using FnGet0AlpnSelected = void (*)(const void*, const unsigned char**, unsigned int*);
+        using FnSSLVersion = int (*)(const void*);
+        using FnExportKeyingMaterial = int (*)(void*, unsigned char*, std::size_t,
+                                               const char*, std::size_t,
+                                               const unsigned char*, std::size_t, int);
 
         FnOpenSSLInit OPENSSL_init_ssl = nullptr;
         FnTLSClientMethod TLS_client_method = nullptr;
@@ -1052,6 +1289,11 @@ private:
         FnX509Free X509_free = nullptr;
         FnSSLGetServername SSL_get_servername = nullptr;
         FnSSLSetSSLCTX SSL_set_SSL_CTX = nullptr;
+        FnCTXSetAlpnSelectCb SSL_CTX_set_alpn_select_cb = nullptr;
+        FnSetAlpnProtos SSL_set_alpn_protos = nullptr;
+        FnGet0AlpnSelected SSL_get0_alpn_selected = nullptr;
+        FnSSLVersion SSL_version = nullptr;
+        FnExportKeyingMaterial SSL_export_keying_material = nullptr;
 
         /**
          * @brief Performs the `load` operation on the associated resource.
@@ -1128,6 +1370,14 @@ private:
             X509_free = (FnX509Free)sym(crypto, "X509_free");
             SSL_get_servername = (FnSSLGetServername)sym(ssl, "SSL_get_servername");
             SSL_set_SSL_CTX = (FnSSLSetSSLCTX)sym(ssl, "SSL_set_SSL_CTX");
+            SSL_CTX_set_alpn_select_cb =
+                (FnCTXSetAlpnSelectCb)sym(ssl, "SSL_CTX_set_alpn_select_cb");
+            SSL_set_alpn_protos = (FnSetAlpnProtos)sym(ssl, "SSL_set_alpn_protos");
+            SSL_get0_alpn_selected =
+                (FnGet0AlpnSelected)sym(ssl, "SSL_get0_alpn_selected");
+            SSL_version = (FnSSLVersion)sym(ssl, "SSL_version");
+            SSL_export_keying_material =
+                (FnExportKeyingMaterial)sym(ssl, "SSL_export_keying_material");
 
             if (!TLS_client_method || !SSL_CTX_new || !SSL_new || !SSL_set_fd || !SSL_do_handshake ||
                 !SSL_get_error || !SSL_read || !SSL_write || !SSL_shutdown) {
@@ -1270,6 +1520,7 @@ private:
         m_ssl = nullptr;
         m_ctx = nullptr;
         m_serverContextBundle = nullptr;
+        m_handshakeComplete = false;
     }
 
     bool ensureLoaded() {
@@ -1294,8 +1545,13 @@ private:
     static constexpr long kSslModeAcceptMovingWriteBuffer = 0x02;
     static constexpr int kSslCtrlSetTlsextServernameCallback = 53;
     static constexpr int kSslCtrlSetTlsextServernameArg = 54;
+    static constexpr int kSslCtrlSetMinProtoVersion = 123;
+    static constexpr int kSslCtrlSetMaxProtoVersion = 124;
     static constexpr int kTlsExtNameTypeHostName = 0;
     static constexpr int kSslTlsextErrOk = 0;
+    static constexpr int kSslTlsextErrAlertFatal = 2;
+    static constexpr int kTls13Version = 0x0304;
+    static constexpr std::size_t kMaxExporterBytes = 64 * 1024;
     static constexpr uint64_t kSslOpIgnoreUnexpectedEof = static_cast<uint64_t>(1) << 7;
 
 #if defined(_WIN32)
@@ -1385,5 +1641,7 @@ private:
     void* m_ctx = nullptr;
     void* m_ssl = nullptr;
     ServerContextBundle* m_serverContextBundle = nullptr;
+    std::vector<std::string> m_clientApplicationProtocols;
     std::string m_lastError;
+    bool m_handshakeComplete = false;
 };

@@ -143,6 +143,7 @@ private:
         }
 
         m_client = new SwWebSocket(this);
+        m_client->setPerMessageDeflateEnabled(true);
         m_client->setRequestedSubprotocols(SwList<SwString>{ SwString("chat"), SwString("binary") });
         if (testCase.secure) {
             m_client->setTrustedCaFile("exemples/test-assets/ssl/localhost_cert.pem");

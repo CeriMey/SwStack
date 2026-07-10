@@ -55,6 +55,12 @@ public:
         m_size = 0;
     }
 
+    void release() noexcept {
+        std::vector<char>().swap(m_buffer);
+        m_head = 0;
+        m_size = 0;
+    }
+
     void reserve(std::size_t capacity) {
         if (capacity > m_buffer.size()) {
             reallocate_(capacity);

@@ -31,6 +31,7 @@ public:
         m_socket->setReceiveBufferSize(4 * 1024 * 1024);
         m_socket->setMaxDatagramSize(64 * 1024);
         m_socket->setMaxPendingDatagrams(256);
+        m_socket->setMaxPendingBytes(4 * 1024 * 1024);
         m_tsDemux.setPacketCallback([this](const SwMediaPacket& packet) {
             emitProgramVideoPacket_(packet);
         });
@@ -90,6 +91,7 @@ public:
         }
         setRunning(true);
         m_lastPacketTime = {};
+        m_streamingReported = false;
         if (m_monitorTimer && !m_monitorTimer->isActive()) {
             m_monitorTimer->start();
         }
@@ -105,6 +107,7 @@ public:
         }
         m_tsDemux.reset();
         m_detectedFormat = SwMediaOpenOptions::UdpPayloadFormat::Auto;
+        m_streamingReported = false;
         emitStatus(StreamState::Stopped, "Stream stopped");
     }
 
@@ -114,13 +117,42 @@ private:
     }
 
     static bool hasStartCodeH264Idr_(const SwByteArray& payload) {
-        std::vector<uint8_t> bytes(payload.begin(), payload.end());
-        return SwTsProgramDemux::hasStartCodeH264Idr(bytes);
+        const uint8_t* bytes = reinterpret_cast<const uint8_t*>(payload.constData());
+        const std::size_t size = payload.size();
+        for (std::size_t i = 0; bytes && i + 4U < size; ++i) {
+            if (bytes[i] != 0U || bytes[i + 1U] != 0U) {
+                continue;
+            }
+            const bool shortCode = bytes[i + 2U] == 1U;
+            const bool longCode = i + 4U < size && bytes[i + 2U] == 0U &&
+                                  bytes[i + 3U] == 1U;
+            const std::size_t header = shortCode ? i + 3U : i + 4U;
+            if ((shortCode || longCode) && header < size &&
+                (bytes[header] & 0x1FU) == 5U) {
+                return true;
+            }
+        }
+        return false;
     }
 
     static bool hasStartCodeHevcIdr_(const SwByteArray& payload) {
-        std::vector<uint8_t> bytes(payload.begin(), payload.end());
-        return SwTsProgramDemux::hasStartCodeHevcIdr(bytes);
+        const uint8_t* bytes = reinterpret_cast<const uint8_t*>(payload.constData());
+        const std::size_t size = payload.size();
+        for (std::size_t i = 0; bytes && i + 5U < size; ++i) {
+            if (bytes[i] != 0U || bytes[i + 1U] != 0U) {
+                continue;
+            }
+            const bool shortCode = bytes[i + 2U] == 1U;
+            const bool longCode = bytes[i + 2U] == 0U && bytes[i + 3U] == 1U;
+            const std::size_t header = shortCode ? i + 3U : i + 4U;
+            if (shortCode || longCode) {
+                const uint8_t nalType = static_cast<uint8_t>((bytes[header] >> 1U) & 0x3FU);
+                if (nalType >= 16U && nalType <= 21U) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     static bool looksLikeMpegTs_(const SwByteArray& payload) {
@@ -253,7 +285,7 @@ private:
             emitMediaPacket(packet);
             return;
         }
-        emitStatus(StreamState::Streaming, "Streaming");
+        reportStreaming_();
         SwVideoPacket videoPacket(videoCodecFromName_(packet.codec()),
                                   packet.payload(),
                                   packet.pts(),
@@ -270,9 +302,13 @@ private:
         while (m_socket->hasPendingDatagrams()) {
             SwString sender;
             uint16_t senderPort = 0;
-            SwByteArray datagram = m_socket->receiveDatagram(&sender, &senderPort);
-            if (datagram.isEmpty()) {
-                break;
+            bool truncated = false;
+            SwString* senderOutput = m_options.sourceAddressFilter.isEmpty() ? nullptr : &sender;
+            SwByteArray datagram = m_socket->receiveDatagram(senderOutput,
+                                                             &senderPort,
+                                                             &truncated);
+            if (truncated || datagram.isEmpty()) {
+                continue;
             }
             if (!m_options.sourceAddressFilter.isEmpty() &&
                 sender != m_options.sourceAddressFilter) {
@@ -299,13 +335,21 @@ private:
                 (codec == SwVideoPacket::Codec::H265) ? hasStartCodeHevcIdr_(datagram)
                                                       : hasStartCodeH264Idr_(datagram);
             SwVideoPacket packet(codec,
-                                 datagram,
+                                 std::move(datagram),
                                  static_cast<std::int64_t>(++m_timestampCounter),
                                  static_cast<std::int64_t>(m_timestampCounter),
                                  keyFrame);
-            emitStatus(StreamState::Streaming, "Streaming");
+            reportStreaming_();
             emitPacket(packet);
         }
+    }
+
+    void reportStreaming_() {
+        if (m_streamingReported) {
+            return;
+        }
+        m_streamingReported = true;
+        emitStatus(StreamState::Streaming, "Streaming");
     }
 
     void checkTimeout_() {
@@ -315,6 +359,7 @@ private:
         const auto now = std::chrono::steady_clock::now();
         const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - m_lastPacketTime).count();
         if (elapsed > 3) {
+            m_streamingReported = false;
             emitStatus(StreamState::Recovering,
                        SwString("No UDP data received for ") +
                            SwString::number(static_cast<int>(elapsed)) + SwString(" s"));
@@ -329,4 +374,5 @@ private:
     SwMediaOpenOptions::UdpPayloadFormat m_detectedFormat{SwMediaOpenOptions::UdpPayloadFormat::Auto};
     std::chrono::steady_clock::time_point m_lastPacketTime{};
     uint32_t m_timestampCounter{0};
+    bool m_streamingReported{false};
 };

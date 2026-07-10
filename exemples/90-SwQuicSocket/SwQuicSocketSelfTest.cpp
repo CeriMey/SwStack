@@ -64,6 +64,28 @@ int main() {
 
     // The endpoint accepts inbound connections: SIGNAL connectionAccepted.
     server.endpoint().listen(SwString("h3"), SwQuicAuthMode::RawPublicKey);
+
+    // Unroutable garbage and an undersized Initial must not allocate any
+    // per-peer handshake state (the UDP-facing DoS boundary).
+    SwByteArray garbage(1200, 'g');
+    server.endpoint().onUdpPacket(
+        reinterpret_cast<const std::uint8_t*>(garbage.constData()), garbage.size(),
+        SwString("127.0.0.2"), 44444);
+    SwByteArray undersizedInitial(1199, '\0');
+    undersizedInitial[0] = static_cast<char>(0xc0);
+    undersizedInitial[4] = static_cast<char>(0x01);
+    undersizedInitial[5] = static_cast<char>(0x08);
+    for (int i = 0; i < 8; ++i) undersizedInitial[6 + i] = static_cast<char>('a' + i);
+    undersizedInitial[14] = static_cast<char>(0x08);
+    for (int i = 0; i < 8; ++i) undersizedInitial[15 + i] = static_cast<char>('k' + i);
+    server.endpoint().onUdpPacket(
+        reinterpret_cast<const std::uint8_t*>(undersizedInitial.constData()),
+        undersizedInitial.size(), SwString("127.0.0.2"), 44445);
+    if (server.endpoint().connectionCount() != 0) {
+        std::printf("FAIL: invalid datagram allocated QUIC connection state\n");
+        return 2;
+    }
+
     SwObject::connect(&server.endpoint(), &SwQuicEndpoint::connectionAccepted, &bus,
                       [&](std::shared_ptr<SwQuicConnectionHandle> conn) {
         serverAccepted = true;

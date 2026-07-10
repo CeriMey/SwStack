@@ -29,12 +29,15 @@
  ***************************************************************************************************/
 
 #include "SwCoreApplication.h"
+#include "SwDequeue.h"
 #include "SwDebug.h"
 #include "SwList.h"
 #include "SwObject.h"
 #include "SwTcpSocket.h"
 
 static constexpr const char* kSwLogCategory_SwTcpServer = "sw.core.io.swtcpserver";
+static constexpr std::size_t kSwTcpServerDefaultMaxPendingConnections = 1024;
+static constexpr std::size_t kSwTcpServerDefaultAcceptBudget = 64;
 
 #if defined(_WIN32)
 #include <winsock2.h>
@@ -119,6 +122,30 @@ public:
         return m_sendBufferSize;
     }
 
+    void setMaxPendingConnections(std::size_t count) {
+        if (count > 0) {
+            m_maxPendingConnections = count;
+        }
+    }
+
+    std::size_t maxPendingConnections() const {
+        return m_maxPendingConnections;
+    }
+
+    std::size_t pendingConnectionCount() const {
+        return m_pendingConnections.count();
+    }
+
+    void setAcceptBudget(std::size_t count) {
+        if (count > 0) {
+            m_acceptBudget = count;
+        }
+    }
+
+    std::size_t acceptBudget() const {
+        return m_acceptBudget;
+    }
+
     bool listen(uint16_t port) {
         return listen(SwString(), port);
     }
@@ -196,22 +223,26 @@ public:
         m_requestedListenAddress.clear();
         m_listenFamily = AF_UNSPEC;
         m_dualStackEnabled = false;
+
+        SwTcpSocket* pending = nullptr;
+        while (m_pendingConnections.tryTakeFirst(pending)) {
+            delete pending;
+            pending = nullptr;
+        }
     }
 
     virtual SwTcpSocket* nextPendingConnection() {
         if (m_pendingConnections.isEmpty()) {
             return nullptr;
         }
-        SwTcpSocket* sock = m_pendingConnections.first();
-        m_pendingConnections.removeFirst();
-        return sock;
+        return m_pendingConnections.takeFirst();
     }
 
 signals:
     DECLARE_SIGNAL_VOID(newConnection)
 
 protected:
-    SwList<SwTcpSocket*> m_pendingConnections;
+    SwDequeue<SwTcpSocket*> m_pendingConnections;
 
     virtual SwTcpSocket* createPendingSocket_() {
         return new SwTcpSocket();
@@ -230,6 +261,13 @@ protected:
         if (!socket) {
             return;
         }
+        if (m_pendingConnections.count() >= m_maxPendingConnections) {
+            swCWarning(kSwLogCategory_SwTcpServer)
+                << "pending connection cap reached=" << m_maxPendingConnections;
+            socket->abort();
+            socket->deleteLater();
+            return;
+        }
         m_pendingConnections.append(socket);
         emit newConnection();
     }
@@ -242,6 +280,8 @@ private:
     uint16_t m_listenPort = 0;
     int m_receiveBufferSize = 0;
     int m_sendBufferSize = 0;
+    std::size_t m_maxPendingConnections = kSwTcpServerDefaultMaxPendingConnections;
+    std::size_t m_acceptBudget = kSwTcpServerDefaultAcceptBudget;
     SwString m_listenAddress;
     SwString m_requestedListenAddress;
 
@@ -371,16 +411,29 @@ private:
             return false;
         }
         u_long mode = 1;
-        ::ioctlsocket(m_listenSocket, FIONBIO, &mode);
+        if (::ioctlsocket(m_listenSocket, FIONBIO, &mode) == SOCKET_ERROR) {
+            swCError(kSwLogCategory_SwTcpServer) << "ioctlsocket(FIONBIO) failed: " << WSAGetLastError();
+            return false;
+        }
 #else
-        m_listenSocket = ::socket(family, SOCK_STREAM, 0);
+        int socketType = SOCK_STREAM;
+#if defined(SOCK_NONBLOCK)
+        socketType |= SOCK_NONBLOCK;
+#endif
+#if defined(SOCK_CLOEXEC)
+        socketType |= SOCK_CLOEXEC;
+#endif
+        m_listenSocket = ::socket(family, socketType, 0);
         if (m_listenSocket < 0) {
             swCError(kSwLogCategory_SwTcpServer) << "socket failed: " << std::strerror(errno);
             return false;
         }
         int reuse = 1;
         ::setsockopt(m_listenSocket, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-        setNonBlocking_(m_listenSocket);
+        if (!setNonBlockingAndCloseOnExec_(m_listenSocket)) {
+            swCError(kSwLogCategory_SwTcpServer) << "failed to configure nonblocking/CLOEXEC: " << std::strerror(errno);
+            return false;
+        }
 #endif
 
         m_listenFamily = family;
@@ -479,14 +532,18 @@ private:
         }
 
 #if defined(_WIN32)
-        m_dispatchToken = app->ioDispatcher().watchHandle(
+        m_dispatchToken = app->ioDispatcher().watchHandleReliable(
             m_listenEvent,
-            [affinity](std::function<void()> task) mutable {
+            [affinity](std::function<void()> task) mutable -> bool {
                 if (affinity && ThreadHandle::isLive(affinity) && ThreadHandle::currentThread() != affinity) {
-                    affinity->postTask(std::move(task));
-                    return;
+                    std::function<void()> controlFallback = task;
+                    if (affinity->postTaskOnLane(std::move(task), SwFiberLane::Input)) {
+                        return true;
+                    }
+                    return affinity->postTaskOnLane(std::move(controlFallback), SwFiberLane::Control);
                 }
                 task();
+                return true;
             },
             [this]() {
                 if (!SwObject::isLive(this)) {
@@ -495,15 +552,19 @@ private:
                 onCheckEvents_();
             });
 #else
-        m_dispatchToken = app->ioDispatcher().watchFd(
+        m_dispatchToken = app->ioDispatcher().watchFdReliable(
             m_listenSocket,
             SwIoDispatcher::Readable | SwIoDispatcher::Error | SwIoDispatcher::Hangup,
-            [affinity](std::function<void()> task) mutable {
+            [affinity](std::function<void()> task) mutable -> bool {
                 if (affinity && ThreadHandle::isLive(affinity) && ThreadHandle::currentThread() != affinity) {
-                    affinity->postTask(std::move(task));
-                    return;
+                    std::function<void()> controlFallback = task;
+                    if (affinity->postTaskOnLane(std::move(task), SwFiberLane::Input)) {
+                        return true;
+                    }
+                    return affinity->postTaskOnLane(std::move(controlFallback), SwFiberLane::Control);
                 }
                 task();
+                return true;
             },
             [this](uint32_t) {
                 if (!SwObject::isLive(this)) {
@@ -541,7 +602,9 @@ private:
             if (networkEvents.iErrorCode[FD_ACCEPT_BIT] != 0) {
                 swCError(kSwLogCategory_SwTcpServer) << "FD_ACCEPT error: " << networkEvents.iErrorCode[FD_ACCEPT_BIT];
             } else {
-                while (true) {
+                const std::size_t acceptBudget = m_acceptBudget;
+                std::size_t acceptedCount = 0;
+                while (acceptedCount < acceptBudget) {
                     SOCKET clientSocket = ::accept(m_listenSocket, NULL, NULL);
                     if (clientSocket == INVALID_SOCKET) {
                         const int acceptError = WSAGetLastError();
@@ -550,7 +613,11 @@ private:
                         }
                         break;
                     }
+                    ++acceptedCount;
                     handleAcceptedSocket_(clientSocket);
+                    if (!SwObject::isLive(this) || !isListening()) {
+                        return;
+                    }
                 }
             }
         }
@@ -563,15 +630,42 @@ private:
             return;
         }
 
-        while (true) {
-            int clientFd = ::accept(m_listenSocket, nullptr, nullptr);
+        const std::size_t acceptBudget = m_acceptBudget;
+        std::size_t acceptedCount = 0;
+        while (acceptedCount < acceptBudget) {
+            int clientFd = -1;
+#if defined(__linux__) && defined(SOCK_NONBLOCK) && defined(SOCK_CLOEXEC)
+            clientFd = ::accept4(m_listenSocket,
+                                 nullptr,
+                                 nullptr,
+                                 SOCK_NONBLOCK | SOCK_CLOEXEC);
+            if (clientFd < 0 && (errno == ENOSYS || errno == EINVAL)) {
+                clientFd = ::accept(m_listenSocket, nullptr, nullptr);
+            }
+#else
+            clientFd = ::accept(m_listenSocket, nullptr, nullptr);
+#endif
             if (clientFd < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
                 if (errno != EAGAIN && errno != EWOULDBLOCK) {
                     swCError(kSwLogCategory_SwTcpServer) << "accept failed: " << std::strerror(errno);
                 }
                 break;
             }
+            if (!setNonBlockingAndCloseOnExec_(clientFd)) {
+                const int configureError = errno;
+                ::close(clientFd);
+                swCError(kSwLogCategory_SwTcpServer)
+                    << "accepted socket configuration failed: " << std::strerror(configureError);
+                continue;
+            }
+            ++acceptedCount;
             handleAcceptedSocket_(clientFd);
+            if (!SwObject::isLive(this) || !isListening()) {
+                return;
+            }
         }
 #endif
     }
@@ -590,8 +684,14 @@ private:
         client->setReceiveBufferSize(m_receiveBufferSize);
         client->setSendBufferSize(m_sendBufferSize);
         client->adoptSocket(socketHandle, shouldEmitConnectedOnAdopt_(client));
+        if (!SwObject::isLive(client) || client->state() != SwAbstractSocket::ConnectedState) {
+            if (SwObject::isLive(client)) {
+                delete client;
+            }
+            return;
+        }
         if (!finalizeAcceptedSocket_(client)) {
-            client->close();
+            client->abort();
             client->deleteLater();
         }
     }
@@ -608,11 +708,16 @@ private:
         }
     }
 #else
-    void setNonBlocking_(int fd) {
+    bool setNonBlockingAndCloseOnExec_(int fd) {
         const int flags = ::fcntl(fd, F_GETFL, 0);
-        if (flags >= 0) {
-            ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
+            return false;
         }
+        const int descriptorFlags = ::fcntl(fd, F_GETFD, 0);
+        if (descriptorFlags < 0 || ::fcntl(fd, F_SETFD, descriptorFlags | FD_CLOEXEC) != 0) {
+            return false;
+        }
+        return true;
     }
 #endif
 };

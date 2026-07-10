@@ -50,8 +50,12 @@
 #include "SwSslServer.h"
 #include "SwTcpServer.h"
 #include "SwWebSocket.h"
+#include "SwDequeue.h"
 #include "SwList.h"
 #include "SwMap.h"
+
+#include <algorithm>
+#include <cstddef>
 
 static constexpr const char* kSwLogCategory_SwWebSocketServer = "sw.core.io.swwebsocketserver";
 
@@ -134,7 +138,33 @@ public:
         if (m_sslServer) {
             m_sslServer->close();
         }
+
+        SwList<SwWebSocket*> sockets;
+        for (auto it = m_liveSockets.begin(); it != m_liveSockets.end(); ++it) {
+            if (it.key()) {
+                sockets.append(it.key());
+            }
+        }
+        m_liveSockets.clear();
+        m_handshakePending.clear();
+        m_pendingSockets.clear();
+        for (std::size_t i = 0; i < sockets.size(); ++i) {
+            sockets[i]->abort();
+            sockets[i]->deleteLater();
+        }
     }
+
+    void setMaxConnections(std::size_t count) { m_maxConnections = count; }
+    std::size_t maxConnections() const { return m_maxConnections; }
+
+    void setMaxPendingConnections(std::size_t count) { m_maxPendingConnections = count; }
+    std::size_t maxPendingConnections() const { return m_maxPendingConnections; }
+
+    void setHandshakeTimeoutMs(int ms) { m_handshakeTimeoutMs = (std::max)(0, ms); }
+    int handshakeTimeoutMs() const { return m_handshakeTimeoutMs; }
+
+    void setMaxHandshakeBytes(std::size_t bytes) { m_maxHandshakeBytes = bytes; }
+    std::size_t maxHandshakeBytes() const { return m_maxHandshakeBytes; }
 
     /**
      * @brief Sets the supported Subprotocols.
@@ -208,9 +238,7 @@ public:
         if (m_pendingSockets.isEmpty()) {
             return nullptr;
         }
-        SwWebSocket* ws = m_pendingSockets.first();
-        m_pendingSockets.removeFirst();
-        return ws;
+        return m_pendingSockets.takeFirst();
     }
 
 signals:
@@ -241,32 +269,57 @@ private:
         if (!socket) {
             return;
         }
+        if (m_maxConnections > 0 && m_liveSockets.size() >= m_maxConnections) {
+            socket->close();
+            socket->deleteLater();
+            return;
+        }
 
         auto* ws = new SwWebSocket(SwWebSocket::ServerRole, this);
         ws->setSupportedSubprotocols(m_supportedSubprotocols);
         ws->setPerMessageDeflateEnabled(m_perMessageDeflateEnabled);
         ws->setTcpReceiveBufferSize(m_tcpReceiveBufferSize);
         ws->setTcpSendBufferSize(m_tcpSendBufferSize);
-        m_handshakeComplete[ws] = false;
+        ws->setHandshakeTimeoutMs(m_handshakeTimeoutMs);
+        ws->setMaxHandshakeBytes(m_maxHandshakeBytes);
+        m_liveSockets[ws] = true;
+        m_handshakePending[ws] = true;
 
-        SwObject::connect(ws, &SwWebSocket::connected, [this, ws]() {
-            m_handshakeComplete[ws] = true;
+        SwObject::connect(ws, &SwWebSocket::connected, this, [this, ws]() {
+            if (!m_liveSockets.contains(ws)) {
+                return;
+            }
+            m_handshakePending.remove(ws);
+            if (m_maxPendingConnections > 0 &&
+                m_pendingSockets.size() >= static_cast<int>(m_maxPendingConnections)) {
+                m_liveSockets.remove(ws);
+                ws->close(SwWebSocket::CloseCodeGoingAway, "Server accept queue full");
+                ws->deleteLater();
+                return;
+            }
             m_pendingSockets.append(ws);
             emit newConnection();
         });
 
-        SwObject::connect(ws, &SwWebSocket::errorOccurred, [this, ws](int) {
-            if (!m_handshakeComplete.value(ws, false)) {
-                m_handshakeComplete.remove(ws);
+        SwObject::connect(ws, &SwWebSocket::errorOccurred, this, [this, ws](int) {
+            if (m_handshakePending.contains(ws)) {
+                m_handshakePending.remove(ws);
+                m_liveSockets.remove(ws);
+                m_pendingSockets.removeOne(ws);
                 ws->deleteLater();
             }
         });
 
-        SwObject::connect(ws, &SwWebSocket::disconnected, [this, ws]() {
-            if (!m_handshakeComplete.value(ws, false)) {
-                m_handshakeComplete.remove(ws);
-                ws->deleteLater();
-            }
+        SwObject::connect(ws, &SwWebSocket::disconnected, this, [this, ws]() {
+            m_handshakePending.remove(ws);
+            m_liveSockets.remove(ws);
+            m_pendingSockets.removeOne(ws);
+            ws->deleteLater();
+        });
+        SwObject::connect(ws, &SwObject::destroyed, this, [this, ws]() {
+            m_handshakePending.remove(ws);
+            m_liveSockets.remove(ws);
+            m_pendingSockets.removeOne(ws);
         });
 
         ws->accept(socket, secure);
@@ -275,9 +328,14 @@ private:
     SwTcpServer* m_tcpServer = nullptr;
     SwSslServer* m_sslServer = nullptr;
     SwList<SwString> m_supportedSubprotocols;
-    bool m_perMessageDeflateEnabled = true;
+    bool m_perMessageDeflateEnabled = false;
     int m_tcpReceiveBufferSize = 0;
     int m_tcpSendBufferSize = 0;
-    SwList<SwWebSocket*> m_pendingSockets;
-    SwMap<SwWebSocket*, bool> m_handshakeComplete;
+    std::size_t m_maxConnections = 4096;
+    std::size_t m_maxPendingConnections = 1024;
+    int m_handshakeTimeoutMs = 10 * 1000;
+    std::size_t m_maxHandshakeBytes = 32 * 1024;
+    SwDequeue<SwWebSocket*> m_pendingSockets;
+    SwMap<SwWebSocket*, bool> m_liveSockets;
+    SwMap<SwWebSocket*, bool> m_handshakePending;
 };

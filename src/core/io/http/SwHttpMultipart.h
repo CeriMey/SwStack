@@ -53,8 +53,14 @@
 #include "SwFile.h"
 #include "platform/SwPlatformSelector.h"
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
+#include <random>
+#include <utility>
 
 inline SwString swHttpTrimQuotes_(const SwString& value) {
     SwString out = value.trimmed();
@@ -108,7 +114,25 @@ inline bool swHttpExtractMultipartBoundary(const SwString& contentType, SwString
     }
 
     SwString boundary = params["boundary"].trimmed();
-    if (boundary.isEmpty()) {
+    if (boundary.isEmpty() || boundary.size() > 70) {
+        return false;
+    }
+
+    // RFC 2046 bchars: spaces are permitted internally, but not as the final
+    // character. Reject controls and punctuation that can alter MIME framing.
+    for (std::size_t i = 0; i < boundary.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(boundary[i]);
+        const bool alphaNumeric = (c >= '0' && c <= '9') ||
+                                  (c >= 'A' && c <= 'Z') ||
+                                  (c >= 'a' && c <= 'z');
+        const bool punctuation = c == '\'' || c == '(' || c == ')' || c == '+' ||
+                                 c == '_' || c == ',' || c == '-' || c == '.' ||
+                                 c == '/' || c == ':' || c == '=' || c == '?';
+        if (!alphaNumeric && !punctuation && c != ' ') {
+            return false;
+        }
+    }
+    if (boundary[boundary.size() - 1] == ' ') {
         return false;
     }
 
@@ -142,15 +166,58 @@ inline bool swHttpParseMultipartHeaders_(const SwByteArray& rawHeaders,
             return false;
         }
 
-        SwString key = line.left(colon).trimmed().toLower();
-        SwString value = line.mid(colon + 1).trimmed();
-        if (key.isEmpty()) {
+        const SwString rawKey = line.left(colon);
+        if (rawKey.isEmpty()) {
             outError = "Malformed multipart part header";
+            return false;
+        }
+        for (std::size_t j = 0; j < rawKey.size(); ++j) {
+            const unsigned char c = static_cast<unsigned char>(rawKey[j]);
+            const bool alphaNumeric = (c >= '0' && c <= '9') ||
+                                      (c >= 'A' && c <= 'Z') ||
+                                      (c >= 'a' && c <= 'z');
+            const bool punctuation = c == '!' || c == '#' || c == '$' || c == '%' ||
+                                     c == '&' || c == '\'' || c == '*' || c == '+' ||
+                                     c == '-' || c == '.' || c == '^' || c == '_' ||
+                                     c == '`' || c == '|' || c == '~';
+            if (!alphaNumeric && !punctuation) {
+                outError = "Malformed multipart part header";
+                return false;
+            }
+        }
+        SwString key = rawKey.toLower();
+        SwString value = line.mid(colon + 1).trimmed();
+        for (std::size_t j = 0; j < value.size(); ++j) {
+            const unsigned char c = static_cast<unsigned char>(value[j]);
+            if ((c < 0x20u && c != '\t') || c == 0x7fu) {
+                outError = "Malformed multipart part header";
+                return false;
+            }
+        }
+        if (outHeaders.contains(key)) {
+            outError = "Duplicate multipart part header";
             return false;
         }
         outHeaders[key] = value;
     }
     return true;
+}
+
+inline void swHttpCleanupMultipartTemporaryFiles(SwHttpRequest& request) {
+    for (std::size_t i = 0; i < request.multipartParts.size(); ++i) {
+        SwHttpRequest::MultipartPart& part = request.multipartParts[i];
+        if (!part.storedOnDisk || part.tempFilePath.isEmpty()) {
+            continue;
+        }
+#if defined(_WIN32)
+        const std::wstring widePath = part.tempFilePath.toStdWString();
+        (void)_wremove(widePath.c_str());
+#else
+        (void)std::remove(part.tempFilePath.toStdString().c_str());
+#endif
+        part.tempFilePath.clear();
+        part.storedOnDisk = false;
+    }
 }
 
 class SwHttpMultipartStreamParser {
@@ -168,7 +235,6 @@ public:
      * @details Use this hook to release any resources that remain associated with the instance.
      */
     ~SwHttpMultipartStreamParser() {
-        cleanupTemporaryFiles();
         reset();
     }
 
@@ -176,7 +242,7 @@ public:
      * @brief Resets the object to a baseline state.
      */
     void reset() {
-        closeCurrentFile_();
+        cleanupTemporaryFiles();
         m_state = State::NeedInitialBoundary;
         m_limits = SwHttpLimits();
         m_tempDirectory.clear();
@@ -188,7 +254,7 @@ public:
         m_currentPart = SwHttpRequest::MultipartPart();
         m_currentPartBytes = 0;
         m_hasCurrentPart = false;
-        m_fileCounter = 0;
+        m_totalInputBytes = 0;
     }
 
     /**
@@ -206,7 +272,7 @@ public:
         outError.clear();
         reset();
 
-        if (boundary.isEmpty()) {
+        if (boundary.isEmpty() || boundary.size() > 70) {
             outError = "Missing multipart boundary";
             return false;
         }
@@ -238,11 +304,26 @@ public:
      * @return `true` on success; otherwise `false`.
      */
     bool feed(const SwByteArray& bytes, SwString& outError) {
+        return feed(bytes.constData(), bytes.size(), outError);
+    }
+
+    bool feed(const char* data, std::size_t size, SwString& outError) {
         outError.clear();
-        if (!bytes.isEmpty()) {
-            m_buffer.append(bytes);
+        if (size > 0) {
+            if (!data) {
+                outError = "Invalid multipart input";
+                return false;
+            }
+            if (m_totalInputBytes > m_limits.maxBodyBytes ||
+                size > m_limits.maxBodyBytes - m_totalInputBytes) {
+                outError = "Multipart body too large";
+                failAndCleanup_();
+                return false;
+            }
+            m_totalInputBytes += size;
+            m_buffer.append(data, size);
         }
-        return process_(outError);
+        return process_(outError, false);
     }
 
     /**
@@ -253,24 +334,28 @@ public:
      * @return `true` on success; otherwise `false`.
      */
     bool finish(SwList<SwHttpRequest::MultipartPart>& outParts,
-                SwMap<SwString, SwString>& outFormFields,
-                SwString& outError) {
+                 SwMap<SwString, SwString>& outFormFields,
+                 SwString& outError) {
+        outParts.clear();
+        outFormFields.clear();
         outError.clear();
-        if (!process_(outError)) {
+        if (!process_(outError, true)) {
             return false;
         }
 
         if (m_state != State::Done) {
             outError = "Incomplete multipart body";
+            failAndCleanup_();
             return false;
         }
         if (m_hasCurrentPart) {
             outError = "Incomplete multipart part";
+            failAndCleanup_();
             return false;
         }
 
-        outParts = m_parts;
-        outFormFields = m_formFields;
+        outParts = std::move(m_parts);
+        outFormFields = std::move(m_formFields);
         return true;
     }
 
@@ -278,10 +363,13 @@ public:
      * @brief Performs the `cleanupTemporaryFiles` operation.
      */
     void cleanupTemporaryFiles() {
-        if (m_hasCurrentPart && m_currentPart.storedOnDisk && !m_currentPart.tempFilePath.isEmpty()) {
-            removeFile_(m_currentPart.tempFilePath);
-        }
+        const SwString currentPath =
+            (m_hasCurrentPart && m_currentPart.storedOnDisk) ? m_currentPart.tempFilePath
+                                                             : SwString();
         closeCurrentFile_();
+        if (!currentPath.isEmpty()) {
+            removeFile_(currentPath);
+        }
 
         for (std::size_t i = 0; i < m_parts.size(); ++i) {
             const SwHttpRequest::MultipartPart& part = m_parts[i];
@@ -313,11 +401,12 @@ private:
 
     SwHttpRequest::MultipartPart m_currentPart;
     std::size_t m_currentPartBytes = 0;
+    std::size_t m_totalInputBytes = 0;
     bool m_hasCurrentPart = false;
-    int m_fileCounter = 0;
+    std::uint64_t m_fileCounter = 0;
     SwFile* m_currentFile = nullptr;
 
-    bool process_(SwString& outError) {
+    bool process_(SwString& outError, bool finalInput) {
         while (true) {
             if (m_state == State::Error) {
                 outError = "Malformed multipart body";
@@ -329,18 +418,18 @@ private:
 
             bool changed = false;
             if (m_state == State::NeedInitialBoundary) {
-                if (!consumeInitialBoundary_(changed, outError)) {
-                    m_state = State::Error;
+                if (!consumeInitialBoundary_(changed, outError, finalInput)) {
+                    failAndCleanup_();
                     return false;
                 }
             } else if (m_state == State::NeedPartHeaders) {
                 if (!consumePartHeaders_(changed, outError)) {
-                    m_state = State::Error;
+                    failAndCleanup_();
                     return false;
                 }
             } else if (m_state == State::NeedPartData) {
-                if (!consumePartData_(changed, outError)) {
-                    m_state = State::Error;
+                if (!consumePartData_(changed, outError, finalInput)) {
+                    failAndCleanup_();
                     return false;
                 }
             }
@@ -351,45 +440,72 @@ private:
         }
     }
 
-    bool consumeInitialBoundary_(bool& changed, SwString& outError) {
+    bool consumeInitialBoundary_(bool& changed, SwString& outError, bool finalInput) {
         changed = false;
 
-        if (m_buffer.size() >= 2 && m_buffer[0] == '\r' && m_buffer[1] == '\n') {
-            m_buffer.consume(2);
-            changed = true;
-        }
-
-        if (m_buffer.size() < m_delimiter.size()) {
-            return true;
-        }
-        if (!m_buffer.startsWith(m_delimiter)) {
-            outError = "Malformed multipart boundary";
-            return false;
-        }
-
-        m_buffer.consume(m_delimiter.size());
-        changed = true;
-
-        if (m_buffer.size() < 2) {
-            return true;
-        }
-
-        if (m_buffer[0] == '-' && m_buffer[1] == '-') {
-            m_buffer.consume(2);
-            if (m_buffer.size() >= 2 && m_buffer[0] == '\r' && m_buffer[1] == '\n') {
-                m_buffer.consume(2);
+        std::size_t prefixBytes = 0;
+        if (m_buffer.size() > 0 && m_buffer[0] == '\r') {
+            if (m_buffer.size() < 2) {
+                return true;
             }
-            m_state = State::Done;
+            if (m_buffer[1] != '\n') {
+                outError = "Malformed multipart boundary";
+                return false;
+            }
+            prefixBytes = 2;
+        }
+
+        const std::size_t availableDelimiterBytes =
+            m_buffer.size() > prefixBytes
+                ? (std::min)(m_delimiter.size(), m_buffer.size() - prefixBytes)
+                : 0;
+        for (std::size_t i = 0; i < availableDelimiterBytes; ++i) {
+            if (m_buffer[prefixBytes + i] != m_delimiter[i]) {
+                outError = "Malformed multipart boundary";
+                return false;
+            }
+        }
+        if (m_buffer.size() < prefixBytes + m_delimiter.size() + 2) {
             return true;
         }
 
-        if (m_buffer[0] != '\r' || m_buffer[1] != '\n') {
+        const std::size_t suffix = prefixBytes + m_delimiter.size();
+        if (m_buffer[suffix] == '-' && m_buffer[suffix + 1] == '-') {
+            const std::size_t closeEnd = suffix + 2;
+            if (m_buffer.size() == closeEnd) {
+                if (!finalInput) {
+                    return true;
+                }
+            } else if (m_buffer.size() == closeEnd + 1) {
+                if (!finalInput && m_buffer[closeEnd] == '\r') {
+                    return true;
+                }
+                outError = "Malformed multipart closing boundary";
+                return false;
+            } else if (m_buffer[closeEnd] != '\r' || m_buffer[closeEnd + 1] != '\n') {
+                outError = "Malformed multipart closing boundary";
+                return false;
+            }
+
+            std::size_t consume = closeEnd;
+            if (m_buffer.size() >= closeEnd + 2 && m_buffer[closeEnd] == '\r' &&
+                m_buffer[closeEnd + 1] == '\n') {
+                consume += 2;
+            }
+            m_buffer.consume(consume);
+            m_state = State::Done;
+            changed = true;
+            return true;
+        }
+
+        if (m_buffer[suffix] != '\r' || m_buffer[suffix + 1] != '\n') {
             outError = "Malformed multipart boundary delimiter";
             return false;
         }
 
-        m_buffer.consume(2);
+        m_buffer.consume(suffix + 2);
         m_state = State::NeedPartHeaders;
+        changed = true;
         return true;
     }
 
@@ -441,10 +557,16 @@ private:
 
         if (m_currentPart.isFile && m_limits.enableMultipartFileStreaming) {
             m_currentPart.storedOnDisk = true;
-            m_currentPart.tempFilePath = makeTempFilePath_();
-            m_currentFile = new SwFile(m_currentPart.tempFilePath);
-            if (!m_currentFile->openBinary(SwFile::Write)) {
-                closeCurrentFile_();
+            for (int attempt = 0; attempt < 16 && !m_currentFile; ++attempt) {
+                m_currentPart.tempFilePath = makeTempFilePath_();
+                SwFile* candidate = new SwFile(m_currentPart.tempFilePath);
+                if (candidate->openBinaryExclusive()) {
+                    m_currentFile = candidate;
+                } else {
+                    delete candidate;
+                }
+            }
+            if (!m_currentFile) {
                 outError = "Unable to open multipart temp file";
                 return false;
             }
@@ -455,80 +577,94 @@ private:
         return true;
     }
 
-    bool consumePartData_(bool& changed, SwString& outError) {
+    bool consumePartData_(bool& changed, SwString& outError, bool finalInput) {
         changed = false;
         if (!m_hasCurrentPart) {
             outError = "Multipart state mismatch";
             return false;
         }
 
-        const int markerPos = m_buffer.indexOf(m_boundaryMarker);
-        if (markerPos < 0) {
-            std::size_t keep = 0;
-            if (m_boundaryMarker.size() > 0) {
-                keep = m_boundaryMarker.size() - 1;
+        while (true) {
+            const int markerPos = m_buffer.indexOf(m_boundaryMarker);
+            if (markerPos < 0) {
+                const std::size_t keep = m_boundaryMarker.isEmpty()
+                                             ? 0
+                                             : m_boundaryMarker.size() - 1;
+                if (m_buffer.size() > keep) {
+                    if (!appendAndConsumeCurrentData_(m_buffer.size() - keep, outError)) {
+                        return false;
+                    }
+                    changed = true;
+                }
+                return true;
             }
-            if (m_buffer.size() > keep) {
-                const std::size_t flushBytes = m_buffer.size() - keep;
-                const SwByteArray chunk = m_buffer.left(flushBytes);
-                if (!appendCurrentData_(chunk.constData(), chunk.size(), outError)) {
+
+            if (markerPos > 0) {
+                if (!appendAndConsumeCurrentData_(static_cast<std::size_t>(markerPos), outError)) {
                     return false;
                 }
-                m_buffer.consume(flushBytes);
                 changed = true;
             }
-            return true;
-        }
 
-        if (markerPos > 0) {
-            const SwByteArray chunk = m_buffer.left(static_cast<std::size_t>(markerPos));
-            if (!appendCurrentData_(chunk.constData(), chunk.size(), outError)) {
+            const std::size_t markerEnd = m_boundaryMarker.size();
+            if (m_buffer.size() < markerEnd + 2) {
+                return true;
+            }
+
+            bool closingBoundary = false;
+            std::size_t delimiterBytes = markerEnd + 2;
+            if (m_buffer[markerEnd] == '\r' && m_buffer[markerEnd + 1] == '\n') {
+                closingBoundary = false;
+            } else if (m_buffer[markerEnd] == '-' && m_buffer[markerEnd + 1] == '-') {
+                closingBoundary = true;
+                const std::size_t closeEnd = markerEnd + 2;
+                if (m_buffer.size() == closeEnd) {
+                    if (!finalInput) {
+                        return true;
+                    }
+                } else if (m_buffer.size() == closeEnd + 1) {
+                    if (!finalInput && m_buffer[closeEnd] == '\r') {
+                        return true;
+                    }
+                    // A boundary-looking prefix followed by payload is data.
+                    if (!appendAndConsumeCurrentData_(markerEnd, outError)) {
+                        return false;
+                    }
+                    changed = true;
+                    continue;
+                } else if (m_buffer[closeEnd] == '\r' && m_buffer[closeEnd + 1] == '\n') {
+                    delimiterBytes += 2;
+                } else {
+                    if (!appendAndConsumeCurrentData_(markerEnd, outError)) {
+                        return false;
+                    }
+                    changed = true;
+                    continue;
+                }
+            } else {
+                // Not a delimiter: retain the complete false marker as data and
+                // continue searching without discarding its suffix bytes.
+                if (!appendAndConsumeCurrentData_(markerEnd, outError)) {
+                    return false;
+                }
+                changed = true;
+                continue;
+            }
+
+            m_buffer.consume(delimiterBytes);
+
+            if (!finalizeCurrentPart_(outError)) {
                 return false;
             }
-            m_buffer.consume(static_cast<std::size_t>(markerPos));
+
+            if (closingBoundary) {
+                m_state = State::Done;
+            } else {
+                m_state = State::NeedPartHeaders;
+            }
             changed = true;
-        }
-
-        if (m_buffer.size() < m_boundaryMarker.size() + 2) {
             return true;
         }
-
-        m_buffer.consume(2); // consume CRLF before "--boundary"
-        if (!m_buffer.startsWith(m_delimiter)) {
-            outError = "Malformed multipart boundary";
-            return false;
-        }
-        m_buffer.consume(m_delimiter.size());
-
-        if (m_buffer.size() < 2) {
-            return true;
-        }
-
-        const bool closingBoundary = (m_buffer[0] == '-' && m_buffer[1] == '-');
-        if (closingBoundary) {
-            m_buffer.consume(2);
-        } else {
-            if (m_buffer[0] != '\r' || m_buffer[1] != '\n') {
-                outError = "Malformed multipart boundary delimiter";
-                return false;
-            }
-            m_buffer.consume(2);
-        }
-
-        if (!finalizeCurrentPart_(outError)) {
-            return false;
-        }
-
-        if (closingBoundary) {
-            if (m_buffer.size() >= 2 && m_buffer[0] == '\r' && m_buffer[1] == '\n') {
-                m_buffer.consume(2);
-            }
-            m_state = State::Done;
-        } else {
-            m_state = State::NeedPartHeaders;
-        }
-        changed = true;
-        return true;
     }
 
     bool appendCurrentData_(const char* data, std::size_t len, SwString& outError) {
@@ -540,6 +676,10 @@ private:
             return false;
         }
 
+        if (m_currentPartBytes > (std::numeric_limits<std::size_t>::max)() - len) {
+            outError = "Multipart part too large";
+            return false;
+        }
         m_currentPartBytes += len;
         m_currentPart.sizeBytes = m_currentPartBytes;
 
@@ -548,20 +688,39 @@ private:
                 outError = "Multipart file stream not open";
                 return false;
             }
-            SwByteArray chunk(data, len);
-            if (!m_currentFile->write(chunk)) {
+            if (!m_currentFile->writeBuffered(data, len)) {
                 outError = "Unable to write multipart file data";
                 return false;
             }
             return true;
         }
 
-        if (!m_currentPart.isFile && (m_currentPart.data.size() + len > m_limits.maxMultipartFieldBytes)) {
+        if (!m_currentPart.isFile &&
+            (m_currentPart.data.size() > m_limits.maxMultipartFieldBytes ||
+             len > m_limits.maxMultipartFieldBytes - m_currentPart.data.size())) {
             outError = "Multipart form field too large";
             return false;
         }
 
         m_currentPart.data.append(data, len);
+        return true;
+    }
+
+    bool appendAndConsumeCurrentData_(std::size_t len, SwString& outError) {
+        std::size_t remaining = len;
+        while (remaining > 0) {
+            const std::size_t chunk = (std::min)(remaining, m_buffer.contiguousSize());
+            const char* data = m_buffer.contiguousData();
+            if (!data || chunk == 0) {
+                outError = "Multipart buffer state mismatch";
+                return false;
+            }
+            if (!appendCurrentData_(data, chunk, outError)) {
+                return false;
+            }
+            m_buffer.consume(chunk);
+            remaining -= chunk;
+        }
         return true;
     }
 
@@ -574,7 +733,8 @@ private:
         closeCurrentFile_();
 
         if (!m_currentPart.isFile && !m_currentPart.name.isEmpty()) {
-            m_formFields[m_currentPart.name] = SwString(m_currentPart.data.toStdString());
+            m_formFields[m_currentPart.name] =
+                SwString(m_currentPart.data.constData(), m_currentPart.data.size());
         }
 
         if (m_parts.size() >= m_limits.maxMultipartParts) {
@@ -582,7 +742,7 @@ private:
             return false;
         }
 
-        m_parts.append(m_currentPart);
+        m_parts.append(std::move(m_currentPart));
         m_currentPart = SwHttpRequest::MultipartPart();
         m_currentPartBytes = 0;
         m_hasCurrentPart = false;
@@ -597,15 +757,37 @@ private:
         }
     }
 
+    void failAndCleanup_() {
+        m_state = State::Error;
+        cleanupTemporaryFiles();
+    }
+
     SwString makeTempFilePath_() {
         SwString directory = m_tempDirectory;
         directory.replace("\\", "/");
         if (!directory.endsWith("/")) {
             directory += "/";
         }
-        const std::uintptr_t tag = reinterpret_cast<std::uintptr_t>(this);
+        static std::atomic<std::uint64_t> sequence(1);
+        const std::uint64_t clockTag = static_cast<std::uint64_t>(
+            std::chrono::high_resolution_clock::now().time_since_epoch().count());
+        const std::uint64_t uniqueCounter = sequence.fetch_add(1, std::memory_order_relaxed);
+        std::uint64_t randomTag = clockTag ^ uniqueCounter ^
+                                  static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(this));
+        try {
+            std::random_device entropy;
+            const std::uint64_t randomHigh = static_cast<std::uint64_t>(entropy()) << 32;
+            const std::uint64_t randomLow = static_cast<std::uint64_t>(entropy());
+            randomTag ^= randomHigh ^ randomLow;
+        } catch (...) {
+            // O_EXCL remains the collision authority if the platform entropy source is absent.
+        }
         SwString fileName = "multipart_"
-                            + SwString::number(static_cast<long long>(tag))
+                            + SwString::number(static_cast<long long>(randomTag))
+                            + "_"
+                            + SwString::number(static_cast<long long>(clockTag))
+                            + "_"
+                            + SwString::number(static_cast<long long>(uniqueCounter))
                             + "_"
                             + SwString::number(static_cast<long long>(m_fileCounter++))
                             + ".part";
@@ -633,117 +815,18 @@ inline bool swHttpParseMultipartFormData(const SwByteArray& body,
     outParts.clear();
     outError.clear();
 
-    if (boundary.isEmpty()) {
-        outError = "Missing multipart boundary";
+    SwHttpLimits memoryLimits = limits;
+    memoryLimits.enableMultipartFileStreaming = false;
+
+    SwHttpMultipartStreamParser parser;
+    if (!parser.begin(boundary, memoryLimits, SwString(), outError)) {
         return false;
     }
-
-    const SwString delimiterText = "--" + boundary;
-    const SwString closeDelimiterText = delimiterText + "--";
-    const SwByteArray delimiter(delimiterText.toStdString());
-    const SwByteArray closeDelimiter(closeDelimiterText.toStdString());
-    const SwByteArray nextMarker("\r\n" + delimiterText.toStdString());
-
-    int pos = 0;
-    if (body.size() >= 2 && body[0] == '\r' && body[1] == '\n') {
-        pos = 2;
+    if (!parser.feed(body, outError)) {
+        return false;
     }
-
-    while (true) {
-        if (body.size() < static_cast<std::size_t>(pos) + delimiter.size()) {
-            outError = "Malformed multipart body";
-            return false;
-        }
-
-        if (body.mid(pos, static_cast<int>(closeDelimiter.size())) == closeDelimiter) {
-            pos += static_cast<int>(closeDelimiter.size());
-            if (body.size() >= static_cast<std::size_t>(pos) + 2 &&
-                body[pos] == '\r' && body[pos + 1] == '\n') {
-                pos += 2;
-            }
-            return true;
-        }
-
-        if (body.mid(pos, static_cast<int>(delimiter.size())) != delimiter) {
-            outError = "Malformed multipart boundary";
-            return false;
-        }
-        pos += static_cast<int>(delimiter.size());
-
-        if (body.size() < static_cast<std::size_t>(pos) + 2 ||
-            body[pos] != '\r' || body[pos + 1] != '\n') {
-            outError = "Malformed multipart boundary delimiter";
-            return false;
-        }
-        pos += 2;
-
-        const int headerEnd = body.indexOf("\r\n\r\n", pos);
-        if (headerEnd < 0) {
-            outError = "Malformed multipart headers";
-            return false;
-        }
-
-        const int headersLen = headerEnd - pos;
-        if (headersLen < 0) {
-            outError = "Malformed multipart headers";
-            return false;
-        }
-
-        SwMap<SwString, SwString> partHeaders;
-        if (!swHttpParseMultipartHeaders_(body.mid(pos, headersLen), limits, partHeaders, outError)) {
-            return false;
-        }
-        pos = headerEnd + 4;
-
-        const int markerPos = body.indexOf(nextMarker, pos);
-        if (markerPos < 0) {
-            outError = "Multipart closing boundary not found";
-            return false;
-        }
-
-        const int partDataLen = markerPos - pos;
-        if (partDataLen < 0) {
-            outError = "Malformed multipart body";
-            return false;
-        }
-
-        SwHttpRequest::MultipartPart part;
-        part.headers = partHeaders;
-        part.data = body.mid(pos, partDataLen);
-        part.sizeBytes = part.data.size();
-        if (partHeaders.contains("content-type")) {
-            part.contentType = partHeaders["content-type"];
-        }
-
-        if (!partHeaders.contains("content-disposition")) {
-            outError = "Missing Content-Disposition in multipart part";
-            return false;
-        }
-
-        SwString dispositionType;
-        SwMap<SwString, SwString> dispositionParams;
-        swHttpParseHeaderParams_(partHeaders["content-disposition"], dispositionType, dispositionParams);
-        if (dispositionType != "form-data") {
-            outError = "Unsupported multipart Content-Disposition";
-            return false;
-        }
-
-        if (dispositionParams.contains("name")) {
-            part.name = dispositionParams["name"];
-        }
-        if (dispositionParams.contains("filename")) {
-            part.fileName = dispositionParams["filename"];
-            part.isFile = !part.fileName.isEmpty();
-        }
-
-        outParts.append(part);
-        if (outParts.size() > limits.maxMultipartParts) {
-            outError = "Too many multipart parts";
-            return false;
-        }
-
-        pos = markerPos + 2; // skip CRLF and position on next "--boundary"
-    }
+    SwMap<SwString, SwString> ignoredFormFields;
+    return parser.finish(outParts, ignoredFormFields, outError);
 }
 
 inline bool swHttpParseMultipartRequest(SwHttpRequest& request,

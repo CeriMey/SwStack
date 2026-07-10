@@ -11,11 +11,13 @@
 #include "media/swvtp/SwVtpFeedbackController.h"
 #include "media/swvtp/SwVtpKlv.h"
 #include "media/swvtp/SwVtpUdpTransport.h"
+#include "core/runtime/SwThread.h"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <deque>
+#include <future>
 #include <limits>
 #include <mutex>
 #include <thread>
@@ -23,6 +25,17 @@
 
 class SwVtpServerTransport : public SwVideoTransportServer {
 public:
+    SwVtpServerTransport() {
+        m_udp.setPacketHandler([this](SwVtpUdpPacket&& packet) {
+            handleIncomingPacket_(std::move(packet));
+        });
+    }
+
+    ~SwVtpServerTransport() override {
+        stop();
+        m_udp.setPacketHandler(SwVtpUdpTransport::PacketHandler());
+    }
+
     SwString protocolName() const override {
         return "swvtp";
     }
@@ -79,26 +92,39 @@ public:
             return false;
         }
         const uint16_t bindPort = config().endpoint.port != 0U ? config().endpoint.port : 55245;
+        const std::size_t receiveDatagramBytes =
+            std::max<std::size_t>(2048U, static_cast<std::size_t>(config().mtuBytes));
+        m_udp.setReceiveLimits(receiveDatagramBytes, 512U, 4U * 1024U * 1024U);
+        if (!m_ioThread.isRunning() && m_ioThread.start()) {
+            m_udp.moveToThread(m_ioThread.handle());
+        }
         if (!m_udp.open(bindIpv4, bindPort)) {
+            stopIoThread_();
             return false;
         }
         m_stopRequested.store(false);
         m_running = true;
-        m_receiverThread = std::thread([this]() { receiverLoop_(); });
+        if (!m_udp.eventDrivenReceiveActive()) {
+            m_receiverThread = std::thread([this]() { receiverLoop_(); });
+        }
         return true;
     }
 
     void stop() override {
         m_stopRequested.store(true);
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_running = false;
+        }
+        closeUdpOnOwnerThread_();
         if (m_receiverThread.joinable()) {
             m_receiverThread.join();
         }
+        stopIoThread_();
         std::lock_guard<std::mutex> lock(m_mutex);
-        m_udp.close();
         m_clients.clear();
         m_recentFragments.clear();
         m_metrics.transport.activeClients = 0;
-        m_running = false;
     }
 
     bool isRunning() const override {
@@ -190,12 +216,13 @@ protected:
                 }
             }
         }
+        std::lock_guard<std::mutex> sendLock(m_sendMutex);
         if (hasSingleClient) {
-            return sendDatagramToClient_(datagram, singleClient.ipv4, singleClient.port);
+            return m_udp.send(datagram, singleClient.ipv4, singleClient.port);
         }
         bool allSent = true;
         for (std::size_t i = 0; i < clients.size(); ++i) {
-            if (!sendDatagramToClient_(datagram, clients[i].ipv4, clients[i].port)) {
+            if (!m_udp.send(datagram, clients[i].ipv4, clients[i].port)) {
                 allSent = false;
             }
         }
@@ -309,29 +336,66 @@ private:
     void receiverLoop_() {
         while (!m_stopRequested.load()) {
             SwVtpUdpPacket packet;
-            if (!m_udp.receive(50, packet)) {
+            if (!m_udp.receive(1000, packet)) {
                 continue;
             }
-            {
-                std::lock_guard<std::mutex> lock(m_mutex);
-                ++m_metrics.transport.datagramsReceived;
-                m_metrics.transport.bytesReceived += packet.bytes.size();
+            handleIncomingPacket_(std::move(packet));
+        }
+    }
+
+    void handleIncomingPacket_(SwVtpUdpPacket&& packet) {
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (!m_running) {
+                return;
             }
-            SwVtpDatagram datagram;
-            if (!swVtpParseDatagram(packet.bytes, datagram)) {
-                continue;
-            }
-            if (datagram.header.messageType == SwVtpMessageType::Ping) {
-                handlePing_(datagram.payload, packet.senderIpv4, packet.senderPort);
-            } else if (datagram.header.messageType == SwVtpMessageType::Hello) {
-                handleHello_(datagram.payload, packet.senderIpv4, packet.senderPort);
-            } else if (datagram.header.messageType == SwVtpMessageType::ReceiverStats) {
-                handleReceiverStats_(datagram.payload, packet.senderIpv4, packet.senderPort);
-            } else if (datagram.header.messageType == SwVtpMessageType::Nack) {
-                handleNack_(datagram, packet.senderIpv4, packet.senderPort);
-            } else if (datagram.header.messageType == SwVtpMessageType::KeyFrameRequest) {
-                handleKeyFrameRequest_(datagram, packet.senderIpv4, packet.senderPort);
-            }
+            ++m_metrics.transport.datagramsReceived;
+            m_metrics.transport.bytesReceived += packet.bytes.size();
+        }
+        SwVtpDatagram datagram;
+        if (!swVtpParseDatagram(packet.bytes, datagram)) {
+            return;
+        }
+        if (datagram.header.messageType == SwVtpMessageType::Ping) {
+            handlePing_(datagram.payload, packet.senderIpv4, packet.senderPort);
+        } else if (datagram.header.messageType == SwVtpMessageType::Hello) {
+            handleHello_(datagram.payload, packet.senderIpv4, packet.senderPort);
+        } else if (datagram.header.messageType == SwVtpMessageType::ReceiverStats) {
+            handleReceiverStats_(datagram.payload, packet.senderIpv4, packet.senderPort);
+        } else if (datagram.header.messageType == SwVtpMessageType::Nack) {
+            handleNack_(datagram, packet.senderIpv4, packet.senderPort);
+        } else if (datagram.header.messageType == SwVtpMessageType::KeyFrameRequest) {
+            handleKeyFrameRequest_(datagram, packet.senderIpv4, packet.senderPort);
+        }
+    }
+
+    void closeUdpOnOwnerThread_() {
+        if (!m_ioThread.isRunning() ||
+            std::this_thread::get_id() == m_ioThread.threadId()) {
+            m_udp.close();
+            return;
+        }
+        std::shared_ptr<std::promise<void>> done(new std::promise<void>());
+        std::future<void> completed = done->get_future();
+        if (!m_ioThread.postTask([this, done]() {
+                m_udp.close();
+                done->set_value();
+            })) {
+            m_udp.close();
+            return;
+        }
+        completed.wait();
+    }
+
+    void stopIoThread_() {
+        if (!m_ioThread.isRunning()) {
+            return;
+        }
+        const bool onIoThread = std::this_thread::get_id() == m_ioThread.threadId();
+        m_ioThread.quit();
+        if (!onIoThread) {
+            m_ioThread.wait();
+            m_udp.moveToThread(ThreadHandle::currentThread());
         }
     }
 
@@ -595,7 +659,7 @@ private:
         return true;
     }
 
-    void cacheFrameFragments_(const std::vector<CachedFragment>& fragments,
+    void cacheFrameFragments_(std::vector<CachedFragment>& fragments,
                               uint64_t nowUs) {
         if (fragments.empty()) {
             return;
@@ -603,8 +667,9 @@ private:
         std::lock_guard<std::mutex> lock(m_mutex);
         trimFragmentCacheLocked_(nowUs);
         for (std::size_t i = 0; i < fragments.size(); ++i) {
-            m_recentFragments.push_back(fragments[i]);
+            m_recentFragments.push_back(std::move(fragments[i]));
         }
+        fragments.clear();
         trimFragmentCacheLocked_(nowUs);
     }
 
@@ -736,12 +801,13 @@ private:
             if (fragmentIndex + 1U == fragmentCount) {
                 datagram.header.flags |= SwVtpFlag_LastFragment;
             }
-            datagram.payload = payload.mid(static_cast<int>(begin), static_cast<int>(count));
-
-            const SwByteArray bytes = swVtpSerializeDatagram(datagram);
+            const SwByteArray bytes = swVtpSerializeDatagramPayload(
+                datagram.header,
+                payload.constData() + begin,
+                count);
             CachedFragment cachedFragment;
             if (makeCachedFrameFragment_(datagram, bytes, datagram.header.sendTimeUs, cachedFragment)) {
-                cachedFragments.push_back(cachedFragment);
+                cachedFragments.push_back(std::move(cachedFragment));
             }
             if (!writeDatagram_(bytes)) {
                 cacheFrameFragments_(cachedFragments, nowUs);
@@ -817,7 +883,7 @@ private:
                                          packetized.serializedDatagrams[i],
                                          options.nowUs,
                                          cachedFragment)) {
-                cachedFragments.push_back(cachedFragment);
+                cachedFragments.push_back(std::move(cachedFragment));
             }
         }
         cacheFrameFragments_(cachedFragments, options.nowUs);
@@ -888,6 +954,7 @@ private:
     SwByteArray m_av1SequenceHeader{};
     SwVideoServerMetrics m_metrics{};
     SwVtpFeedbackController m_feedbackController{};
+    SwThread m_ioThread{"SwVtpServerIo"};
     SwVtpUdpTransport m_udp{};
     std::vector<Client> m_clients{};
     std::deque<CachedFragment> m_recentFragments{};

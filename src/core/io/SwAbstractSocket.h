@@ -175,6 +175,16 @@ public:
         return write(SwString(data.constData(), data.size()));
     }
 
+    bool write(const char* data, std::size_t size) override {
+        if (size == 0) {
+            return true;
+        }
+        if (!data) {
+            return false;
+        }
+        return write(SwByteArray(data, size));
+    }
+
     /**
      * @brief Checks if the socket is currently open.
      *

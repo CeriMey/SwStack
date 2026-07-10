@@ -156,7 +156,7 @@ public:
                 m_platformIntegration->processPlatformEvents();
             }
 
-            int sleepDuration = processEvent();
+            std::int64_t sleepDuration = processEvent();
 
             // Batch-drain: process all pending events before re-entering the
             // platform pump and measurement overhead.  This avoids paying the
@@ -200,8 +200,8 @@ public:
                 // merged into SwCoreApplication waitables, so never sleep forever.
                 // Waking up regularly keeps APP_CMD_* delivery, resize and paint
                 // requests flowing without changing desktop behavior.
-                const int boundedSleepDuration =
-                    (sleepDuration < 0) ? 16000 : std::min(sleepDuration, 16000);
+                const std::int64_t boundedSleepDuration =
+                    (sleepDuration < 0) ? 16000 : (std::min<std::int64_t>)(sleepDuration, 16000);
                 waitForWork(boundedSleepDuration);
 #else
                 waitForWork(sleepDuration);

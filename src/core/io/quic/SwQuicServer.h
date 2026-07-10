@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cstddef>
 #include <functional>
+#include <limits>
 #include <map>
 #include <string>
 #include <vector>
@@ -46,9 +47,10 @@ public:
 
     bool listen(const SwString& bindAddress, uint16_t port, SwString* error = nullptr) {
         close();
-        m_socket.setMaxDatagramSize(65536);
+        m_socket.setMaxDatagramSize(2048);
         m_socket.setMaxPendingDatagrams(2048);
         m_socket.setMaxReadBatchDatagrams(256);
+        m_socket.setBatchReceive(true);
 
         if (!m_socket.bind(bindAddress,
                            port,
@@ -79,6 +81,8 @@ public:
         m_localConnectionIdLength = length;
     }
     std::size_t localConnectionIdLength() const { return m_localConnectionIdLength; }
+    void setMaxConnections(std::size_t maximum) { m_maxConnections = maximum; }
+    std::size_t maxConnections() const { return m_maxConnections; }
 
     int poll(int timeoutMs = 0, SwString* error = nullptr) {
         if (!isListening()) {
@@ -121,7 +125,16 @@ public:
         std::int64_t next = -1;
         for (SwMap<SwString, Entry_>::const_iterator it = m_connections.begin();
              it != m_connections.end(); ++it) {
-            const std::int64_t t = it->second.connection.nextTimeoutMs(now);
+            std::int64_t t = it->second.connection.nextTimeoutMs(now);
+            if (it->second.candidateActive) {
+                const std::uint64_t deadline = (std::min)(
+                    it->second.candidateRetryDeadlineMs,
+                    it->second.candidateExpiryMs);
+                const std::int64_t candidate = deadline <= now
+                                                   ? 0
+                                                   : static_cast<std::int64_t>(deadline - now);
+                if (t < 0 || candidate < t) t = candidate;
+            }
             if (t >= 0 && (next < 0 || t < next)) {
                 next = t;
             }
@@ -210,6 +223,15 @@ private:
         SwQuicConnection connection;
         SwString host;
         uint16_t port;
+        bool candidateActive = false;
+        SwString candidateHost;
+        uint16_t candidatePort = 0;
+        SwByteArray candidateChallenge;
+        std::uint64_t candidateBytesReceived = 0;
+        std::uint64_t candidateBytesSent = 0;
+        std::uint64_t candidateRetryDeadlineMs = 0;
+        std::uint64_t candidateExpiryMs = 0;
+        std::size_t candidateAttempts = 0;
 
         Entry_() : port(0) {}
     };
@@ -261,6 +283,33 @@ private:
         return true;
     }
 
+    static bool isPlausibleInitial_(const SwByteArray& datagram) {
+        if (datagram.size() < 7) {
+            return false;
+        }
+        const std::uint8_t first = static_cast<std::uint8_t>(datagram.constData()[0]);
+        if ((first & 0xc0U) != 0xc0U || (first & 0x30U) != 0) {
+            return false;
+        }
+        if (static_cast<std::uint8_t>(datagram.constData()[1]) != 0 ||
+            static_cast<std::uint8_t>(datagram.constData()[2]) != 0 ||
+            static_cast<std::uint8_t>(datagram.constData()[3]) != 0 ||
+            static_cast<std::uint8_t>(datagram.constData()[4]) != 1) {
+            return false;
+        }
+        const std::size_t dcidLength =
+            static_cast<std::uint8_t>(datagram.constData()[5]);
+        if (dcidLength == 0 || dcidLength > SwQuicConnectionId::kMaxLength ||
+            static_cast<std::size_t>(datagram.size()) < 7 + dcidLength) {
+            return false;
+        }
+        const std::size_t scidOffset = 6 + dcidLength;
+        const std::size_t scidLength =
+            static_cast<std::uint8_t>(datagram.constData()[scidOffset]);
+        return scidLength <= SwQuicConnectionId::kMaxLength &&
+               static_cast<std::size_t>(datagram.size()) >= 7 + dcidLength + scidLength;
+    }
+
     bool processDatagram_(const SwByteArray& datagram,
                           const SwString& sender,
                           uint16_t senderPort,
@@ -285,6 +334,14 @@ private:
         SwMap<SwString, Entry_>::iterator it = m_connections.find(connectionKey);
         const bool isNewConnection = (it == m_connections.end());
         if (isNewConnection) {
+            if (!isPlausibleInitial_(datagram)) {
+                setError_(error, SwString("Unroutable QUIC packet is not an Initial"));
+                return false;
+            }
+            if (m_maxConnections > 0 && m_connections.size() >= m_maxConnections) {
+                setError_(error, SwString("QUIC connection limit reached"));
+                return false;
+            }
             it = m_connections.insert(SwMakePair(connectionKey, Entry_())).first;
             if (hasCid) {
                 m_connectionIdIndex[cid] = connectionKey;
@@ -293,36 +350,206 @@ private:
 
         Entry_& entry = it->second;
 
-        // The connection was found by its connection ID but the UDP source
-        // changed: this is a peer migration (e.g. Wi-Fi -> cellular). Start
-        // path validation before trusting the new path (RFC 9000 9).
         const bool addressChanged =
             !isNewConnection && (entry.host != sender || entry.port != senderPort);
 
-        entry.host = sender;
-        entry.port = senderPort;
+        if (isNewConnection) {
+            entry.host = sender;
+            entry.port = senderPort;
+        }
 
-        if (!entry.connection.receiveDatagram(datagram, nowMs_(), error)) {
+        const std::uint64_t now = nowMs_();
+        SwQuicConnection::PathControlEvents pathEvents;
+        bool authenticated = false;
+        std::uint64_t authenticatedBytes = 0;
+        if (!entry.connection.receiveDatagramWithPathEvents(
+                datagram, now, pathEvents, error, &authenticated, &authenticatedBytes)) {
+            if (isNewConnection) {
+                m_connections.erase(it);
+                if (hasCid) {
+                    SwMap<SwString, SwString>::iterator cidIt =
+                        m_connectionIdIndex.find(cid);
+                    if (cidIt != m_connectionIdIndex.end() &&
+                        cidIt->second == connectionKey) {
+                        m_connectionIdIndex.erase(cidIt);
+                    }
+                }
+            }
             return false;
         }
-        if (addressChanged) {
-            entry.connection.onPeerAddressChanged(
-                nowMs_(), static_cast<std::uint64_t>(datagram.size()), error);
+        if (addressChanged && authenticated) {
+            if (!processCandidatePath_(entry, pathEvents, authenticatedBytes,
+                                       sender, senderPort, now, error)) {
+                return false;
+            }
+        } else if (authenticated) {
+            for (std::size_t i = 0; i < pathEvents.challenges.size(); ++i) {
+                if (!sendPathControl_(entry, true, pathEvents.challenges[i],
+                                      entry.host, entry.port,
+                                      (std::numeric_limits<std::uint64_t>::max)(),
+                                      now, nullptr, error)) {
+                    return false;
+                }
+            }
         }
 
-        flushConnection_(entry, error);
+        if (!flushConnection_(entry, error)) {
+            return false;
+        }
         connectionUpdated(&entry.connection);
+        return true;
+    }
+
+    static void addSaturated_(std::uint64_t& target, std::uint64_t value) {
+        const std::uint64_t maximum = (std::numeric_limits<std::uint64_t>::max)();
+        target = value > maximum - target ? maximum : target + value;
+    }
+
+    static std::uint64_t candidateBudget_(const Entry_& entry) {
+        const std::uint64_t maximum = (std::numeric_limits<std::uint64_t>::max)();
+        const std::uint64_t permitted = entry.candidateBytesReceived > maximum / 3
+                                            ? maximum
+                                            : entry.candidateBytesReceived * 3;
+        return entry.candidateBytesSent >= permitted
+                   ? 0
+                   : permitted - entry.candidateBytesSent;
+    }
+
+    void clearCandidate_(Entry_& entry, bool cancelValidation) {
+        if (cancelValidation) entry.connection.cancelPathValidation();
+        entry.candidateActive = false;
+        entry.candidateHost.clear();
+        entry.candidatePort = 0;
+        entry.candidateChallenge.clear();
+        entry.candidateBytesReceived = 0;
+        entry.candidateBytesSent = 0;
+        entry.candidateRetryDeadlineMs = 0;
+        entry.candidateExpiryMs = 0;
+        entry.candidateAttempts = 0;
+    }
+
+    bool sendPathControl_(Entry_& entry,
+                          bool response,
+                          const SwByteArray& data,
+                          const SwString& host,
+                          std::uint16_t port,
+                          std::uint64_t maxWireBytes,
+                          std::uint64_t now,
+                          std::size_t* sentBytes,
+                          SwString* error) {
+        SwByteArray packet;
+        if (!entry.connection.buildPathControlDatagram(response, data, now,
+                                                        maxWireBytes, packet, error)) {
+            return false;
+        }
+        if (sentBytes) *sentBytes = 0;
+        if (packet.isEmpty()) return true;
+        if (!writeDatagram_(packet, host, port, error)) return false;
+        if (sentBytes) *sentBytes = static_cast<std::size_t>(packet.size());
+        return true;
+    }
+
+    bool sendCandidateChallenge_(Entry_& entry,
+                                 std::uint64_t now,
+                                 SwString* error) {
+        if (!entry.candidateActive || now < entry.candidateRetryDeadlineMs) return true;
+        if (entry.candidateAttempts >= 3 || now >= entry.candidateExpiryMs) {
+            clearCandidate_(entry, true);
+            return true;
+        }
+        std::size_t sent = 0;
+        if (!sendPathControl_(entry, false, entry.candidateChallenge,
+                              entry.candidateHost, entry.candidatePort,
+                              candidateBudget_(entry), now, &sent, error)) {
+            return false;
+        }
+        if (sent > 0) ++entry.candidateAttempts;
+        addSaturated_(entry.candidateBytesSent, static_cast<std::uint64_t>(sent));
+        entry.candidateRetryDeadlineMs = now + (250ULL << entry.candidateAttempts);
+        return true;
+    }
+
+    bool processCandidatePath_(Entry_& entry,
+                               const SwQuicConnection::PathControlEvents& events,
+                               std::uint64_t authenticatedBytes,
+                               const SwString& sender,
+                               std::uint16_t senderPort,
+                               std::uint64_t now,
+                               SwString* error) {
+        if (!entry.candidateActive || entry.candidateHost != sender ||
+            entry.candidatePort != senderPort) {
+            clearCandidate_(entry, true);
+            entry.candidateActive = true;
+            entry.candidateHost = sender;
+            entry.candidatePort = senderPort;
+            entry.candidateBytesReceived = authenticatedBytes;
+            entry.candidateRetryDeadlineMs = now;
+            entry.candidateExpiryMs = now + 3000;
+            if (!entry.connection.beginPathValidation(
+                    now, entry.candidateChallenge, error)) {
+                clearCandidate_(entry, false);
+                return false;
+            }
+        } else {
+            addSaturated_(entry.candidateBytesReceived, authenticatedBytes);
+        }
+
+        if (!sendCandidateChallenge_(entry, now, error)) return false;
+        for (std::size_t i = 0; i < events.challenges.size(); ++i) {
+            std::size_t sent = 0;
+            if (!sendPathControl_(entry, true, events.challenges[i], sender, senderPort,
+                                  candidateBudget_(entry), now, &sent, error)) {
+                return false;
+            }
+            addSaturated_(entry.candidateBytesSent, static_cast<std::uint64_t>(sent));
+        }
+        for (std::size_t i = 0; i < events.responses.size(); ++i) {
+            if (!entry.connection.matchesPathResponse(events.responses[i])) continue;
+            entry.connection.commitPathMigration();
+            entry.host = sender;
+            entry.port = senderPort;
+            clearCandidate_(entry, false);
+            break;
+        }
         return true;
     }
 
     void fireExpiredTimers_() {
         const std::uint64_t now = nowMs_();
         for (SwMap<SwString, Entry_>::iterator it = m_connections.begin();
-             it != m_connections.end(); ++it) {
+             it != m_connections.end();) {
+            if (it->second.candidateActive) {
+                SwString ignoredCandidateError;
+                if (now >= it->second.candidateExpiryMs) {
+                    clearCandidate_(it->second, true);
+                } else if (now >= it->second.candidateRetryDeadlineMs) {
+                    (void)sendCandidateChallenge_(it->second, now,
+                                                  &ignoredCandidateError);
+                }
+            }
             if (it->second.connection.nextTimeoutMs(now) == 0) {
                 it->second.connection.onTimeout(now);
                 SwString ignored;
                 flushConnection_(it->second, &ignored);
+            }
+            if (it->second.connection.state() == SwQuicConnection::State::Closed) {
+                const SwString doomedKey = it->first;
+                SwMap<SwString, Entry_>::iterator doomed = it;
+                ++it;
+                m_connections.erase(doomed);
+                for (SwMap<SwString, SwString>::iterator cidIt =
+                         m_connectionIdIndex.begin();
+                     cidIt != m_connectionIdIndex.end();) {
+                    if (cidIt->second == doomedKey) {
+                        SwMap<SwString, SwString>::iterator doomedCid = cidIt;
+                        ++cidIt;
+                        m_connectionIdIndex.erase(doomedCid);
+                    } else {
+                        ++cidIt;
+                    }
+                }
+            } else {
+                ++it;
             }
         }
     }
@@ -350,10 +577,10 @@ private:
         if (m_sendSink) {
             return m_sendSink(packet, host, port, error);
         }
-        const int64_t sent = m_socket.writeDatagram(packet.constData(),
-                                                    static_cast<int64_t>(packet.size()),
-                                                    host,
-                                                    port);
+        const int64_t sent = m_socket.writeDatagramCached(packet.constData(),
+                                                          static_cast<int64_t>(packet.size()),
+                                                          host,
+                                                          port);
         if (sent != static_cast<int64_t>(packet.size())) {
             setError_(error, m_socket.errorString());
             return false;
@@ -373,6 +600,7 @@ private:
     SwMap<SwString, Entry_> m_connections;
     SwMap<SwString, SwString> m_connectionIdIndex;
     std::size_t m_localConnectionIdLength;
+    std::size_t m_maxConnections = 4096;
 };
 
 #endif

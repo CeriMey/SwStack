@@ -5,6 +5,7 @@
 
 #include "core/io/SwUdpSocket.h"
 #include "core/io/quic/SwQuicHandshakeClient.h"
+#include "core/types/SwVector.h"
 
 #include <chrono>
 #include <cstdint>
@@ -88,7 +89,7 @@ int main(int argc, char** argv) {
                       << " bytes=" << datagram.size()
                       << " from=" << sender.toStdString() << std::endl;
 
-            std::vector<SwByteArray> responses;
+            SwVector<SwByteArray> responses;
             if (!client.processIncomingDatagram(datagram, responses, &error)) {
                 std::cerr << "handshake failed: " << error.toStdString() << std::endl;
                 std::cerr << "final_state=" << stateName(client.state()) << std::endl;

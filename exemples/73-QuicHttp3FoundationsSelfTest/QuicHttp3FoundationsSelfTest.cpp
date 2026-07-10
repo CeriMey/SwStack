@@ -11,6 +11,8 @@
 #include "core/io/http3/SwQpackStaticTable.h"
 #include "core/io/http3/SwQpackEncoder.h"
 #include "core/io/http3/SwQpackDecoder.h"
+#include "core/types/SwPair.h"
+#include "core/types/SwVector.h"
 
 #include <cmath>
 #include <iostream>
@@ -202,8 +204,8 @@ bool testLossRecoveryRtt() {
     p0.sentBytes = 1200;
     recovery.onPacketSent(p0);
 
-    std::vector<std::pair<std::uint64_t, std::uint64_t> > range0;
-    range0.push_back(std::make_pair<std::uint64_t, std::uint64_t>(0, 0));
+    SwVector<SwPair<std::uint64_t, std::uint64_t> > range0;
+    range0.push_back(SwMakePair<std::uint64_t, std::uint64_t>(0, 0));
     SwQuicLossRecovery::AckResult ack0;
     if (!requireTrue(recovery.onAckReceived(0, 0, range0, 100, ack0, &error),
                      "loss recovery first ACK failed")) {
@@ -225,8 +227,8 @@ bool testLossRecoveryRtt() {
     p1.sentBytes = 1200;
     recovery.onPacketSent(p1);
 
-    std::vector<std::pair<std::uint64_t, std::uint64_t> > range1;
-    range1.push_back(std::make_pair<std::uint64_t, std::uint64_t>(1, 1));
+    SwVector<SwPair<std::uint64_t, std::uint64_t> > range1;
+    range1.push_back(SwMakePair<std::uint64_t, std::uint64_t>(1, 1));
     SwQuicLossRecovery::AckResult ack1;
     if (!requireTrue(recovery.onAckReceived(1, 0, range1, 220, ack1, &error),
                      "loss recovery second ACK failed")) {

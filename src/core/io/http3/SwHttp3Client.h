@@ -5,6 +5,7 @@
 #include "SwMap.h"
 #include "SwString.h"
 #include "SwUdpSocket.h"
+#include "SwVector.h"
 #include "http3/SwHttp3Connection.h"
 #include "quic/SwQuicConnection.h"
 #include "quic/SwQuicHandshakeClient.h"
@@ -113,7 +114,8 @@ public:
         const bool resuming = m_haveResumptionTicket &&
                               m_resumptionTicket.allowsEarlyData() &&
                               static_cast<std::uint64_t>(requestStream.size()) <=
-                                  m_resumptionTicket.serverInitialMaxData;
+                                  m_resumptionTicket.serverInitialMaxData &&
+                              requestStream.size() <= kMaxSingleFlightEarlyRequestBytes_();
         if (resuming) {
             handshake.setResumption(m_resumptionTicket, requestStream);
         }
@@ -122,8 +124,11 @@ public:
         if (!handshake.start(host, initial, error)) {
             return false;
         }
-        socket.writeDatagram(initial.constData(), static_cast<int64_t>(initial.size()),
-                             host, port);
+        if (socket.writeDatagramCached(initial.constData(), static_cast<int64_t>(initial.size()),
+                                       host, port) != static_cast<int64_t>(initial.size())) {
+            setError_(error, socket.errorString());
+            return false;
+        }
 
         const std::uint64_t deadline = nowMs_() + static_cast<std::uint64_t>(timeoutMs);
         while (!handshake.handshakeComplete() && nowMs_() < deadline) {
@@ -135,13 +140,17 @@ public:
                 if (datagram.isEmpty()) {
                     continue;
                 }
-                std::vector<SwByteArray> replies;
+                SwVector<SwByteArray> replies;
                 if (!handshake.processIncomingDatagram(datagram, replies, error)) {
                     return false;
                 }
                 for (std::size_t i = 0; i < replies.size(); ++i) {
-                    socket.writeDatagram(replies[i].constData(),
-                                         static_cast<int64_t>(replies[i].size()), host, port);
+                    if (socket.writeDatagramCached(
+                            replies[i].constData(), static_cast<int64_t>(replies[i].size()),
+                            host, port) != static_cast<int64_t>(replies[i].size())) {
+                        setError_(error, socket.errorString());
+                        return false;
+                    }
                 }
             }
         }
@@ -152,6 +161,7 @@ public:
 
         // 1-RTT connection over the derived application keys.
         SwQuicConnection connection(SwQuicConnection::Role::Client);
+        connection.applyLocalTransportParameters(handshake.localTransportParameters());
         connection.setLocalConnectionId(handshake.sourceConnectionId());
         connection.setPeerConnectionId(handshake.destinationConnectionId());
         connection.setLevelKeys(SwQuicConnection::Level::Application,
@@ -167,6 +177,9 @@ public:
                                          handshake.clientEarlyPacketNumber());
 
         m_earlyDataAccepted = resuming && handshake.earlyDataAccepted();
+        if (m_earlyDataAccepted) {
+            connection.registerLocalStream(0);
+        }
 
         // RFC 9114 6.2.1: each side MUST open a control stream and send its
         // SETTINGS as the first frame. Open the client control stream
@@ -196,13 +209,17 @@ public:
             }
         }
 
-        std::vector<SwByteArray> outgoing;
+        SwVector<SwByteArray> outgoing;
         if (!connection.buildDatagrams(nowMs_(), outgoing, error)) {
             return false;
         }
         for (std::size_t i = 0; i < outgoing.size(); ++i) {
-            socket.writeDatagram(outgoing[i].constData(),
-                                 static_cast<int64_t>(outgoing[i].size()), host, port);
+            if (socket.writeDatagramCached(
+                    outgoing[i].constData(), static_cast<int64_t>(outgoing[i].size()),
+                    host, port) != static_cast<int64_t>(outgoing[i].size())) {
+                setError_(error, socket.errorString());
+                return false;
+            }
         }
 
         SwByteArray responseStream;
@@ -238,11 +255,15 @@ public:
             if (timeout == 0) {
                 connection.onTimeout(nowMs_());
             }
-            std::vector<SwByteArray> pending;
+            SwVector<SwByteArray> pending;
             if (connection.buildDatagrams(nowMs_(), pending, error)) {
                 for (std::size_t i = 0; i < pending.size(); ++i) {
-                    socket.writeDatagram(pending[i].constData(),
-                                         static_cast<int64_t>(pending[i].size()), host, port);
+                    if (socket.writeDatagramCached(
+                            pending[i].constData(), static_cast<int64_t>(pending[i].size()),
+                            host, port) != static_cast<int64_t>(pending[i].size())) {
+                        setError_(error, socket.errorString());
+                        return false;
+                    }
                 }
             }
         }
@@ -258,6 +279,12 @@ public:
     void clearRawHeaders() { m_requestHeaders.clear(); }
 
 private:
+    // The current handshake API coalesces one 0-RTT packet behind the
+    // minimum-sized Initial in a single UDP datagram. Keep that first flight
+    // below the QUIC drivers' 2048-byte receive slots; larger requests are
+    // sent after the handshake as ordinary packetised 1-RTT stream data.
+    static std::size_t kMaxSingleFlightEarlyRequestBytes_() { return 700; }
+
     static void setError_(SwString* error, const SwString& message) {
         if (error) {
             *error = message;
@@ -276,7 +303,7 @@ private:
         if (appCrypto.isEmpty() || m_receivedTicket.valid) {
             return;
         }
-        std::vector<SwTls13Messages::HandshakeMessage> messages;
+        SwVector<SwTls13Messages::HandshakeMessage> messages;
         if (!SwTls13Messages::splitMessages(appCrypto, messages, nullptr)) {
             return;
         }

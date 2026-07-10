@@ -86,12 +86,16 @@ public:
         SwByteArray pskBinder;           // first PSK binder
         std::size_t pskBindersTotalLength; // tail bytes to strip for binder calc
         SwVector<std::uint16_t> signatureSchemes; // signature_algorithms (0x000d)
+        SwVector<std::uint8_t> clientCertificateTypes; // RFC 7250 extension 19
+        SwVector<std::uint8_t> serverCertificateTypes; // RFC 7250 extension 20
         bool offersAes128GcmSha256;      // cipher suite 0x1301 offered
         bool offersX25519;               // supported group 0x001d offered
         bool hasTransportParameters;
         bool hasAlpn;
         bool hasPreSharedKey;            // pre_shared_key extension present
         bool offersEarlyData;            // early_data extension present
+        bool hasClientCertificateTypes;
+        bool hasServerCertificateTypes;
 
         ClientHello()
             : pskBindersTotalLength(0),
@@ -100,7 +104,9 @@ public:
               hasTransportParameters(false),
               hasAlpn(false),
               hasPreSharedKey(false),
-              offersEarlyData(false) {}
+              offersEarlyData(false),
+              hasClientCertificateTypes(false),
+              hasServerCertificateTypes(false) {}
     };
 
     // Parse a ClientHello body (bytes after the 4-byte handshake header).
@@ -179,7 +185,7 @@ public:
         }
         const std::uint16_t extensionsLength = readU16_(chBody, pos);
         pos += 2;
-        if (pos + extensionsLength > total) {
+        if (pos + extensionsLength != total) {
             setError_(error, "ClientHello extensions block is truncated");
             return false;
         }
@@ -214,6 +220,24 @@ public:
             } else if (extType == 0x000d) {
                 parseSignatureAlgorithmsExtension_(chBody, dataStart, extLen,
                                                    out.signatureSchemes);
+            } else if (extType == 0x0013 || extType == 0x0014) {
+                bool& present = extType == 0x0013
+                    ? out.hasClientCertificateTypes
+                    : out.hasServerCertificateTypes;
+                SwVector<std::uint8_t>& types = extType == 0x0013
+                    ? out.clientCertificateTypes
+                    : out.serverCertificateTypes;
+                if (present || extLen < 2 ||
+                    readU8_(chBody, dataStart) == 0 ||
+                    static_cast<std::size_t>(readU8_(chBody, dataStart)) + 1 != extLen) {
+                    setError_(error, "Invalid RFC 7250 certificate_type offer");
+                    return false;
+                }
+                present = true;
+                const std::size_t count = readU8_(chBody, dataStart);
+                for (std::size_t item = 0; item < count; ++item) {
+                    types.push_back(readU8_(chBody, dataStart + 1 + item));
+                }
             } else if (extType == 0x002a) {
                 out.offersEarlyData = true;
             } else if (extType == 0x0029) {
@@ -354,9 +378,15 @@ public:
         bool hasAlpn;
         bool hasTransportParameters;
         bool acceptedEarlyData; // early_data (0x2a) present => 0-RTT accepted
+        std::uint8_t clientCertificateType;
+        std::uint8_t serverCertificateType;
+        bool hasClientCertificateType;
+        bool hasServerCertificateType;
 
         EncryptedExtensions()
-            : hasAlpn(false), hasTransportParameters(false), acceptedEarlyData(false) {}
+            : hasAlpn(false), hasTransportParameters(false), acceptedEarlyData(false),
+              clientCertificateType(0), serverCertificateType(0),
+              hasClientCertificateType(false), hasServerCertificateType(false) {}
     };
 
     static bool parseEncryptedExtensions(const SwByteArray& eeBody,
@@ -372,7 +402,7 @@ public:
         }
         const std::uint16_t extensionsLength = readU16_(eeBody, pos);
         pos += 2;
-        if (pos + extensionsLength > total) {
+        if (pos + extensionsLength != total) {
             setError_(error, "EncryptedExtensions block is truncated");
             return false;
         }
@@ -412,6 +442,19 @@ public:
                 out.alpnProtocol = eeBody.mid(static_cast<int>(dataStart + 3),
                                               static_cast<int>(nameLength));
                 out.hasAlpn = true;
+            } else if (extType == 0x0013 || extType == 0x0014) {
+                bool& present = extType == 0x0013
+                    ? out.hasClientCertificateType
+                    : out.hasServerCertificateType;
+                std::uint8_t& selected = extType == 0x0013
+                    ? out.clientCertificateType
+                    : out.serverCertificateType;
+                if (present || extLen != 1) {
+                    setError_(error, "Invalid RFC 7250 selected certificate_type");
+                    return false;
+                }
+                present = true;
+                selected = readU8_(eeBody, dataStart);
             }
 
             pos = dataStart + extLen;
@@ -433,7 +476,7 @@ public:
         }
         outSignatureScheme = readU16_(cvBody, 0);
         const std::uint16_t signatureLength = readU16_(cvBody, 2);
-        if (static_cast<std::size_t>(4) + signatureLength > total) {
+        if (static_cast<std::size_t>(4) + signatureLength != total) {
             setError_(error, "CertificateVerify signature is truncated");
             return false;
         }
@@ -595,7 +638,7 @@ public:
         }
         const std::uint32_t listLength = readU24_(certificateBody, pos);
         pos += 3;
-        if (pos + listLength > total) {
+        if (pos + listLength != total) {
             setError_(error, "Certificate list is truncated");
             return false;
         }

@@ -42,6 +42,7 @@ public:
     }
 
     bool start() override {
+        std::lock_guard<std::mutex> sendLock(m_sendMutex);
         std::lock_guard<std::mutex> lock(m_mutex);
         if (m_streams.isEmpty() || config().endpoint.port == 0U) {
             return false;
@@ -66,11 +67,18 @@ public:
             m_socket.close();
             return false;
         }
+        if (!m_socket.resolveHostAddress(m_destinationHost,
+                                         m_destinationPort,
+                                         m_destinationTarget)) {
+            m_socket.close();
+            return false;
+        }
         m_running = true;
         return true;
     }
 
     void stop() override {
+        std::lock_guard<std::mutex> sendLock(m_sendMutex);
         std::lock_guard<std::mutex> lock(m_mutex);
         m_socket.close();
         m_running = false;
@@ -83,21 +91,24 @@ public:
 
     bool publishVideoPacket(const SwString& streamId,
                             const SwVideoPacket& packet) override {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        const SwVideoPublishStream* stream = findStreamLocked_(streamId);
-        if (!m_running || !stream || packet.payload().isEmpty()) {
-            ++m_metrics.framesDropped;
-            return false;
-        }
+        std::lock_guard<std::mutex> sendLock(m_sendMutex);
+        std::vector<SwByteArray> datagrams;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            const SwVideoPublishStream* stream = findStreamLocked_(streamId);
+            if (!m_running || !stream || packet.payload().isEmpty()) {
+                ++m_metrics.framesDropped;
+                return false;
+            }
 
-        ++m_metrics.framesAccepted;
-        m_metrics.videoBytesAccepted += packet.payload().size();
-
-        const std::vector<SwByteArray> datagrams = makeDatagramsLocked_(*stream, packet);
-        if (datagrams.empty()) {
-            ++m_metrics.framesDropped;
-            ++m_metrics.transport.sendFailures;
-            return false;
+            ++m_metrics.framesAccepted;
+            m_metrics.videoBytesAccepted += packet.payload().size();
+            datagrams = makeDatagramsLocked_(*stream, packet);
+            if (datagrams.empty()) {
+                ++m_metrics.framesDropped;
+                ++m_metrics.transport.sendFailures;
+                return false;
+            }
         }
 
         bool sentAll = true;
@@ -113,16 +124,19 @@ public:
             ++datagramsSent;
         }
 
-        if (!sentAll) {
-            ++m_metrics.framesDropped;
-            ++m_metrics.transport.sendFailures;
-            return false;
-        }
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (!sentAll) {
+                ++m_metrics.framesDropped;
+                ++m_metrics.transport.sendFailures;
+                return false;
+            }
 
-        ++m_metrics.framesSent;
-        m_metrics.videoBytesSent += packet.payload().size();
-        m_metrics.transport.datagramsSent += datagramsSent;
-        m_metrics.transport.bytesSent += bytesSent;
+            ++m_metrics.framesSent;
+            m_metrics.videoBytesSent += packet.payload().size();
+            m_metrics.transport.datagramsSent += datagramsSent;
+            m_metrics.transport.bytesSent += bytesSent;
+        }
         return true;
     }
 
@@ -154,8 +168,7 @@ protected:
         }
         const int64_t sent = m_socket.writeDatagram(datagram.constData(),
                                                     static_cast<int64_t>(datagram.size()),
-                                                    m_destinationHost,
-                                                    m_destinationPort);
+                                                    m_destinationTarget);
         return sent == static_cast<int64_t>(datagram.size());
     }
 
@@ -169,6 +182,7 @@ protected:
     }
 
     mutable std::mutex m_mutex;
+    mutable std::mutex m_sendMutex;
     SwList<SwVideoPublishStream> m_streams{};
     SwVideoServerMetrics m_metrics{};
     bool m_running{false};
@@ -216,4 +230,5 @@ private:
     SwUdpSocket m_socket{};
     SwString m_destinationHost{};
     uint16_t m_destinationPort{0};
+    SwUdpSocket::ResolvedAddress m_destinationTarget{};
 };

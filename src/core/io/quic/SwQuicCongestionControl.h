@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include "quic/SwQuicLimits.h"
 
 // RFC 9002 (QUIC Loss Detection and Congestion Control) section 7 NewReno.
 //
@@ -15,7 +16,7 @@
 class SwQuicCongestionControl {
 public:
     SwQuicCongestionControl()
-        : m_maxDatagramSize(1200),
+        : m_maxDatagramSize(SwQuicLimits::maximumUdpPayloadBytes()),
           m_congestionWindow(0),
           m_bytesInFlight(0),
           m_ssthresh(UINT64_MAX),

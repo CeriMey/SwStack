@@ -826,6 +826,22 @@ inline SwByteArray swVtpSerializeDatagram(const SwVtpDatagram& datagram) {
     return out;
 }
 
+inline SwByteArray swVtpSerializeDatagramPayload(const SwVtpHeader& inputHeader,
+                                                 const char* payload,
+                                                 std::size_t payloadBytes) {
+    if ((!payload && payloadBytes > 0U) || payloadBytes > 0xFFFFU) {
+        return SwByteArray();
+    }
+    SwVtpHeader header = inputHeader;
+    header.headerBytes = kSwVtpHeaderBytes;
+    header.payloadBytes = static_cast<uint16_t>(payloadBytes);
+    SwByteArray out = swVtpSerializeHeader(header);
+    if (payloadBytes > 0U) {
+        out.append(payload, payloadBytes);
+    }
+    return out;
+}
+
 inline bool swVtpParseDatagram(const SwByteArray& bytes, SwVtpDatagram& outDatagram) {
     SwVtpHeader header;
     if (!swVtpParseHeader(bytes, header)) {

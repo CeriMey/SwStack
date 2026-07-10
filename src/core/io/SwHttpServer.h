@@ -56,14 +56,21 @@
 #include "SwMutex.h"
 #include "SwDebug.h"
 #include "SwEventLoop.h"
+#include "SwTimer.h"
 
 #include "http/SwHttpTypes.h"
 #include "http/SwHttpRouter.h"
 #include "http/SwHttpSession.h"
 #include "http/SwHttpStaticFileHandler.h"
 
-#include <functional>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <cstddef>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <utility>
 
 static constexpr const char* kSwLogCategory_SwHttpServer = "sw.core.io.swhttpserver";
 
@@ -104,6 +111,106 @@ using SwHttpPreRouteAsyncHandler = std::function<void(const SwHttpRequest&, cons
 class SwHttpServer : public SwObject {
     SW_OBJECT(SwHttpServer, SwObject)
 
+private:
+    struct LifetimeState_ {
+#if defined(_WIN32)
+        LifetimeState_() {
+            InitializeCriticalSection(&mutex);
+            InitializeConditionVariable(&drained);
+        }
+        ~LifetimeState_() { DeleteCriticalSection(&mutex); }
+        void lock() { EnterCriticalSection(&mutex); }
+        void unlock() { LeaveCriticalSection(&mutex); }
+        void notifyDrained_() { WakeAllConditionVariable(&drained); }
+        void stopAndDrain_() {
+            lock();
+            stopping = true;
+            while (activeUsers != 0) {
+                SleepConditionVariableCS(&drained, &mutex, INFINITE);
+            }
+            owner = nullptr;
+            unlock();
+        }
+        CRITICAL_SECTION mutex;
+        CONDITION_VARIABLE drained;
+#else
+        void lock() { mutex.lock(); }
+        void unlock() { mutex.unlock(); }
+        void notifyDrained_() { drained.notify_all(); }
+        void stopAndDrain_() {
+            std::unique_lock<std::mutex> lock(mutex);
+            stopping = true;
+            drained.wait(lock, [this]() { return activeUsers == 0; });
+            owner = nullptr;
+        }
+        std::mutex mutex;
+        std::condition_variable drained;
+#endif
+        SwHttpServer* owner = nullptr;
+        std::size_t activeUsers = 0;
+        bool stopping = false;
+    };
+
+    class LifetimeAccess_ {
+    public:
+        explicit LifetimeAccess_(const std::shared_ptr<LifetimeState_>& state)
+            : state_(state) {
+            if (!state_) {
+                return;
+            }
+            std::lock_guard<LifetimeState_> lock(*state_);
+            if (state_->stopping || !state_->owner) {
+                return;
+            }
+            owner_ = state_->owner;
+            ++state_->activeUsers;
+        }
+
+        ~LifetimeAccess_() {
+            if (!owner_ || !state_) {
+                return;
+            }
+            std::lock_guard<LifetimeState_> lock(*state_);
+            if (state_->activeUsers > 0) {
+                --state_->activeUsers;
+            }
+            if (state_->stopping && state_->activeUsers == 0) {
+                state_->notifyDrained_();
+            }
+        }
+
+        SwHttpServer* get() const { return owner_; }
+        explicit operator bool() const { return owner_ != nullptr; }
+
+        LifetimeAccess_(const LifetimeAccess_&) = delete;
+        LifetimeAccess_& operator=(const LifetimeAccess_&) = delete;
+
+    private:
+        std::shared_ptr<LifetimeState_> state_;
+        SwHttpServer* owner_ = nullptr;
+    };
+
+    struct DispatchGate_ {
+        std::atomic<bool> completed{false};
+        SwPointer<SwTimer> timeout;
+        std::function<void(SwHttpResponse)> finishCallback;
+
+        void finish(SwHttpResponse response) {
+            if (completed.exchange(true, std::memory_order_acq_rel)) {
+                return;
+            }
+            if (timeout) {
+                timeout->stop();
+                timeout->deleteLater();
+                timeout = nullptr;
+            }
+            std::function<void(SwHttpResponse)> callback = std::move(finishCallback);
+            if (callback) {
+                callback(std::move(response));
+            }
+        }
+    };
+
 public:
     enum class DispatchMode {
         Inline,
@@ -117,7 +224,9 @@ public:
      * @details The instance is initialized and can optionally be attached to a parent object for ownership management.
      */
     explicit SwHttpServer(SwObject* parent = nullptr)
-        : SwObject(parent) {
+        : SwObject(parent),
+          m_lifetime(std::make_shared<LifetimeState_>()) {
+        m_lifetime->owner = this;
         connect(&m_tcpServer, &SwTcpServer::newConnection, this, &SwHttpServer::onNewTcpConnection_);
         connect(&m_sslServer, &SwTcpServer::newConnection, this, &SwHttpServer::onNewTcpConnection_);
 
@@ -135,6 +244,7 @@ public:
      */
     ~SwHttpServer() override {
         close();
+        shutdownLifetime_();
         while (!m_staticHandlers.isEmpty()) {
             SwHttpStaticFileHandler* handler = m_staticHandlers.first();
             m_staticHandlers.removeFirst();
@@ -206,6 +316,7 @@ public:
     }
 
     bool listenHttp(const SwString& bindAddress, uint16_t port) {
+        resumeDispatching_();
         return m_tcpServer.listen(bindAddress, port);
     }
 
@@ -217,6 +328,7 @@ public:
         if (!m_sslServer.setLocalCredentials(certPath, keyPath)) {
             return false;
         }
+        resumeDispatching_();
         return m_sslServer.listen(bindAddress, port);
     }
 
@@ -228,6 +340,7 @@ public:
         if (!m_sslServer.setLocalCredentials(credentials)) {
             return false;
         }
+        resumeDispatching_();
         return m_sslServer.listen(bindAddress, port);
     }
 
@@ -260,13 +373,21 @@ public:
      */
     void close() {
         closeListeners_();
-        while (!m_sessions.isEmpty()) {
-            SwHttpSession* session = m_sessions.first();
-            m_sessions.removeFirst();
+        while (true) {
+            SwHttpSession* session = nullptr;
+            {
+                SwMutexLocker locker(&m_sessionsMutex);
+                if (m_sessions.isEmpty()) {
+                    break;
+                }
+                session = m_sessions.first();
+                m_sessions.removeAt(0);
+            }
             if (session) {
                 session->closeSession();
             }
         }
+        cancelDispatches_();
     }
 
     /**
@@ -278,16 +399,33 @@ public:
      */
     bool closeGraceful(int timeoutMs = 5000) {
         closeListeners_();
-        int waitedMs = 0;
-        while (!m_sessions.isEmpty()) {
-            if (timeoutMs >= 0 && waitedMs >= timeoutMs) {
-                close();
-                return false;
-            }
-            SwEventLoop::swsleep(10);
-            waitedMs += 10;
+        if (isDrained_()) {
+            return true;
         }
-        return true;
+
+        SwEventLoop loop;
+        SwTimer timeout;
+        bool timedOut = false;
+        connect(this, &SwHttpServer::sessionsDrained, &loop, [this, &loop]() {
+            if (isDrained_()) {
+                loop.quit();
+            }
+        });
+        if (timeoutMs >= 0) {
+            timeout.setSingleShot(true);
+            connect(&timeout, &SwTimer::timeout, &loop, [&loop, &timedOut]() {
+                timedOut = true;
+                loop.quit();
+            });
+            timeout.start(timeoutMs);
+        }
+        loop.exec();
+
+        if (timedOut && !isDrained_()) {
+            close();
+            return false;
+        }
+        return isDrained_();
     }
 
     /**
@@ -562,8 +700,10 @@ public:
         const long long currentInFlight = m_metrics.inFlightRequests;
         m_metrics = SwHttpServerMetrics();
         m_metrics.inFlightRequests = currentInFlight;
-        m_threadPoolQueuedDispatches = 0;
     }
+
+signals:
+    DECLARE_SIGNAL_VOID(sessionsDrained)
 
 private slots:
     /**
@@ -583,6 +723,77 @@ private slots:
     }
 
 private:
+    bool runOnAffinityReliable_(std::function<void()> task) {
+        if (!task) {
+            return false;
+        }
+        ThreadHandle* affinity = threadHandle();
+        if (!affinity || ThreadHandle::currentThread() == affinity) {
+            task();
+            return true;
+        }
+        return affinity->postTaskOnLaneReliable(std::move(task), SwFiberLane::Control);
+    }
+
+    bool isDrained_() const {
+        {
+            SwMutexLocker locker(&m_sessionsMutex);
+            if (!m_sessions.isEmpty()) {
+                return false;
+            }
+        }
+        SwMutexLocker locker(&m_dispatchMutex);
+        return m_dispatchGates.isEmpty();
+    }
+
+    void notifyDrainState_() {
+        ThreadHandle* affinity = threadHandle();
+        if (affinity && ThreadHandle::currentThread() != affinity) {
+            std::shared_ptr<LifetimeState_> lifetime = m_lifetime;
+            (void)affinity->postTaskOnLaneReliable([lifetime]() {
+                LifetimeAccess_ access(lifetime);
+                if (access) {
+                    access.get()->notifyDrainState_();
+                }
+            }, SwFiberLane::Control);
+            return;
+        }
+        if (isDrained_()) {
+            emit sessionsDrained();
+        }
+    }
+
+    void shutdownLifetime_() {
+        if (!m_lifetime) {
+            return;
+        }
+        m_lifetime->stopAndDrain_();
+    }
+
+    void cancelDispatches_() {
+        SwList<std::shared_ptr<DispatchGate_>> gates;
+        {
+            SwMutexLocker locker(&m_dispatchMutex);
+            m_dispatchStopping = true;
+            for (auto it = m_dispatchGates.begin(); it != m_dispatchGates.end(); ++it) {
+                if (it.value()) {
+                    gates.append(it.value());
+                }
+            }
+            m_dispatchGates.clear();
+        }
+        for (std::size_t i = 0; i < gates.size(); ++i) {
+            SwHttpResponse cancelled = swHttpTextResponse(503, "Server shutting down");
+            cancelled.closeConnection = true;
+            gates[i]->finish(std::move(cancelled));
+        }
+    }
+
+    void resumeDispatching_() {
+        SwMutexLocker locker(&m_dispatchMutex);
+        m_dispatchStopping = false;
+    }
+
     void closeListeners_() {
         m_tcpServer.close();
         m_sslServer.close();
@@ -592,34 +803,70 @@ private:
         if (!socket) {
             return;
         }
-        if (m_limits.maxConnections > 0 && m_sessions.size() >= m_limits.maxConnections) {
+        bool connectionLimitReached = false;
+        {
+            SwMutexLocker locker(&m_sessionsMutex);
+            connectionLimitReached = m_limits.maxConnections > 0 &&
+                                     m_sessions.size() >= m_limits.maxConnections;
+        }
+        if (connectionLimitReached) {
             {
                 SwMutexLocker locker(&m_metricsMutex);
                 ++m_metrics.rejectedConnections;
             }
-            socket->close();
+            if (SwTcpSocket* tcp = dynamic_cast<SwTcpSocket*>(socket)) {
+                tcp->abort();
+            } else {
+                socket->close();
+            }
             socket->deleteLater();
             return;
         }
 
         SwHttpSession* session = new SwHttpSession(socket, &m_router, m_limits, m_timeouts, isTls, localPort, this);
         SwPointer<SwHttpSession> sessionGuard(session);
-        session->setRequestHandler([this, sessionGuard](const SwHttpRequest& request,
-                                                        const SwHttpSession::SwHttpResponseCallback& complete) {
+        std::shared_ptr<LifetimeState_> lifetime = m_lifetime;
+        session->setRequestHandler([lifetime, sessionGuard](const SwHttpRequest& request,
+                                                            const SwHttpSession::SwHttpResponseCallback& complete) {
+            LifetimeAccess_ access(lifetime);
+            if (!access) {
+                return;
+            }
             SwHttpSession::SwHttpResponseCallback guardedComplete =
-                [sessionGuard, complete](const SwHttpResponse& response) {
+                [sessionGuard, complete](SwHttpResponse response) mutable {
                     if (!sessionGuard) {
                         return;
                     }
                     if (complete) {
-                        complete(response);
+                        complete(std::move(response));
                     }
                 };
-            dispatchRequest_(request, guardedComplete);
+            access.get()->dispatchRequest_(request, guardedComplete);
         });
-        m_sessions.append(session);
-        session->setFinishedCallback([this](SwHttpSession* doneSession) {
-            m_sessions.removeOne(doneSession);
+        session->setPendingBytesBudgetCallbacks(
+            [lifetime](std::size_t bytes) {
+                LifetimeAccess_ access(lifetime);
+                return access && access.get()->reservePendingRequestBytes_(bytes);
+            },
+            [lifetime](std::size_t bytes) {
+                LifetimeAccess_ access(lifetime);
+                if (access) {
+                    access.get()->releasePendingRequestBytes_(bytes);
+                }
+            });
+        {
+            SwMutexLocker locker(&m_sessionsMutex);
+            m_sessions.append(session);
+        }
+        session->setFinishedCallback([lifetime](SwHttpSession* doneSession) {
+            LifetimeAccess_ access(lifetime);
+            if (access) {
+                {
+                    SwMutexLocker locker(&access.get()->m_sessionsMutex);
+                    access.get()->m_sessions.removeOne(doneSession);
+                }
+                access.get()->notifyDrainState_();
+            }
             if (doneSession) {
                 doneSession->deleteLater();
             }
@@ -653,16 +900,20 @@ private:
         return response;
     }
 
-    void routeRequestAsync_(const SwHttpRequest& request,
+    void routeRequestAsync_(const std::shared_ptr<const SwHttpRequest>& request,
                             const SwHttpSession::SwHttpResponseCallback& complete) {
+        if (!request) {
+            return;
+        }
         SwHttpResponse preRouteResponse;
-        if (tryPreRoute_(request, preRouteResponse)) {
+        if (tryPreRoute_(*request, preRouteResponse)) {
             if (complete) {
-                complete(preRouteResponse);
+                complete(std::move(preRouteResponse));
             }
             return;
         }
-        tryPreRouteAsync_(request, 0, [this, request, complete](bool handled, const SwHttpResponse& preRouteAsyncResponse) {
+        std::shared_ptr<LifetimeState_> lifetime = m_lifetime;
+        tryPreRouteAsync_(request, 0, [lifetime, request, complete](bool handled, const SwHttpResponse& preRouteAsyncResponse) {
             if (handled) {
                 if (complete) {
                     complete(preRouteAsyncResponse);
@@ -670,7 +921,11 @@ private:
                 return;
             }
 
-            const bool routed = m_router.routeAsync(request, [complete](const SwHttpResponse& response) {
+            LifetimeAccess_ access(lifetime);
+            if (!access) {
+                return;
+            }
+            const bool routed = access.get()->m_router.routeAsync(*request, [complete](const SwHttpResponse& response) {
                 if (complete) {
                     complete(response);
                 }
@@ -680,21 +935,11 @@ private:
             }
 
             SwHttpResponse response = swHttpTextResponse(404, "Not Found");
-            response.closeConnection = !request.keepAlive;
+            response.closeConnection = !request->keepAlive;
             if (complete) {
-                complete(response);
+                complete(std::move(response));
             }
         });
-    }
-
-    void completeDispatch_(const SwHttpSession::SwHttpResponseCallback& complete,
-                           const SwHttpResponse& response,
-                           const std::chrono::steady_clock::time_point& startAt) {
-        releaseInFlight_();
-        recordResponseMetrics_(response, elapsedMs_(startAt));
-        if (complete) {
-            complete(response);
-        }
     }
 
     void dispatchRequest_(const SwHttpRequest& request,
@@ -705,8 +950,97 @@ private:
             response.closeConnection = !request.keepAlive;
             recordResponseMetrics_(response, elapsedMs_(startAt));
             if (complete) {
-                complete(response);
+                complete(std::move(response));
             }
+            return;
+        }
+        bool dispatchStopping = false;
+        {
+            SwMutexLocker locker(&m_dispatchMutex);
+            dispatchStopping = m_dispatchStopping;
+        }
+        if (dispatchStopping) {
+            releaseInFlight_();
+            SwHttpResponse response = swHttpTextResponse(503, "Server shutting down");
+            response.closeConnection = true;
+            recordResponseMetrics_(response, elapsedMs_(startAt));
+            if (complete) {
+                complete(std::move(response));
+            }
+            return;
+        }
+
+        // The common inline route is fully synchronous: avoid a request copy, shared gate,
+        // timer allocation and dispatch-map mutex on every keep-alive request.
+        if (m_dispatchMode == DispatchMode::Inline &&
+            m_preRouteHandlersAsync.isEmpty() &&
+            !m_router.willRouteAsync(request)) {
+            SwHttpResponse response = routeRequestInline_(request);
+            releaseInFlight_();
+            recordResponseMetrics_(response, elapsedMs_(startAt));
+            SwPointer<SwHttpServer> self(this);
+            if (complete) {
+                complete(std::move(response));
+            }
+            if (self) {
+                self->notifyDrainState_();
+            }
+            return;
+        }
+
+        std::shared_ptr<const SwHttpRequest> requestState =
+            std::make_shared<SwHttpRequest>(request);
+        std::shared_ptr<DispatchGate_> gate = std::make_shared<DispatchGate_>();
+        std::shared_ptr<LifetimeState_> lifetime = m_lifetime;
+        DispatchGate_* const gateKey = gate.get();
+        gate->finishCallback = [lifetime, complete, startAt, gateKey](SwHttpResponse response) mutable {
+            {
+                LifetimeAccess_ access(lifetime);
+                if (!access) {
+                    return;
+                }
+                SwHttpServer* owner = access.get();
+                {
+                    SwMutexLocker locker(&owner->m_dispatchMutex);
+                    owner->m_dispatchGates.remove(gateKey);
+                }
+                owner->releaseInFlight_();
+                owner->recordResponseMetrics_(response, elapsedMs_(startAt));
+                owner->notifyDrainState_();
+            }
+            if (complete) {
+                complete(std::move(response));
+            }
+        };
+
+        if (m_timeouts.routeTimeoutMs > 0) {
+            SwTimer* timeout = new SwTimer(this);
+            timeout->setSingleShot(true);
+            gate->timeout = timeout;
+            const bool keepAlive = request.keepAlive;
+            SwObject::connect(timeout, &SwTimer::timeout, this, [gate, keepAlive]() {
+                SwHttpResponse timedOut = swHttpTextResponse(504, "Route timeout");
+                timedOut.closeConnection = !keepAlive;
+                gate->finish(std::move(timedOut));
+            });
+            timeout->start(m_timeouts.routeTimeoutMs);
+        }
+
+        // Publish only after callback and deadline are fully initialized. Timer callbacks execute
+        // on this affinity after the current dispatch turn, so the gate cannot finish before it
+        // becomes visible; a concurrent close() can safely finish everything it can observe.
+        bool published = false;
+        {
+            SwMutexLocker locker(&m_dispatchMutex);
+            if (!m_dispatchStopping) {
+                m_dispatchGates[gateKey] = gate;
+                published = true;
+            }
+        }
+        if (!published) {
+            SwHttpResponse stopping = swHttpTextResponse(503, "Server shutting down");
+            stopping.closeConnection = true;
+            gate->finish(std::move(stopping));
             return;
         }
 
@@ -716,30 +1050,22 @@ private:
             !m_router.willRouteAsync(request) &&
             m_preRouteHandlersAsync.isEmpty()) {
             if (!tryReserveThreadPoolDispatch_()) {
-                releaseInFlight_();
                 SwHttpResponse response = swHttpTextResponse(503, "ThreadPool saturated");
                 response.closeConnection = !request.keepAlive;
-                recordResponseMetrics_(response, elapsedMs_(startAt));
-                if (complete) {
-                    complete(response);
-                }
+                gate->finish(std::move(response));
                 return;
             }
 
-            ThreadHandle* affinity = threadHandle();
             bool rejectedByBackpressure = false;
-            bool started = m_threadPool->tryStartQueued([this, request, complete, startAt, affinity]() {
-                SwHttpResponse computed = routeRequestInline_(request);
-
-                releaseThreadPoolDispatch_();
-                auto completeOnAffinity = [this, complete, computed, startAt]() {
-                    completeDispatch_(complete, computed, startAt);
-                };
-                if (affinity && ThreadHandle::currentThread() != affinity) {
-                    affinity->postTaskOnLane(completeOnAffinity, SwFiberLane::Control);
-                } else {
-                    completeOnAffinity();
+            bool started = m_threadPool->tryStartQueued([lifetime, requestState, gate]() {
+                LifetimeAccess_ access(lifetime);
+                if (!access) {
+                    return;
                 }
+                SwHttpServer* owner = access.get();
+                SwHttpResponse computed = owner->routeRequestInline_(*requestState);
+                owner->releaseThreadPoolDispatch_();
+                gate->finish(std::move(computed));
             }, 0, &rejectedByBackpressure);
 
             if (started) {
@@ -752,13 +1078,13 @@ private:
                 rejectedByBackpressure ? SwString("ThreadPool saturated")
                                        : SwString("ThreadPool unavailable"));
             saturated.closeConnection = !request.keepAlive;
-            completeDispatch_(complete, saturated, startAt);
+            gate->finish(std::move(saturated));
             return;
         }
 #endif
 
-        routeRequestAsync_(request, [this, complete, startAt](const SwHttpResponse& response) {
-            completeDispatch_(complete, response, startAt);
+        routeRequestAsync_(requestState, [gate](SwHttpResponse response) {
+            gate->finish(std::move(response));
         });
     }
 
@@ -773,6 +1099,25 @@ private:
         ++m_metrics.totalRequests;
         m_metrics.totalRequestBodyBytes += static_cast<long long>(request.body.size());
         return true;
+    }
+
+    bool reservePendingRequestBytes_(std::size_t bytes) {
+        SwMutexLocker locker(&m_metricsMutex);
+        if (m_limits.maxPendingRequestBytesGlobal > 0 &&
+            (bytes > m_limits.maxPendingRequestBytesGlobal ||
+             m_pendingRequestBytesGlobal >
+                 m_limits.maxPendingRequestBytesGlobal - bytes)) {
+            return false;
+        }
+        m_pendingRequestBytesGlobal += bytes;
+        return true;
+    }
+
+    void releasePendingRequestBytes_(std::size_t bytes) {
+        SwMutexLocker locker(&m_metricsMutex);
+        m_pendingRequestBytesGlobal = bytes > m_pendingRequestBytesGlobal
+                                          ? 0
+                                          : m_pendingRequestBytesGlobal - bytes;
     }
 
     void releaseInFlight_() {
@@ -837,6 +1182,7 @@ private:
     SwSslServer m_sslServer;
     SwHttpRouter m_router;
     SwList<SwHttpSession*> m_sessions;
+    mutable SwMutex m_sessionsMutex;
     SwList<SwHttpPreRouteHandler> m_preRouteHandlers;
     SwList<SwHttpPreRouteAsyncHandler> m_preRouteHandlersAsync;
     SwList<SwHttpStaticFileHandler*> m_staticHandlers;
@@ -847,10 +1193,18 @@ private:
     mutable SwMutex m_metricsMutex;
     SwHttpServerMetrics m_metrics;
     long long m_threadPoolQueuedDispatches = 0;
+    std::size_t m_pendingRequestBytesGlobal = 0;
+    mutable SwMutex m_dispatchMutex;
+    SwMap<DispatchGate_*, std::shared_ptr<DispatchGate_>> m_dispatchGates;
+    bool m_dispatchStopping = false;
+    std::shared_ptr<LifetimeState_> m_lifetime;
 
-    void tryPreRouteAsync_(const SwHttpRequest& request,
+    void tryPreRouteAsync_(const std::shared_ptr<const SwHttpRequest>& request,
                            std::size_t index,
                            const std::function<void(bool, const SwHttpResponse&)>& complete) const {
+        if (!request) {
+            return;
+        }
         if (index >= m_preRouteHandlersAsync.size()) {
             if (complete) {
                 complete(false, SwHttpResponse());
@@ -858,20 +1212,32 @@ private:
             return;
         }
 
-        const SwHttpPreRouteAsyncHandler& handler = m_preRouteHandlersAsync[index];
+        const SwHttpPreRouteAsyncHandler handler = m_preRouteHandlersAsync[index];
         if (!handler) {
             tryPreRouteAsync_(request, index + 1, complete);
             return;
         }
 
-        handler(request, [this, request, index, complete](bool handled, const SwHttpResponse& response) {
+        std::shared_ptr<LifetimeState_> lifetime = m_lifetime;
+        handler(*request, [lifetime, request, index, complete](bool handled, const SwHttpResponse& response) {
             if (handled) {
                 if (complete) {
                     complete(true, response);
                 }
                 return;
             }
-            tryPreRouteAsync_(request, index + 1, complete);
+            LifetimeAccess_ access(lifetime);
+            if (access) {
+                SwHttpServer* owner = access.get();
+                owner->runOnAffinityReliable_([lifetime, request, index, complete]() {
+                    LifetimeAccess_ continuationAccess(lifetime);
+                    if (continuationAccess) {
+                        continuationAccess.get()->tryPreRouteAsync_(request,
+                                                                   index + 1,
+                                                                   complete);
+                    }
+                });
+            }
         });
     }
 };

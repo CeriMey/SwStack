@@ -88,6 +88,7 @@ public:
     using Token = size_t;
     using EventCallback = std::function<void(EventMask)>;
     using AffinityPoster = std::function<void(std::function<void()>)>;
+    using ReliableAffinityPoster = std::function<bool(std::function<void()>)>;
 
     SwIoDispatcher() {
 #if !defined(_WIN32)
@@ -149,85 +150,56 @@ public:
     Token watchHandle(HANDLE handle,
                       const AffinityPoster& poster,
                       const std::function<void()>& callback) {
-        if (!handle || !callback) {
-            return 0;
-        }
+        return watchHandleImpl_(handle,
+                                ReliableAffinityPoster(),
+                                poster,
+                                callback);
+    }
 
-        std::shared_ptr<Entry_> entry(new Entry_());
-        entry->token = nextToken_();
-        entry->poster = poster;
-        entry->callback = [callback](EventMask) { callback(); };
-        entry->waitHandle = handle;
-
-        if (!::RegisterWaitForSingleObject(&entry->registeredWait,
-                                           handle,
-                                           &SwIoDispatcher::windowsWaitCallback_,
-                                           entry.get(),
-                                           INFINITE,
-                                           WT_EXECUTEINWAITTHREAD | WT_EXECUTEDEFAULT)) {
-            swCError(kSwLogCategory_SwIoDispatcher) << "[SwIoDispatcher] RegisterWaitForSingleObject failed";
-            return 0;
-        }
-
-        SwIoDispatcherLock_ lock(m_mutex);
-        if (m_shutdown) {
-            unregisterWindowsEntry_(entry);
-            return 0;
-        }
-        m_entries[entry->token] = entry;
-        return entry->token;
+    Token watchHandleReliable(HANDLE handle,
+                              const ReliableAffinityPoster& poster,
+                              const std::function<void()>& callback) {
+        return watchHandleImpl_(handle,
+                                poster,
+                                AffinityPoster(),
+                                callback);
     }
 #else
     Token watchFd(int fd,
                   EventMask events,
                   const AffinityPoster& poster,
                   const EventCallback& callback) {
-        if (fd < 0 || !callback || m_linuxEpollFd < 0) {
-            return 0;
-        }
+        return watchFdImpl_(fd,
+                            events,
+                            ReliableAffinityPoster(),
+                            poster,
+                            callback);
+    }
 
-        std::shared_ptr<Entry_> entry(new Entry_());
-        entry->token = nextToken_();
-        entry->poster = poster;
-        entry->callback = callback;
-        entry->fd = fd;
-        entry->events = events;
-
-        struct epoll_event ev{};
-        ev.events = toLinuxEvents_(events);
-        ev.data.u64 = static_cast<uint64_t>(entry->token);
-        if (::epoll_ctl(m_linuxEpollFd, EPOLL_CTL_ADD, fd, &ev) != 0) {
-            swCError(kSwLogCategory_SwIoDispatcher) << "[SwIoDispatcher] epoll_ctl add failed fd=" << fd;
-            return 0;
-        }
-
-        {
-            SwIoDispatcherLock_ lock(m_mutex);
-            if (m_shutdown.load()) {
-                ::epoll_ctl(m_linuxEpollFd, EPOLL_CTL_DEL, fd, nullptr);
-                return 0;
-            }
-            m_entries[entry->token] = entry;
-        }
-
-        signalLinuxWake_();
-        return entry->token;
+    Token watchFdReliable(int fd,
+                          EventMask events,
+                          const ReliableAffinityPoster& poster,
+                          const EventCallback& callback) {
+        return watchFdImpl_(fd,
+                            events,
+                            poster,
+                            AffinityPoster(),
+                            callback);
     }
 
     bool updateFd(Token token, EventMask events) {
-        std::shared_ptr<Entry_> entry;
-        {
-            SwIoDispatcherLock_ lock(m_mutex);
-            auto it = m_entries.find(token);
-            if (it == m_entries.end()) {
-                return false;
-            }
-            entry = it->second;
-            entry->events = events;
+        SwIoDispatcherLock_ lock(m_mutex);
+        auto it = m_entries.find(token);
+        if (it == m_entries.end()) {
+            return false;
         }
 
+        const std::shared_ptr<Entry_>& entry = it->second;
         if (!entry || entry->fd < 0 || m_linuxEpollFd < 0) {
             return false;
+        }
+        if (entry->events == events) {
+            return true;
         }
 
         struct epoll_event ev{};
@@ -237,7 +209,7 @@ public:
             swCError(kSwLogCategory_SwIoDispatcher) << "[SwIoDispatcher] epoll_ctl mod failed fd=" << entry->fd;
             return false;
         }
-        signalLinuxWake_();
+        entry->events = events;
         return true;
     }
 #endif
@@ -269,14 +241,85 @@ public:
         if (m_linuxEpollFd >= 0 && entry->fd >= 0) {
             ::epoll_ctl(m_linuxEpollFd, EPOLL_CTL_DEL, entry->fd, nullptr);
         }
-        signalLinuxWake_();
 #endif
     }
 
 private:
+#if defined(_WIN32)
+    Token watchHandleImpl_(HANDLE handle,
+                           const ReliableAffinityPoster& reliablePoster,
+                           const AffinityPoster& legacyPoster,
+                           const std::function<void()>& callback) {
+        if (!handle || !callback) {
+            return 0;
+        }
+
+        std::shared_ptr<Entry_> entry(new Entry_());
+        entry->token = nextToken_();
+        entry->reliablePoster = reliablePoster;
+        entry->legacyPoster = legacyPoster;
+        entry->callback = [callback](EventMask) { callback(); };
+        entry->waitHandle = handle;
+
+        if (!::RegisterWaitForSingleObject(&entry->registeredWait,
+                                           handle,
+                                           &SwIoDispatcher::windowsWaitCallback_,
+                                           entry.get(),
+                                           INFINITE,
+                                           WT_EXECUTEINWAITTHREAD | WT_EXECUTEDEFAULT)) {
+            swCError(kSwLogCategory_SwIoDispatcher) << "[SwIoDispatcher] RegisterWaitForSingleObject failed";
+            return 0;
+        }
+
+        SwIoDispatcherLock_ lock(m_mutex);
+        if (m_shutdown) {
+            unregisterWindowsEntry_(entry);
+            return 0;
+        }
+        m_entries[entry->token] = entry;
+        return entry->token;
+    }
+#else
+    Token watchFdImpl_(int fd,
+                       EventMask events,
+                       const ReliableAffinityPoster& reliablePoster,
+                       const AffinityPoster& legacyPoster,
+                       const EventCallback& callback) {
+        if (fd < 0 || !callback || m_linuxEpollFd < 0) {
+            return 0;
+        }
+
+        std::shared_ptr<Entry_> entry(new Entry_());
+        entry->token = nextToken_();
+        entry->reliablePoster = reliablePoster;
+        entry->legacyPoster = legacyPoster;
+        entry->callback = callback;
+        entry->fd = fd;
+        entry->events = events;
+
+        struct epoll_event ev{};
+        ev.events = toLinuxEvents_(events);
+        ev.data.u64 = static_cast<uint64_t>(entry->token);
+        if (::epoll_ctl(m_linuxEpollFd, EPOLL_CTL_ADD, fd, &ev) != 0) {
+            swCError(kSwLogCategory_SwIoDispatcher) << "[SwIoDispatcher] epoll_ctl add failed fd=" << fd;
+            return 0;
+        }
+
+        {
+            SwIoDispatcherLock_ lock(m_mutex);
+            if (m_shutdown.load()) {
+                ::epoll_ctl(m_linuxEpollFd, EPOLL_CTL_DEL, fd, nullptr);
+                return 0;
+            }
+            m_entries[entry->token] = entry;
+        }
+        return entry->token;
+    }
+#endif
     struct Entry_ : public std::enable_shared_from_this<Entry_> {
         Token token{0};
-        AffinityPoster poster;
+        ReliableAffinityPoster reliablePoster;
+        AffinityPoster legacyPoster;
         EventCallback callback;
         std::atomic<bool> active{true};
         std::atomic<bool> dispatchQueued{false};
@@ -338,8 +381,19 @@ private:
             }
         };
 
-        if (entry->poster) {
-            entry->poster(std::move(invoke));
+        if (entry->reliablePoster) {
+            if (entry->reliablePoster(std::move(invoke))) {
+                return;
+            }
+
+            // The event bits remain in pendingEvents.  Release the coalescing lease so a
+            // level-triggered native notification can retry once the affinity queue has room.
+            // In particular, never leave dispatchQueued stuck after runtime backpressure.
+            entry->dispatchQueued.store(false, std::memory_order_release);
+            return;
+        }
+        if (entry->legacyPoster) {
+            entry->legacyPoster(std::move(invoke));
             return;
         }
         invoke();
@@ -368,12 +422,15 @@ private:
     }
 #else
     static uint32_t toLinuxEvents_(EventMask events) {
-        uint32_t nativeEvents = EPOLLERR | EPOLLHUP | EPOLLRDHUP;
+        uint32_t nativeEvents = EPOLLERR | EPOLLHUP;
         if (events & Readable) {
             nativeEvents |= EPOLLIN;
         }
         if (events & Writable) {
             nativeEvents |= EPOLLOUT;
+        }
+        if (events & Hangup) {
+            nativeEvents |= EPOLLRDHUP;
         }
         return nativeEvents;
     }

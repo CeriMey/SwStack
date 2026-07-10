@@ -4,6 +4,7 @@
 #include "core/io/quic/SwQuicFrameCodec.h"
 #include "core/io/quic/SwQuicInitialSecrets.h"
 #include "core/io/quic/SwQuicPacketProtector.h"
+#include "core/types/SwVector.h"
 
 #include <algorithm>
 #include <chrono>
@@ -135,7 +136,7 @@ const char* frameName_(SwQuicFrame::Type type) {
     return "UNKNOWN";
 }
 
-bool printFrameSummary_(const std::vector<SwQuicFrame>& frames) {
+bool printFrameSummary_(const SwVector<SwQuicFrame>& frames) {
     std::size_t paddingCount = 0;
     bool sawCrypto = false;
     std::cout << "frames=" << frames.size() << std::endl;
@@ -220,7 +221,7 @@ bool unprotectServerInitialPackets_(const SwByteArray& response,
             return false;
         }
 
-        std::vector<SwQuicFrame> frames;
+        SwVector<SwQuicFrame> frames;
         if (!SwQuicFrameCodec::decodeFrames(plaintext, frames, error)) {
             return false;
         }

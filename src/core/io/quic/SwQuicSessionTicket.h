@@ -50,6 +50,11 @@ public:
                const SwByteArray& resumptionPsk,
                std::uint32_t maxEarlyDataSize,
                const SwByteArray& serverTransportParams) {
+        if (m_maxEntries > 0 && m_entries.find(ticket) == m_entries.end()) {
+            while (m_entries.size() >= m_maxEntries && !m_entries.empty()) {
+                m_entries.erase(m_entries.begin());
+            }
+        }
         Entry entry;
         entry.resumptionPsk = resumptionPsk;
         entry.maxEarlyDataSize = maxEarlyDataSize;
@@ -73,10 +78,18 @@ public:
     }
 
     std::size_t size() const { return m_entries.size(); }
+    void setMaxEntries(std::size_t maximum) {
+        m_maxEntries = maximum;
+        if (m_maxEntries > 0) {
+            while (m_entries.size() > m_maxEntries) m_entries.erase(m_entries.begin());
+        }
+    }
+    std::size_t maxEntries() const { return m_maxEntries; }
     void clear() { m_entries.clear(); }
 
 private:
     SwMap<SwByteArray, Entry> m_entries;
+    std::size_t m_maxEntries = 4096;
 };
 
 #endif

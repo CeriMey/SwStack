@@ -5,6 +5,7 @@
 #include "SwString.h"
 #include "quic/SwQuicConnectionId.h"
 #include "quic/SwQuicInitialSecrets.h"
+#include "quic/SwQuicLimits.h"
 #include "quic/SwQuicPacketKeys.h"
 #include "quic/SwQuicVarIntCodec.h"
 #include "quic/SwTls13KeySchedule.h"
@@ -35,6 +36,20 @@ public:
                               const SwByteArray& random32,
                               SwByteArray& outClientHello,
                               SwString* error = nullptr) {
+        return buildForAlpn(serverName, initialSourceConnectionId, x25519Public32,
+                            random32, SwByteArray("h3"), outClientHello, error);
+    }
+
+    // Generic QUIC ClientHello with one explicit ALPN. The protocol is an
+    // opaque TLS ALPN identifier (1..255 bytes), not an HTTP/3 alias.
+    static bool buildForAlpn(const SwString& serverName,
+                             const SwQuicConnectionId& initialSourceConnectionId,
+                             const SwByteArray& x25519Public32,
+                             const SwByteArray& random32,
+                             const SwByteArray& applicationProtocol,
+                             SwByteArray& outClientHello,
+                             SwString* error = nullptr,
+                             bool rawPublicKey = false) {
         const SwString& host = serverName;
         if (host.empty() || host.size() > 255) {
             setError_(error, "Invalid QUIC TLS server name");
@@ -46,6 +61,10 @@ public:
         }
         if (random32.size() != 32) {
             setError_(error, "ClientHello random must be 32 bytes");
+            return false;
+        }
+        if (applicationProtocol.isEmpty() || applicationProtocol.size() > 255) {
+            setError_(error, "QUIC ALPN must contain 1..255 bytes");
             return false;
         }
 
@@ -85,18 +104,32 @@ public:
 
         SwByteArray signatureAlgorithms;
         SwByteArray signatureList;
-        appendU16_(signatureList, 0x0403);
-        appendU16_(signatureList, 0x0804);
-        appendU16_(signatureList, 0x0805);
-        appendU16_(signatureList, 0x0401);
+        if (rawPublicKey) {
+            appendU16_(signatureList, 0x0807); // ed25519
+        } else {
+            appendU16_(signatureList, 0x0403);
+            appendU16_(signatureList, 0x0804);
+            appendU16_(signatureList, 0x0805);
+            appendU16_(signatureList, 0x0401);
+        }
         appendU16_(signatureAlgorithms, static_cast<std::uint16_t>(signatureList.size()));
         signatureAlgorithms.append(signatureList);
         appendExtension_(extensions, 0x000d, signatureAlgorithms);
 
+        if (rawPublicKey) {
+            // RFC 7250 + TLS 1.3: offer only RawPublicKey(2) in both
+            // directions. Omitting X509 makes downgrade/fallback impossible.
+            SwByteArray certificateTypes;
+            appendU8_(certificateTypes, 1);
+            appendU8_(certificateTypes, 2);
+            appendExtension_(extensions, 0x0013, certificateTypes);
+            appendExtension_(extensions, 0x0014, certificateTypes);
+        }
+
         SwByteArray alpn;
         SwByteArray protocolList;
-        appendU8_(protocolList, 2);
-        protocolList.append("h3", 2);
+        appendU8_(protocolList, static_cast<std::uint8_t>(applicationProtocol.size()));
+        protocolList.append(applicationProtocol);
         appendU16_(alpn, static_cast<std::uint16_t>(protocolList.size()));
         alpn.append(protocolList);
         appendExtension_(extensions, 0x0010, alpn);
@@ -118,7 +151,8 @@ public:
 
         SwByteArray transportParameters;
         if (!appendVarIntTransportParameter_(transportParameters, 0x01, 30000, error) ||
-            !appendVarIntTransportParameter_(transportParameters, 0x03, 1200, error) ||
+            !appendVarIntTransportParameter_(transportParameters, 0x03,
+                                             SwQuicLimits::maximumUdpPayloadBytes(), error) ||
             !appendVarIntTransportParameter_(transportParameters, 0x04, 1048576, error) ||
             !appendVarIntTransportParameter_(transportParameters, 0x05, 262144, error) ||
             !appendVarIntTransportParameter_(transportParameters, 0x06, 262144, error) ||
@@ -126,6 +160,8 @@ public:
             !appendVarIntTransportParameter_(transportParameters, 0x08, 100, error) ||
             !appendVarIntTransportParameter_(transportParameters, 0x09, 100, error) ||
             !appendVarIntTransportParameter_(transportParameters, 0x0e, 4, error) ||
+            !appendVarIntTransportParameter_(transportParameters, 0x20,
+                                             SwQuicLimits::maximumDatagramFrameBytes(), error) ||
             !appendTransportParameter_(transportParameters,
                                        0x0f,
                                        initialSourceConnectionId.bytes(),
@@ -415,7 +451,8 @@ private:
         SwByteArray transportParameters;
         SwString ignoredError;
         appendVarIntTransportParameter_(transportParameters, 0x01, 30000, &ignoredError);
-        appendVarIntTransportParameter_(transportParameters, 0x03, 1200, &ignoredError);
+        appendVarIntTransportParameter_(transportParameters, 0x03,
+                                        SwQuicLimits::maximumUdpPayloadBytes(), &ignoredError);
         appendVarIntTransportParameter_(transportParameters, 0x04, 1048576, &ignoredError);
         appendVarIntTransportParameter_(transportParameters, 0x05, 262144, &ignoredError);
         appendVarIntTransportParameter_(transportParameters, 0x06, 262144, &ignoredError);
@@ -423,6 +460,8 @@ private:
         appendVarIntTransportParameter_(transportParameters, 0x08, 100, &ignoredError);
         appendVarIntTransportParameter_(transportParameters, 0x09, 100, &ignoredError);
         appendVarIntTransportParameter_(transportParameters, 0x0e, 4, &ignoredError);
+        appendVarIntTransportParameter_(transportParameters, 0x20,
+                                        SwQuicLimits::maximumDatagramFrameBytes(), &ignoredError);
         appendTransportParameter_(transportParameters, 0x0f,
                                   initialSourceConnectionId.bytes(), &ignoredError);
         appendExtension_(extensions, 0x0039, transportParameters);

@@ -22,6 +22,7 @@
 // caller as lambdas — there is no VIGIL/mesh knowledge and no hard-coded byte.
 
 #include "SwVector.h"
+#include "SwDequeue.h"
 #include "SwObject.h"
 #include "SwString.h"
 #include "SwByteArray.h"
@@ -31,6 +32,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -45,9 +47,14 @@ public:
         : SwObject(parent) {
         // The engine emits through the socket; it never touches the socket itself.
         m_endpoint.setSendSink([this](const std::uint8_t* data, std::size_t len,
-                                      const SwString& toAddr, std::uint16_t toPort) {
-            m_socket.writeDatagram(reinterpret_cast<const char*>(data),
-                                   static_cast<std::int64_t>(len), toAddr, toPort);
+                                      const SwString& toAddr, std::uint16_t toPort) -> bool {
+            return sendOrQueue_(data, len, toAddr, toPort);
+        });
+        SwObject::connect(&m_endpoint, &SwQuicEndpoint::timerDeadlineChanged,
+                          this, [this]() { armTimer_(); });
+        SwObject::connect(&m_socket, &SwIODevice::readyWrite, this, [this]() {
+            flushPendingSends_();
+            armTimer_();
         });
     }
 
@@ -63,7 +70,10 @@ public:
     // Bind a real UDP socket and start the event loop wiring (D11): drain on
     // readyRead + a periodic tick for the QUIC timers. No manual while-loop.
     bool bind(const SwString& ip, std::uint16_t port) {
-        m_socket.setMaxDatagramSize(65536);
+        // QUIC packets are currently capped at 1200 bytes by SwQuicConnection.
+        // Keep a little headroom for future PMTU growth without preallocating
+        // 64 KiB for every pending slot (2048 * 64 KiB was 128 MiB/socket).
+        m_socket.setMaxDatagramSize(2048);
         m_socket.setMaxPendingDatagrams(2048);
         m_socket.setMaxReadBatchDatagrams(256);
         // Réception par lots recvmmsg (Linux) : ~x1,5 en débit de réception (mesuré), sûr depuis le
@@ -80,14 +90,18 @@ public:
             drainAndDispatch_();
         });
 
-        // Periodic tick to fire the engine's PTO/idle/ACK timers.
+        // One-shot timer re-armed to the engine's earliest real deadline.
         if (!m_tickTimer) {
-            m_tickTimer = new SwTimer(kTickMs_, this);
+            m_tickTimer = new SwTimer(1, this);
+            m_tickTimer->setSingleShot(true);
             SwObject::connect(m_tickTimer, &SwTimer::timeout, this, [this]() {
+                m_tickTimer->stop();
+                flushPendingSends_();
                 m_endpoint.onTick();
+                armTimer_();
             });
-            m_tickTimer->start();
         }
+        armTimer_();
         return true;
     }
 
@@ -113,8 +127,6 @@ public:
     }
 
 private:
-    static const int kTickMs_ = 5;
-
     // Drain the socket in one readiness edge and dispatch each datagram through
     // the demux, then to the QUIC engine. Driven by readyRead — no manual pump.
     void drainAndDispatch_() {
@@ -131,8 +143,80 @@ private:
             if (dispatchPrefix_(dg, data, len, from, port)) {
                 continue; // routed to a registered prefix handler
             }
-            m_endpoint.onUdpPacket(data, len, from, port); // otherwise: QUIC
+            m_endpoint.onUdpPacket(dg, from, port); // otherwise: QUIC, no second copy
         }
+        flushPendingSends_();
+        armTimer_();
+    }
+
+    void armTimer_() {
+        if (!m_tickTimer) return;
+        std::int64_t next = m_endpoint.nextTimeoutMs();
+        m_tickTimer->stop();
+        if (next < 0) return;
+        std::int64_t delay = next <= 0 ? 1 : next;
+        if (delay > static_cast<std::int64_t>((std::numeric_limits<int>::max)())) {
+            delay = (std::numeric_limits<int>::max)();
+        }
+        m_tickTimer->start(static_cast<int>(delay));
+    }
+
+    struct PendingSend_ {
+        SwByteArray datagram;
+        SwString host;
+        std::uint16_t port = 0;
+    };
+
+    static std::size_t kMaxPendingSendDatagrams_() { return 2048; }
+    static std::size_t kMaxPendingSendBytes_() { return 4U * 1024U * 1024U; }
+
+    bool queuePendingSend_(const std::uint8_t* data, std::size_t len,
+                           const SwString& host, std::uint16_t port) {
+        if (!data || len == 0 ||
+            m_pendingSends.size() >= kMaxPendingSendDatagrams_() ||
+            m_pendingSendBytes > kMaxPendingSendBytes_() ||
+            len > kMaxPendingSendBytes_() - m_pendingSendBytes) {
+            return false;
+        }
+        PendingSend_ pending;
+        pending.datagram = SwByteArray(reinterpret_cast<const char*>(data), len);
+        pending.host = host;
+        pending.port = port;
+        m_pendingSendBytes += len;
+        m_pendingSends.push_back(std::move(pending));
+        m_socket.setWriteNotificationsEnabled(true);
+        return true;
+    }
+
+    bool sendOrQueue_(const std::uint8_t* data, std::size_t len,
+                      const SwString& host, std::uint16_t port) {
+        if (!m_pendingSends.empty()) return queuePendingSend_(data, len, host, port);
+        const std::int64_t sent = m_socket.writeDatagramCached(
+            reinterpret_cast<const char*>(data), static_cast<std::int64_t>(len), host, port);
+        if (sent == static_cast<std::int64_t>(len)) return true;
+        if (m_socket.lastDatagramIoStatus() == SwUdpSocket::DatagramIoStatus::WouldBlock) {
+            return queuePendingSend_(data, len, host, port);
+        }
+        return false;
+    }
+
+    void flushPendingSends_() {
+        while (!m_pendingSends.empty()) {
+            PendingSend_& pending = m_pendingSends.front();
+            const std::int64_t sent = m_socket.writeDatagramCached(
+                pending.datagram.constData(),
+                static_cast<std::int64_t>(pending.datagram.size()),
+                pending.host, pending.port);
+            if (sent != static_cast<std::int64_t>(pending.datagram.size()) &&
+                m_socket.lastDatagramIoStatus() == SwUdpSocket::DatagramIoStatus::WouldBlock) {
+                break;
+            }
+            m_pendingSendBytes -= static_cast<std::size_t>(pending.datagram.size());
+            m_pendingSends.pop_front();
+            // A hard send error is treated as packet loss. QUIC loss recovery
+            // retransmits ack-eliciting data; retaining it here would spin.
+        }
+        m_socket.setWriteNotificationsEnabled(!m_pendingSends.empty());
     }
 
     bool dispatchPrefix_(const SwByteArray& dg, const std::uint8_t* data, std::size_t len,
@@ -163,6 +247,8 @@ private:
     SwUdpSocket m_socket;
     SwQuicEndpoint m_endpoint;
     SwVector<SwPair<SwByteArray, PrefixHandler>> m_prefixes;
+    SwDequeue<PendingSend_> m_pendingSends;
+    std::size_t m_pendingSendBytes = 0;
     SwTimer* m_tickTimer = nullptr;
 };
 

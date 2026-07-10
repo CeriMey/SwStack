@@ -45,11 +45,13 @@ public:
         m_rtcpSocket = new SwUdpSocket();
         m_monitorTimer = new SwTimer(100);
         m_rtpSocket->setReceiveBufferSize(8 * 1024 * 1024);
-        m_rtpSocket->setMaxDatagramSize(64 * 1024);
-        m_rtpSocket->setMaxPendingDatagrams(1024);
+        m_rtpSocket->setMaxDatagramSize(16 * 1024);
+        m_rtpSocket->setMaxPendingDatagrams(512);
+        m_rtpSocket->setMaxPendingBytes(4 * 1024 * 1024);
         m_rtcpSocket->setReceiveBufferSize(1 * 1024 * 1024);
         m_rtcpSocket->setMaxDatagramSize(4096);
         m_rtcpSocket->setMaxPendingDatagrams(128);
+        m_rtcpSocket->setMaxPendingBytes(256 * 1024);
         const int defaultJitterPackets = m_descriptor.lowLatency ? 128 : 512;
         const int defaultJitterDelayMs = m_descriptor.lowLatency ? 80 : 250;
         m_effectiveJitterPackets =
@@ -179,10 +181,10 @@ public:
         packet[9] = static_cast<uint8_t>((m_remoteSsrc >> 16) & 0xFF);
         packet[10] = static_cast<uint8_t>((m_remoteSsrc >> 8) & 0xFF);
         packet[11] = static_cast<uint8_t>(m_remoteSsrc & 0xFF);
-        if (m_rtcpSocket->writeDatagram(reinterpret_cast<const char*>(packet),
-                                        12,
-                                        targetAddress,
-                                        targetPort) > 0) {
+        if (m_rtcpSocket->writeDatagramCached(reinterpret_cast<const char*>(packet),
+                                              12,
+                                              targetAddress,
+                                              targetPort) > 0) {
             m_lastPliTime = now;
             ++m_stats.m_pliSent;
             swCWarning(kSwLogCategory_SwRtpSession)
@@ -332,9 +334,17 @@ private:
         while (m_rtpSocket->hasPendingDatagrams()) {
             SwString sender;
             uint16_t senderPort = 0;
-            SwByteArray datagram = m_rtpSocket->receiveDatagram(&sender, &senderPort);
-            if (datagram.isEmpty()) {
-                break;
+            bool truncated = false;
+            SwString* senderOutput =
+                (!m_descriptor.sourceAddressFilter.isEmpty() ||
+                 m_detectedRtpSenderAddress.isEmpty())
+                    ? &sender
+                    : nullptr;
+            SwByteArray datagram = m_rtpSocket->receiveDatagram(senderOutput,
+                                                                &senderPort,
+                                                                &truncated);
+            if (truncated || datagram.isEmpty()) {
+                continue;
             }
             if (!acceptsSender_(sender, senderPort, false)) {
                 continue;
@@ -351,7 +361,7 @@ private:
                 continue;
             }
             const auto insertResult = m_jitterBuffer.enqueue(sequenceNumber,
-                                                             datagram,
+                                                             std::move(datagram),
                                                              std::chrono::steady_clock::now());
             if (insertResult == SwRtpJitterBuffer::InsertResult::Late) {
                 const uint64_t lateCount = ++m_stats.m_latePackets;
@@ -581,9 +591,17 @@ private:
         while (m_rtcpSocket->hasPendingDatagrams()) {
             SwString sender;
             uint16_t senderPort = 0;
-            SwByteArray datagram = m_rtcpSocket->receiveDatagram(&sender, &senderPort);
-            if (datagram.isEmpty()) {
-                break;
+            bool truncated = false;
+            SwString* senderOutput =
+                (!m_descriptor.sourceAddressFilter.isEmpty() ||
+                 m_detectedRtcpSenderAddress.isEmpty())
+                    ? &sender
+                    : nullptr;
+            SwByteArray datagram = m_rtcpSocket->receiveDatagram(senderOutput,
+                                                                 &senderPort,
+                                                                 &truncated);
+            if (truncated || datagram.isEmpty()) {
+                continue;
             }
             if (!acceptsSender_(sender, senderPort, true)) {
                 continue;
@@ -652,10 +670,10 @@ private:
         packet[5] = static_cast<uint8_t>((mySsrc >> 16) & 0xFF);
         packet[6] = static_cast<uint8_t>((mySsrc >> 8) & 0xFF);
         packet[7] = static_cast<uint8_t>(mySsrc & 0xFF);
-        if (m_rtcpSocket->writeDatagram(reinterpret_cast<const char*>(packet),
-                                        8,
-                                        targetAddress,
-                                        targetPort) > 0) {
+        if (m_rtcpSocket->writeDatagramCached(reinterpret_cast<const char*>(packet),
+                                              8,
+                                              targetAddress,
+                                              targetPort) > 0) {
             m_lastReceiverReportTime = std::chrono::steady_clock::now();
             ++m_stats.m_receiverReportsSent;
         }
@@ -680,7 +698,10 @@ private:
         packet[10] = static_cast<uint8_t>((mySsrc >> 8) & 0xFF);
         packet[11] = static_cast<uint8_t>(mySsrc & 0xFF);
         const int64_t written =
-            m_rtpSocket->writeDatagram(reinterpret_cast<const char*>(packet), 12, host, rtpPort);
+            m_rtpSocket->writeDatagramCached(reinterpret_cast<const char*>(packet),
+                                             12,
+                                             host,
+                                             rtpPort);
         if (written > 0) {
             swCDebug(kSwLogCategory_SwRtpSession)
                 << "[SwRtpSession] Sent RTP startup probe"

@@ -465,6 +465,28 @@ public:
         m_response.switchToRawSocket = true;
         m_response.switchToRawSocketWithoutHttpResponse = !sendHttpResponseFirst;
         m_response.onSwitchToRawSocket = callback;
+        m_response.onSwitchToRawSocketWithInitialData = nullptr;
+        if (!sendHttpResponseFirst) {
+            m_response.body.clear();
+            m_response.useChunkedTransfer = false;
+            m_response.chunkedParts.clear();
+            m_response.hasFile = false;
+        }
+        m_handled = true;
+    }
+
+    /** Hands over the detached socket together with bytes already read past the HTTP request. */
+    void switchToRawSocket(
+        const std::function<void(SwAbstractSocket*, SwByteArray)>& callback,
+        bool sendHttpResponseFirst = true) {
+        if (!callback) {
+            return;
+        }
+
+        m_response.switchToRawSocket = true;
+        m_response.switchToRawSocketWithoutHttpResponse = !sendHttpResponseFirst;
+        m_response.onSwitchToRawSocket = nullptr;
+        m_response.onSwitchToRawSocketWithInitialData = callback;
         if (!sendHttpResponseFirst) {
             m_response.body.clear();
             m_response.useChunkedTransfer = false;

@@ -12,18 +12,21 @@
 #include "quic/SwQuicFrame.h"
 #include "quic/SwQuicFrameCodec.h"
 #include "quic/SwQuicInitialSecrets.h"
+#include "quic/SwQuicLimits.h"
 #include "quic/SwQuicPacketCodec.h"
 #include "quic/SwQuicPacketHeader.h"
 #include "quic/SwQuicPacketKeys.h"
 #include "quic/SwQuicPacketProtector.h"
 #include "quic/SwQuicRandom.h"
 #include "quic/SwQuicSessionTicket.h"
+#include "quic/SwQuicServerCredential.h"
 #include "quic/SwQuicStream.h"
 #include "quic/SwQuicTransportParameters.h"
 #include "quic/SwQuicVarIntCodec.h"
 #include "quic/SwQuicX25519.h"
 #include "quic/SwTls13KeySchedule.h"
 
+#include <algorithm>
 #include <functional>
 #include "quic/SwTls13Messages.h"
 
@@ -40,6 +43,8 @@
 // signature over the transcript is checked (SwQuicCertificateVerifier). The
 // server Finished MAC is verified as well. setVerifyPeer(false) disables the
 // PKI checks for loopback self-tests that use synthetic certificates.
+// When CertificateRequest is received, a configured credential emits the TLS
+// 1.3 client Certificate + CertificateVerify flight before client Finished.
 class SwQuicHandshakeClient {
 public:
     enum class State {
@@ -58,6 +63,17 @@ public:
           m_clientInitialPacketNumber(0),
           m_clientHandshakePacketNumber(0),
           m_handshakeComplete(false) {
+        m_localTransportParameters.maxIdleTimeoutMs = 30000;
+        m_localTransportParameters.maxUdpPayloadSize = SwQuicLimits::maximumUdpPayloadBytes();
+        m_localTransportParameters.initialMaxData = 1048576;
+        m_localTransportParameters.initialMaxStreamDataBidiLocal = 262144;
+        m_localTransportParameters.initialMaxStreamDataBidiRemote = 262144;
+        m_localTransportParameters.initialMaxStreamDataUni = 262144;
+        m_localTransportParameters.initialMaxStreamsBidi = 100;
+        m_localTransportParameters.initialMaxStreamsUni = 100;
+        m_localTransportParameters.activeConnectionIdLimit = 4;
+        m_localTransportParameters.maxDatagramFrameSize =
+            SwQuicLimits::maximumDatagramFrameBytes();
     }
 
     State state() const { return m_state; }
@@ -67,6 +83,18 @@ public:
     const SwVector<SwByteArray>& serverCertificateChain() const {
         return m_serverCertificateChain;
     }
+    // Empty until the server CertificateVerify and Finished have both been
+    // authenticated. This avoids exposing an unauthenticated identity merely
+    // because a Certificate message was received.
+    const SwByteArray& authenticatedServerSubjectPublicKeyInfo() const {
+        return m_authenticatedServerSpkiDer;
+    }
+
+    // Client credential used only when the server sends CertificateRequest.
+    // SwQuicServerCredential is deliberately role-neutral at the wire level:
+    // it is a DER chain plus a CertificateVerify signing callback.
+    void setCredential(const SwQuicServerCredential& credential) { m_credential = credential; }
+    bool hasCredential() const { return m_credential.isValid(); }
 
     // PKI verification toggle: keep it enabled against real servers; disable
     // it only for loopback tests with synthetic certificates.
@@ -93,9 +121,12 @@ public:
         return static_cast<bool>(m_subjectPublicKeyInfoVerifier);
     }
 
-    // Compatibility aliases for callers using the former seam name. They have
-    // the exact SPKI-only semantics above and do not imply RFC 7250 support.
+    // RFC 7250 is opt-in and fail-closed: both certificate_type extensions,
+    // an Ed25519 RPK credential and the delegated SPKI verifier are required.
+    void setRequireRawPublicKeys(bool required) { m_requireRawPublicKeys = required; }
+    bool requiresRawPublicKeys() const { return m_requireRawPublicKeys; }
     void setRawPublicKeyVerifier(std::function<bool(const SwByteArray& spkiDer)> verifier) {
+        m_requireRawPublicKeys = true;
         setSubjectPublicKeyInfoVerifier(std::move(verifier));
     }
     bool hasRawPublicKeyVerifier() const { return hasSubjectPublicKeyInfoVerifier(); }
@@ -130,7 +161,16 @@ public:
     const SwQuicTransportParameters& peerTransportParameters() const {
         return m_peerTransportParameters;
     }
+    const SwQuicTransportParameters& localTransportParameters() const {
+        return m_localTransportParameters;
+    }
     const SwByteArray& negotiatedAlpn() const { return m_negotiatedAlpn; }
+    bool setApplicationProtocol(const SwByteArray& protocol) {
+        if (m_state != State::Idle || protocol.isEmpty() || protocol.size() > 255) return false;
+        m_applicationProtocol = protocol;
+        return true;
+    }
+    const SwByteArray& applicationProtocol() const { return m_applicationProtocol; }
 
     const SwByteArray& clientEphemeralPublicKey() const { return m_clientPublicKey; }
     const SwQuicInitialKeys& clientHandshakeKeys() const { return m_clientHandshakeKeys; }
@@ -139,6 +179,11 @@ public:
     const SwQuicInitialKeys& serverApplicationKeys() const { return m_serverApplicationKeys; }
     const SwQuicConnectionId& destinationConnectionId() const { return m_serverConnectionId; }
     const SwQuicConnectionId& sourceConnectionId() const { return m_sourceConnectionId; }
+    // DCID du tout premier Initial. Contrairement a destinationConnectionId(),
+    // cette valeur ne change pas quand le serveur choisit son SCID.
+    const SwQuicConnectionId& originalDestinationConnectionId() const {
+        return m_originalDestinationConnectionId;
+    }
 
     // RFC 8446 section 7.5. The exporter master secret never leaves the
     // handshake driver; callers can only derive labelled keying material.
@@ -165,7 +210,18 @@ public:
                SwString* error = nullptr) {
         m_serverName = serverName;
 
-        if (m_resuming && m_subjectPublicKeyInfoVerifier) {
+        if (m_requireRawPublicKeys &&
+            (!m_credential.isValid() ||
+             m_credential.certificateType != SwQuicCertificateType::RawPublicKey ||
+             m_credential.signatureScheme != 0x0807 ||
+             !m_subjectPublicKeyInfoVerifier)) {
+            outInitialDatagram.clear();
+            setError_(error,
+                      "RFC 7250 requires an Ed25519 client RPK and peer verifier");
+            return fail_(error);
+        }
+
+        if (m_resuming && (m_subjectPublicKeyInfoVerifier || m_requireRawPublicKeys)) {
             outInitialDatagram.clear();
             setError_(error,
                       "TLS resumption is disabled with SPKI pinning until tickets are identity-bound");
@@ -205,6 +261,10 @@ public:
         }
 
         if (m_resuming) {
+            if (m_applicationProtocol != SwByteArray("h3")) {
+                setError_(error, "Custom ALPN resumption is not configured");
+                return fail_(error);
+            }
             // Resumption ClientHello with a PSK binder + early_data, and derive
             // the client early (0-RTT) keys (RFC 8446 4.2.11, RFC 9001 4.6).
             if (!SwQuicClientHelloBuilder::buildForHttp3Resumption(
@@ -215,12 +275,14 @@ public:
                 return fail_(error);
             }
             m_hasEarlyKeys = true;
-        } else if (!SwQuicClientHelloBuilder::buildForHttp3(serverName,
-                                                            m_sourceConnectionId,
-                                                            m_clientPublicKey,
-                                                            m_clientRandom,
-                                                            m_clientHelloMessage,
-                                                            error)) {
+        } else if (!SwQuicClientHelloBuilder::buildForAlpn(serverName,
+                                                           m_sourceConnectionId,
+                                                           m_clientPublicKey,
+                                                           m_clientRandom,
+                                                           m_applicationProtocol,
+                                                           m_clientHelloMessage,
+                                                           error,
+                                                           m_requireRawPublicKeys)) {
             return fail_(error);
         }
 
@@ -242,6 +304,10 @@ public:
         if (m_resuming && !m_earlyData.isEmpty()) {
             SwByteArray zeroRttPacket;
             if (!buildZeroRttPacket_(m_earlyData, zeroRttPacket, error)) {
+                return fail_(error);
+            }
+            if (outInitialDatagram.size() + zeroRttPacket.size() > 2048) {
+                setError_(error, "Coalesced Initial and 0-RTT flight exceeds UDP receive budget");
                 return fail_(error);
             }
             outInitialDatagram.append(zeroRttPacket);
@@ -272,8 +338,14 @@ public:
             }
 
             const std::uint8_t longType = static_cast<std::uint8_t>(firstByte & 0x30U);
-            const SwByteArray remaining =
-                datagram.mid(static_cast<int>(offset), static_cast<int>(datagram.size() - offset));
+            SwByteArray remainingStorage;
+            const SwByteArray* remaining = &datagram;
+            if (offset > 0) {
+                remainingStorage = datagram.mid(
+                    static_cast<int>(offset),
+                    static_cast<int>(datagram.size() - offset));
+                remaining = &remainingStorage;
+            }
 
             std::size_t consumed = 0;
             if (longType == 0x00U) {
@@ -282,11 +354,11 @@ public:
                 if (m_initialKeysDiscarded) {
                     break;
                 }
-                if (!handleServerInitial_(remaining, consumed, error)) {
+                if (!handleServerInitial_(*remaining, consumed, error)) {
                     return fail_(error);
                 }
             } else if (longType == 0x20U) {
-                if (!handleServerHandshake_(remaining, consumed, error)) {
+                if (!handleServerHandshake_(*remaining, consumed, error)) {
                     return fail_(error);
                 }
             } else {
@@ -588,6 +660,15 @@ private:
         if (extensions.acceptedEarlyData) {
             m_earlyDataAccepted = true; // server confirmed our 0-RTT (RFC 9001 4.6)
         }
+        if (m_requireRawPublicKeys &&
+            (!extensions.hasClientCertificateType ||
+             !extensions.hasServerCertificateType ||
+             extensions.clientCertificateType != 2 ||
+             extensions.serverCertificateType != 2)) {
+            setError_(error,
+                      "Server did not select mutual RFC 7250 RawPublicKey");
+            return false;
+        }
         // quic_transport_parameters is mandatory in EncryptedExtensions
         // (RFC 9001 8.2); its absence is a missing_extension (0x016d).
         if (!extensions.hasTransportParameters) {
@@ -676,6 +757,8 @@ private:
         // and Finished(20). Locate the Finished; everything before it is the
         // transcript context for its verify_data.
         int finishedIndex = -1;
+        int encryptedExtensionsIndex = -1;
+        int certificateRequestIndex = -1;
         int certificateIndex = -1;
         int certificateVerifyIndex = -1;
         for (std::size_t i = 0; i < messages.size(); ++i) {
@@ -684,9 +767,22 @@ private:
                 break;
             }
             if (messages[i].type == 0x08) {
+                if (encryptedExtensionsIndex >= 0) {
+                    setError_(error, "Duplicate EncryptedExtensions message");
+                    return false;
+                }
+                encryptedExtensionsIndex = static_cast<int>(i);
                 if (!processEncryptedExtensions_(messages[i].body, error)) {
                     return false;
                 }
+            } else if (messages[i].type == 0x0d) {
+                if (certificateRequestIndex >= 0) {
+                    setError_(error, "Duplicate CertificateRequest message");
+                    return false;
+                }
+                certificateRequestIndex = static_cast<int>(i);
+                if (!parseCertificateRequest_(messages[i].body, error)) return false;
+                m_serverRequestedClientCertificate = true;
             } else if (messages[i].type == 0x0b) {
                 certificateIndex = static_cast<int>(i);
                 SwByteArray leaf;
@@ -697,11 +793,40 @@ private:
                                                          m_serverCertificateChain, nullptr);
             } else if (messages[i].type == 0x0f) {
                 certificateVerifyIndex = static_cast<int>(i);
+            } else {
+                setError_(error, "Unexpected TLS message in the server Handshake flight");
+                return false;
             }
         }
         if (finishedIndex < 0) {
             clearError_(error);
             return true;  // Finished not received yet
+        }
+        if (static_cast<std::size_t>(finishedIndex + 1) != messages.size() ||
+            encryptedExtensionsIndex != 0) {
+            setError_(error, "Invalid TLS server Handshake message ordering");
+            return false;
+        }
+        if (m_pskAccepted) {
+            if (certificateRequestIndex >= 0 || certificateIndex >= 0 ||
+                certificateVerifyIndex >= 0 || finishedIndex != 1) {
+                setError_(error, "Invalid PSK server Handshake message ordering");
+                return false;
+            }
+        } else {
+            const int expectedCertificateIndex = certificateRequestIndex >= 0 ? 2 : 1;
+            if ((certificateRequestIndex >= 0 && certificateRequestIndex != 1) ||
+                certificateIndex != expectedCertificateIndex ||
+                certificateVerifyIndex != certificateIndex + 1 ||
+                finishedIndex != certificateVerifyIndex + 1) {
+                setError_(error, "Invalid certificate server Handshake message ordering");
+                return false;
+            }
+            if (m_requireRawPublicKeys && certificateRequestIndex != 1) {
+                setError_(error,
+                          "Mutual RFC 7250 requires CertificateRequest");
+                return false;
+            }
         }
 
         // Transcript up to (not including) the server Finished; on the way,
@@ -728,29 +853,29 @@ private:
             return false;
         }
 
-        // Server authentication (PKI): chain to a trusted root with hostname
-        // match, then the CertificateVerify signature over the transcript. On
-        // PSK resumption the server authenticates via the PSK and sends no
-        // Certificate/CertificateVerify (RFC 8446 2.2), so this is skipped.
+        // Server authentication. RFC 7250 consumes one SPKI directly and has
+        // no X.509 fallback; the other modes keep the existing chain/SPKI path.
+        SwByteArray delegatedSpkiDer;
         if (m_verifyPeer && !m_pskAccepted) {
             if (certificateIndex < 0 || certificateVerifyIndex < 0 ||
                 m_serverCertificateChain.empty()) {
                 setError_(error, "Server did not send a certificate chain to verify");
                 return false;
             }
-            if (m_subjectPublicKeyInfoVerifier) {
-                SwByteArray spkiDer;
-                try {
-                    if (!SwQuicCertificateVerifier::extractSubjectPublicKeyInfo(
-                            m_serverCertificateDer, spkiDer, error)) {
-                        return false;
-                    }
-                    if (!m_subjectPublicKeyInfoVerifier(spkiDer)) {
-                        setError_(error, "Server SPKI rejected by delegated trust verifier");
-                        return false;
-                    }
-                } catch (...) {
-                    setError_(error, "Server SPKI verifier raised an exception");
+            if (m_requireRawPublicKeys) {
+                if (m_serverCertificateChain.size() != 1) {
+                    setError_(error, "Invalid RFC 7250 server Certificate payload");
+                    return false;
+                }
+                delegatedSpkiDer = m_serverCertificateDer;
+                SwByteArray rawNodeId;
+                if (!SwQuicCertificateVerifier::extractEd25519RawPublicKey(
+                        delegatedSpkiDer, rawNodeId, error) || rawNodeId.size() != 32) {
+                    return false;
+                }
+            } else if (m_subjectPublicKeyInfoVerifier) {
+                if (!SwQuicCertificateVerifier::extractSubjectPublicKeyInfo(
+                        m_serverCertificateDer, delegatedSpkiDer, error)) {
                     return false;
                 }
             } else if (m_verifyChain &&
@@ -768,25 +893,32 @@ private:
             // RFC 8446 4.4.3: the CertificateVerify scheme MUST be one we
             // advertised (signature_algorithms) and valid for TLS 1.3
             // CertificateVerify. We offer only these three.
-            if (signatureScheme != 0x0403 && signatureScheme != 0x0804 &&
-                signatureScheme != 0x0805) {
+            if (m_requireRawPublicKeys && signatureScheme != 0x0807) {
+                setError_(error, "Server RPK CertificateVerify is not ed25519");
+                return false;
+            }
+            if (!m_requireRawPublicKeys && signatureScheme != 0x0403 &&
+                signatureScheme != 0x0804 && signatureScheme != 0x0805) {
                 setError_(error, "Server CertificateVerify uses a non-offered signature scheme");
                 return false;
             }
-            if (!SwQuicCertificateVerifier::verifyCertificateVerify(m_serverCertificateDer,
-                                                                    signatureScheme,
-                                                                    signature,
-                                                                    thSignedByCertVerify,
-                                                                    error)) {
+            const bool signatureValid = m_requireRawPublicKeys
+                ? SwQuicCertificateVerifier::verifyRawPublicKeyCertificateVerify(
+                      m_serverCertificateDer, signatureScheme, signature,
+                      thSignedByCertVerify, error)
+                : SwQuicCertificateVerifier::verifyCertificateVerify(
+                      m_serverCertificateDer, signatureScheme, signature,
+                      thSignedByCertVerify, error);
+            if (!signatureValid) {
                 return false;
             }
         }
 
-        // ALPN must have resolved to "h3": QUIC requires a negotiated
+        // ALPN must equal the exact opaque protocol configured by the caller.
         // application protocol (RFC 9001 8.1 / RFC 7301 3.2). A missing or
         // mismatched ALPN is a fatal no_application_protocol.
-        if (!(m_negotiatedAlpn == SwByteArray("h3"))) {
-            setError_(error, "ALPN negotiation failed: server did not select h3");
+        if (m_negotiatedAlpn != m_applicationProtocol) {
+            setError_(error, "ALPN negotiation failed: server selected another protocol");
             return false;
         }
 
@@ -807,6 +939,32 @@ private:
         if (!(serverVerifyData == expectedServerVerifyData)) {
             setError_(error, "Server Finished verify_data mismatch (handshake authentication failed)");
             return false;
+        }
+
+        // External trust policy observes the peer identity only after both
+        // CertificateVerify and Finished authenticated the complete flight.
+        if (m_subjectPublicKeyInfoVerifier && !m_pskAccepted) {
+            try {
+                if (!m_subjectPublicKeyInfoVerifier(delegatedSpkiDer)) {
+                    setError_(error, "Server SPKI rejected by delegated trust verifier");
+                    return false;
+                }
+            } catch (...) {
+                setError_(error, "Server SPKI verifier raised an exception");
+                return false;
+            }
+        }
+
+        // Publish the authenticated server identity only after its Finished
+        // has covered the certificate-bearing transcript.
+        if (m_verifyPeer && !m_pskAccepted && !m_serverCertificateDer.isEmpty()) {
+            if (m_requireRawPublicKeys) {
+                m_authenticatedServerSpkiDer = m_serverCertificateDer;
+            } else if (!SwQuicCertificateVerifier::extractSubjectPublicKeyInfo(
+                           m_serverCertificateDer,
+                           m_authenticatedServerSpkiDer, error)) {
+                return false;
+            }
         }
 
         // Transcript including the server Finished: drives the client Finished,
@@ -832,12 +990,55 @@ private:
             return false;
         }
 
-        // Build the client Finished and send it in a Handshake packet.
+        // If requested, authenticate the client before Finished. The client
+        // CertificateVerify signs the transcript through its Certificate with
+        // the distinct RFC 8446 client context string.
+        SwByteArray clientFlightPrefix;
+        SwByteArray transcriptToClientFinished = transcriptToServerFinished;
+        if (m_serverRequestedClientCertificate) {
+            if (!m_credential.isValid()) {
+                setError_(error, "Server requested a client certificate but none is configured");
+                return false;
+            }
+            bool signatureSchemeRequested = false;
+            for (std::size_t i = 0; i < m_requestedClientSignatureSchemes.size(); ++i) {
+                if (m_requestedClientSignatureSchemes[i] == m_credential.signatureScheme) {
+                    signatureSchemeRequested = true;
+                    break;
+                }
+            }
+            if (!signatureSchemeRequested) {
+                setError_(error,
+                          "Client credential signature scheme was not requested by the server");
+                return false;
+            }
+            SwByteArray certificateBody;
+            buildClientCertificateBody_(certificateBody);
+            const SwByteArray certificateMessage = rawMessage_(0x0b, certificateBody);
+            transcriptToClientFinished.append(certificateMessage);
+
+            const SwByteArray thToClientCertificateVerify =
+                SwTls13KeySchedule::transcriptHash(transcriptToClientFinished);
+            SwByteArray certificateVerifyBody;
+            if (!buildClientCertificateVerifyBody_(thToClientCertificateVerify,
+                                                   certificateVerifyBody, error)) {
+                return false;
+            }
+            const SwByteArray certificateVerifyMessage =
+                rawMessage_(0x0f, certificateVerifyBody);
+            transcriptToClientFinished.append(certificateVerifyMessage);
+            clientFlightPrefix.append(certificateMessage);
+            clientFlightPrefix.append(certificateVerifyMessage);
+        }
+
+        // Build the client Finished over the complete client-auth transcript.
         SwByteArray clientFinishedKey;
         SecretGuard_ clientFinishedKeyGuard(clientFinishedKey);
         SwByteArray clientVerifyData;
         if (!SwTls13KeySchedule::finishedKey(m_clientHandshakeTrafficSecret, clientFinishedKey, error) ||
-            !SwTls13KeySchedule::verifyData(clientFinishedKey, thToServerFinished,
+            !SwTls13KeySchedule::verifyData(
+                clientFinishedKey,
+                SwTls13KeySchedule::transcriptHash(transcriptToClientFinished),
                                             clientVerifyData, error)) {
             return false;
         }
@@ -845,7 +1046,6 @@ private:
 
         // resumption_master_secret over the transcript through the client
         // Finished, for issuing/accepting session tickets (RFC 8446 7.1).
-        SwByteArray transcriptToClientFinished = transcriptToServerFinished;
         transcriptToClientFinished.append(clientFinishedMessage);
         const SwByteArray thToClientFinished =
             SwTls13KeySchedule::transcriptHash(transcriptToClientFinished);
@@ -854,11 +1054,14 @@ private:
             return false;
         }
 
-        SwByteArray handshakeDatagram;
-        if (!buildClientHandshakeFlight_(clientFinishedMessage, handshakeDatagram, error)) {
+        clientFlightPrefix.append(clientFinishedMessage);
+        SwVector<SwByteArray> handshakeDatagrams;
+        if (!buildClientHandshakeFlight_(clientFlightPrefix, handshakeDatagrams, error)) {
             return false;
         }
-        outDatagrams.push_back(handshakeDatagram);
+        for (std::size_t i = 0; i < handshakeDatagrams.size(); ++i) {
+            outDatagrams.push_back(handshakeDatagrams[i]);
+        }
 
         // RFC 9001 4.9.1: the client MUST discard its Initial keys as soon as it
         // first sends a Handshake packet (this flight). Drop the key material and
@@ -927,44 +1130,170 @@ public:
 
 private:
 
-    // Builds a datagram with the client's Handshake-level ACK + CRYPTO(Finished).
-    bool buildClientHandshakeFlight_(const SwByteArray& clientFinishedMessage,
-                                     SwByteArray& outDatagram,
+    bool parseCertificateRequest_(const SwByteArray& body, SwString* error) {
+        const std::size_t size = static_cast<std::size_t>(body.size());
+        if (size < 3 || !body.constData()) {
+            setError_(error, "TLS CertificateRequest is truncated");
+            return false;
+        }
+        const std::uint8_t* data =
+            reinterpret_cast<const std::uint8_t*>(body.constData());
+        const std::size_t contextLength = data[0];
+        if (contextLength != 0 || 1 + contextLength + 2 > size) {
+            setError_(error, "Unsupported TLS CertificateRequest context");
+            return false;
+        }
+        std::size_t pos = 1 + contextLength;
+        const std::size_t extensionsLength =
+            (static_cast<std::size_t>(data[pos]) << 8) | data[pos + 1];
+        pos += 2;
+        if (extensionsLength != size - pos) {
+            setError_(error, "TLS CertificateRequest extensions length mismatch");
+            return false;
+        }
+
+        m_requestedClientSignatureSchemes.clear();
+        bool foundSignatureAlgorithms = false;
+        while (pos < size) {
+            if (size - pos < 4) {
+                setError_(error, "TLS CertificateRequest extension is truncated");
+                return false;
+            }
+            const std::uint16_t type =
+                static_cast<std::uint16_t>((data[pos] << 8) | data[pos + 1]);
+            const std::size_t length =
+                (static_cast<std::size_t>(data[pos + 2]) << 8) | data[pos + 3];
+            pos += 4;
+            if (length > size - pos) {
+                setError_(error, "TLS CertificateRequest extension payload is truncated");
+                return false;
+            }
+            if (type == 0x000d) {
+                if (foundSignatureAlgorithms || length < 4) {
+                    setError_(error, "Invalid CertificateRequest signature_algorithms");
+                    return false;
+                }
+                foundSignatureAlgorithms = true;
+                const std::size_t listLength =
+                    (static_cast<std::size_t>(data[pos]) << 8) | data[pos + 1];
+                if (listLength != length - 2 || listLength == 0 || (listLength & 1U) != 0) {
+                    setError_(error, "Invalid CertificateRequest signature scheme list");
+                    return false;
+                }
+                for (std::size_t item = pos + 2; item < pos + length; item += 2) {
+                    m_requestedClientSignatureSchemes.push_back(
+                        static_cast<std::uint16_t>((data[item] << 8) | data[item + 1]));
+                }
+            }
+            pos += length;
+        }
+        if (!foundSignatureAlgorithms) {
+            setError_(error, "CertificateRequest is missing signature_algorithms");
+            return false;
+        }
+        if (m_requireRawPublicKeys &&
+            (m_requestedClientSignatureSchemes.size() != 1 ||
+             m_requestedClientSignatureSchemes.front() != 0x0807)) {
+            setError_(error,
+                      "RPK CertificateRequest must select only ed25519");
+            return false;
+        }
+        return true;
+    }
+
+    static void appendU16_(SwByteArray& out, std::uint16_t value) {
+        out.append(static_cast<char>((value >> 8) & 0xffU));
+        out.append(static_cast<char>(value & 0xffU));
+    }
+
+    static void appendU24_(SwByteArray& out, std::uint32_t value) {
+        out.append(static_cast<char>((value >> 16) & 0xffU));
+        out.append(static_cast<char>((value >> 8) & 0xffU));
+        out.append(static_cast<char>(value & 0xffU));
+    }
+
+    void buildClientCertificateBody_(SwByteArray& outBody) const {
+        outBody.clear();
+        outBody.append(static_cast<char>(0)); // certificate_request_context
+        SwByteArray certificateList;
+        for (std::size_t i = 0; i < m_credential.certificateChain.size(); ++i) {
+            const SwByteArray& certificate = m_credential.certificateChain[i];
+            appendU24_(certificateList, static_cast<std::uint32_t>(certificate.size()));
+            certificateList.append(certificate);
+            appendU16_(certificateList, 0); // per-certificate extensions
+        }
+        appendU24_(outBody, static_cast<std::uint32_t>(certificateList.size()));
+        outBody.append(certificateList);
+    }
+
+    bool buildClientCertificateVerifyBody_(const SwByteArray& transcriptHash,
+                                           SwByteArray& outBody,
+                                           SwString* error) const {
+        SwByteArray content;
+        for (int i = 0; i < 64; ++i) content.append(static_cast<char>(0x20));
+        content.append("TLS 1.3, client CertificateVerify");
+        content.append(static_cast<char>(0));
+        content.append(transcriptHash);
+
+        SwByteArray signature;
+        if (!m_credential.sign(content, signature, error) || signature.isEmpty() ||
+            signature.size() > 0xffffU) {
+            if (error && error->isEmpty()) {
+                *error = SwString("Client CertificateVerify signing failed");
+            }
+            return false;
+        }
+        outBody.clear();
+        appendU16_(outBody, m_credential.signatureScheme);
+        appendU16_(outBody, static_cast<std::uint16_t>(signature.size()));
+        outBody.append(signature);
+        return true;
+    }
+
+    // Builds the client's Handshake flight. A persistent certificate chain may
+    // span multiple MTU-sized CRYPTO frames; offsets form one TLS byte stream.
+    bool buildClientHandshakeFlight_(const SwByteArray& handshakeCrypto,
+                                     SwVector<SwByteArray>& outDatagrams,
                                      SwString* error) {
-        SwVector<SwQuicFrame> frames;
-        if (!m_receivedHandshakePacketNumbers.empty()) {
-            SwMap<std::uint64_t, bool>::const_iterator largestIt =
-                m_receivedHandshakePacketNumbers.end();
-            --largestIt;
-            const std::uint64_t largest = largestIt.key();
-            frames.push_back(SwQuicFrame::ack(largest, 0, 0));
-        }
-        frames.push_back(SwQuicFrame::crypto(0, clientFinishedMessage));
-
-        SwByteArray plaintext;
-        if (!SwQuicFrameCodec::encodeFrames(frames, plaintext, error)) {
+        outDatagrams.clear();
+        if (handshakeCrypto.isEmpty()) {
+            setError_(error, "Client Handshake flight is empty");
             return false;
         }
+        const std::size_t kMaxCryptoPerPacket = 900;
+        std::size_t offset = 0;
+        bool first = true;
+        while (offset < static_cast<std::size_t>(handshakeCrypto.size())) {
+            const std::size_t remaining = static_cast<std::size_t>(handshakeCrypto.size()) - offset;
+            const std::size_t take = (std::min)(remaining, kMaxCryptoPerPacket);
+            SwVector<SwQuicFrame> frames;
+            if (first && !m_receivedHandshakePacketNumbers.empty()) {
+                SwMap<std::uint64_t, bool>::const_iterator largestIt =
+                    m_receivedHandshakePacketNumbers.end();
+                --largestIt;
+                frames.push_back(SwQuicFrame::ack(largestIt.key(), 0, 0));
+            }
+            frames.push_back(SwQuicFrame::crypto(
+                static_cast<std::uint64_t>(offset),
+                handshakeCrypto.mid(static_cast<int>(offset), static_cast<int>(take))));
 
-        const std::uint8_t pnLen = 2;
-        const std::uint64_t protectedLength =
-            static_cast<std::uint64_t>(plaintext.size() + SwQuicPacketProtector::kTagLength);
-        SwByteArray header;
-        if (!buildHandshakeHeader_(protectedLength, pnLen, m_clientHandshakePacketNumber,
-                                   header, error)) {
-            return false;
+            SwByteArray plaintext;
+            if (!SwQuicFrameCodec::encodeFrames(frames, plaintext, error)) return false;
+            const std::uint8_t pnLen = 2;
+            const std::uint64_t protectedLength =
+                static_cast<std::uint64_t>(plaintext.size() + SwQuicPacketProtector::kTagLength);
+            SwByteArray header;
+            if (!buildHandshakeHeader_(protectedLength, pnLen, m_clientHandshakePacketNumber,
+                                       header, error)) return false;
+            SwByteArray datagram;
+            if (!SwQuicPacketProtector::protectLongHeader(
+                    m_clientHandshakeKeys, m_clientHandshakePacketNumber, pnLen,
+                    header, plaintext, datagram, error)) return false;
+            ++m_clientHandshakePacketNumber;
+            outDatagrams.push_back(datagram);
+            offset += take;
+            first = false;
         }
-
-        if (!SwQuicPacketProtector::protectLongHeader(m_clientHandshakeKeys,
-                                                      m_clientHandshakePacketNumber,
-                                                      pnLen,
-                                                      header,
-                                                      plaintext,
-                                                      outDatagram,
-                                                      error)) {
-            return false;
-        }
-        ++m_clientHandshakePacketNumber;
         clearError_(error);
         return true;
     }
@@ -1112,6 +1441,10 @@ private:
 
     bool m_verifyPeer;
     bool m_verifyChain;
+    bool m_requireRawPublicKeys = false;
+    SwQuicServerCredential m_credential;
+    bool m_serverRequestedClientCertificate = false;
+    SwVector<std::uint16_t> m_requestedClientSignatureSchemes;
     std::function<bool(const SwByteArray&)> m_subjectPublicKeyInfoVerifier;
     SwByteArray m_exporterMasterSecret;
     SwByteArray m_resumptionMasterSecret;
@@ -1127,7 +1460,9 @@ private:
     std::uint64_t m_clientEarlyPacketNumber = 0;
 
     SwQuicTransportParameters m_peerTransportParameters;
+    SwQuicTransportParameters m_localTransportParameters;
     bool m_hasPeerTransportParameters;
+    SwByteArray m_applicationProtocol{SwByteArray("h3")};
     SwByteArray m_negotiatedAlpn;
     SwVector<SwByteArray> m_serverCertificateChain;
 
@@ -1137,6 +1472,7 @@ private:
     SwByteArray m_clientApplicationTrafficSecret;
     SwByteArray m_serverApplicationTrafficSecret;
     SwByteArray m_serverCertificateDer;
+    SwByteArray m_authenticatedServerSpkiDer;
 
     std::uint64_t m_clientInitialPacketNumber;
     std::uint64_t m_clientHandshakePacketNumber;

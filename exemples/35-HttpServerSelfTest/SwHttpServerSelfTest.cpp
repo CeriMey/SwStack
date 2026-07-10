@@ -199,6 +199,10 @@ private slots:
             }
             m_responseRaw.append(chunk.data(), chunk.size());
         }
+        if (m_caseIndex == 13 && m_requestPartIndex == 1 &&
+            m_responseRaw.indexOf("HTTP/1.1 100 Continue\r\n\r\n") == 0) {
+            sendNextPart_();
+        }
     }
 
     void onClientDisconnected_() {
@@ -208,8 +212,18 @@ private slots:
         m_caseDone = true;
         m_timeout.stop();
 
+        SwByteArray responseForParsing = m_responseRaw;
+        if (m_caseIndex == 13) {
+            static const SwByteArray interim("HTTP/1.1 100 Continue\r\n\r\n");
+            if (!responseForParsing.startsWith(interim)) {
+                fail_("missing 100 Continue interim response");
+                return;
+            }
+            responseForParsing.remove(0, static_cast<int>(interim.size()));
+        }
+
         ParsedHttpResponse parsed;
-        if (!parseResponse(m_responseRaw, parsed)) {
+        if (!parseResponse(responseForParsing, parsed)) {
             swError() << "[HttpServerSelfTest] Case " << m_caseIndex
                       << " raw response size=" << m_responseRaw.size()
                       << " preview=" << SwString(m_responseRaw.left(256).toStdString());
@@ -228,7 +242,7 @@ private slots:
 
 private:
     void runNextCase_() {
-        if (m_caseIndex >= 13) {
+        if (m_caseIndex >= 15) {
             swDebug() << "[HttpServerSelfTest] PASS all cases";
             m_server->close();
             m_app->exit(0);
@@ -316,6 +330,15 @@ private:
         }
         if (index == 12) {
             partsOut.append("GET /.well-known/acme-challenge/http-selftest-token HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+            return true;
+        }
+        if (index == 13) {
+            partsOut.append("POST /echo HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 11\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n");
+            partsOut.append("hello world");
+            return true;
+        }
+        if (index == 14) {
+            partsOut.append("POST /echo HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 11\r\nExpect: unsupported-feature\r\nConnection: close\r\n\r\n");
             return true;
         }
         return false;
@@ -515,6 +538,20 @@ private:
             }
             return true;
         }
+        if (m_caseIndex == 13) {
+            if (parsed.statusCode != 200 || SwString(parsed.body) != "hello world") {
+                fail_("100-continue request mismatch");
+                return false;
+            }
+            return true;
+        }
+        if (m_caseIndex == 14) {
+            if (parsed.statusCode != 417) {
+                fail_("unsupported Expect was not rejected");
+                return false;
+            }
+            return true;
+        }
         return false;
     }
 
@@ -537,6 +574,9 @@ private:
 
         m_client->write(m_requestParts[m_requestPartIndex]);
         ++m_requestPartIndex;
+        if (m_caseIndex == 13 && m_requestPartIndex == 1) {
+            return;
+        }
         if (m_requestPartIndex < m_requestParts.size()) {
             SwTimer::singleShot(10, [this]() { sendNextPart_(); });
         }

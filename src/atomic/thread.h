@@ -287,8 +287,8 @@ public:
      * @brief Posts a task to the internal event loop.
      *
      * @param task Functor to execute inside the thread's SwCoreApplication event loop.
-     * @return true if the task was delivered immediately, false if it was queued
-     *         for delivery once the event loop becomes available.
+     * @return true when ownership was accepted either by the event loop or by
+     *         the pre-start queue; false when runtime backpressure rejected it.
      */
     bool postTask(std::function<void()> task) {
         return postTaskOnLane(std::move(task), SwFiberLane::Normal);
@@ -299,23 +299,47 @@ public:
      *
      * @param task Functor to execute inside the thread's SwCoreApplication event loop.
      * @param lane Fiber lane used when the owning application is already available.
-     * @return true if the task was delivered immediately, false if it was queued
-     *         for delivery once the event loop becomes available.
+     * @return true when ownership was accepted either by the event loop or by
+     *         the pre-start queue; false when runtime backpressure rejected it.
      */
     bool postTaskOnLane(std::function<void()> task, SwFiberLane lane) {
         auto app = application();
         if (app) {
-            app->postEventOnLane(std::move(task), lane);
-            return true;
+            return app->tryPostEventOnLane(std::move(task), lane);
         }
         {
             RegistryLock_ lock(m_pendingMutex);
+            if (m_pendingTasks.size() >= kMaxPendingTasks_) {
+                return false;
+            }
             PendingTask_ pending;
             pending.task = std::move(task);
             pending.lane = lane;
+            pending.reliable = false;
             m_pendingTasks.push_back(std::move(pending));
         }
-        return false;
+        return true;
+    }
+
+    /** Queue a lifecycle/control completion even when the target fiber lane is full. */
+    bool postTaskOnLaneReliable(std::function<void()> task,
+                                SwFiberLane lane = SwFiberLane::Control) {
+        auto app = application();
+        if (app) {
+            return app->postEventOnLaneReliable(std::move(task), lane);
+        }
+        {
+            RegistryLock_ lock(m_pendingMutex);
+            if (m_pendingTasks.size() >= kMaxPendingTasks_) {
+                return false;
+            }
+            PendingTask_ pending;
+            pending.task = std::move(task);
+            pending.lane = lane;
+            pending.reliable = true;
+            m_pendingTasks.push_back(std::move(pending));
+        }
+        return true;
     }
 
     /**
@@ -507,7 +531,25 @@ private:
         for (size_t i = 0; i < pending.size(); ++i) {
             auto app = application();
             if (app) {
-                app->postEventOnLane(std::move(pending[i].task), pending[i].lane);
+                std::function<void()> candidate = pending[i].task;
+                bool accepted = pending[i].reliable
+                                    ? app->postEventOnLaneReliable(std::move(candidate),
+                                                                   pending[i].lane)
+                                    : app->tryPostEventOnLane(std::move(candidate),
+                                                              pending[i].lane);
+                if (!accepted && !pending[i].reliable) {
+                    // Ownership was acknowledged before start. Promote a saturated normal task
+                    // to the bounded reliable queue instead of losing it during the hand-off.
+                    candidate = pending[i].task;
+                    accepted = app->postEventOnLaneReliable(std::move(candidate),
+                                                            pending[i].lane);
+                }
+                if (!accepted && pending[i].task) {
+                    // The pre-start queue is smaller than the reliable queue, so this only
+                    // occurs under concurrent saturation. We are already on the destination
+                    // thread; inline execution is the final lossless, affinity-safe fallback.
+                    pending[i].task();
+                }
             }
         }
     }
@@ -621,8 +663,10 @@ private:
     struct PendingTask_ {
         std::function<void()> task;
         SwFiberLane lane = SwFiberLane::Normal;
+        bool reliable = false;
     };
 
+    static constexpr std::size_t kMaxPendingTasks_ = 16 * 1024;
     RegistryMutex_ m_pendingMutex;
     std::vector<PendingTask_> m_pendingTasks;
 

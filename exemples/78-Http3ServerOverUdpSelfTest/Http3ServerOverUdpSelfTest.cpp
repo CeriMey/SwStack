@@ -14,6 +14,7 @@
 #include "core/io/quic/SwQuicConnection.h"
 #include "core/io/quic/SwQuicHandshakeClient.h"
 #include "core/io/quic/SwQuicServerCredential.h"
+#include "core/types/SwVector.h"
 
 #include <chrono>
 #include <cstdint>
@@ -103,7 +104,7 @@ bool testHttp3ServerOverUdp() {
             if (datagram.isEmpty()) {
                 continue;
             }
-            std::vector<SwByteArray> replies;
+            SwVector<SwByteArray> replies;
             if (!requireTrue(handshake.processIncomingDatagram(datagram, replies, &error),
                              "client handshake processing failed")) {
                 std::cerr << "client_error=" << handshake.errorString().toStdString() << std::endl;
@@ -149,7 +150,7 @@ bool testHttp3ServerOverUdp() {
         return false;
     }
 
-    std::vector<SwByteArray> clientOut;
+    SwVector<SwByteArray> clientOut;
     if (!requireTrue(client.buildDatagrams(nowMs(), clientOut, &error),
                      "client request build datagrams failed")) {
         return false;
@@ -201,7 +202,7 @@ bool testHttp3ServerOverUdp() {
         if (t == 0) {
             client.onTimeout(nowMs());
         }
-        std::vector<SwByteArray> pending;
+        SwVector<SwByteArray> pending;
         if (client.buildDatagrams(nowMs(), pending, &error)) {
             for (std::size_t i = 0; i < pending.size(); ++i) {
                 clientSocket.writeDatagram(pending[i].constData(),

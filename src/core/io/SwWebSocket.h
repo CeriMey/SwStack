@@ -45,6 +45,7 @@
  ***************************************************************************************************/
 
 #include "SwObject.h"
+#include "SwPointer.h"
 #include "SwAbstractSocket.h"
 #include "SwSslSocket.h"
 #include "SwTcpSocket.h"
@@ -58,10 +59,16 @@
 #include "SwTimer.h"
 #include "third_party/miniz/miniz.h"
 
+#include <algorithm>
+#include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <chrono>
 #include <cstring>
+#include <deque>
 #include <limits>
+#include <memory>
+#include <utility>
 
 #if !defined(_WIN32)
   #include <openssl/rand.h>
@@ -146,6 +153,7 @@ public:
      * @details Use this hook to release any resources that remain associated with the instance.
      */
     ~SwWebSocket() override {
+        m_destroying = true;
         abort();
     }
 
@@ -289,6 +297,19 @@ public:
         return m_maxIncomingMessageSize;
     }
 
+    void setMaxOutgoingMessageSize(uint64_t bytes) {
+        m_maxOutgoingMessageSize = bytes;
+    }
+
+    uint64_t maxOutgoingMessageSize() const {
+        return m_maxOutgoingMessageSize;
+    }
+
+    std::size_t bytesToWrite() const {
+        const SwTcpSocket* tcp = dynamic_cast<const SwTcpSocket*>(m_socket);
+        return tcp ? tcp->bytesToWrite() : 0;
+    }
+
     /**
      * @brief Sets the close Timeout Ms.
      * @param ms Value passed to the method.
@@ -309,7 +330,49 @@ public:
         return m_closeTimeoutMs;
     }
 
-    // permessage-deflate (RFC7692). Enabled by default; negotiated during handshake.
+    void setHandshakeTimeoutMs(int ms) {
+        m_handshakeTimeoutMs = (std::max)(0, ms);
+    }
+
+    int handshakeTimeoutMs() const {
+        return m_handshakeTimeoutMs;
+    }
+
+    void setMaxHandshakeBytes(std::size_t bytes) {
+        m_maxHandshakeBytes = bytes;
+    }
+
+    std::size_t maxHandshakeBytes() const {
+        return m_maxHandshakeBytes;
+    }
+
+    /** Bounds bytes retained while waiting for a complete frame. Zero derives the cap from
+     *  maxIncomingMessageSize(). */
+    void setMaxBufferedIncomingBytes(std::size_t bytes) {
+        m_maxBufferedIncomingBytes = bytes;
+    }
+
+    std::size_t maxBufferedIncomingBytes() const {
+        return effectiveIncomingBufferLimit_();
+    }
+
+    void setReadBudgetBytes(std::size_t bytes) {
+        m_readBudgetBytes = (std::max)(static_cast<std::size_t>(1), bytes);
+    }
+
+    void setFrameParseBudget(std::size_t frames) {
+        m_frameParseBudget = (std::max)(static_cast<std::size_t>(1), frames);
+    }
+
+    void setMaxPendingControlFrames(std::size_t frames) {
+        m_maxPendingControlFrames = (std::max)(static_cast<std::size_t>(1), frames);
+    }
+
+    void setMaxPendingControlBytes(std::size_t bytes) {
+        m_maxPendingControlBytes = (std::max)(static_cast<std::size_t>(131), bytes);
+    }
+
+    // permessage-deflate (RFC7692). Opt-in because compression changes memory and CPU bounds.
     /**
      * @brief Sets the per Message Deflate Enabled.
      * @param enabled Value passed to the method.
@@ -557,21 +620,52 @@ public:
                            const SwString& requestPath,
                            const SwMap<SwString, SwString>& requestHeaders,
                            bool secure = false) {
+        return acceptHttpUpgrade(socket, requestPath, requestHeaders, secure, SwByteArray());
+    }
+
+    /** Adopts an upgraded transport and any frame bytes coalesced after the HTTP headers. */
+    bool acceptHttpUpgrade(SwAbstractSocket* socket,
+                           const SwString& requestPath,
+                           const SwMap<SwString, SwString>& requestHeaders,
+                           bool secure,
+                           SwByteArray initialData) {
         if (!attachAcceptedSocket_(socket)) {
             return false;
         }
 
         m_secure = secure;
         if (!finishAcceptedHandshake_(requestPath, requestHeaders)) {
-            reportError_(kErrorHandshakeFailed);
-            abort();
+            if (reportError_(kErrorHandshakeFailed)) {
+                abort();
+            }
             return false;
+        }
+
+        if (initialData.size() > effectiveIncomingBufferLimit_()) {
+            if (reportError_(kErrorMessageTooBig)) {
+                abort();
+            }
+            return false;
+        }
+        if (!initialData.isEmpty()) {
+            m_buffer.append(initialData.constData(), initialData.size());
         }
 
         m_handshakeDone = true;
         m_handshakeStage = StageConnected;
-        setState(SwAbstractSocket::ConnectedState);
+        stopHandshakeTimer_();
+        if (!setState(SwAbstractSocket::ConnectedState)) {
+            return false;
+        }
+        const std::uint64_t generation = m_protocolGeneration;
+        SwPointer<SwWebSocket> self(this);
         emit connected();
+        if (!self || self->m_protocolGeneration != generation) {
+            return false;
+        }
+        if (!m_buffer.isEmpty()) {
+            processFrames();
+        }
         return true;
     }
 
@@ -595,9 +689,15 @@ public:
             return;
         }
 
-        emitAboutToCloseOnce_();
-        setState(SwAbstractSocket::ClosingState);
-        sendCloseFrame(static_cast<uint16_t>(code), reason);
+        if (!emitAboutToCloseOnce_()) {
+            return;
+        }
+        if (!setState(SwAbstractSocket::ClosingState)) {
+            return;
+        }
+        if (!sendCloseFrame(static_cast<uint16_t>(code), reason)) {
+            return;
+        }
         m_closeSent = true;
         startCloseTimer_();
     }
@@ -606,12 +706,21 @@ public:
      * @brief Performs the `abort` operation.
      */
     void abort() {
+        const bool wasConnected = (m_state == SwAbstractSocket::ConnectedState ||
+                                   m_state == SwAbstractSocket::ClosingState);
+        ++m_protocolGeneration;
+        stopHandshakeTimer_();
         stopCloseTimer_();
         stopCloseReplyTimer_();
         cleanupSocket();
         resetProtocolState(false);
         m_handshakeStage = StageIdle;
-        setState(SwAbstractSocket::UnconnectedState);
+        if (!setState(SwAbstractSocket::UnconnectedState)) {
+            return;
+        }
+        if (wasConnected && !m_destroying) {
+            emit disconnected();
+        }
     }
 
     /**
@@ -620,7 +729,11 @@ public:
      * @return The requested send Text Message.
      */
     int64_t sendTextMessage(const SwString& message) {
-        SwByteArray payload(message.toStdString());
+        if (m_maxOutgoingMessageSize > 0 && message.size() > m_maxOutgoingMessageSize) {
+            reportError_(kErrorMessageTooBig);
+            return -1;
+        }
+        SwByteArray payload(message.data(), message.size());
         bool rsv1 = false;
         if (m_pmd.negotiated) {
             SwByteArray compressed;
@@ -640,6 +753,10 @@ public:
      * @return The requested send Binary Message.
      */
     int64_t sendBinaryMessage(const SwByteArray& message) {
+        if (m_maxOutgoingMessageSize > 0 && message.size() > m_maxOutgoingMessageSize) {
+            reportError_(kErrorMessageTooBig);
+            return -1;
+        }
         if (m_pmd.negotiated) {
             SwByteArray compressed;
             if (!deflateMessage_(message, compressed)) {
@@ -664,12 +781,12 @@ public:
             return;
         }
 
-        PendingPing pending;
-        pending.payload = payload;
-        pending.sentAt = std::chrono::steady_clock::now();
-        m_pendingPings.append(pending);
-
-        sendControlFrame(kOpPing, payload);
+        if (sendControlFrame(kOpPing, payload)) {
+            PendingPing pending;
+            pending.payload = payload;
+            pending.sentAt = std::chrono::steady_clock::now();
+            m_pendingPings.append(std::move(pending));
+        }
     }
 
 signals:
@@ -681,6 +798,7 @@ signals:
     DECLARE_SIGNAL(textMessageReceived, const SwString&)
     DECLARE_SIGNAL(binaryMessageReceived, const SwByteArray&)
     DECLARE_SIGNAL(pong, uint64_t, const SwByteArray&)
+    DECLARE_SIGNAL_VOID(writable)
 
 private:
     struct PendingPing {
@@ -688,8 +806,19 @@ private:
         std::chrono::steady_clock::time_point sentAt{};
     };
 
+    struct PendingControlFrame {
+        uint8_t opcode = 0;
+        SwByteArray frame;
+    };
+
+    enum class FrameWriteResult {
+        Accepted,
+        WouldBlock,
+        Failed
+    };
+
     struct PerMessageDeflateState {
-        bool requested = true;
+        bool requested = false;
         bool negotiated = false;
 
         // Parameters that affect how *we* compress outgoing messages.
@@ -720,7 +849,10 @@ private:
         kErrorProxyInvalid        = -109,
         kErrorProxyFailed         = -110,
         kErrorRedirectLimit       = -111,
-        kErrorRedirectFailed      = -112
+        kErrorRedirectFailed      = -112,
+        kErrorEntropyUnavailable  = -113,
+        kErrorControlQueueFull    = -114,
+        kErrorReceiveBufferFull   = -115
     };
 
     enum : uint8_t {
@@ -742,6 +874,21 @@ private:
     };
 
     static bool parseUrl(const SwString& url, SwString& scheme, SwString& host, uint16_t& port, SwString& path) {
+        scheme.clear();
+        host.clear();
+        path.clear();
+
+        if (url.isEmpty() || url.indexOf("#") >= 0) {
+            // RFC 6455 websocket-resource-name never carries a URI fragment.
+            return false;
+        }
+        for (std::size_t i = 0; i < url.size(); ++i) {
+            const unsigned char c = static_cast<unsigned char>(url.data()[i]);
+            if (c <= 0x20 || c == 0x7f || c == '\\') {
+                return false;
+            }
+        }
+
         SwString lower = url.toLower();
         int offset = -1;
         if (lower.startsWith("ws://")) {
@@ -756,29 +903,80 @@ private:
             return false;
         }
 
-        SwString remainder = url.mid(offset);
-        int slashPos = remainder.indexOf("/");
-        SwString hostPortPart;
-        if (slashPos >= 0) {
-            hostPortPart = remainder.left(slashPos);
-            path = remainder.mid(slashPos);
+        const SwString remainder = url.mid(offset);
+        const int slashPos = remainder.indexOf("/");
+        const int queryPos = remainder.indexOf("?");
+        int authorityEnd = -1;
+        if (slashPos >= 0 && queryPos >= 0) {
+            authorityEnd = (std::min)(slashPos, queryPos);
         } else {
-            hostPortPart = remainder;
-            path = "/";
+            authorityEnd = slashPos >= 0 ? slashPos : queryPos;
         }
 
-        int colonPos = hostPortPart.indexOf(":");
-        if (colonPos >= 0) {
-            host = hostPortPart.left(colonPos);
-            SwString portStr = hostPortPart.mid(colonPos + 1);
+        const SwString hostPortPart = authorityEnd >= 0
+                                          ? remainder.left(authorityEnd)
+                                          : remainder;
+        if (authorityEnd < 0) {
+            path = "/";
+        } else {
+            path = remainder.mid(authorityEnd);
+            if (path.startsWith("?")) {
+                path = "/" + path;
+            }
+        }
+
+        if (hostPortPart.isEmpty() || hostPortPart.indexOf("@") >= 0) {
+            // Userinfo is deliberately rejected: accepting it risks credential confusion and
+            // Host-header/connect-target inconsistencies.
+            return false;
+        }
+
+        SwString portStr;
+        if (hostPortPart.startsWith("[")) {
+            const int closingBracket = hostPortPart.indexOf("]");
+            if (closingBracket <= 1) {
+                return false;
+            }
+            host = hostPortPart.mid(1, closingBracket - 1);
+            const SwString suffix = hostPortPart.mid(closingBracket + 1);
+            if (!suffix.isEmpty()) {
+                if (!suffix.startsWith(":") || suffix.size() == 1) {
+                    return false;
+                }
+                portStr = suffix.mid(1);
+            }
+            if (host.indexOf("[") >= 0 || host.indexOf("]") >= 0) {
+                return false;
+            }
+        } else {
+            const int colonPos = hostPortPart.indexOf(":");
+            if (colonPos >= 0) {
+                if (hostPortPart.indexOf(":", static_cast<std::size_t>(colonPos + 1)) >= 0) {
+                    // IPv6 literals must use RFC 3986 brackets.
+                    return false;
+                }
+                host = hostPortPart.left(colonPos);
+                portStr = hostPortPart.mid(colonPos + 1);
+            } else {
+                host = hostPortPart;
+            }
+        }
+
+        if (!portStr.isEmpty()) {
+            for (std::size_t i = 0; i < portStr.size(); ++i) {
+                const char c = portStr.data()[i];
+                if (c < '0' || c > '9') {
+                    return false;
+                }
+            }
             bool ok = false;
-            int p = portStr.toInt(&ok);
+            const int p = portStr.toInt(&ok);
             if (!ok || p <= 0 || p > 65535) {
                 return false;
             }
             port = static_cast<uint16_t>(p);
-        } else {
-            host = hostPortPart;
+        } else if (!hostPortPart.startsWith("[") && hostPortPart.endsWith(":")) {
+            return false;
         }
 
         if (path.isEmpty()) {
@@ -789,10 +987,11 @@ private:
 
     SwString hostHeaderValue() const {
         bool defaultPort = (!m_secure && m_port == 80) || (m_secure && m_port == 443);
+        const SwString renderedHost = m_host.indexOf(":") >= 0 ? "[" + m_host + "]" : m_host;
         if (defaultPort || m_port == 0) {
-            return m_host;
+            return renderedHost;
         }
-        return m_host + ":" + SwString::number(static_cast<int>(m_port));
+        return renderedHost + ":" + SwString::number(static_cast<int>(m_port));
     }
 
     static bool fillRandomBytes(unsigned char* data, size_t len) {
@@ -813,10 +1012,9 @@ private:
     static SwString makeClientKeyBase64() {
         unsigned char key[16] = {0};
         if (!fillRandomBytes(key, sizeof(key))) {
-            // fallback: deterministic but still valid (server must accept any 16-byte value)
-            for (size_t i = 0; i < sizeof(key); ++i) {
-                key[i] = static_cast<unsigned char>(i * 23u + 17u);
-            }
+            // Mask keys and handshake nonces are security-sensitive. Never silently downgrade
+            // to predictable bytes when the operating-system CSPRNG is unavailable.
+            return SwString();
         }
 
         SwByteArray raw(reinterpret_cast<const char*>(key), sizeof(key));
@@ -1096,7 +1294,8 @@ private:
             return false;
         }
 
-        const SwString target = m_host + ":" + SwString::number(static_cast<int>(m_port));
+        const SwString proxyHost = m_host.indexOf(":") >= 0 ? "[" + m_host + "]" : m_host;
+        const SwString target = proxyHost + ":" + SwString::number(static_cast<int>(m_port));
         SwString request = "CONNECT " + target + " HTTP/1.1\r\n";
         request += "Host: " + target + "\r\n";
         request += "Proxy-Connection: Keep-Alive\r\n";
@@ -1152,7 +1351,7 @@ private:
             if (!m_trustedCaFile.isEmpty()) {
                 m_sslSocket->setTrustedCaFile(m_trustedCaFile);
             }
-            SwObject::connect(m_sslSocket, &SwSslSocket::sslErrors, [this](const SwSslErrorList& errors) {
+            SwObject::connect(m_sslSocket, &SwSslSocket::sslErrors, this, [this](const SwSslErrorList& errors) {
                 if (!errors.isEmpty()) {
                     m_lastErrorText = errors.first();
                     swCError(kSwLogCategory_SwWebSocket) << "[SwWebSocket] TLS error: " << errors.first();
@@ -1163,6 +1362,9 @@ private:
         connect(m_socket, &SwAbstractSocket::disconnected, this, &SwWebSocket::onTcpDisconnected);
         connect(m_socket, &SwAbstractSocket::errorOccurred, this, &SwWebSocket::onTcpError);
         connect(m_socket, &SwIODevice::readyRead, this, &SwWebSocket::onTcpReadyRead);
+        connect(m_socket, &SwIODevice::readyWrite, this, [this]() { onTransportWritable_(); });
+        connect(m_socket, &SwAbstractSocket::writeFinished, this,
+                &SwWebSocket::onTransportWriteFinished_);
         if (m_sslSocket && !shouldUseProxy_()) {
             connect(m_sslSocket, &SwSslSocket::encrypted, this, &SwWebSocket::onTcpConnected);
         } else if (m_sslSocket && shouldUseProxy_()) {
@@ -1173,7 +1375,10 @@ private:
         }
 
         m_handshakeStage = StageTcpConnecting;
-        setState(SwAbstractSocket::ConnectingState);
+        if (!setState(SwAbstractSocket::ConnectingState)) {
+            return;
+        }
+        startHandshakeTimer_();
 
         const SwString connectHost = shouldUseProxy_() ? m_proxy.host : m_host;
         const uint16_t connectPort = shouldUseProxy_() ? m_proxy.port : m_port;
@@ -1182,8 +1387,11 @@ private:
                                                 : m_socket->connectToHost(connectHost, connectPort);
         if (!connectOk) {
             swCError(kSwLogCategory_SwWebSocket) << "[SwWebSocket] connectToHost failed";
+            stopHandshakeTimer_();
             cleanupSocket();
-            setState(SwAbstractSocket::UnconnectedState);
+            if (!setState(SwAbstractSocket::UnconnectedState)) {
+                return;
+            }
             reportError_(kErrorConnectFailed);
             return;
         }
@@ -1191,6 +1399,10 @@ private:
 
     SwString buildHandshakeRequest() {
         m_clientKeyBase64 = makeClientKeyBase64();
+        if (m_clientKeyBase64.isEmpty()) {
+            m_expectedAccept.clear();
+            return SwString();
+        }
         m_expectedAccept = computeAcceptKey(m_clientKeyBase64);
 
         SwString request = "GET " + (m_path.isEmpty() ? SwString("/") : m_path) + " HTTP/1.1\r\n";
@@ -1564,23 +1776,23 @@ private:
             }
         }
 
-        const SwByteArray* payloadOut = &payload;
-        SwByteArray maskedPayload;
+        std::size_t payloadOffset = 0;
         if (mask) {
             frame.append(static_cast<char>(maskKey[0]));
             frame.append(static_cast<char>(maskKey[1]));
             frame.append(static_cast<char>(maskKey[2]));
             frame.append(static_cast<char>(maskKey[3]));
-            maskedPayload = payload;
-            for (size_t i = 0; i < maskedPayload.size(); ++i) {
-                maskedPayload[i] = static_cast<char>(
-                    static_cast<unsigned char>(maskedPayload[i]) ^ maskKey[i % 4]);
-            }
-            payloadOut = &maskedPayload;
+            payloadOffset = frame.size();
         }
 
-        if (!payloadOut->isEmpty()) {
-            frame.append(payloadOut->constData(), payloadOut->size());
+        if (!payload.isEmpty()) {
+            frame.append(payload.constData(), payload.size());
+        }
+        if (mask) {
+            for (size_t i = 0; i < payload.size(); ++i) {
+                frame[payloadOffset + i] = static_cast<char>(
+                    static_cast<unsigned char>(frame[payloadOffset + i]) ^ maskKey[i % 4]);
+            }
         }
         return frame;
     }
@@ -1608,6 +1820,11 @@ private:
         outFin = (b0 & 0x80) != 0;
         outRsv1 = (b0 & 0x40) != 0;
         outOpcode = static_cast<uint8_t>(b0 & 0x0F);
+        if (outOpcode != kOpContinuation && outOpcode != kOpText &&
+            outOpcode != kOpBinary && outOpcode != kOpClose &&
+            outOpcode != kOpPing && outOpcode != kOpPong) {
+            return false;
+        }
         const bool masked = (b1 & 0x80) != 0;
         outWasMasked = masked;
 
@@ -1622,6 +1839,12 @@ private:
         if (outRsv1 && !allowRsv1) {
             return false;
         }
+        if ((outOpcode & 0x08) != 0 && (!outFin || outRsv1)) {
+            return false;
+        }
+        if (outOpcode == kOpContinuation && outRsv1) {
+            return false;
+        }
 
         if (payloadLen == 126) {
             if (buffer.size() < pos + 2) {
@@ -1631,6 +1854,9 @@ private:
             payloadLen = (static_cast<uint64_t>(static_cast<unsigned char>(buffer[pos])) << 8) |
                          static_cast<uint64_t>(static_cast<unsigned char>(buffer[pos + 1]));
             pos += 2;
+            if (payloadLen < 126) {
+                return false;
+            }
         } else if (payloadLen == 127) {
             if (buffer.size() < pos + 8) {
                 outNeedMoreData = true;
@@ -1646,6 +1872,9 @@ private:
                              static_cast<uint64_t>(static_cast<unsigned char>(buffer[pos + static_cast<size_t>(i)]));
             }
             pos += 8;
+            if (payloadLen <= 65535) {
+                return false;
+            }
         }
 
         outPayloadLen = payloadLen;
@@ -1837,7 +2066,10 @@ private:
         return true;
     }
 
-    bool inflateMessage_(const SwByteArray& compressed, SwByteArray& out) {
+    bool inflateMessage_(const SwByteArray& compressed,
+                         SwByteArray& out,
+                         bool& tooLarge) {
+        tooLarge = false;
         if (!m_pmd.negotiated) {
             return false;
         }
@@ -1874,8 +2106,7 @@ private:
 
                 if (m_maxIncomingMessageSize > 0 &&
                     static_cast<uint64_t>(result.size()) > m_maxIncomingMessageSize) {
-                    reportError_(kErrorMessageTooBig);
-                    close(CloseCodeMessageTooBig);
+                    tooLarge = true;
                     return false;
                 }
 
@@ -1920,61 +2151,149 @@ private:
             return -1;
         }
 
+        // Control traffic (pong/close in particular) is protocol-critical and gets admission
+        // before new application data whenever the transport has applied backpressure.
+        pumpControlFrames_();
+        if (!m_socket || !m_pendingControlFrames.empty()) {
+            return -1;
+        }
+
         const bool mask = (m_role == ClientRole);
         unsigned char maskKey[4] = {0, 0, 0, 0};
         if (mask) {
             if (!fillRandomBytes(maskKey, sizeof(maskKey))) {
-                maskKey[0] = 0x12; maskKey[1] = 0x34; maskKey[2] = 0x56; maskKey[3] = 0x78;
+                if (reportError_(kErrorEntropyUnavailable)) {
+                    abort();
+                }
+                return -1;
             }
         }
 
         SwByteArray frame = buildFrame(opcode, payload, mask, true, rsv1, maskKey);
-        if (!m_socket->write(frame)) {
+        if (tryWriteFrame_(frame) != FrameWriteResult::Accepted) {
             return -1;
         }
         return static_cast<int64_t>(payload.size());
     }
 
-    void sendControlFrame(uint8_t opcode, const SwByteArray& payload) {
+    bool sendControlFrame(uint8_t opcode, const SwByteArray& payload) {
         if (!m_socket || !m_handshakeDone) {
-            return;
+            return false;
         }
         if (payload.size() > 125) {
             reportError_(kErrorProtocolError);
-            return;
+            return false;
         }
 
         const bool mask = (m_role == ClientRole);
         unsigned char maskKey[4] = {0, 0, 0, 0};
         if (mask) {
             if (!fillRandomBytes(maskKey, sizeof(maskKey))) {
-                maskKey[0] = 0xAA; maskKey[1] = 0xBB; maskKey[2] = 0xCC; maskKey[3] = 0xDD;
+                if (reportError_(kErrorEntropyUnavailable)) {
+                    abort();
+                }
+                return false;
             }
         }
 
         SwByteArray frame = buildFrame(opcode, payload, mask, true, false, maskKey);
-        m_socket->write(frame);
+        if (m_pendingControlFrames.empty()) {
+            const FrameWriteResult writeResult = tryWriteFrame_(frame);
+            if (writeResult == FrameWriteResult::Accepted) {
+                return true;
+            }
+            if (writeResult == FrameWriteResult::Failed) {
+                if (reportError_(kErrorProtocolError)) {
+                    abort();
+                }
+                return false;
+            }
+        }
+
+        if (m_pendingControlFrames.size() >= m_maxPendingControlFrames ||
+            frame.size() > m_maxPendingControlBytes -
+                               (std::min)(m_pendingControlBytes, m_maxPendingControlBytes)) {
+            // A bounded queue must never turn into a silent protocol drop. Terminate explicitly
+            // when a peer generates more control traffic than the configured memory budget.
+            if (reportError_(kErrorControlQueueFull)) {
+                abort();
+            }
+            return false;
+        }
+
+        PendingControlFrame pending;
+        pending.opcode = opcode;
+        pending.frame = std::move(frame);
+        m_pendingControlBytes += pending.frame.size();
+        m_pendingControlFrames.push_back(std::move(pending));
+        return true;
     }
 
-    void sendCloseFrame(uint16_t code, const SwString& reason) {
+    bool sendCloseFrame(uint16_t code, const SwString& reason) {
         SwByteArray payload;
         payload.append(static_cast<char>((code >> 8) & 0xFF));
         payload.append(static_cast<char>(code & 0xFF));
         if (!reason.isEmpty()) {
-            SwByteArray reasonBytes(reason.toStdString());
+            SwByteArray reasonBytes(reason.data(), reason.size());
             if (reasonBytes.size() <= 123) {
                 payload.append(reasonBytes.constData(), reasonBytes.size());
             }
         }
-        sendControlFrame(kOpClose, payload);
+        return sendControlFrame(kOpClose, payload);
     }
 
-    void setState(SwAbstractSocket::SocketState newState) {
-        if (m_state == newState) {
+    FrameWriteResult tryWriteFrame_(const SwByteArray& frame) {
+        if (!m_socket) {
+            return FrameWriteResult::Failed;
+        }
+        if (m_socket->write(frame)) {
+            return FrameWriteResult::Accepted;
+        }
+        const SwTcpSocket* tcp = dynamic_cast<const SwTcpSocket*>(m_socket);
+        if (tcp && tcp->lastWriteResult() == SwTcpSocket::WriteResult::WouldBlock) {
+            return FrameWriteResult::WouldBlock;
+        }
+        return FrameWriteResult::Failed;
+    }
+
+    void pumpControlFrames_() {
+        if (m_pumpingControlFrames || !m_socket) {
             return;
         }
+        m_pumpingControlFrames = true;
+        while (m_socket && !m_pendingControlFrames.empty()) {
+            PendingControlFrame& pending = m_pendingControlFrames.front();
+            const FrameWriteResult result = tryWriteFrame_(pending.frame);
+            if (result == FrameWriteResult::WouldBlock) {
+                break;
+            }
+            if (result == FrameWriteResult::Failed) {
+                m_pumpingControlFrames = false;
+                if (reportError_(kErrorProtocolError)) {
+                    abort();
+                }
+                return;
+            }
+            m_pendingControlBytes -= pending.frame.size();
+            m_pendingControlFrames.pop_front();
+        }
+        m_pumpingControlFrames = false;
+
+        maybeFinishCloseReply_();
+    }
+
+    bool setState(SwAbstractSocket::SocketState newState) {
+        if (m_state == newState) {
+            return true;
+        }
         m_state = newState;
+        if (m_destroying) {
+            return true;
+        }
+        const std::uint64_t generation = m_protocolGeneration;
+        SwPointer<SwWebSocket> self(this);
         emit stateChanged(m_state);
+        return self && self->m_protocolGeneration == generation;
     }
 
 private slots:
@@ -1982,7 +2301,9 @@ private slots:
         if (m_state != SwAbstractSocket::ClosingState) {
             return;
         }
-        reportError_(kErrorCloseTimeout);
+        if (!reportError_(kErrorCloseTimeout)) {
+            return;
+        }
         m_closeCode = static_cast<uint16_t>(CloseCodeAbnormalClosure);
         m_closeReason.clear();
         stopCloseTimer_();
@@ -1990,7 +2311,10 @@ private slots:
         cleanupSocket();
         resetProtocolState(true);
         m_handshakeStage = StageIdle;
-        setState(SwAbstractSocket::UnconnectedState);
+        ++m_protocolGeneration;
+        if (!setState(SwAbstractSocket::UnconnectedState)) {
+            return;
+        }
         emit disconnected();
     }
 
@@ -2002,8 +2326,31 @@ private slots:
         cleanupSocket();
         resetProtocolState(true);
         m_handshakeStage = StageIdle;
-        setState(SwAbstractSocket::UnconnectedState);
+        ++m_protocolGeneration;
+        if (!setState(SwAbstractSocket::UnconnectedState)) {
+            return;
+        }
         emit disconnected();
+    }
+
+    void onTransportWritable_() {
+        const std::uint64_t generation = m_protocolGeneration;
+        SwPointer<SwWebSocket> self(this);
+        pumpControlFrames_();
+        if (!self || self->m_protocolGeneration != generation || !m_pendingControlFrames.empty()) {
+            return;
+        }
+        emit writable();
+    }
+
+    void onTransportWriteFinished_() {
+        const std::uint64_t generation = m_protocolGeneration;
+        SwPointer<SwWebSocket> self(this);
+        pumpControlFrames_();
+        if (!self || self->m_protocolGeneration != generation) {
+            return;
+        }
+        maybeFinishCloseReply_();
     }
 
     void onTcpConnected() {
@@ -2015,8 +2362,9 @@ private slots:
             if (shouldUseProxy_()) {
                 swCDebug(kSwLogCategory_SwWebSocket) << "[SwWebSocket] Connected to proxy, sending CONNECT";
                 if (!sendProxyConnectRequest_()) {
-                    reportError_(kErrorProxyFailed);
-                    abort();
+                    if (reportError_(kErrorProxyFailed)) {
+                        abort();
+                    }
                     return;
                 }
                 m_handshakeStage = StageProxyHandshake;
@@ -2025,8 +2373,9 @@ private slots:
 
             swCDebug(kSwLogCategory_SwWebSocket) << "[SwWebSocket] TCP connected, sending handshake";
             if (!sendWebSocketHandshake_()) {
-                reportError_(kErrorHandshakeFailed);
-                abort();
+                if (reportError_(kErrorHandshakeFailed)) {
+                    abort();
+                }
                 return;
             }
             m_handshakeStage = StageWebSocketHandshake;
@@ -2036,8 +2385,9 @@ private slots:
         if (m_handshakeStage == StageTlsHandshake) {
             swCDebug(kSwLogCategory_SwWebSocket) << "[SwWebSocket] TLS ready, sending handshake";
             if (!sendWebSocketHandshake_()) {
-                reportError_(kErrorHandshakeFailed);
-                abort();
+                if (reportError_(kErrorHandshakeFailed)) {
+                    abort();
+                }
                 return;
             }
             m_handshakeStage = StageWebSocketHandshake;
@@ -2046,21 +2396,77 @@ private slots:
     }
 
     void onTcpReadyRead() {
+        if (m_processingRead) {
+            m_readAgain = true;
+            return;
+        }
+        m_processingRead = true;
+        const std::uint64_t generation = m_protocolGeneration;
+        SwPointer<SwWebSocket> self(this);
+        serviceTcpReadyRead_();
+        if (!self || self->m_protocolGeneration != generation) {
+            return;
+        }
+        m_processingRead = false;
+        if (m_readAgain) {
+            m_readAgain = false;
+            scheduleReadContinuation_();
+        }
+    }
+
+    void serviceTcpReadyRead_() {
         if (!m_socket) {
             return;
         }
 
         char readBuffer[kSwTcpDefaultReadChunkSize];
-        while (true) {
-            const int64_t bytesRead = m_socket->readInto(readBuffer, sizeof(readBuffer));
+        std::size_t remainingReadBudget = m_readBudgetBytes;
+        bool exhaustedReadBudget = false;
+        while (remainingReadBudget > 0) {
+            const bool handshaking = m_handshakeStage != StageConnected || !m_handshakeDone;
+            const std::size_t cap = handshaking
+                                        ? (m_maxHandshakeBytes == 0
+                                               ? static_cast<std::size_t>(32 * 1024)
+                                               : m_maxHandshakeBytes)
+                                        : effectiveIncomingBufferLimit_();
+            const std::size_t retained = handshaking
+                                             ? m_buffer.size()
+                                             : saturatedAdd_(m_buffer.size(), m_messageBuffer.size());
+            if (retained >= cap) {
+                handleReceiveBufferFull_(handshaking);
+                return;
+            }
+            const std::size_t toRead = (std::min)(
+                sizeof(readBuffer),
+                (std::min)(remainingReadBudget, cap - retained));
+            const int64_t bytesRead = m_socket->readInto(readBuffer, static_cast<int64_t>(toRead));
             if (bytesRead <= 0) {
                 break;
             }
-            m_buffer.append(readBuffer, static_cast<size_t>(bytesRead));
+            const std::size_t appended = static_cast<std::size_t>(bytesRead);
+            // Capacity was checked before the syscall, so no geometric allocation can cross the
+            // configured logical bound because of an oversized read.
+            m_buffer.append(readBuffer, appended);
+            remainingReadBudget -= appended;
+
+            if (handshaking) {
+                const int boundary = m_buffer.indexOf("\r\n\r\n");
+                if (boundary >= 0) {
+                    break;
+                }
+                if (m_buffer.size() >= cap) {
+                    handleReceiveBufferFull_(true);
+                    return;
+                }
+            }
         }
+        exhaustedReadBudget = remainingReadBudget == 0;
 
         if (m_handshakeStage == StageProxyHandshake) {
             int boundary = m_buffer.indexOf("\r\n\r\n");
+            if (!validateHandshakeBuffer_(boundary)) {
+                return;
+            }
             if (boundary < 0) {
                 return;
             }
@@ -2071,23 +2477,26 @@ private slots:
             int statusCode = 0;
             SwMap<SwString, SwString> headerMap;
             if (!parseHttpResponseHeaders_(SwString(headerBytes), statusCode, headerMap)) {
-                reportError_(kErrorProxyFailed);
-                abort();
+                if (reportError_(kErrorProxyFailed)) {
+                    abort();
+                }
                 return;
             }
 
             if (statusCode != 200) {
                 swCError(kSwLogCategory_SwWebSocket) << "[SwWebSocket] Proxy CONNECT failed status=" << statusCode;
-                reportError_(kErrorProxyFailed);
-                abort();
+                if (reportError_(kErrorProxyFailed)) {
+                    abort();
+                }
                 return;
             }
 
             if (m_secure) {
                 m_handshakeStage = StageTlsHandshake;
                 if (!m_sslSocket || !m_sslSocket->startClientEncryption()) {
-                    reportError_(kErrorProxyFailed);
-                    abort();
+                    if (reportError_(kErrorProxyFailed)) {
+                        abort();
+                    }
                     return;
                 }
                 // TLS completion will trigger onTcpConnected (connected signal).
@@ -2095,8 +2504,9 @@ private slots:
             }
 
             if (!sendWebSocketHandshake_()) {
-                reportError_(kErrorHandshakeFailed);
-                abort();
+                if (reportError_(kErrorHandshakeFailed)) {
+                    abort();
+                }
                 return;
             }
             m_handshakeStage = StageWebSocketHandshake;
@@ -2104,6 +2514,9 @@ private slots:
 
         if (m_handshakeStage == StageWebSocketHandshake && !m_handshakeDone) {
             int boundary = m_buffer.indexOf("\r\n\r\n");
+            if (!validateHandshakeBuffer_(boundary)) {
+                return;
+            }
             if (boundary < 0) {
                 return;
             }
@@ -2114,22 +2527,32 @@ private slots:
 
             if (m_role == ServerRole) {
                 if (!handleServerHandshakeRequest_(headerText)) {
-                    reportError_(kErrorHandshakeFailed);
-                    abort();
+                    if (reportError_(kErrorHandshakeFailed)) {
+                        abort();
+                    }
                     return;
                 }
 
                 m_handshakeDone = true;
                 m_handshakeStage = StageConnected;
-                setState(SwAbstractSocket::ConnectedState);
+                stopHandshakeTimer_();
+                if (!setState(SwAbstractSocket::ConnectedState)) {
+                    return;
+                }
+                const std::uint64_t generation = m_protocolGeneration;
+                SwPointer<SwWebSocket> self(this);
                 emit connected();
+                if (!self || self->m_protocolGeneration != generation) {
+                    return;
+                }
                 // Fallthrough: process any already-buffered frames.
             } else {
             int statusCode = 0;
             SwMap<SwString, SwString> headerMap;
             if (!parseHttpResponseHeaders_(headerText, statusCode, headerMap)) {
-                reportError_(kErrorHandshakeFailed);
-                abort();
+                if (reportError_(kErrorHandshakeFailed)) {
+                    abort();
+                }
                 return;
             }
 
@@ -2137,15 +2560,17 @@ private slots:
                 if (m_followRedirects && isRedirectStatus_(statusCode)) {
                     const SwString location = headerMap.value("location").trimmed();
                     if (location.isEmpty()) {
-                        reportError_(kErrorRedirectFailed);
-                        abort();
+                        if (reportError_(kErrorRedirectFailed)) {
+                            abort();
+                        }
                         return;
                     }
 
                     SwString newUrl;
                     if (!resolveRedirectUrl_(location, newUrl)) {
-                        reportError_(kErrorRedirectFailed);
-                        abort();
+                        if (reportError_(kErrorRedirectFailed)) {
+                            abort();
+                        }
                         return;
                     }
 
@@ -2153,37 +2578,54 @@ private slots:
                     return;
                 }
 
-                reportError_(kErrorHandshakeFailed);
-                abort();
+                if (reportError_(kErrorHandshakeFailed)) {
+                    abort();
+                }
                 return;
             }
 
             if (!parseHandshakeResponse(headerText)) {
-                reportError_(kErrorHandshakeFailed);
-                abort();
+                if (reportError_(kErrorHandshakeFailed)) {
+                    abort();
+                }
                 return;
             }
 
             m_handshakeDone = true;
             m_handshakeStage = StageConnected;
-            setState(SwAbstractSocket::ConnectedState);
+            stopHandshakeTimer_();
+            if (!setState(SwAbstractSocket::ConnectedState)) {
+                return;
+            }
+            const std::uint64_t generation = m_protocolGeneration;
+            SwPointer<SwWebSocket> self(this);
             emit connected();
+            if (!self || self->m_protocolGeneration != generation) {
+                return;
+            }
             }
         }
 
         if (m_handshakeStage == StageConnected && m_handshakeDone) {
             processFrames();
         }
+        if (exhaustedReadBudget && m_socket && m_handshakeStage != StageIdle) {
+            scheduleReadContinuation_();
+        }
     }
 
     void onTcpDisconnected() {
+        stopHandshakeTimer_();
         stopCloseTimer_();
         stopCloseReplyTimer_();
         bool wasConnected = (m_state == SwAbstractSocket::ConnectedState || m_state == SwAbstractSocket::ClosingState);
         cleanupSocket();
         resetProtocolState(true);
         m_handshakeStage = StageIdle;
-        setState(SwAbstractSocket::UnconnectedState);
+        ++m_protocolGeneration;
+        if (!setState(SwAbstractSocket::UnconnectedState)) {
+            return;
+        }
         if (wasConnected) {
             emit disconnected();
         }
@@ -2191,22 +2633,141 @@ private slots:
 
     void onTcpError(int err) {
         swCError(kSwLogCategory_SwWebSocket) << "[SwWebSocket] socket error " << err;
-        reportError_(err);
-        abort();
+        if (reportError_(err)) {
+            abort();
+        }
     }
 
 private:
-    void reportError_(int err) {
-        m_lastError = err;
-        emit errorOccurred(err);
+    static std::size_t saturatedAdd_(std::size_t a, std::size_t b) {
+        if (a > (std::numeric_limits<std::size_t>::max)() - b) {
+            return (std::numeric_limits<std::size_t>::max)();
+        }
+        return a + b;
     }
 
-    void emitAboutToCloseOnce_() {
-        if (m_aboutToCloseEmitted) {
+    std::size_t effectiveIncomingBufferLimit_() const {
+        if (m_maxBufferedIncomingBytes > 0) {
+            return m_maxBufferedIncomingBytes;
+        }
+        const std::size_t messageLimit = m_maxIncomingMessageSize == 0
+                                             ? static_cast<std::size_t>(16 * 1024 * 1024)
+                                             : static_cast<std::size_t>((std::min<uint64_t>)(
+                                                   m_maxIncomingMessageSize,
+                                                   static_cast<uint64_t>((std::numeric_limits<std::size_t>::max)())));
+        return saturatedAdd_(messageLimit, static_cast<std::size_t>(64 * 1024));
+    }
+
+    void handleReceiveBufferFull_(bool handshaking) {
+        if (handshaking) {
+            failHandshake_("WebSocket handshake receive buffer limit exceeded");
             return;
         }
+        if (reportError_(kErrorReceiveBufferFull)) {
+            close(CloseCodeMessageTooBig);
+        }
+    }
+
+    void scheduleReadContinuation_() {
+        if (m_readContinuationScheduled || !m_socket) {
+            return;
+        }
+        m_readContinuationScheduled = true;
+        const std::uint64_t generation = m_protocolGeneration;
+        SwPointer<SwWebSocket> self(this);
+        std::function<void()> continuation = [self, generation]() mutable {
+            if (!self || self->m_protocolGeneration != generation) {
+                return;
+            }
+            self->m_readContinuationScheduled = false;
+            self->onTcpReadyRead();
+        };
+
+        ThreadHandle* affinity = threadHandle();
+        if (affinity && affinity->postTaskOnLaneReliable(continuation, SwFiberLane::Control)) {
+            return;
+        }
+        SwCoreApplication* app = SwCoreApplication::instance(false);
+        if (app && app->postEventOnLaneReliable(std::move(continuation), SwFiberLane::Control)) {
+            return;
+        }
+        m_readContinuationScheduled = false;
+    }
+
+    void startHandshakeTimer_() {
+        if (m_handshakeTimeoutMs <= 0) {
+            return;
+        }
+        if (!m_handshakeTimer) {
+            m_handshakeTimer = new SwTimer(this);
+            m_handshakeTimer->setSingleShot(true);
+            connect(m_handshakeTimer, &SwTimer::timeout, [this]() {
+                if (m_handshakeDone || m_handshakeStage == StageIdle ||
+                    m_handshakeStage == StageConnected) {
+                    return;
+                }
+                failHandshake_("WebSocket handshake timeout");
+            });
+        }
+        if (m_handshakeTimer->isActive()) {
+            m_handshakeTimer->stop();
+        }
+        m_handshakeTimer->start(m_handshakeTimeoutMs);
+    }
+
+    void stopHandshakeTimer_() {
+        if (m_handshakeTimer && m_handshakeTimer->isActive()) {
+            m_handshakeTimer->stop();
+        }
+    }
+
+    void failHandshake_(const SwString& reason) {
+        m_lastErrorText = reason;
+        const std::uint64_t generation = m_protocolGeneration;
+        SwPointer<SwWebSocket> self(this);
+        reportError_(kErrorHandshakeFailed);
+        if (self && self->m_protocolGeneration == generation) {
+            self->abort();
+        }
+    }
+
+    bool validateHandshakeBuffer_(int boundary) {
+        if (m_maxHandshakeBytes == 0) {
+            return true;
+        }
+        const std::size_t headerBytes = boundary >= 0
+                                            ? static_cast<std::size_t>(boundary) + 4
+                                            : m_buffer.size();
+        if (headerBytes <= m_maxHandshakeBytes) {
+            return true;
+        }
+        failHandshake_("WebSocket handshake headers exceed configured limit");
+        return false;
+    }
+
+    bool reportError_(int err) {
+        m_lastError = err;
+        if (m_destroying) {
+            return true;
+        }
+        const std::uint64_t generation = m_protocolGeneration;
+        SwPointer<SwWebSocket> self(this);
+        emit errorOccurred(err);
+        return self && self->m_protocolGeneration == generation;
+    }
+
+    bool emitAboutToCloseOnce_() {
+        if (m_aboutToCloseEmitted) {
+            return true;
+        }
         m_aboutToCloseEmitted = true;
+        if (m_destroying) {
+            return true;
+        }
+        const std::uint64_t generation = m_protocolGeneration;
+        SwPointer<SwWebSocket> self(this);
         emit aboutToClose();
+        return self && self->m_protocolGeneration == generation;
     }
 
     void startCloseTimer_() {
@@ -2229,17 +2790,13 @@ private:
     }
 
     void startCloseReplyTimer_() {
-        if (m_closeReplyDelayMs <= 0) {
-            onCloseReplyTimeout_();
-            return;
-        }
         if (!m_closeReplyTimer) {
             m_closeReplyTimer = new SwTimer(this);
             m_closeReplyTimer->setSingleShot(true);
             connect(m_closeReplyTimer, &SwTimer::timeout, this, &SwWebSocket::onCloseReplyTimeout_);
         }
         m_closeReplyTimer->stop();
-        m_closeReplyTimer->start(m_closeReplyDelayMs);
+        m_closeReplyTimer->start(m_closeTimeoutMs > 0 ? m_closeTimeoutMs : 3000);
     }
 
     void stopCloseReplyTimer_() {
@@ -2248,15 +2805,104 @@ private:
         }
     }
 
-    void cleanupSocket() {
-        if (m_socket) {
-            m_socket->disconnectAllSlots();
-            m_socket->close();
-            m_socket->deleteLater();
-            m_socket = nullptr;
+    void maybeFinishCloseReply_() {
+        if (!m_closeAfterControlFlush || !m_socket || !m_pendingControlFrames.empty()) {
+            return;
         }
+        const SwTcpSocket* tcp = dynamic_cast<const SwTcpSocket*>(m_socket);
+        if (tcp && tcp->bytesToWrite() != 0) {
+            return;
+        }
+
+        m_closeAfterControlFlush = false;
+        stopCloseReplyTimer_();
+        stopCloseTimer_();
+        cleanupSocket(true);
+        resetProtocolState(true);
+        m_handshakeStage = StageIdle;
+        ++m_protocolGeneration;
+        if (!setState(SwAbstractSocket::UnconnectedState)) {
+            return;
+        }
+        emit disconnected();
+    }
+
+    static void disposeTransport_(SwAbstractSocket* socket, bool graceful) {
+        if (!socket) {
+            return;
+        }
+        socket->disconnectAllSlots();
+        socket->setParent(nullptr);
+
+        if (!graceful) {
+            if (SwTcpSocket* tcp = dynamic_cast<SwTcpSocket*>(socket)) {
+                tcp->abort();
+            } else {
+                socket->close();
+            }
+            if (!socket->deleteLater()) {
+                delete socket;
+            }
+            return;
+        }
+
+        SwPointer<SwAbstractSocket> guard(socket);
+        std::shared_ptr<std::atomic<bool>> deletionScheduled(
+            new std::atomic<bool>(false));
+        SwObject::connect(socket, &SwAbstractSocket::disconnected, socket,
+                          [guard, deletionScheduled]() mutable {
+            if (!guard || deletionScheduled->exchange(true, std::memory_order_acq_rel)) {
+                return;
+            }
+            SwAbstractSocket* owned = guard.data();
+            if (!owned->deleteLater()) {
+                delete owned;
+            }
+        });
+
+        SwTimer* deadline = new SwTimer(6000, socket);
+        deadline->setSingleShot(true);
+        SwObject::connect(deadline, &SwTimer::timeout, socket,
+                          [guard, deletionScheduled]() mutable {
+            if (!guard) {
+                return;
+            }
+            SwAbstractSocket* owned = guard.data();
+            if (SwTcpSocket* tcp = dynamic_cast<SwTcpSocket*>(owned)) {
+                tcp->abort();
+            } else {
+                owned->close();
+            }
+            if (guard && !deletionScheduled->exchange(true, std::memory_order_acq_rel)) {
+                owned = guard.data();
+                if (!owned->deleteLater()) {
+                    delete owned;
+                }
+            }
+        });
+
+        socket->close();
+        if (!guard) {
+            return;
+        }
+        if (guard->state() == SwAbstractSocket::UnconnectedState) {
+            if (!deletionScheduled->exchange(true, std::memory_order_acq_rel)) {
+                SwAbstractSocket* owned = guard.data();
+                if (!owned->deleteLater()) {
+                    delete owned;
+                }
+            }
+        } else {
+            deadline->start();
+        }
+    }
+
+    void cleanupSocket(bool graceful = false) {
+        SwAbstractSocket* socket = m_socket;
+        m_socket = nullptr;
         m_sslSocket = nullptr;
-        m_buffer.clear();
+        m_buffer.release();
+        disposeTransport_(socket, graceful);
     }
 
     bool attachAcceptedSocket_(SwAbstractSocket* socket) {
@@ -2280,10 +2926,14 @@ private:
         connect(m_socket, &SwAbstractSocket::disconnected, this, &SwWebSocket::onTcpDisconnected);
         connect(m_socket, &SwAbstractSocket::errorOccurred, this, &SwWebSocket::onTcpError);
         connect(m_socket, &SwIODevice::readyRead, this, &SwWebSocket::onTcpReadyRead);
+        connect(m_socket, &SwIODevice::readyWrite, this, [this]() { onTransportWritable_(); });
+        connect(m_socket, &SwAbstractSocket::writeFinished, this,
+                &SwWebSocket::onTransportWriteFinished_);
 
         m_handshakeDone = false;
         m_handshakeStage = StageWebSocketHandshake;
         setState(SwAbstractSocket::ConnectingState);
+        startHandshakeTimer_();
         return true;
     }
 
@@ -2295,11 +2945,18 @@ private:
         m_acceptedExtensions.clear();
         resetPerMessageDeflate_();
         m_messageOpcode = -1;
-        m_messageBuffer.clear();
+        m_messageBuffer = SwByteArray();
         m_closeSent = false;
         m_closeReceived = false;
         m_aboutToCloseEmitted = false;
         m_pendingPings.clear();
+        m_pendingControlFrames.clear();
+        m_pendingControlBytes = 0;
+        m_pumpingControlFrames = false;
+        m_closeAfterControlFlush = false;
+        m_readContinuationScheduled = false;
+        m_processingRead = false;
+        m_readAgain = false;
         if (!keepCloseInfo) {
             m_closeCode = static_cast<uint16_t>(CloseCodeNoStatusRcvd);
             m_closeReason.clear();
@@ -2307,7 +2964,12 @@ private:
     }
 
     void processFrames() {
+        std::size_t processedFrames = 0;
         while (!m_buffer.isEmpty()) {
+            if (processedFrames >= m_frameParseBudget) {
+                scheduleReadContinuation_();
+                return;
+            }
             uint8_t opcode = 0;
             bool fin = false;
             bool rsv1 = false;
@@ -2320,26 +2982,38 @@ private:
                 if (needMore) {
                     if (m_maxIncomingMessageSize > 0 &&
                         (opcode == kOpText || opcode == kOpBinary || opcode == kOpContinuation) &&
-                        payloadLen > m_maxIncomingMessageSize) {
-                        reportError_(kErrorMessageTooBig);
+                        (payloadLen > m_maxIncomingMessageSize ||
+                         (opcode == kOpContinuation &&
+                          payloadLen > m_maxIncomingMessageSize -
+                                           (std::min<uint64_t>)(m_messageBuffer.size(),
+                                                                m_maxIncomingMessageSize)))) {
+                        if (!reportError_(kErrorMessageTooBig)) {
+                            return;
+                        }
                         close(CloseCodeMessageTooBig);
                         return;
                     }
                     return;
                 }
-                reportError_(kErrorProtocolError);
-                abort();
+                if (reportError_(kErrorProtocolError)) {
+                    abort();
+                }
                 return;
             }
+            ++processedFrames;
 
             const bool expectMasked = (m_role == ServerRole);
             if (expectMasked && !masked) {
-                reportError_(kErrorProtocolError);
+                if (!reportError_(kErrorProtocolError)) {
+                    return;
+                }
                 close(CloseCodeProtocolError);
                 return;
             }
             if (!expectMasked && masked) {
-                reportError_(kErrorProtocolError);
+                if (!reportError_(kErrorProtocolError)) {
+                    return;
+                }
                 close(CloseCodeProtocolError);
                 return;
             }
@@ -2347,12 +3021,16 @@ private:
             // Control frames must be unfragmented and <= 125 bytes.
             if (opcode == kOpPing || opcode == kOpPong || opcode == kOpClose) {
                 if (rsv1) {
-                    reportError_(kErrorProtocolError);
+                    if (!reportError_(kErrorProtocolError)) {
+                        return;
+                    }
                     close(CloseCodeProtocolError);
                     return;
                 }
                 if (!fin || payload.size() > 125) {
-                    reportError_(kErrorProtocolError);
+                    if (!reportError_(kErrorProtocolError)) {
+                        return;
+                    }
                     close(CloseCodeProtocolError);
                     return;
                 }
@@ -2361,7 +3039,10 @@ private:
             // Control frames must be unfragmented and <= 125 bytes; parseOneFrame already ensured length <= available.
             if (opcode == kOpPing) {
                 // Respond immediately with pong.
-                sendControlFrame(kOpPong, payload);
+                const std::uint64_t generation = m_protocolGeneration;
+                if (!sendControlFrame(kOpPong, payload) || m_protocolGeneration != generation) {
+                    return;
+                }
                 continue;
             }
             if (opcode == kOpPong) {
@@ -2384,52 +3065,42 @@ private:
                         m_pendingPings.removeAt(0);
                     }
                 }
+                const std::uint64_t generation = m_protocolGeneration;
+                SwPointer<SwWebSocket> self(this);
                 emit pong(elapsedMs, payload);
+                if (!self || self->m_protocolGeneration != generation) {
+                    return;
+                }
                 continue;
             }
             if (opcode == kOpClose) {
                 m_closeReceived = true;
                 uint16_t closeCode = static_cast<uint16_t>(CloseCodeNoStatusRcvd);
                 SwString closeReason;
-                bool sentCloseReply = false;
+                bool echoPeerPayload = true;
 
                 if (payload.size() == 1) {
                     closeCode = static_cast<uint16_t>(CloseCodeProtocolError);
-                    closeReason = "";
-                    reportError_(kErrorProtocolError);
-                    if (!m_closeSent) {
-                        emitAboutToCloseOnce_();
-                        setState(SwAbstractSocket::ClosingState);
-                        sendCloseFrame(static_cast<uint16_t>(CloseCodeProtocolError), SwString());
-                        m_closeSent = true;
-                        sentCloseReply = true;
+                    echoPeerPayload = false;
+                    if (!reportError_(kErrorProtocolError)) {
+                        return;
                     }
                 } else if (payload.size() >= 2) {
                     closeCode = (static_cast<uint16_t>(static_cast<unsigned char>(payload[0])) << 8) |
                                 static_cast<uint16_t>(static_cast<unsigned char>(payload[1]));
                     SwByteArray reasonBytes = payload.mid(2);
                     if (!isValidCloseCode_(closeCode)) {
-                        reportError_(kErrorProtocolError);
+                        if (!reportError_(kErrorProtocolError)) {
+                            return;
+                        }
                         closeCode = static_cast<uint16_t>(CloseCodeProtocolError);
-                        closeReason = "";
-                        if (!m_closeSent) {
-                            emitAboutToCloseOnce_();
-                            setState(SwAbstractSocket::ClosingState);
-                            sendCloseFrame(static_cast<uint16_t>(CloseCodeProtocolError), SwString());
-                            m_closeSent = true;
-                            sentCloseReply = true;
-                        }
+                        echoPeerPayload = false;
                     } else if (!reasonBytes.isEmpty() && !isValidUtf8_(reasonBytes)) {
-                        reportError_(kErrorInvalidUtf8);
-                        closeCode = static_cast<uint16_t>(CloseCodeInvalidPayload);
-                        closeReason = "";
-                        if (!m_closeSent) {
-                            emitAboutToCloseOnce_();
-                            setState(SwAbstractSocket::ClosingState);
-                            sendCloseFrame(static_cast<uint16_t>(CloseCodeInvalidPayload), SwString());
-                            m_closeSent = true;
-                            sentCloseReply = true;
+                        if (!reportError_(kErrorInvalidUtf8)) {
+                            return;
                         }
+                        closeCode = static_cast<uint16_t>(CloseCodeInvalidPayload);
+                        echoPeerPayload = false;
                     } else {
                         closeReason = SwString(reasonBytes);
                     }
@@ -2439,43 +3110,57 @@ private:
                 m_closeReason = closeReason;
 
                 if (!m_closeSent) {
-                    // Echo close payload as per RFC.
-                    emitAboutToCloseOnce_();
-                    setState(SwAbstractSocket::ClosingState);
-                    sendControlFrame(kOpClose, payload);
+                    if (!emitAboutToCloseOnce_() ||
+                        !setState(SwAbstractSocket::ClosingState)) {
+                        return;
+                    }
+                    const bool queued = echoPeerPayload
+                                            ? sendControlFrame(kOpClose, payload)
+                                            : sendCloseFrame(closeCode, SwString());
+                    if (!queued) {
+                        return;
+                    }
                     m_closeSent = true;
-                    sentCloseReply = true;
-                }
-                stopCloseTimer_();
-                if (sentCloseReply) {
-                    // Give the close reply a chance to flush before closing the TCP connection.
+                    m_closeAfterControlFlush = true;
+                    // Event-driven completion closes as soon as the reply leaves the transport
+                    // buffer; this timer is only the bounded failure deadline.
                     startCloseReplyTimer_();
+                    maybeFinishCloseReply_();
                     return;
                 }
-                cleanupSocket();
+                stopCloseTimer_();
+                cleanupSocket(true);
                 resetProtocolState(true);
                 m_handshakeStage = StageIdle;
-                setState(SwAbstractSocket::UnconnectedState);
+                ++m_protocolGeneration;
+                if (!setState(SwAbstractSocket::UnconnectedState)) {
+                    return;
+                }
                 emit disconnected();
                 return;
             }
 
             if (opcode == kOpContinuation) {
                 if (rsv1) {
-                    reportError_(kErrorProtocolError);
+                    if (!reportError_(kErrorProtocolError)) {
+                        return;
+                    }
                     close(CloseCodeProtocolError);
                     return;
                 }
                 if (m_messageOpcode < 0) {
-                    reportError_(kErrorProtocolError);
-                    abort();
+                    if (reportError_(kErrorProtocolError)) {
+                        abort();
+                    }
                     return;
                 }
                 if (!payload.isEmpty()) {
                     m_messageBuffer.append(payload.constData(), payload.size());
                 }
                 if (m_maxIncomingMessageSize > 0 && m_messageBuffer.size() > m_maxIncomingMessageSize) {
-                    reportError_(kErrorMessageTooBig);
+                    if (!reportError_(kErrorMessageTooBig)) {
+                        return;
+                    }
                     close(CloseCodeMessageTooBig);
                     return;
                 }
@@ -2489,50 +3174,75 @@ private:
 
             if (opcode == kOpText || opcode == kOpBinary) {
                 if (m_messageOpcode >= 0) {
-                    reportError_(kErrorProtocolError);
-                    abort();
+                    if (reportError_(kErrorProtocolError)) {
+                        abort();
+                    }
                     return;
                 }
 
                 if (fin) {
                     if (m_maxIncomingMessageSize > 0 && payload.size() > m_maxIncomingMessageSize) {
-                        reportError_(kErrorMessageTooBig);
+                        if (!reportError_(kErrorMessageTooBig)) {
+                            return;
+                        }
                         close(CloseCodeMessageTooBig);
                         return;
                     }
 
-                    SwByteArray messagePayload = payload;
+                    SwByteArray messagePayload = std::move(payload);
                     if (rsv1) {
                         if (!m_pmd.negotiated) {
-                            reportError_(kErrorProtocolError);
+                            if (!reportError_(kErrorProtocolError)) {
+                                return;
+                            }
                             close(CloseCodeProtocolError);
                             return;
                         }
                         SwByteArray inflated;
-                        if (!inflateMessage_(payload, inflated)) {
-                            reportError_(kErrorProtocolError);
-                            close(CloseCodeProtocolError);
+                        bool inflatedTooLarge = false;
+                        if (!inflateMessage_(messagePayload, inflated, inflatedTooLarge)) {
+                            if (!reportError_(inflatedTooLarge ? kErrorMessageTooBig
+                                                              : kErrorProtocolError)) {
+                                return;
+                            }
+                            close(inflatedTooLarge ? CloseCodeMessageTooBig
+                                                   : CloseCodeProtocolError);
                             return;
                         }
-                        messagePayload = inflated;
+                        messagePayload = std::move(inflated);
                     }
 
                     if (opcode == kOpText) {
                         if (!isValidUtf8_(messagePayload)) {
-                            reportError_(kErrorInvalidUtf8);
+                            if (!reportError_(kErrorInvalidUtf8)) {
+                                return;
+                            }
                             close(CloseCodeInvalidPayload);
                             return;
                         }
-                        emit textMessageReceived(SwString(messagePayload));
+                        const std::uint64_t generation = m_protocolGeneration;
+                        SwPointer<SwWebSocket> self(this);
+                        const SwString text(messagePayload);
+                        emit textMessageReceived(text);
+                        if (!self || self->m_protocolGeneration != generation) {
+                            return;
+                        }
                     } else {
+                        const std::uint64_t generation = m_protocolGeneration;
+                        SwPointer<SwWebSocket> self(this);
                         emit binaryMessageReceived(messagePayload);
+                        if (!self || self->m_protocolGeneration != generation) {
+                            return;
+                        }
                     }
                 } else {
                     m_messageOpcode = static_cast<int>(opcode);
-                    m_messageBuffer = payload;
+                    m_messageBuffer = std::move(payload);
                     m_currentMessageCompressed = rsv1;
                     if (m_maxIncomingMessageSize > 0 && m_messageBuffer.size() > m_maxIncomingMessageSize) {
-                        reportError_(kErrorMessageTooBig);
+                        if (!reportError_(kErrorMessageTooBig)) {
+                            return;
+                        }
                         close(CloseCodeMessageTooBig);
                         return;
                     }
@@ -2541,38 +3251,58 @@ private:
             }
 
             // Unknown opcode
-            reportError_(kErrorProtocolError);
+            if (!reportError_(kErrorProtocolError)) {
+                return;
+            }
             close(CloseCodeProtocolError);
             return;
         }
     }
 
     bool finalizeMessage_() {
-        SwByteArray payload = m_messageBuffer;
+        SwByteArray payload;
         if (m_currentMessageCompressed) {
             SwByteArray inflated;
-            if (!inflateMessage_(m_messageBuffer, inflated)) {
-                reportError_(kErrorProtocolError);
-                close(CloseCodeProtocolError);
+            bool inflatedTooLarge = false;
+            if (!inflateMessage_(m_messageBuffer, inflated, inflatedTooLarge)) {
+                if (!reportError_(inflatedTooLarge ? kErrorMessageTooBig
+                                                   : kErrorProtocolError)) {
+                    return false;
+                }
+                close(inflatedTooLarge ? CloseCodeMessageTooBig
+                                       : CloseCodeProtocolError);
                 return false;
             }
-            payload = inflated;
+            payload = std::move(inflated);
+        } else {
+            payload = std::move(m_messageBuffer);
         }
 
-        if (m_messageOpcode == kOpText) {
+        const int completedOpcode = m_messageOpcode;
+        if (completedOpcode == kOpText) {
             if (!isValidUtf8_(payload)) {
-                reportError_(kErrorInvalidUtf8);
+                if (!reportError_(kErrorInvalidUtf8)) {
+                    return false;
+                }
                 close(CloseCodeInvalidPayload);
                 return false;
             }
-            emit textMessageReceived(SwString(payload));
-        } else if (m_messageOpcode == kOpBinary) {
+        }
+
+        // Clear fragmentation state before arbitrary user callbacks can re-enter this object.
+        m_messageOpcode = -1;
+        m_messageBuffer = SwByteArray();
+        m_currentMessageCompressed = false;
+
+        const std::uint64_t generation = m_protocolGeneration;
+        SwPointer<SwWebSocket> self(this);
+        if (completedOpcode == kOpText) {
+            const SwString text(payload);
+            emit textMessageReceived(text);
+        } else if (completedOpcode == kOpBinary) {
             emit binaryMessageReceived(payload);
         }
-        m_messageOpcode = -1;
-        m_messageBuffer.clear();
-        m_currentMessageCompressed = false;
-        return true;
+        return self && self->m_protocolGeneration == generation;
     }
 
 private:
@@ -2628,10 +3358,29 @@ private:
     PerMessageDeflateState m_pmd;
 
     uint64_t m_maxIncomingMessageSize = 16ULL * 1024ULL * 1024ULL; // 16 MiB default
+    uint64_t m_maxOutgoingMessageSize = 16ULL * 1024ULL * 1024ULL;
+    std::size_t m_maxBufferedIncomingBytes = 0;
+    std::size_t m_readBudgetBytes = 256 * 1024;
+    std::size_t m_frameParseBudget = 64;
+
+    std::deque<PendingControlFrame> m_pendingControlFrames;
+    std::size_t m_pendingControlBytes = 0;
+    std::size_t m_maxPendingControlFrames = 64;
+    std::size_t m_maxPendingControlBytes = 16 * 1024;
+    bool m_pumpingControlFrames = false;
+    bool m_closeAfterControlFlush = false;
+
+    std::uint64_t m_protocolGeneration = 1;
+    bool m_readContinuationScheduled = false;
+    bool m_processingRead = false;
+    bool m_readAgain = false;
+    bool m_destroying = false;
 
     int m_closeTimeoutMs = 3000;
     SwTimer* m_closeTimer = nullptr;
-    int m_closeReplyDelayMs = 200;
+    int m_handshakeTimeoutMs = 10 * 1000;
+    std::size_t m_maxHandshakeBytes = 32 * 1024;
+    SwTimer* m_handshakeTimer = nullptr;
     SwTimer* m_closeReplyTimer = nullptr;
     int m_lastError = 0;
     SwString m_lastErrorText;

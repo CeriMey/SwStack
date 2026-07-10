@@ -288,9 +288,10 @@ public: \
     void signalName(SW_SIGNAL_PARAMS_FROM_TYPES(__VA_ARGS__)) { \
         using __SwSignalClass = typename std::decay<decltype(*this)>::type; \
         using __SwSignalPointer = SW_SIGNAL_MEMBER_PTR(__SwSignalClass, __VA_ARGS__); \
+        static const SwObject::SignalKey __sw_signal_key = \
+            SwObject::createSignalKey(static_cast<__SwSignalPointer>(&__SwSignalClass::signalName)); \
         emitSignal(#signalName SW_SIGNAL_ARGS_WITH_COMMA_FROM_TYPES(__VA_ARGS__)); \
-        emitSignal(SwObject::createSignalKey(static_cast<__SwSignalPointer>(&__SwSignalClass::signalName)) \
-            SW_SIGNAL_ARGS_WITH_COMMA_FROM_TYPES(__VA_ARGS__)); \
+        emitSignal(__sw_signal_key SW_SIGNAL_ARGS_WITH_COMMA_FROM_TYPES(__VA_ARGS__)); \
     } \
     template <typename... Args> \
     void invoke_##signalName(Args&&... args) { \
@@ -307,8 +308,10 @@ public: \
     void signalName() { \
         using __SwSignalClass = typename std::decay<decltype(*this)>::type; \
         using __SwSignalPointer = void (__SwSignalClass::*)(); \
+        static const SwObject::SignalKey __sw_signal_key = \
+            SwObject::createSignalKey(static_cast<__SwSignalPointer>(&__SwSignalClass::signalName)); \
         emitSignal(#signalName); \
-        emitSignal(SwObject::createSignalKey(static_cast<__SwSignalPointer>(&__SwSignalClass::signalName))); \
+        emitSignal(__sw_signal_key); \
     } \
     template <typename... Args> \
     void invoke_##signalName(Args&&... args) { \
@@ -697,10 +700,42 @@ protected:
      */
     static SignalKey createSignalKey(SignalPtr signal) {
         static_assert(std::is_member_function_pointer<SignalPtr>::value, "Signal pointer attendu");
-        return SignalKey(
-            std::type_index(typeid(SignalPtr)),
-            std::string(reinterpret_cast<const char*>(&signal), sizeof(SignalPtr))
-        );
+        // Comparing the object representation is not portable: on MSVC a
+        // multiple-inheritance member pointer may contain padding whose bytes
+        // differ between call sites even though operator== says the pointers
+        // designate the same method.  Intern the semantic value once per exact
+        // pointer type and use its stable registry index as the map key.
+        struct Registry {
+#if defined(_WIN32)
+            Registry() { InitializeCriticalSection(&mutex); }
+            ~Registry() { DeleteCriticalSection(&mutex); }
+            void lock() { EnterCriticalSection(&mutex); }
+            void unlock() { LeaveCriticalSection(&mutex); }
+            CRITICAL_SECTION mutex;
+#else
+            void lock() { mutex.lock(); }
+            void unlock() { mutex.unlock(); }
+            std::mutex mutex;
+#endif
+            std::vector<SignalPtr> entries;
+        };
+        // Process-lifetime interning avoids static-destruction ordering against live objects.
+        static Registry* const registry = new Registry();
+        std::size_t index = 0;
+        {
+            std::lock_guard<Registry> lock(*registry);
+            for (; index < registry->entries.size(); ++index) {
+                if (registry->entries[index] == signal) {
+                    break;
+                }
+            }
+            if (index == registry->entries.size()) {
+                registry->entries.push_back(signal);
+            }
+        }
+        std::string encoded(sizeof(index), '\0');
+        std::memcpy(&encoded[0], &index, sizeof(index));
+        return SignalKey(std::type_index(typeid(SignalPtr)), std::move(encoded));
     }
 
     using ConnectionEntry = std::pair<std::shared_ptr<ISlotBase>, ConnectionType>;
@@ -827,7 +862,8 @@ public:
            * @brief Performs the `m_parent` operation.
            * @param nullptr Value passed to the method.
            */
-          m_parent(nullptr)
+          m_parent(nullptr),
+          m_lifetimeToken(std::make_shared<int>(0))
     {
         { SwWriteLocker lk(s_liveObjectsMutex_()); s_liveObjects_().insert(this); }
         setParent(parent);
@@ -849,6 +885,7 @@ public:
      * and deleting child objects if necessary (commented out here for customization).
      */
     virtual ~SwObject() {
+        m_lifetimeToken.reset();
         { SwWriteLocker lk(s_liveObjectsMutex_()); s_liveObjects_().erase(this); }
         disconnectFromAllSenders_();
         auto localChildren = m_children;
@@ -1047,8 +1084,9 @@ public:
      * The actual deletion occurs asynchronously, ensuring that the SwObject is safely
      * removed without disrupting the current execution flow.
      */
-    void deleteLater() {
+    bool deleteLater() {
         SwObject* meAsDurtyToClean = this;
+        const std::weak_ptr<void> lifetime = m_lifetimeToken;
         ThreadHandle* targetThread = this->threadHandle();
         if (!targetThread) {
             targetThread = ThreadHandle::currentThread();
@@ -1057,8 +1095,9 @@ public:
             }
         }
         if (targetThread) {
-            targetThread->postTask([meAsDurtyToClean]() {
-                if (!SwObject::isLive(meAsDurtyToClean)) {
+            const bool accepted = targetThread->postTaskOnLaneReliable(
+                [meAsDurtyToClean, lifetime]() {
+                if (lifetime.expired() || !SwObject::isLive(meAsDurtyToClean)) {
                     return;
                 }
                 if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
@@ -1066,16 +1105,17 @@ public:
                 } else {
                     delete meAsDurtyToClean;
                 }
-            });
-            return;
+            }, SwFiberLane::Control);
+            return accepted;
         }
 
         if (SwCoreApplication* app = SwCoreApplication::instance(false)) {
             app->postEvent(meAsDurtyToClean, new SwDeferredDeleteEvent());
-            return;
+            return true;
         }
 
         delete meAsDurtyToClean;
+        return true;
     }
 
     /**
@@ -2373,6 +2413,7 @@ signals:
 
 private:
     SwObject* m_parent = nullptr;
+    std::shared_ptr<void> m_lifetimeToken;
     SwList<SwObject*> m_children;
     SwString objectName;
 
