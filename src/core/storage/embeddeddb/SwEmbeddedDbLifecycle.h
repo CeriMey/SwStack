@@ -188,23 +188,23 @@ public:
         if (db_.options_.readOnly && db_.readOnlySnapshotState_) {
             snapshot.state_ = db_.readOnlySnapshotState_;
         } else if (!db_.options_.readOnly && db_.writerSnapshotState_ &&
-                   db_.writerSnapshotState_->visibleSequence == db_.lastVisibleSequence_) {
-            // Nothing written since the base was built: serve it as-is. The
+                   db_.writerSnapshotGeneration_ == db_.applyGeneration_) {
+            // Nothing applied since the base was built: serve it as-is. The
             // state is self-contained (shared memtable copies, shared table
             // handles, materialized read model), and flush/compaction/blob GC
-            // never change the logical content at a given sequence.
+            // never change the logical content at a given generation.
             db_.metrics_.snapshotCacheHitCount += 1;
             snapshot.state_ = db_.writerSnapshotState_;
         } else if (!db_.options_.readOnly && db_.writerSnapshotState_ &&
                    db_.writerOverlay_.baseSequence == db_.writerSnapshotState_->visibleSequence) {
             // Base + overlay: records written since the base was built are
             // merged on top of it at iteration/lookup time. One immutable copy
-            // of the overlay is shared by every snapshot at this sequence.
+            // of the overlay is shared by every snapshot at this generation.
             if (!db_.writerOverlaySnapshot_ ||
-                db_.writerOverlaySnapshotSequence_ != db_.lastVisibleSequence_) {
+                db_.writerOverlaySnapshotGeneration_ != db_.applyGeneration_) {
                 db_.writerOverlaySnapshot_.reset(
                     new swEmbeddedDbDetail::WriterOverlay_(db_.writerOverlay_));
-                db_.writerOverlaySnapshotSequence_ = db_.lastVisibleSequence_;
+                db_.writerOverlaySnapshotGeneration_ = db_.applyGeneration_;
             }
             db_.metrics_.snapshotCacheHitCount += 1;
             snapshot.state_.reset(new swEmbeddedDbDetail::SnapshotState_());
@@ -236,10 +236,11 @@ public:
             }
             if (!db_.options_.readOnly) {
                 db_.writerSnapshotState_ = snapshot.state_;
+                db_.writerSnapshotGeneration_ = db_.applyGeneration_;
                 db_.writerOverlay_ = swEmbeddedDbDetail::WriterOverlay_();
                 db_.writerOverlay_.baseSequence = db_.lastVisibleSequence_;
                 db_.writerOverlaySnapshot_.reset();
-                db_.writerOverlaySnapshotSequence_ = 0;
+                db_.writerOverlaySnapshotGeneration_ = 0;
             }
         }
         snapshot.valid_ = true;
@@ -259,7 +260,9 @@ public:
         db_.writerSnapshotState_.reset();
         db_.writerOverlay_ = swEmbeddedDbDetail::WriterOverlay_();
         db_.writerOverlaySnapshot_.reset();
-        db_.writerOverlaySnapshotSequence_ = 0;
+        db_.applyGeneration_ = 0;
+        db_.writerSnapshotGeneration_ = 0;
+        db_.writerOverlaySnapshotGeneration_ = 0;
         db_.activeWalFileId_ = 0;
         db_.pendingWrites_.clear();
         db_.writerLockHeld_ = false;

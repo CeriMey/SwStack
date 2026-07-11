@@ -131,18 +131,28 @@ private:
         if (!overlayActive_()) {
             return;
         }
+        // approximateBytes tracks the RESIDENT overlay size (it models the
+        // per-scan merge cost): replaced entries swap their contribution and
+        // guard-rejected stores add nothing, otherwise hot-key updates would
+        // inflate it and collapse the cache prematurely.
+        const unsigned long long newBytes =
+            static_cast<unsigned long long>(primaryKey.size() + record.value.size()) + 64ull;
         const std::map<SwByteArray, swEmbeddedDbDetail::PrimaryRecord_>::iterator it =
             db_.writerOverlay_.primary.find(primaryKey);
         if (it != db_.writerOverlay_.primary.end()) {
             if (it->second.sequence <= record.sequence) {
+                const unsigned long long oldBytes =
+                    static_cast<unsigned long long>(primaryKey.size() + it->second.value.size()) + 64ull;
+                db_.writerOverlay_.approximateBytes -=
+                    std::min(db_.writerOverlay_.approximateBytes, oldBytes);
+                db_.writerOverlay_.approximateBytes += newBytes;
                 it->second = record;
             }
         } else {
             db_.writerOverlay_.primary.insert(std::make_pair(primaryKey, record));
             db_.writerOverlay_.entryCount += 1;
+            db_.writerOverlay_.approximateBytes += newBytes;
         }
-        db_.writerOverlay_.approximateBytes +=
-            static_cast<unsigned long long>(primaryKey.size() + record.value.size()) + 64ull;
     }
 
     void overlayStoreIndexEntries(const SwByteArray& primaryKey,
@@ -169,14 +179,15 @@ private:
                     bucket.find(compositeKey);
                 if (entryIt != bucket.end()) {
                     if (entryIt->second.sequence <= sequence) {
+                        // Same composite key => same size: no byte accounting.
                         entryIt->second = entry;
                     }
                 } else {
                     bucket.insert(std::make_pair(compositeKey, entry));
                     db_.writerOverlay_.entryCount += 1;
+                    db_.writerOverlay_.approximateBytes +=
+                        static_cast<unsigned long long>(compositeKey.size()) + 48ull;
                 }
-                db_.writerOverlay_.approximateBytes +=
-                    static_cast<unsigned long long>(compositeKey.size()) + 48ull;
             }
         }
     }
@@ -204,6 +215,7 @@ public:
         if (db_.writerSnapshotState_) {
             db_.invalidateWriterReadCacheLocked_();
         }
+        db_.applyGeneration_ += 1;
         db_.mutable_.walId = db_.manifest_.activeWalId;
         if (db_.mutable_.minSeq == 0 || sequence < db_.mutable_.minSeq) {
             db_.mutable_.minSeq = sequence;
@@ -259,10 +271,13 @@ public:
                     hadPrevious = db_.lookupPrimaryLocked_(op.primaryKey, previous, false);
                 }
             }
-            if (mutableIt != db_.mutable_.primary.end() && mutableIt->second.sequence > sequence) {
-                // A newer write already superseded this op (out-of-order apply
-                // or replay): skip it entirely so no stale secondary
-                // tombstones/upserts are emitted for it.
+            // A newer write already superseded this op (out-of-order apply or
+            // replay): skip it entirely so no stale record/tombstone lands in
+            // the memtable and no stale secondary entries are emitted. The
+            // lookup fills `previous` from ANY tier — mutable_, immutables_ or
+            // tables — including tombstones (its return value is false for
+            // them but the sequence is set); an absent key leaves sequence 0.
+            if (previous.sequence > sequence) {
                 continue;
             }
             if (hadPrevious && !previous.deleted) {
@@ -340,6 +355,7 @@ public:
     }
 
     void applyBatchLockedMutable(unsigned long long sequence, SwDbWriteBatch& batch) {
+        db_.applyGeneration_ += 1;
         db_.mutable_.walId = db_.manifest_.activeWalId;
         if (db_.mutable_.minSeq == 0 || sequence < db_.mutable_.minSeq) {
             db_.mutable_.minSeq = sequence;
@@ -395,10 +411,13 @@ public:
                     hadPrevious = db_.lookupPrimaryLocked_(op.primaryKey, previous, false);
                 }
             }
-            if (mutableIt != db_.mutable_.primary.end() && mutableIt->second.sequence > sequence) {
-                // A newer write already superseded this op (out-of-order apply
-                // or replay): skip it entirely so no stale secondary
-                // tombstones/upserts are emitted for it.
+            // A newer write already superseded this op (out-of-order apply or
+            // replay): skip it entirely so no stale record/tombstone lands in
+            // the memtable and no stale secondary entries are emitted. The
+            // lookup fills `previous` from ANY tier — mutable_, immutables_ or
+            // tables — including tombstones (its return value is false for
+            // them but the sequence is set); an absent key leaves sequence 0.
+            if (previous.sequence > sequence) {
                 continue;
             }
             if (hadPrevious && !previous.deleted) {

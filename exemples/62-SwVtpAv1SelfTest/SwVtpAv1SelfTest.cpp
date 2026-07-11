@@ -729,9 +729,18 @@ bool runControlPayloadValidationScenario() {
     stats.streamId = 1;
     stats.trackId = 1;
     stats.lastFrameId = 8;
+    stats.delayGradientUsPerS = 1234;
+    stats.queueDelayMs = 7;
     const SwByteArray statsPayload = swVtpSerializeReceiverStats(stats);
-    ok = expect(!swVtpParseReceiverStatsPayload(withoutLastByte(statsPayload),
-                                                parsedStats),
+    // The gradient fields are an optional tail: a legacy 36-byte payload must still
+    // parse (fields default to 0), while anything below 36 bytes is rejected.
+    SwByteArray legacyPayload(statsPayload.constData(), 36U);
+    ok = expect(swVtpParseReceiverStatsPayload(legacyPayload, parsedStats),
+                "receiver stats parser accepts legacy payload") && ok;
+    ok = expect(parsedStats.delayGradientUsPerS == 0 && parsedStats.queueDelayMs == 0U,
+                "legacy payload leaves gradient fields at zero") && ok;
+    SwByteArray belowMinimum(statsPayload.constData(), 35U);
+    ok = expect(!swVtpParseReceiverStatsPayload(belowMinimum, parsedStats),
                 "receiver stats parser rejects truncated payload") && ok;
 
     SwVtpClockSyncPing zeroPing;
@@ -805,6 +814,8 @@ bool runReceiverStatsPayloadRoundTrip() {
     stats.captureLatencyMs = 47;
     stats.clockUncertaintyMs = 4;
     stats.droppedFrames = 3;
+    stats.delayGradientUsPerS = -5200; // negative drift (draining queue) round-trips
+    stats.queueDelayMs = 14;
 
     SwVtpReceiverStats parsed;
     bool ok = expect(swVtpParseReceiverStatsPayload(swVtpSerializeReceiverStats(stats),
@@ -833,9 +844,120 @@ bool runReceiverStatsPayloadRoundTrip() {
                 "receiver stats clock uncertainty") && ok;
     ok = expect(parsed.droppedFrames == stats.droppedFrames,
                 "receiver stats dropped frames") && ok;
+    ok = expect(parsed.delayGradientUsPerS == stats.delayGradientUsPerS,
+                "receiver stats delay gradient (signed)") && ok;
+    ok = expect(parsed.queueDelayMs == stats.queueDelayMs,
+                "receiver stats queue delay") && ok;
 
     if (ok) {
         std::cout << "[SwVTP receiver stats payload] PASS\n";
+    }
+    return ok;
+}
+
+bool runDelayGradientEstimatorScenario() {
+    // Flat network: constant one-way delay -> no drift, no jitter, no standing queue.
+    SwVtpDelayGradientEstimator flat;
+    for (int i = 0; i < 30; ++i) {
+        const uint64_t sendUs = 1000000ULL + static_cast<uint64_t>(i) * 33333ULL;
+        flat.addSample(sendUs, sendUs + 5000ULL); // constant 5 ms offset
+    }
+    bool ok = expect(flat.gradientUsPerSecond() == 0, "gradient flat network is zero");
+    ok = expect(flat.jitterUs() < 100.0, "jitter flat network is ~zero") && ok;
+    ok = expect(flat.queueDelayMs() == 0U, "queue delay flat network is zero") && ok;
+
+    // Congestion ramp: each frame arrives 2 ms later than the previous relative to its
+    // send time (queue building at ~60 ms/s). The gradient must expose that drift.
+    SwVtpDelayGradientEstimator ramp;
+    for (int i = 0; i < 30; ++i) {
+        const uint64_t sendUs = 1000000ULL + static_cast<uint64_t>(i) * 33333ULL;
+        const uint64_t queueUs = static_cast<uint64_t>(i) * 2000ULL;
+        ramp.addSample(sendUs, sendUs + 5000ULL + queueUs);
+    }
+    ok = expect(ramp.gradientUsPerSecond() > 30000, "gradient detects the upward drift") && ok;
+    ok = expect(ramp.queueDelayMs() > 5U, "standing queue grows on the ramp") && ok;
+
+    // Draining queue: delay shrinking back -> clearly negative gradient.
+    SwVtpDelayGradientEstimator drain;
+    for (int i = 0; i < 30; ++i) {
+        const uint64_t sendUs = 1000000ULL + static_cast<uint64_t>(i) * 33333ULL;
+        const uint64_t queueUs = static_cast<uint64_t>(29 - i) * 2000ULL;
+        drain.addSample(sendUs, sendUs + 5000ULL + queueUs);
+    }
+    ok = expect(drain.gradientUsPerSecond() < -30000, "gradient detects the drain") && ok;
+
+    // Pure jitter (alternating +/-4 ms, no trend): jitter reported, gradient near zero.
+    SwVtpDelayGradientEstimator jitter;
+    for (int i = 0; i < 60; ++i) {
+        const uint64_t sendUs = 1000000ULL + static_cast<uint64_t>(i) * 33333ULL;
+        const uint64_t wobbleUs = (i % 2 == 0) ? 4000ULL : 0ULL;
+        jitter.addSample(sendUs, sendUs + 5000ULL + wobbleUs);
+    }
+    ok = expect(jitter.jitterUs() > 2000.0, "jitter reported on wobble") && ok;
+    ok = expect(jitter.gradientUsPerSecond() > -15000 &&
+                    jitter.gradientUsPerSecond() < 15000,
+                "wobble without trend keeps the gradient small") && ok;
+
+    // Discontinuity (sender restart): the drift series restarts instead of exploding.
+    SwVtpDelayGradientEstimator restart;
+    for (int i = 0; i < 10; ++i) {
+        const uint64_t sendUs = 1000000ULL + static_cast<uint64_t>(i) * 33333ULL;
+        restart.addSample(sendUs, sendUs + 5000ULL);
+    }
+    restart.addSample(500000000ULL, 500005000ULL); // 8-minute jump
+    ok = expect(restart.gradientUsPerSecond() == 0,
+                "discontinuity restarts the drift series") && ok;
+
+    if (ok) {
+        std::cout << "[SwVTP delay gradient estimator] PASS\n";
+    }
+    return ok;
+}
+
+bool runDelayGradientAbrScenario() {
+    SwVtpAdaptiveBitratePolicy policy;
+    policy.startBitrateKbps = 6000;
+    policy.minBitrateKbps = 500;
+    policy.maxBitrateKbps = 12000;
+    SwVtpAdaptiveBitrateController controller(policy);
+
+    // Upward delay drift with ZERO loss: the controller must back off BEFORE any packet
+    // is lost, gently, and without requesting a key frame.
+    SwVtpReceiverStats drifting;
+    drifting.estimatedBandwidthKbps = 6000;
+    drifting.delayGradientUsPerS = policy.overuseGradientUsPerS + 1000;
+    drifting.queueDelayMs = 12;
+    const SwVtpAdaptiveBitrateDecision early = controller.update(drifting, 1000);
+    bool ok = expect(early.reason ==
+                         SwVtpAdaptiveBitrateDecision::Reason::DelayGradientPressure,
+                     "ABR reacts to delay drift before loss");
+    ok = expect(early.targetBitrateKbps < 6000U, "ABR gradient downshift applied") && ok;
+    ok = expect(!early.requestKeyFrame, "gradient downshift needs no key frame") && ok;
+    ok = expect(early.preferBaseTemporalLayer, "gradient downshift sheds temporal layers") && ok;
+    ok = expect(early.targetBitrateKbps >
+                    (6000U * policy.softDownshiftPercent) / 100U,
+                "gradient downshift is gentler than the loss-driven one") && ok;
+
+    // While the drift persists, no upshift probe may fire even after the cooldown.
+    SwVtpReceiverStats stillDrifting;
+    stillDrifting.estimatedBandwidthKbps = 6000;
+    stillDrifting.delayGradientUsPerS = policy.upshiftGradientCeilingUsPerS + 500;
+    stillDrifting.queueDelayMs = 2; // below the floor: no downshift either
+    const SwVtpAdaptiveBitrateDecision held =
+        controller.update(stillDrifting, 1000 + policy.upshiftCooldownMs + 1000);
+    ok = expect(held.reason == SwVtpAdaptiveBitrateDecision::Reason::Stable,
+                "residual drift blocks the upshift probe") && ok;
+
+    // Once the drift is gone, the regular upshift probing resumes.
+    SwVtpReceiverStats calm;
+    calm.estimatedBandwidthKbps = 12000;
+    const SwVtpAdaptiveBitrateDecision probe =
+        controller.update(calm, 1000 + 2 * (policy.upshiftCooldownMs + 1000));
+    ok = expect(probe.reason == SwVtpAdaptiveBitrateDecision::Reason::UpshiftProbe,
+                "upshift resumes once the delay is flat") && ok;
+
+    if (ok) {
+        std::cout << "[SwVTP delay gradient ABR] PASS\n";
     }
     return ok;
 }
@@ -1396,6 +1518,8 @@ int main(int argc, char** argv) {
     ok = runAdaptiveBandwidthHeadroomScenario() && ok;
     ok = runAdaptiveQueueAndDecoderPressureScenario() && ok;
     ok = runAdaptiveMinMaxClampScenario() && ok;
+    ok = runDelayGradientEstimatorScenario() && ok;
+    ok = runDelayGradientAbrScenario() && ok;
     if (argc > 1) {
         ok = runIvfAv1StreamValidation(argv[1]) && ok;
     }

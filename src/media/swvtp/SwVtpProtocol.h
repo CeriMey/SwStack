@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <vector>
 
 static constexpr const char* kSwVtpProtocolName = "SwVTP";
 static constexpr uint8_t kSwVtpVersion1 = 1;
@@ -170,6 +171,10 @@ struct SwVtpReceiverStats {
     uint16_t captureLatencyMs{0};
     uint16_t clockUncertaintyMs{0};
     uint32_t droppedFrames{0};
+    // Delay-gradient congestion signals (SwVtpDelayGradientEstimator). Appended to the
+    // wire format; older senders leave them at 0 and older parsers ignore them.
+    int32_t delayGradientUsPerS{0}; // one-way-delay drift: >0 = queue building up
+    uint16_t queueDelayMs{0};       // estimated standing network queue
 };
 
 struct SwVtpBitrateControl {
@@ -257,6 +262,13 @@ struct SwVtpAdaptiveBitratePolicy {
     uint16_t softDownshiftPercent{82};
     uint16_t upshiftPercent{110};
     uint32_t upshiftCooldownMs{3000};
+    // Delay-gradient reaction: back off as soon as the one-way delay DRIFTS upward
+    // (queue building), before any packet is lost. Gentler than the loss-driven
+    // downshifts because it fires much earlier.
+    int32_t overuseGradientUsPerS{4000};       // sustained drift that means congestion
+    int32_t upshiftGradientCeilingUsPerS{1000}; // no probing while delay still drifts up
+    uint16_t gradientDownshiftPercent{88};
+    uint16_t gradientQueueFloorMs{5}; // ignore drift noise below this standing queue
 };
 
 struct SwVtpAdaptiveBitrateDecision {
@@ -266,13 +278,167 @@ struct SwVtpAdaptiveBitrateDecision {
         NetworkPressure,
         ClientQueuePressure,
         DecoderPressure,
-        UpshiftProbe
+        UpshiftProbe,
+        DelayGradientPressure
     };
 
     uint32_t targetBitrateKbps{0};
     bool requestKeyFrame{false};
     bool preferBaseTemporalLayer{false};
     Reason reason{Reason::Startup};
+};
+
+/**
+ * @brief One-way-delay drift ("jitter derivative") estimator, in the spirit of the
+ *        WebRTC/GCC trendline filter.
+ *
+ * Fed one sample per video frame (the first fragment's `sendTimeUs` from the sender clock
+ * and the local arrival time), it tracks the inter-frame delay variation
+ * `d = arrivalDelta - sendDelta`. The clock offset between the two machines cancels out
+ * of `d`, so no clock synchronisation is required.
+ *
+ * Exposed signals:
+ *  - `jitterUs()`          — RFC 3550 interarrival jitter (smoothed |d|),
+ *  - `gradientUsPerSecond()` — least-squares slope of the smoothed cumulative delay over
+ *    a short window: > 0 means the network queue is FILLING (congestion is coming, before
+ *    any loss), < 0 means it is draining,
+ *  - `queueDelayMs()`      — standing queue estimate relative to the recent minimum.
+ */
+class SwVtpDelayGradientEstimator {
+public:
+    void reset() {
+        m_haveLast = false;
+        m_lastSendUs = 0;
+        m_lastArrivalUs = 0;
+        m_jitterUs = 0.0;
+        m_queueUs = 0.0;
+        m_smoothedQueueUs = 0.0;
+        m_points.clear();
+    }
+
+    void addSample(uint64_t remoteSendTimeUs, uint64_t localArrivalTimeUs) {
+        if (remoteSendTimeUs == 0U || localArrivalTimeUs == 0U) {
+            return;
+        }
+        if (!m_haveLast) {
+            m_lastSendUs = remoteSendTimeUs;
+            m_lastArrivalUs = localArrivalTimeUs;
+            m_haveLast = true;
+            return;
+        }
+        const int64_t sendDelta =
+            static_cast<int64_t>(remoteSendTimeUs) - static_cast<int64_t>(m_lastSendUs);
+        const int64_t arrivalDelta = static_cast<int64_t>(localArrivalTimeUs) -
+                                     static_cast<int64_t>(m_lastArrivalUs);
+        m_lastSendUs = remoteSendTimeUs;
+        m_lastArrivalUs = localArrivalTimeUs;
+        if (sendDelta < 0 || sendDelta > kMaxGapUs_ ||
+            arrivalDelta < 0 || arrivalDelta > kMaxGapUs_) {
+            // Stream discontinuity (reconnect, sender restart, clock step): keep the
+            // jitter estimate but restart the drift series from this sample.
+            m_queueUs = 0.0;
+            m_smoothedQueueUs = 0.0;
+            m_points.clear();
+            return;
+        }
+
+        const int64_t delta = arrivalDelta - sendDelta; // queuing delay change, us
+        const double magnitude = delta < 0 ? static_cast<double>(-delta)
+                                           : static_cast<double>(delta);
+        m_jitterUs += (magnitude - m_jitterUs) / 16.0; // RFC 3550
+
+        m_queueUs += static_cast<double>(delta);
+        m_smoothedQueueUs += kSmoothing_ * (m_queueUs - m_smoothedQueueUs);
+        if (m_points.size() >= kWindow_) {
+            m_points.erase(m_points.begin());
+        }
+        Point point;
+        point.timeMs = static_cast<double>(localArrivalTimeUs) / 1000.0;
+        point.queueUs = m_smoothedQueueUs;
+        m_points.push_back(point);
+    }
+
+    double jitterUs() const { return m_jitterUs; }
+
+    std::size_t sampleCount() const { return m_points.size(); }
+
+    /**
+     * @brief Slope of the smoothed queuing delay, in microseconds of drift per second.
+     *        Returns 0 until enough samples accumulated.
+     */
+    int32_t gradientUsPerSecond() const {
+        if (m_points.size() < kMinSamples_) {
+            return 0;
+        }
+        // Least-squares fit of queueUs against timeMs over the window.
+        double meanT = 0.0;
+        double meanQ = 0.0;
+        for (std::size_t i = 0; i < m_points.size(); ++i) {
+            meanT += m_points[i].timeMs;
+            meanQ += m_points[i].queueUs;
+        }
+        meanT /= static_cast<double>(m_points.size());
+        meanQ /= static_cast<double>(m_points.size());
+        double numerator = 0.0;
+        double denominator = 0.0;
+        for (std::size_t i = 0; i < m_points.size(); ++i) {
+            const double dt = m_points[i].timeMs - meanT;
+            numerator += dt * (m_points[i].queueUs - meanQ);
+            denominator += dt * dt;
+        }
+        if (denominator <= 0.0) {
+            return 0;
+        }
+        const double slopeUsPerMs = numerator / denominator;
+        double slopeUsPerS = slopeUsPerMs * 1000.0;
+        if (slopeUsPerS > 2000000.0) {
+            slopeUsPerS = 2000000.0;
+        } else if (slopeUsPerS < -2000000.0) {
+            slopeUsPerS = -2000000.0;
+        }
+        return static_cast<int32_t>(slopeUsPerS);
+    }
+
+    /**
+     * @brief Standing queue estimate: how far the smoothed delay sits above the window
+     *        minimum, in milliseconds.
+     */
+    uint16_t queueDelayMs() const {
+        if (m_points.empty()) {
+            return 0;
+        }
+        double minQueue = m_points[0].queueUs;
+        for (std::size_t i = 1; i < m_points.size(); ++i) {
+            if (m_points[i].queueUs < minQueue) {
+                minQueue = m_points[i].queueUs;
+            }
+        }
+        const double standingUs = m_points.back().queueUs - minQueue;
+        if (standingUs <= 0.0) {
+            return 0;
+        }
+        const double standingMs = standingUs / 1000.0;
+        return standingMs >= 65535.0 ? 65535U : static_cast<uint16_t>(standingMs);
+    }
+
+private:
+    struct Point {
+        double timeMs{0.0};
+        double queueUs{0.0};
+    };
+
+    static const int64_t kMaxGapUs_ = 2000000; // 2 s: treat as discontinuity
+    static const std::size_t kWindow_ = 20;    // ~0.7 s at 30 fps
+    static const std::size_t kMinSamples_ = 6;
+    static constexpr double kSmoothing_ = 0.25;
+
+    bool m_haveLast{false};
+    uint64_t m_lastSendUs{0};
+    uint64_t m_lastArrivalUs{0};
+    double m_jitterUs{0.0};
+    double m_queueUs{0.0};
+    double m_smoothedQueueUs{0.0};
+    std::vector<Point> m_points{};
 };
 
 class SwVtpAdaptiveBitrateController {
@@ -319,6 +485,11 @@ public:
             stats.lossPermille >= m_policy.highLossPermille ||
             stats.nackPermille >= m_policy.highNackPermille ||
             stats.jitterMs >= m_policy.highJitterMs;
+        // Early signal: the one-way delay is drifting upward with a measurable standing
+        // queue — the bottleneck is filling but nothing has been lost yet.
+        const bool gradientOveruse =
+            stats.delayGradientUsPerS >= m_policy.overuseGradientUsPerS &&
+            stats.queueDelayMs >= m_policy.gradientQueueFloorMs;
         const bool queueSoft =
             stats.receiveQueueMs >= m_policy.targetQueueMs ||
             stats.renderQueueMs >= m_policy.targetQueueMs ||
@@ -347,6 +518,18 @@ public:
                                   : (clientQueueHard
                                          ? SwVtpAdaptiveBitrateDecision::Reason::ClientQueuePressure
                                          : SwVtpAdaptiveBitrateDecision::Reason::NetworkPressure);
+        } else if (gradientOveruse) {
+            // Gentler than the loss-driven downshifts: this fires several RTTs earlier,
+            // so a small step is usually enough to let the queue drain.
+            m_targetBitrateKbps = scaledBitrate_(m_targetBitrateKbps,
+                                                 m_policy.gradientDownshiftPercent);
+            applyBandwidthCeiling_(bandwidthCeilingKbps);
+            congestionLimited = bandwidthCeilingKbps > 0U &&
+                                m_targetBitrateKbps <= bandwidthCeilingKbps;
+            m_lastPressureMs = nowMs;
+            m_haveLastPressure = true;
+            decision.preferBaseTemporalLayer = true;
+            decision.reason = SwVtpAdaptiveBitrateDecision::Reason::DelayGradientPressure;
         } else if (networkSoft || queueSoft) {
             m_targetBitrateKbps = scaledBitrate_(m_targetBitrateKbps,
                                                  m_policy.softDownshiftPercent);
@@ -436,6 +619,11 @@ private:
         if (stats.lossPermille != 0U ||
             stats.nackPermille != 0U ||
             stats.jitterMs >= m_policy.highJitterMs) {
+            return false;
+        }
+        // Never probe upward while the delay is still drifting up: the queue would
+        // absorb the probe and turn it straight into latency.
+        if (stats.delayGradientUsPerS > m_policy.upshiftGradientCeilingUsPerS) {
             return false;
         }
         if (stats.receiveQueueMs != 0U && stats.receiveQueueMs >= m_policy.targetQueueMs / 2U) {
@@ -1021,6 +1209,8 @@ inline SwByteArray swVtpSerializeReceiverStats(const SwVtpReceiverStats& stats) 
     swVtpAppendU16(payload, stats.captureLatencyMs);
     swVtpAppendU16(payload, stats.clockUncertaintyMs);
     swVtpAppendU32(payload, stats.droppedFrames);
+    swVtpAppendU32(payload, static_cast<uint32_t>(stats.delayGradientUsPerS));
+    swVtpAppendU16(payload, stats.queueDelayMs);
     return payload;
 }
 
@@ -1048,6 +1238,11 @@ inline bool swVtpParseReceiverStatsPayload(const SwByteArray& payload,
     stats.captureLatencyMs = swVtpReadU16(data, offset);
     stats.clockUncertaintyMs = swVtpReadU16(data, offset);
     stats.droppedFrames = swVtpReadU32(data, offset);
+    // Delay-gradient fields appended later; accept payloads from older senders.
+    if (payload.size() >= 42U) {
+        stats.delayGradientUsPerS = static_cast<int32_t>(swVtpReadU32(data, offset));
+        stats.queueDelayMs = swVtpReadU16(data, offset);
+    }
     outStats = stats;
     return true;
 }

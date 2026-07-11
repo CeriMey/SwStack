@@ -341,9 +341,20 @@ inline unsigned long long parseNumericSuffix_(const SwString& fileName,
     if (!fileName.startsWith(prefix) || !fileName.endsWith(suffix)) {
         return 0;
     }
-    return static_cast<unsigned long long>(
-        fileName.mid(static_cast<int>(prefix.size()),
-                     static_cast<int>(fileName.size() - prefix.size() - suffix.size())).toLongLong());
+    // Explicit base 10: SwString::toLongLong uses strtoll base 0, which reads
+    // zero-padded ids ("0000000008") as OCTAL and silently mis-parses them.
+    const std::string digits = fileName.mid(static_cast<int>(prefix.size()),
+                                            static_cast<int>(fileName.size() - prefix.size() - suffix.size()))
+                                   .toStdString();
+    if (digits.empty()) {
+        return 0;
+    }
+    char* end = nullptr;
+    const unsigned long long value = std::strtoull(digits.c_str(), &end, 10);
+    if (!end || *end != '\0') {
+        return 0;
+    }
+    return value;
 }
 
 inline SwString blobFileName_(unsigned long long fileId) {

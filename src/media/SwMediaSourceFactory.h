@@ -8,8 +8,10 @@
 
 #include "media/SwDirectRtpMediaSource.h"
 #include "media/SwMediaOpenOptions.h"
+#include "media/SwMp4Demuxer.h"
 #include "media/SwPlatformMovieSource.h"
 #include "media/SwSdpMediaDescription.h"
+#include "media/SwSrtVideoSource.h"
 #include "media/source/SwFileVideoSource.h"
 #include "media/source/SwHttpMjpegSource.h"
 #include "media/source/SwMediaSource.h"
@@ -63,6 +65,10 @@ public:
 
         if (scheme == "swvtp") {
             return std::make_shared<SwVtpVideoSource>(options);
+        }
+
+        if (scheme == "srt") {
+            return std::make_shared<SwSrtVideoSource>(options);
         }
 
         if (scheme == "file" || scheme.isEmpty()) {

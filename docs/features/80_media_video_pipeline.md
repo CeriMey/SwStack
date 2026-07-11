@@ -57,10 +57,17 @@ Références:
     - Windows → `SwMediaFoundationVideoSource` (RawBGRA)
     - Linux → `SwLinuxVideoSource` (V4L2 pur ioctl/mmap: YUYV/RGB24/BGR24 convertis en
       RawBGRA, MJPEG transmis en `Codec::MotionJPEG`)
-- `SwMediaSourceFactory` route par schéma d'URL; `file://*.mp4|*.mov|*.m4v` va vers
-  `SwPlatformMovieSource` sur toutes les plateformes. Hors Windows, l'en-tête du fichier est
-  sniffé (`SwMp4Demuxer::looksLikeBmff`): un flux Annex-B brut nommé `.mp4` continue de
-  passer par `SwFileVideoSource`.
+  - `SwSrtVideoSource` (SRT, interop OBS/ffmpeg/encodeurs matériels): reçoit du MPEG-TS
+    sur SRT et le démuxe via `SwTsProgramDemux`. `libsrt` est chargée en dlopen
+    (`SwSrtLibrary`, zéro dépendance à l'édition de liens; repli gracieux si absente).
+    Modes caller (`srt://host:port`) et listener (`srt://:port` ou `?mode=listener`),
+    options `?streamid=`, `?passphrase=`, `?latency=<ms>` (SRTO_RCVLATENCY), reconnexion
+    automatique avec statut `Recovering`.
+- `SwMediaSourceFactory` route par schéma d'URL (`rtsp`, `http`, `rtp`, `udp`, `swvtp`,
+  `srt`, `file`); `file://*.mp4|*.mov|*.m4v` va vers `SwPlatformMovieSource` sur toutes
+  les plateformes. Hors Windows, l'en-tête du fichier est sniffé
+  (`SwMp4Demuxer::looksLikeBmff`): un flux Annex-B brut nommé `.mp4` continue de passer
+  par `SwFileVideoSource`.
 
 Références:
 - `src/media/SwVideoSource.h`
@@ -231,8 +238,13 @@ Exemples:
 - VA-API H264: chemin de décodage matériel non implémenté (OpenH264 assure le logiciel).
 - AAC: déclaré dans l'enum audio, aucun décodeur enregistré.
 - VP8/VP9: déclarés dans l'enum vidéo, aucun backend.
-- SRT: non supporté (aucune brique dans le stack; SwVTP couvre le besoin bas-latence
-  maison, SRT ne serait utile que pour l'interop avec encodeurs/décodeurs tiers).
+- SRT: réception **et** émission supportées. Réception: `SwSrtVideoSource` (MPEG-TS sur
+  SRT → `SwTsProgramDemux`). Émission: `SwSrtServerTransport` (listener SRT multi-clients,
+  `SwMediaServerFactory` route `srt://`, port défaut 9710) muxant via `SwTsMuxer`
+  (`media/rtp/SwTsMuxer.h`, PAT/PMT avec CRC32 MPEG valide, PCR, PES multi-paquets —
+  sortie conforme consommable par ffplay/VLC). Chaîne complète serveur→source validée E2E
+  en boucle locale par `exemples/96-SrtMediaSelfTest` (roundtrip muxeur→démuxeur byte-exact
+  inclus). Non couvert: audio dans le TS émis (vidéo seule), stats SRT → feedback ABR.
 - Capture V4L2: pas de sélection résolution/framerate exposée (format du driver conservé);
   MJPEG transmis sans décodage; conversion YUYV→BGRA scalaire (pas de SIMD) et allocation
   du payload par frame (`SwByteArray` ne sait pas allouer sans zero-fill) — piste: émettre

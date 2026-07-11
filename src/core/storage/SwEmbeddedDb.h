@@ -23,6 +23,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <functional>
@@ -715,7 +716,12 @@ private:
     std::shared_ptr<swEmbeddedDbDetail::SnapshotState_> writerSnapshotState_;
     swEmbeddedDbDetail::WriterOverlay_ writerOverlay_;
     std::shared_ptr<const swEmbeddedDbDetail::WriterOverlay_> writerOverlaySnapshot_;
-    unsigned long long writerOverlaySnapshotSequence_{0};
+    // Monotonic count of applied batches. Cache validity keys on it rather
+    // than on lastVisibleSequence_: with concurrent writers an out-of-order
+    // LOWER sequence can be applied without moving lastVisibleSequence_.
+    unsigned long long applyGeneration_{0};
+    unsigned long long writerSnapshotGeneration_{0};
+    unsigned long long writerOverlaySnapshotGeneration_{0};
     swDbPlatform::FileLock writerLock_;
     bool writerLockHeld_{false};
     swDbPlatform::RandomAccessFile activeWalFile_;

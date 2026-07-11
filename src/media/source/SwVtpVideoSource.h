@@ -172,6 +172,7 @@ public:
         m_lastHelloUs = 0;
         m_lastPingUs = 0;
         m_lastStatsUs = 0;
+        m_delayGradient.reset();
         m_lastNackUs = 0;
         m_lastKeyFrameRequestUs = 0;
         m_lastRecoveryEmitUs = 0;
@@ -434,6 +435,10 @@ private:
         }
         stats.rttMs = clampU16_(metrics.clockRttUs / 1000ULL);
         stats.clockUncertaintyMs = clampU16_(metrics.clockUncertaintyUs / 1000ULL);
+        stats.jitterMs = clampU16_(
+            static_cast<uint64_t>(m_delayGradient.jitterUs() / 1000.0 + 0.5));
+        stats.delayGradientUsPerS = m_delayGradient.gradientUsPerSecond();
+        stats.queueDelayMs = m_delayGradient.queueDelayMs();
         stats.lossPermille = frameTotal == 0U
                                  ? 0U
                                  : clampU16_((metrics.droppedFrames * 1000ULL) / frameTotal);
@@ -493,7 +498,7 @@ private:
             sendAnnouncement_(transport);
         }
         if (m_streamConfig.isValid() &&
-            (m_lastStatsUs == 0U || now - m_lastStatsUs > 250000ULL)) {
+            (m_lastStatsUs == 0U || now - m_lastStatsUs > kStatsIntervalUs)) {
             sendReceiverStats_(transport, now);
         }
         if (m_streamConfig.isValid()) {
@@ -946,6 +951,11 @@ private:
                                const SwVtpDatagram& datagram,
                                std::size_t datagramBytes) {
         const uint64_t receiveUs = nowUs_();
+        // One delay-drift sample per frame (first fragment): the sender clock offset
+        // cancels out of the gradient, so no clock sync is needed.
+        if (datagram.header.fragmentIndex == 0U && datagram.header.sendTimeUs != 0U) {
+            m_delayGradient.addSample(datagram.header.sendTimeUs, receiveUs);
+        }
         m_lastVideoReceiveUs = receiveUs;
         m_lastReconnectProbeUs = 0;
         m_noVideoRecoveryActive = false;
@@ -1065,9 +1075,14 @@ private:
     SwMediaOpenOptions m_options{};
     SwVtpFrameReassembler m_reassembler{};
     SwVtpKlvReassembler m_klvReassembler{};
+    // 100 ms receiver feedback: the delay-gradient signal is only as fast as the stats
+    // cadence, and one small control datagram per 100 ms is negligible overhead.
+    static constexpr uint64_t kStatsIntervalUs = 100000ULL;
+
     SwVtpClockEstimate m_clockEstimate{};
     SwVtpStreamConfig m_streamConfig{};
     SwVtpClientAnnouncement m_announcement{};
+    SwVtpDelayGradientEstimator m_delayGradient{};
     SwString m_serverHost{};
     uint32_t m_serverIpv4{0};
     uint16_t m_serverPort{0};

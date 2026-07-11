@@ -14,7 +14,8 @@ enum class SwMediaTransportProtocol {
     Udp,
     Rtp,
     Rtsp,
-    SwVtp
+    SwVtp,
+    Srt
 };
 
 enum class SwMediaTransportDeliveryMode {
@@ -48,6 +49,8 @@ inline SwString swMediaTransportProtocolName(SwMediaTransportProtocol protocol) 
         return "rtsp";
     case SwMediaTransportProtocol::SwVtp:
         return "swvtp";
+    case SwMediaTransportProtocol::Srt:
+        return "srt";
     case SwMediaTransportProtocol::Unknown:
     default:
         break;

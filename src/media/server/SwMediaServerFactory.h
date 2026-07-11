@@ -11,6 +11,7 @@
 #include "media/server/SwMediaServerConfig.h"
 #include "media/server/SwVideoTransportServer.h"
 #include "media/swvtp/SwVtpServerTransport.h"
+#include "media/transport/SwSrtServerTransport.h"
 #include "media/transport/SwUdpServerTransport.h"
 
 #include <algorithm>
@@ -42,6 +43,9 @@ public:
         case SwMediaTransportProtocol::Udp:
             transport = std::make_shared<SwUdpServerTransport>();
             break;
+        case SwMediaTransportProtocol::Srt:
+            transport = std::make_shared<SwSrtServerTransport>();
+            break;
         case SwMediaTransportProtocol::Unknown:
         default:
             return std::shared_ptr<SwVideoTransportServer>();
@@ -62,6 +66,8 @@ private:
             endpoint.protocol = SwMediaTransportProtocol::Rtsp;
         } else if (scheme == "udp") {
             endpoint.protocol = SwMediaTransportProtocol::Udp;
+        } else if (scheme == "srt") {
+            endpoint.protocol = SwMediaTransportProtocol::Srt;
         }
 
         endpoint.host = url.host().isEmpty() ? SwString("0.0.0.0") : url.host();
@@ -94,6 +100,8 @@ private:
             return 5000;
         case SwMediaTransportProtocol::SwVtp:
             return 55245;
+        case SwMediaTransportProtocol::Srt:
+            return 9710;
         case SwMediaTransportProtocol::Unknown:
         default:
             break;

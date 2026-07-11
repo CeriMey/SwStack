@@ -440,6 +440,9 @@ void testMp4DemuxerH264() {
     // Sync-sample lookup (pts: 40/80/120/160/200, keys at samples 0 and 3).
     expect(demuxer.findSyncSampleAtOrBefore(1, 0) == 0, "h264: sync at 0");
     expect(demuxer.findSyncSampleAtOrBefore(1, 100) == 0, "h264: sync before second key");
+    // Discriminates a pts-keyed index from a dts-keyed one: the second key has dts 120
+    // but pts 160, so target 159 must still resolve to the first key.
+    expect(demuxer.findSyncSampleAtOrBefore(1, 159) == 0, "h264: sync index keyed on pts");
     expect(demuxer.findSyncSampleAtOrBefore(1, 160) == 3, "h264: sync at second key");
     expect(demuxer.findSyncSampleAtOrBefore(1, 5000) == 3, "h264: sync past the end");
 }
@@ -562,14 +565,25 @@ void testFactorySdpRouting() {
     if (expect(source != nullptr, "sdp: source created")) {
         expect(source->name() == "SwDirectRtpMediaSource",
                "sdp: udp+SDP routes to the direct RTP source");
+        // Pins that the SDP was actually APPLIED (not just parsed): the direct source
+        // publishes its tracks from the description at construction time.
+        bool sdpVideoTrack = false;
+        const SwList<SwMediaTrack> tracks = source->tracks();
+        for (int i = 0; i < tracks.size(); ++i) {
+            if (tracks[i].isVideo() && tracks[i].codec == "h264" &&
+                tracks[i].payloadType == 96 && tracks[i].clockRate == 90000) {
+                sdpVideoTrack = true;
+            }
+        }
+        expect(sdpVideoTrack, "sdp: h264/96/90000 track applied from the SDP");
     }
 
     // Without SDP the plain UDP source is kept.
     SwMediaOpenOptions plain = SwMediaOpenOptions::fromUrl("udp://127.0.0.1:5004");
     std::shared_ptr<SwMediaSource> plainSource = SwMediaSourceFactory::createMediaSource(plain);
     if (expect(plainSource != nullptr, "sdp: plain udp source created")) {
-        expect(plainSource->name() != "SwDirectRtpMediaSource",
-               "sdp: plain udp does not become a direct RTP source");
+        expect(plainSource->name() == "SwUdpVideoSource",
+               "sdp: plain udp keeps the raw UDP source");
     }
 }
 
@@ -641,6 +655,13 @@ void testFactoryRouting(const std::string& path) {
     expect(source->name() == "SwMp4MovieSource",
            "factory: non-Windows routes to SwMp4MovieSource");
 #endif
+
+    std::shared_ptr<SwMediaSource> srtSource =
+        SwMediaSourceFactory::createMediaSource(SwString("srt://127.0.0.1:9710"));
+    if (expect(srtSource != nullptr, "factory: srt source created")) {
+        expect(srtSource->name() == "SwSrtVideoSource",
+               "factory: srt:// routes to SwSrtVideoSource");
+    }
 }
 
 void testBmffSniffRouting(const std::string& annexBPath) {

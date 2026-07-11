@@ -199,7 +199,15 @@ Default design targets:
 - fixed 64-byte binary header,
 - no global reliable stream and no head-of-line blocking,
 - drop old incomplete frames instead of growing latency,
-- fast ABR downshift, slow ABR upshift.
+- fast ABR downshift, slow ABR upshift,
+- delay-gradient congestion control (`SwVtpDelayGradientEstimator`, GCC/WebRTC-style):
+  the receiver measures the one-way-delay DRIFT per frame (`d = arrivalDelta - sendDelta`,
+  clock offset cancels out — no sync needed) and reports `delayGradientUsPerS` +
+  `queueDelayMs` + a real RFC 3550 `jitterMs` in `ReceiverStats` (sent every 100 ms).
+  The ABR backs off gently (`gradientDownshiftPercent`, no key frame) as soon as the
+  bottleneck queue starts FILLING — several RTTs before any loss — and upshift probes
+  are blocked while the delay still drifts upward, so probes never turn into latency.
+  Wire format: the stats payload grew from 36 to 42 bytes; parsers accept both.
 
 ## 9) Validation
 

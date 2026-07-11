@@ -18,7 +18,8 @@ inline void SwEmbeddedDb::invalidateWriterReadCacheLocked_() {
     writerSnapshotState_.reset();
     writerOverlay_ = swEmbeddedDbDetail::WriterOverlay_();
     writerOverlaySnapshot_.reset();
-    writerOverlaySnapshotSequence_ = 0;
+    writerSnapshotGeneration_ = 0;
+    writerOverlaySnapshotGeneration_ = 0;
 }
 
 inline void SwEmbeddedDb::rebuildTableCachesLocked_() {

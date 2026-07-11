@@ -206,6 +206,11 @@ public:
     bool next(SwDbEntry& outEntry) override {
         while (true) {
             if (!baseLoaded_) {
+                // IteratorState_ conflates end-of-range and failure (e.g. a
+                // blob-resolve error): a false from the base is treated as
+                // exhaustion and the overlay keeps streaming — aborting the
+                // whole merge would wrongly drop overlay keys that sort after
+                // the base's last row.
                 baseValid_ = base_->next(baseEntry_);
                 baseLoaded_ = true;
             }

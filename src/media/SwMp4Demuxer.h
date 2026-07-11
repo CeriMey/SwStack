@@ -824,8 +824,13 @@ private:
             tables.info.durationMs = ticksToMs_(last.dts, tables.info.timescale);
         }
 
-        // Precompute the sync-sample index used by findSyncSampleAtOrBefore.
+        // Precompute the sync-sample index used by findSyncSampleAtOrBefore. Only video
+        // tracks get one: seeking is a video-track operation, and stss-less tracks (audio,
+        // all-intra) would otherwise duplicate their whole sample table into the index.
         tables.syncByPtsMs.clear();
+        if (tables.info.kind != TrackKind::Video) {
+            return true;
+        }
         std::int64_t lastSyncPtsMs = 0;
         bool haveSync = false;
         for (std::size_t i = 0; i < sampleTotal; ++i) {
