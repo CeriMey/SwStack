@@ -173,6 +173,7 @@ set(SW_QUIC_DEPENDENT_EXAMPLES
     exemples/92-HttpAppHttp3SelfTest
     exemples/93-HttpSeoSelfTest
     exemples/94-HttpAppDbBench
+    exemples/98-Http3LoadBench
 )
 
 function(sw_add_example_subdirectory example_dir default_enabled)
@@ -293,6 +294,7 @@ sw_add_example_subdirectory(exemples/66-MediaTransportEndToEndSelfTest ON)
   sw_add_example_subdirectory(exemples/95-LinuxMediaBackendsSelfTest ON)
   sw_add_example_subdirectory(exemples/96-SrtMediaSelfTest ON)
   sw_add_example_subdirectory(exemples/97-SrtFileStreamer OFF)
+  sw_add_example_subdirectory(exemples/98-Http3LoadBench OFF)
   sw_add_example_subdirectory(sandbox/SwMainWindowApplication OFF)
 endif()
 

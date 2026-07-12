@@ -86,14 +86,14 @@ bool requestIsRejectedAsMalformed(std::uint16_t port,
     for (std::size_t i = 0; i < headers.size(); ++i) {
         client.setRawHeader(headers[i].first, headers[i].second);
     }
-    SwString requestError;
     const SwByteArray effectiveMethod = method.isEmpty()
         ? (body.isEmpty() ? SwByteArray("GET") : SwByteArray("POST"))
         : method;
     if (!client.request(effectiveMethod,
                         "127.0.0.1", port, "/shared/rejected", body,
-                        SwByteArray(), 15000, &requestError)) {
-        error = SwString(caseName) + SwString(": request failed: ") + requestError;
+                        SwByteArray(), 15000) ||
+        !client.waitForFinished()) {
+        error = SwString(caseName) + SwString(": request failed: ") + client.errorString();
         return false;
     }
     if (client.statusCode() != 400) {
@@ -371,16 +371,16 @@ int main(int argc, char** argv) {
         SwHttp3Client client;
         client.setVerifyPeer(true);
         client.setVerifyCertificateChain(false); // self-signed test CA
-        SwString error;
         http3.requestSucceeded = client.get(
-            "127.0.0.1", port, "/shared/demo%20value?source=http3", 15000, &error);
+            "127.0.0.1", port, "/shared/demo%20value?source=http3", 15000) &&
+            client.waitForFinished();
         http3.status = client.statusCode();
         http3.body = client.responseBody();
         http3.protocol = client.responseHeaders().value("x-request-protocol");
         http3.middleware = client.responseHeaders().value("x-shared-middleware");
         http3.query = client.responseHeaders().value("x-query-value");
         http3.localPort = client.responseHeaders().value("x-local-port");
-        http3.error = error;
+        http3.error = client.errorString();
 
         const SwByteArray multipartBody(
             "--sw-http3-boundary\r\n"
@@ -393,7 +393,8 @@ int main(int argc, char** argv) {
         http3.multipartSucceeded = multipartClient.post(
             "127.0.0.1", port, "/multipart", multipartBody,
             SwByteArray("multipart/form-data; boundary=sw-http3-boundary"),
-            15000, &http3.multipartError);
+            15000) && multipartClient.waitForFinished();
+        http3.multipartError = multipartClient.errorString();
         http3.multipartStatus = multipartClient.statusCode();
         http3.multipartBody = multipartClient.responseBody();
 
@@ -401,7 +402,9 @@ int main(int argc, char** argv) {
         fileClient.setVerifyPeer(true);
         fileClient.setVerifyCertificateChain(false);
         http3.fileSucceeded = fileClient.get(
-            "127.0.0.1", port, "/certificate", 15000, &http3.fileError);
+            "127.0.0.1", port, "/certificate", 15000) &&
+            fileClient.waitForFinished();
+        http3.fileError = fileClient.errorString();
         http3.fileStatus = fileClient.statusCode();
         http3.fileBody = fileClient.responseBody();
 
@@ -409,7 +412,9 @@ int main(int argc, char** argv) {
         chunkedClient.setVerifyPeer(true);
         chunkedClient.setVerifyCertificateChain(false);
         http3.chunkedSucceeded = chunkedClient.get(
-            "127.0.0.1", port, "/chunks", 15000, &http3.chunkedError);
+            "127.0.0.1", port, "/chunks", 15000) &&
+            chunkedClient.waitForFinished();
+        http3.chunkedError = chunkedClient.errorString();
         http3.chunkedStatus = chunkedClient.statusCode();
         http3.chunkedBody = chunkedClient.responseBody();
         http3.chunkedLength =
@@ -423,7 +428,9 @@ int main(int argc, char** argv) {
         headFileClient.setVerifyCertificateChain(false);
         http3.headFileSucceeded = headFileClient.request(
             SwByteArray("HEAD"), "127.0.0.1", port, "/head-file-no-read",
-            SwByteArray(), SwByteArray(), 15000, &http3.headFileError);
+            SwByteArray(), SwByteArray(), 15000) &&
+            headFileClient.waitForFinished();
+        http3.headFileError = headFileClient.errorString();
         http3.headFileStatus = headFileClient.statusCode();
         http3.headFileBody = headFileClient.responseBody();
         http3.headFileLength = headFileClient.responseHeaders().value("content-length");
@@ -432,8 +439,9 @@ int main(int argc, char** argv) {
         largeFileClient.setVerifyPeer(true);
         largeFileClient.setVerifyCertificateChain(false);
         http3.largeFileSucceeded = largeFileClient.get(
-            "127.0.0.1", port, "/large-file", 120000,
-            &http3.largeFileError);
+            "127.0.0.1", port, "/large-file", 120000) &&
+            largeFileClient.waitForFinished();
+        http3.largeFileError = largeFileClient.errorString();
         http3.largeFileStatus = largeFileClient.statusCode();
         http3.largeFileBody = largeFileClient.responseBody();
 
@@ -441,8 +449,9 @@ int main(int argc, char** argv) {
         asyncGuardClient.setVerifyPeer(true);
         asyncGuardClient.setVerifyCertificateChain(false);
         http3.asyncGuardSucceeded = asyncGuardClient.get(
-            "127.0.0.1", port, "/async-guard", 15000,
-            &http3.asyncGuardError);
+            "127.0.0.1", port, "/async-guard", 15000) &&
+            asyncGuardClient.waitForFinished();
+        http3.asyncGuardError = asyncGuardClient.errorString();
         http3.asyncGuardStatus = asyncGuardClient.statusCode();
         http3.asyncGuardBody = asyncGuardClient.responseBody();
         http3.asyncGuardHeader =
@@ -452,8 +461,9 @@ int main(int argc, char** argv) {
         asyncRouteClient.setVerifyPeer(true);
         asyncRouteClient.setVerifyCertificateChain(false);
         http3.asyncRouteSucceeded = asyncRouteClient.get(
-            "127.0.0.1", port, "/async-route", 15000,
-            &http3.asyncRouteError);
+            "127.0.0.1", port, "/async-route", 15000) &&
+            asyncRouteClient.waitForFinished();
+        http3.asyncRouteError = asyncRouteClient.errorString();
         http3.asyncRouteStatus = asyncRouteClient.statusCode();
         http3.asyncRouteBody = asyncRouteClient.responseBody();
 
@@ -461,8 +471,9 @@ int main(int argc, char** argv) {
         asyncTimeoutClient.setVerifyPeer(true);
         asyncTimeoutClient.setVerifyCertificateChain(false);
         http3.asyncTimeoutSucceeded = asyncTimeoutClient.get(
-            "127.0.0.1", port, "/async-timeout", 15000,
-            &http3.asyncTimeoutError);
+            "127.0.0.1", port, "/async-timeout", 15000) &&
+            asyncTimeoutClient.waitForFinished();
+        http3.asyncTimeoutError = asyncTimeoutClient.errorString();
         http3.asyncTimeoutStatus = asyncTimeoutClient.statusCode();
         http3.asyncTimeoutAltSvc =
             asyncTimeoutClient.responseHeaders().value("alt-svc");
@@ -475,7 +486,9 @@ int main(int argc, char** argv) {
         methodGuardClient.setVerifyCertificateChain(false);
         http3.methodGuardSucceeded = methodGuardClient.request(
             SwByteArray("post"), "127.0.0.1", port, "/method-guard",
-            SwByteArray(), SwByteArray(), 15000, &http3.methodGuardError);
+            SwByteArray(), SwByteArray(), 15000) &&
+            methodGuardClient.waitForFinished();
+        http3.methodGuardError = methodGuardClient.errorString();
         http3.methodGuardStatus = methodGuardClient.statusCode();
         http3.methodGuardBody = methodGuardClient.responseBody();
 

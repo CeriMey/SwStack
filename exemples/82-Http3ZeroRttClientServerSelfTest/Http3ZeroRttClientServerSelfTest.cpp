@@ -5,6 +5,8 @@
 //   request 2  -> SwHttp3Client resumes with that ticket: the HTTP/3 request
 //                 is sent as 0-RTT early data, the server accepts it, routes it
 //                 during the handshake, and answers.
+// The event-driven client is used through waitForFinished(), its synchronous
+// bridge for threads that run no event loop (this main thread).
 
 #include "core/io/http/SwHttpRouter.h"
 #include "core/io/http3/SwHttp3Client.h"
@@ -79,14 +81,14 @@ bool testZeroRttOverUdp() {
         SwHttp3Client client;
         client.setVerifyPeer(true);
         client.setVerifyCertificateChain(false);
-        SwString requestError;
         const bool got = client.get(SwString("127.0.0.1"), port, SwString("/state"),
-                                    10000, &requestError);
+                                    10000) &&
+                         client.waitForFinished();
         if (!requireTrue(got, "request 1 (1-RTT) failed") ||
             !requireTrue(client.statusCode() == 200, "request 1 status is not 200") ||
             !requireTrue(client.responseBody() == SwByteArray("state-ok"), "request 1 body mismatch") ||
             !requireTrue(client.hasSessionTicket(), "client did not capture a session ticket")) {
-            std::cerr << "req1_error=" << requestError.toStdString() << std::endl;
+            std::cerr << "req1_error=" << client.errorString().toStdString() << std::endl;
             ok = false;
         } else {
             ticket = client.sessionTicket();
@@ -99,14 +101,14 @@ bool testZeroRttOverUdp() {
         client.setVerifyPeer(true);
         client.setVerifyCertificateChain(false);
         client.setResumptionTicket(ticket);
-        SwString requestError;
         const bool got = client.get(SwString("127.0.0.1"), port, SwString("/state"),
-                                    10000, &requestError);
+                                    10000) &&
+                         client.waitForFinished();
         if (!requireTrue(got, "request 2 (0-RTT) failed") ||
             !requireTrue(client.earlyDataAccepted(), "server did not accept 0-RTT early data") ||
             !requireTrue(client.statusCode() == 200, "request 2 status is not 200") ||
             !requireTrue(client.responseBody() == SwByteArray("state-ok"), "request 2 body mismatch")) {
-            std::cerr << "req2_error=" << requestError.toStdString() << std::endl;
+            std::cerr << "req2_error=" << client.errorString().toStdString() << std::endl;
             ok = false;
         }
     }
@@ -120,17 +122,17 @@ bool testZeroRttOverUdp() {
         client.setVerifyPeer(true);
         client.setVerifyCertificateChain(false);
         client.setResumptionTicket(ticket);
-        SwString requestError;
         const SwByteArray bigBody(20000, 'x');
         const bool got = client.post(SwString("127.0.0.1"), port, SwString("/echo"),
                                      bigBody, SwByteArray("application/octet-stream"),
-                                     10000, &requestError);
+                                     10000) &&
+                         client.waitForFinished();
         if (!requireTrue(got, "request 3 (oversized) failed") ||
             !requireTrue(!client.earlyDataAccepted(),
                          "oversized request must not be sent as 0-RTT") ||
             !requireTrue(client.statusCode() == 201, "request 3 status is not 201") ||
             !requireTrue(client.responseBody() == bigBody, "request 3 echo body mismatch")) {
-            std::cerr << "req3_error=" << requestError.toStdString() << std::endl;
+            std::cerr << "req3_error=" << client.errorString().toStdString() << std::endl;
             ok = false;
         }
     }
