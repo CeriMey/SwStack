@@ -17,6 +17,7 @@ public:
         Ping,
         Ack,
         ResetStream,
+        ResetStreamAt,
         StopSending,
         Crypto,
         NewToken,
@@ -85,6 +86,18 @@ public:
         frame.m_streamId = streamId;
         frame.m_errorCode = applicationErrorCode;
         frame.m_finalSize = finalSize;
+        return frame;
+    }
+
+    static SwQuicFrame resetStreamAt(std::uint64_t streamId,
+                                     std::uint64_t applicationErrorCode,
+                                     std::uint64_t finalSize,
+                                     std::uint64_t reliableSize) {
+        SwQuicFrame frame(Type::ResetStreamAt);
+        frame.m_streamId = streamId;
+        frame.m_errorCode = applicationErrorCode;
+        frame.m_finalSize = finalSize;
+        frame.m_reliableSize = reliableSize;
         return frame;
     }
 
@@ -256,6 +269,7 @@ public:
     bool fin() const { return m_fin; }
 
     std::uint64_t finalSize() const { return m_finalSize; }
+    std::uint64_t reliableSize() const { return m_reliableSize; }
     std::uint64_t maximum() const { return m_maximum; }
     bool isBidirectional() const { return m_bidirectional; }
 
@@ -284,6 +298,7 @@ private:
           m_offset(0),
           m_fin(false),
           m_finalSize(0),
+          m_reliableSize(0),
           m_maximum(0),
           m_bidirectional(true),
           m_sequenceNumber(0),
@@ -308,6 +323,7 @@ private:
     SwByteArray m_data;
     bool m_fin;
     std::uint64_t m_finalSize;
+    std::uint64_t m_reliableSize;
     std::uint64_t m_maximum;
     bool m_bidirectional;
     std::uint64_t m_sequenceNumber;

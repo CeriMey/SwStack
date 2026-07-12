@@ -33,6 +33,9 @@ public:
     static std::uint64_t idActiveConnectionIdLimit() { return 0x0e; }
     static std::uint64_t idInitialSourceConnectionId() { return 0x0f; }
     static std::uint64_t idRetrySourceConnectionId() { return 0x10; }
+    // draft-ietf-quic-reliable-stream-reset-09. WebTransport over HTTP/3
+    // requires both endpoints to advertise this empty transport parameter.
+    static std::uint64_t idResetStreamAt() { return 0x1d; }
     static std::uint64_t idMaxDatagramFrameSize() { return 0x20; }
 
     SwQuicTransportParameters()
@@ -49,6 +52,7 @@ public:
           disableActiveMigration(false),
           activeConnectionIdLimit(2),
           maxDatagramFrameSize(0),
+          resetStreamAt(false),
           hasOriginalDestinationConnectionId(false),
           hasStatelessResetToken(false),
           hasInitialSourceConnectionId(false),
@@ -68,6 +72,7 @@ public:
     bool disableActiveMigration;
     std::uint64_t activeConnectionIdLimit;
     std::uint64_t maxDatagramFrameSize;
+    bool resetStreamAt;
 
     SwByteArray originalDestinationConnectionId;
     SwByteArray statelessResetToken;
@@ -154,6 +159,10 @@ public:
                                retrySourceConnectionId, error)) {
             return false;
         }
+        if (resetStreamAt &&
+            !appendEmptyParam_(outBytes, idResetStreamAt(), error)) {
+            return false;
+        }
         if (maxDatagramFrameSize != 0 &&
             !appendVarIntParam_(outBytes, idMaxDatagramFrameSize(),
                                 maxDatagramFrameSize, error)) {
@@ -238,6 +247,14 @@ private:
                 return false;
             }
             disableActiveMigration = true;
+            return true;
+        }
+        if (id == idResetStreamAt()) {
+            if (!value.isEmpty()) {
+                setError_(error, "QUIC reset_stream_at must be empty");
+                return false;
+            }
+            resetStreamAt = true;
             return true;
         }
 

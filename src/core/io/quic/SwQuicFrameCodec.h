@@ -36,6 +36,11 @@ public:
                 return false;
             }
             break;
+        case SwQuicFrame::Type::ResetStreamAt:
+            if (!encodeResetStreamAt_(frame, outPayload, error)) {
+                return false;
+            }
+            break;
         case SwQuicFrame::Type::StopSending:
             if (!encodeStopSending_(frame, outPayload, error)) {
                 return false;
@@ -196,6 +201,8 @@ public:
         case 0x1e:
             outFrame = SwQuicFrame::handshakeDone();
             return true;
+        case 0x24:
+            return decodeResetStreamAt_(payload, offset, outFrame, error);
         case 0x30:
         case 0x31:
             return decodeDatagram_(frameType == 0x31, payload, offset, outFrame, error);
@@ -349,6 +356,16 @@ private:
         return appendVarInt_(frame.streamId(), outPayload, error) &&
                appendVarInt_(frame.errorCode(), outPayload, error) &&
                appendVarInt_(frame.finalSize(), outPayload, error);
+    }
+
+    static bool encodeResetStreamAt_(const SwQuicFrame& frame,
+                                     SwByteArray& out,
+                                     SwString* error) {
+        appendByte_(out, 0x24);
+        return appendVarInt_(frame.streamId(), out, error) &&
+               appendVarInt_(frame.errorCode(), out, error) &&
+               appendVarInt_(frame.finalSize(), out, error) &&
+               appendVarInt_(frame.reliableSize(), out, error);
     }
 
     static bool encodeStopSending_(const SwQuicFrame& frame,
@@ -513,6 +530,29 @@ private:
             return false;
         }
         outFrame = SwQuicFrame::resetStream(streamId, errorCode, finalSize);
+        return true;
+    }
+
+    static bool decodeResetStreamAt_(const SwByteArray& payload,
+                                     std::size_t& offset,
+                                     SwQuicFrame& outFrame,
+                                     SwString* error) {
+        std::uint64_t streamId = 0;
+        std::uint64_t errorCode = 0;
+        std::uint64_t finalSize = 0;
+        std::uint64_t reliableSize = 0;
+        if (!readVarInt_(payload, offset, streamId, error) ||
+            !readVarInt_(payload, offset, errorCode, error) ||
+            !readVarInt_(payload, offset, finalSize, error) ||
+            !readVarInt_(payload, offset, reliableSize, error)) {
+            return false;
+        }
+        if (reliableSize > finalSize) {
+            setError_(error, "RESET_STREAM_AT reliable size exceeds final size");
+            return false;
+        }
+        outFrame = SwQuicFrame::resetStreamAt(
+            streamId, errorCode, finalSize, reliableSize);
         return true;
     }
 

@@ -88,6 +88,7 @@ public:
         m_localParams.maxIdleTimeoutMs = 30000;
         m_localParams.maxUdpPayloadSize = SwQuicLimits::maximumUdpPayloadBytes();
         m_localParams.maxDatagramFrameSize = SwQuicLimits::maximumDatagramFrameBytes();
+        m_localParams.resetStreamAt = true;
     }
 
     State state() const { return m_state; }

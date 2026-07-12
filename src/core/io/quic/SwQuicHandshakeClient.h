@@ -75,6 +75,7 @@ public:
         m_localTransportParameters.activeConnectionIdLimit = 4;
         m_localTransportParameters.maxDatagramFrameSize =
             SwQuicLimits::maximumDatagramFrameBytes();
+        m_localTransportParameters.resetStreamAt = true;
     }
 
     State state() const { return m_state; }

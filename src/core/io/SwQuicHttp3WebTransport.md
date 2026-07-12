@@ -168,6 +168,27 @@ SwWebTransportStream
 SwWebTransportDatagram
 ```
 
+### Contrat de fil WebTransport actuel
+
+L'implementation suit `draft-ietf-webtrans-http3-16` (6 juillet 2026),
+et non l'ancien codepoint experimental :
+
+- `SETTINGS_WT_ENABLED = 0x2c7cf000` et valeur `1` ;
+- `SETTINGS_ENABLE_CONNECT_PROTOCOL = 1` ;
+- `SETTINGS_H3_DATAGRAM = 1` et `max_datagram_frame_size > 0` ;
+- parametre QUIC vide `reset_stream_at = 0x1d` ;
+- token Extended CONNECT `:protocol = webtransport-h3` ;
+- le CONNECT reste ouvert pendant toute la session ; son FIN/reset la termine ;
+- les streams uni `0x54`, les streams bidi `0x41` et les HTTP Datagrams sont
+  demultiplexes par l'identifiant du stream CONNECT ;
+- la negociation applicative emploie `WT-Available-Protocols` puis
+  `WT-Protocol` dans la reponse 2xx.
+
+`SwQuicFrame` et `SwQuicFrameCodec` exposent aussi `RESET_STREAM_AT` (`0x24`)
+avec `Final Size` et `Reliable Size`. Une tentative d'emission est refusee si
+le pair n'a pas negocie le parametre ou si le prefixe fiable n'a pas encore ete
+remis a QUIC. Les bytes du prefixe restent retransmissibles apres le reset.
+
 API cible possible :
 
 ```cpp

@@ -69,6 +69,20 @@ bool testHttp3RequestResponse() {
     server.setPeerConnectionId(clientCid);
     client.setLevelKeys(SwQuicConnection::Level::Application, serverKeys, clientKeys);
     server.setLevelKeys(SwQuicConnection::Level::Application, clientKeys, serverKeys);
+    SwQuicTransportParameters clientParameters;
+    clientParameters.initialMaxData = 262144;
+    clientParameters.initialMaxStreamDataBidiLocal = 262144;
+    clientParameters.initialMaxStreamDataBidiRemote = 262144;
+    clientParameters.initialMaxStreamDataUni = 262144;
+    clientParameters.initialMaxStreamsBidi = 100;
+    clientParameters.initialMaxStreamsUni = 100;
+    clientParameters.maxDatagramFrameSize = 1400;
+    clientParameters.resetStreamAt = true;
+    SwQuicTransportParameters serverParameters = clientParameters;
+    client.applyLocalTransportParameters(clientParameters);
+    client.applyPeerTransportParameters(serverParameters);
+    server.applyLocalTransportParameters(serverParameters);
+    server.applyPeerTransportParameters(clientParameters);
 
     SwHttp3Server h3Server(&server);
     bool handlerCalled = false;
@@ -211,10 +225,26 @@ bool testWebTransportConnect() {
     server.setPeerConnectionId(clientCid);
     client.setLevelKeys(SwQuicConnection::Level::Application, serverKeys, clientKeys);
     server.setLevelKeys(SwQuicConnection::Level::Application, clientKeys, serverKeys);
+    SwQuicTransportParameters clientParameters;
+    clientParameters.initialMaxData = 262144;
+    clientParameters.initialMaxStreamDataBidiLocal = 262144;
+    clientParameters.initialMaxStreamDataBidiRemote = 262144;
+    clientParameters.initialMaxStreamDataUni = 262144;
+    clientParameters.initialMaxStreamsBidi = 100;
+    clientParameters.initialMaxStreamsUni = 100;
+    clientParameters.maxDatagramFrameSize = 1400;
+    clientParameters.resetStreamAt = true;
+    SwQuicTransportParameters serverParameters = clientParameters;
+    client.applyLocalTransportParameters(clientParameters);
+    client.applyPeerTransportParameters(serverParameters);
+    server.applyLocalTransportParameters(serverParameters);
+    server.applyPeerTransportParameters(clientParameters);
 
     SwHttp3Server h3Server(&server);
     bool sessionRequested = false;
     std::uint64_t sessionStreamId = 0;
+    SwByteArray receivedWebTransportStream;
+    SwByteArray receivedWebTransportDatagram;
     h3Server.setWebTransportHandler([&](const SwHttpRequest& request,
                                         std::uint64_t sessionId) -> bool {
         (void)request;
@@ -222,9 +252,33 @@ bool testWebTransportConnect() {
         sessionStreamId = sessionId;
         return true;
     });
+    h3Server.setWebTransportStreamHandler(
+        [&](std::uint64_t sessionId, std::uint64_t streamId,
+            const SwByteArray& payload, bool bidirectional, bool fin) {
+            (void)fin;
+            if (sessionId == 0 && streamId == 4 && bidirectional) {
+                receivedWebTransportStream.append(payload);
+            }
+        });
+    h3Server.setWebTransportDatagramHandler(
+        [&](std::uint64_t sessionId, const SwByteArray& payload) {
+            if (sessionId == 0) receivedWebTransportDatagram = payload;
+        });
 
     std::uint64_t now = 800;
     if (!requireTrue(h3Server.start(&error), "wt server start failed")) {
+        std::cerr << error.toStdString() << std::endl;
+        return false;
+    }
+
+    SwByteArray clientControl;
+    SwHttp3Frame::SettingList clientSettings =
+        SwWebTransportSession::requiredClientSettings();
+    if (!requireTrue(SwHttp3Connection::buildControlStream(
+                         clientSettings, clientControl, &error),
+                     "wt client SETTINGS build failed") ||
+        !requireTrue(client.sendStreamData(2, clientControl, false, &error),
+                     "wt client SETTINGS send failed")) {
         std::cerr << error.toStdString() << std::endl;
         return false;
     }
@@ -238,7 +292,8 @@ bool testWebTransportConnect() {
         std::cerr << error.toStdString() << std::endl;
         return false;
     }
-    if (!requireTrue(client.sendStreamData(0, connectStream, true, &error),
+    // CONNECT remains open for the lifetime of the WebTransport session.
+    if (!requireTrue(client.sendStreamData(0, connectStream, false, &error),
                      "wt connect send failed")) {
         std::cerr << error.toStdString() << std::endl;
         return false;
@@ -253,6 +308,34 @@ bool testWebTransportConnect() {
         !requireTrue(sessionStreamId == 0, "WebTransport session id mismatch")) {
         return false;
     }
+
+    SwByteArray webTransportStream;
+    if (!requireTrue(SwWebTransportSession::buildBidiStreamHeader(
+                         0, webTransportStream, &error),
+                     "wt stream header build failed")) return false;
+    webTransportStream.append("control", 7);
+    if (!requireTrue(client.sendStreamData(
+                         4, webTransportStream, false, &error),
+                     "wt stream send failed") ||
+        !requireTrue(transfer(client, server, now, &error),
+                     "wt stream transfer failed") ||
+        !requireTrue(h3Server.pump(&error), "wt stream pump failed") ||
+        !requireTrue(receivedWebTransportStream == SwByteArray("control"),
+                     "wt stream payload mismatch")) return false;
+
+    SwByteArray encodedDatagram;
+    if (!requireTrue(SwWebTransportSession::encodeDatagram(
+                         0, SwByteArray("probe"), encodedDatagram, &error),
+                     "wt datagram encode failed") ||
+        !requireTrue(client.queueDatagramFrame(encodedDatagram, &error),
+                     "wt datagram queue failed") ||
+        !requireTrue(transfer(client, server, now, &error),
+                     "wt datagram transfer failed") ||
+        !requireTrue(h3Server.handleWebTransportDatagram(
+                         server.takeDatagram(), &error),
+                     "wt datagram dispatch failed") ||
+        !requireTrue(receivedWebTransportDatagram == SwByteArray("probe"),
+                     "wt datagram payload mismatch")) return false;
 
     now += 10;
     if (!requireTrue(transfer(server, client, now, &error), "wt server->client failed")) {
@@ -276,6 +359,83 @@ bool testWebTransportConnect() {
         return false;
     }
     return requireTrue(accepted, "WebTransport session was not accepted (status not 2xx)");
+}
+
+bool testReliableResetPrimitives() {
+    SwString error;
+    SwQuicTransportParameters parameters;
+    parameters.resetStreamAt = true;
+    SwByteArray encodedParameters;
+    SwQuicTransportParameters decodedParameters;
+    if (!requireTrue(parameters.encode(encodedParameters, &error),
+                     "reset_stream_at parameter encode failed") ||
+        !requireTrue(SwQuicTransportParameters::decode(
+                         encodedParameters, decodedParameters, &error),
+                     "reset_stream_at parameter decode failed") ||
+        !requireTrue(decodedParameters.resetStreamAt,
+                     "reset_stream_at parameter was not preserved")) return false;
+
+    const SwQuicFrame reset = SwQuicFrame::resetStreamAt(4, 17, 23, 7);
+    SwByteArray encodedFrame;
+    std::size_t offset = 0;
+    SwQuicFrame decoded = SwQuicFrame::ping();
+    if (!requireTrue(SwQuicFrameCodec::encodeFrame(
+                           reset, encodedFrame, &error),
+                       "RESET_STREAM_AT encode failed") ||
+        !requireTrue(SwQuicFrameCodec::decodeFrame(
+                           encodedFrame, offset, decoded, &error),
+                       "RESET_STREAM_AT decode failed")) return false;
+    if (!requireTrue(decoded.type() == SwQuicFrame::Type::ResetStreamAt &&
+                           decoded.streamId() == 4 && decoded.errorCode() == 17 &&
+                           decoded.finalSize() == 23 && decoded.reliableSize() == 7,
+                       "RESET_STREAM_AT fields mismatch")) return false;
+
+    SwQuicConnectionId clientCid;
+    SwQuicConnectionId serverCid;
+    SwQuicInitialKeys clientKeys;
+    SwQuicInitialKeys serverKeys;
+    if (!SwQuicConnectionId::fromBytes(SwByteArray("rrclient"), clientCid, &error) ||
+        !SwQuicConnectionId::fromBytes(SwByteArray("rrserver"), serverCid, &error) ||
+        !SwQuicInitialSecrets::deriveV1(serverCid, clientKeys, serverKeys, &error)) {
+        return false;
+    }
+    SwQuicConnection client(SwQuicConnection::Role::Client);
+    SwQuicConnection server(SwQuicConnection::Role::Server);
+    client.setLocalConnectionId(clientCid);
+    client.setPeerConnectionId(serverCid);
+    server.setLocalConnectionId(serverCid);
+    server.setPeerConnectionId(clientCid);
+    client.setLevelKeys(SwQuicConnection::Level::Application, serverKeys, clientKeys);
+    server.setLevelKeys(SwQuicConnection::Level::Application, clientKeys, serverKeys);
+    SwQuicTransportParameters negotiated;
+    negotiated.initialMaxData = 262144;
+    negotiated.initialMaxStreamDataBidiLocal = 262144;
+    negotiated.initialMaxStreamDataBidiRemote = 262144;
+    negotiated.initialMaxStreamsBidi = 10;
+    negotiated.resetStreamAt = true;
+    client.applyLocalTransportParameters(negotiated);
+    client.applyPeerTransportParameters(negotiated);
+    server.applyLocalTransportParameters(negotiated);
+    server.applyPeerTransportParameters(negotiated);
+
+    if (!client.sendStreamData(0, SwByteArray("headerbody"), false, &error)) return false;
+    SwVector<SwByteArray> dataPackets;
+    if (!client.buildDatagrams(1000, dataPackets, &error) || dataPackets.empty() ||
+        !client.resetStreamAt(0, 99, 6, &error)) return false;
+    SwVector<SwByteArray> resetPackets;
+    if (!client.buildDatagrams(1001, resetPackets, &error) || resetPackets.empty()) return false;
+
+    // Reorder reset ahead of the reliable prefix. The receive-side reset must
+    // remain withheld until the application consumes that prefix.
+    if (!server.receiveDatagram(resetPackets.front(), 1002, &error) ||
+        !requireTrue(!server.isStreamReceiveReset(0),
+                     "RESET_STREAM_AT surfaced before its reliable prefix") ||
+        !server.receiveDatagram(dataPackets.front(), 1003, &error)) return false;
+    const SwByteArray delivered = server.readStream(0);
+    return requireTrue(delivered == SwByteArray("headerbody"),
+                       "RESET_STREAM_AT reliable prefix was not delivered") &&
+           requireTrue(server.isStreamReceiveReset(0),
+                       "RESET_STREAM_AT was not surfaced after prefix delivery");
 }
 
 // Regression for the split-FIN case: the request HEADERS arrive with FIN=0 and
@@ -1159,6 +1319,7 @@ bool testHttp3MultipartExpansionUsesPendingBudget() {
 int main() {
     if (!testHttp3RequestResponse() ||
         !testWebTransportConnect() ||
+        !testReliableResetPrimitives() ||
         !testHttp3SplitFinRequest() ||
         !testHttp3ControlStreamMissingSettings() ||
         !testHttp3ControlStreamRejectsMalformedSettingsImmediately() ||

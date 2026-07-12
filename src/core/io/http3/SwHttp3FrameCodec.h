@@ -46,7 +46,8 @@ public:
     static std::uint64_t settingMaxFieldSectionSize() { return 0x06; }
     static std::uint64_t settingQpackBlockedStreams() { return 0x07; }
     static std::uint64_t settingH3Datagram() { return 0x33; }
-    static std::uint64_t settingEnableWebTransport() { return 0x2b57; }
+    // SETTINGS_WT_ENABLED, draft-ietf-webtrans-http3-16 section 9.2.
+    static std::uint64_t settingEnableWebTransport() { return 0x2c7cf000; }
 
     typedef std::pair<std::uint64_t, std::uint64_t> Setting;
     typedef std::vector<Setting> SettingList;

@@ -72,7 +72,7 @@ public:
 
         std::vector<std::pair<SwByteArray, SwByteArray> > headers;
         headers.push_back(std::make_pair(SwByteArray(":method"), SwByteArray("CONNECT")));
-        headers.push_back(std::make_pair(SwByteArray(":protocol"), SwByteArray("webtransport")));
+        headers.push_back(std::make_pair(SwByteArray(":protocol"), SwByteArray("webtransport-h3")));
         headers.push_back(std::make_pair(SwByteArray(":scheme"), SwByteArray("https")));
         headers.push_back(std::make_pair(SwByteArray(":authority"), req.authority));
         headers.push_back(std::make_pair(SwByteArray(":path"), req.path));

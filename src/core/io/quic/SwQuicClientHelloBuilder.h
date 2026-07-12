@@ -475,6 +475,7 @@ private:
         parameters.activeConnectionIdLimit = 4;
         parameters.maxDatagramFrameSize =
             SwQuicLimits::maximumDatagramFrameBytes();
+        parameters.resetStreamAt = true;
         return parameters;
     }
 

@@ -57,6 +57,21 @@ public:
     // (RFC 9220); return true to accept (204/200) or false to reject (404).
     typedef std::function<bool(const SwHttpRequest&, std::uint64_t sessionId)>
         WebTransportHandler;
+    typedef std::function<bool(const SwHttpRequest&,
+                               std::uint64_t sessionId,
+                               SwString& selectedProtocol)>
+        WebTransportProtocolHandler;
+    typedef std::function<void(std::uint64_t sessionId,
+                               const SwByteArray& payload)>
+        WebTransportDatagramHandler;
+    typedef std::function<void(std::uint64_t sessionId,
+                               std::uint64_t streamId,
+                               const SwByteArray& payload,
+                               bool bidirectional,
+                               bool fin)>
+        WebTransportStreamHandler;
+    typedef std::function<void(std::uint64_t sessionId)>
+        WebTransportSessionClosedHandler;
 
     static std::uint64_t streamTypeControl() { return 0x00; }
     static std::uint64_t settingEnableConnectProtocol() { return 0x08; }
@@ -66,6 +81,8 @@ public:
           m_nextServerUniStreamId(3),
           m_controlStreamOpened(false),
           m_peerSettingsReceived(false),
+          m_peerH3Datagram(false),
+          m_peerEnableConnectProtocol(false),
           m_peerEnableWebTransport(false) {
     }
 
@@ -80,6 +97,78 @@ public:
     }
     void setWebTransportHandler(const WebTransportHandler& handler) {
         m_webTransportHandler = handler;
+    }
+    void setWebTransportProtocolHandler(
+        const WebTransportProtocolHandler& handler) {
+        m_webTransportProtocolHandler = handler;
+    }
+    void setWebTransportDatagramHandler(const WebTransportDatagramHandler& handler) {
+        m_webTransportDatagramHandler = handler;
+    }
+    void setWebTransportStreamHandler(const WebTransportStreamHandler& handler) {
+        m_webTransportStreamHandler = handler;
+    }
+    void setWebTransportSessionClosedHandler(
+        const WebTransportSessionClosedHandler& handler) {
+        m_webTransportSessionClosedHandler = handler;
+    }
+
+    bool hasWebTransportSession(std::uint64_t sessionId) const {
+        return m_webTransportSessions.find(sessionId) !=
+               m_webTransportSessions.end();
+    }
+
+    bool handleWebTransportDatagram(const SwByteArray& datagram,
+                                    SwString* error = nullptr) {
+        std::uint64_t quarterStreamId = 0;
+        SwByteArray payload;
+        if (!SwWebTransportSession::decodeDatagram(
+                datagram, quarterStreamId, payload, error)) return false;
+        const std::uint64_t sessionId = quarterStreamId * 4U;
+        if (!hasWebTransportSession(sessionId)) {
+            setError_(error, "HTTP datagram references an unknown WebTransport session");
+            return false;
+        }
+        if (m_webTransportDatagramHandler) {
+            m_webTransportDatagramHandler(sessionId, payload);
+        }
+        clearError_(error);
+        return true;
+    }
+
+    bool sendWebTransportDatagram(std::uint64_t sessionId,
+                                  const SwByteArray& payload,
+                                  SwString* error = nullptr) {
+        if (!hasWebTransportSession(sessionId)) {
+            setError_(error, "Cannot send a datagram for an unknown WebTransport session");
+            return false;
+        }
+        SwByteArray datagram;
+        if (!SwWebTransportSession::encodeDatagram(
+                sessionId, payload, datagram, error)) return false;
+        return m_connection->queueDatagramFrame(std::move(datagram), error);
+    }
+
+    bool sendWebTransportStreamData(std::uint64_t sessionId,
+                                    std::uint64_t streamId,
+                                    const SwByteArray& payload,
+                                    bool bidirectional,
+                                    bool firstWrite,
+                                    bool fin,
+                                    SwString* error = nullptr) {
+        if (!hasWebTransportSession(sessionId)) {
+            setError_(error, "Cannot send a stream for an unknown WebTransport session");
+            return false;
+        }
+        SwByteArray bytes;
+        if (firstWrite) {
+            const bool built = bidirectional
+                ? SwWebTransportSession::buildBidiStreamHeader(sessionId, bytes, error)
+                : SwWebTransportSession::buildUniStreamHeader(sessionId, bytes, error);
+            if (!built) return false;
+        }
+        bytes.append(payload);
+        return m_connection->sendStreamData(streamId, bytes, fin, error);
     }
 
     void setLimits(const SwHttpLimits& limits) {
@@ -97,6 +186,8 @@ public:
     }
 
     bool peerSettingsReceived() const { return m_peerSettingsReceived; }
+    bool peerH3Datagram() const { return m_peerH3Datagram; }
+    bool peerEnableConnectProtocol() const { return m_peerEnableConnectProtocol; }
     bool peerEnableWebTransport() const { return m_peerEnableWebTransport; }
     std::size_t requestsHandled() const { return m_requestsHandled; }
     std::size_t pendingRequestBytes() const { return m_pendingRequestBytes; }
@@ -153,6 +244,28 @@ public:
 
         for (std::size_t i = 0; i < ids.size(); ++i) {
             const std::uint64_t streamId = ids[i];
+            const bool webTransportConnect = hasWebTransportSession(streamId);
+            std::map<std::uint64_t, RequestStream_>::iterator wtDataIt =
+                m_requestStreams.find(streamId);
+            const bool webTransportData =
+                wtDataIt != m_requestStreams.end() &&
+                wtDataIt->second.webTransportDataStream;
+
+            if (!isUnidirectional_(streamId) &&
+                (webTransportConnect || webTransportData) &&
+                (m_connection->isStreamReceiveReset(streamId) ||
+                 m_connection->isStreamSendReset(streamId))) {
+                if (webTransportConnect) closeWebTransportSession_(streamId);
+                if (webTransportData) {
+                    if (m_webTransportStreamHandler) {
+                        m_webTransportStreamHandler(
+                            wtDataIt->second.webTransportSessionId,
+                            streamId, SwByteArray(), true, true);
+                    }
+                    m_requestStreams.erase(wtDataIt);
+                }
+                continue;
+            }
 
             // A rejected request is kept only as a compact tombstone. Do not
             // keep draining and flow-crediting an unbounded body after sending
@@ -218,6 +331,14 @@ public:
             const SwQuicStream* quicStream = m_connection->streams().stream(streamId);
             const bool fin = quicStream && quicStream->isReceiveComplete();
 
+            if (webTransportConnect) {
+                // The CONNECT stream carries WebTransport capsules, not an
+                // application bidirectional stream. Capsule parsing remains
+                // transport-owned and its FIN/reset terminates the session.
+                if (fin) closeWebTransportSession_(streamId);
+                continue;
+            }
+
             if (isUnidirectional_(streamId)) {
                 // A closed control stream is a fatal H3_CLOSED_CRITICAL_STREAM
                 // (RFC 9114 6.2.1).
@@ -225,10 +346,10 @@ public:
                     setError_(error, "HTTP/3 control stream closed (H3_CLOSED_CRITICAL_STREAM)");
                     return false;
                 }
-                if (chunk.isEmpty()) {
+                if (chunk.isEmpty() && !fin) {
                     continue;
                 }
-                if (!handleUniStream_(streamId, chunk, error)) {
+                if (!handleUniStream_(streamId, chunk, fin, error)) {
                     return false;
                 }
             } else {
@@ -241,6 +362,28 @@ public:
             }
         }
 
+        // Stream IDs are commonly ordered with request stream 0 before the
+        // client control stream 2. A CONNECT received in the same packet must
+        // therefore get one deferred pass after SETTINGS has been consumed;
+        // draft WebTransport forbids processing it before that SETTINGS frame.
+        if (m_peerSettingsReceived) {
+            for (std::size_t i = 0; i < ids.size(); ++i) {
+                const std::uint64_t streamId = ids[i];
+                if (isUnidirectional_(streamId) ||
+                    hasWebTransportSession(streamId)) continue;
+                std::map<std::uint64_t, RequestStream_>::iterator it =
+                    m_requestStreams.find(streamId);
+                if (it == m_requestStreams.end() || it->second.responded ||
+                    it->second.awaitingResponse ||
+                    it->second.webTransportDataStream) continue;
+                const SwQuicStream* quicStream =
+                    m_connection->streams().stream(streamId);
+                const bool fin = quicStream && quicStream->isReceiveComplete();
+                if (!handleRequestStream_(
+                        streamId, SwByteArray(), fin, error)) return false;
+            }
+        }
+
         return pumpResponseStreams_(error);
     }
 
@@ -248,9 +391,13 @@ private:
     struct UniStream_ {
         bool typeKnown;
         std::uint64_t type;
+        bool webTransportSessionKnown;
+        std::uint64_t webTransportSessionId;
         SwByteArray buffer;
         std::size_t accountedBytes;
-        UniStream_() : typeKnown(false), type(0), accountedBytes(0) {}
+        UniStream_()
+            : typeKnown(false), type(0), webTransportSessionKnown(false),
+              webTransportSessionId(0), accountedBytes(0) {}
     };
 
     struct RequestStream_ {
@@ -264,6 +411,8 @@ private:
         bool responded;
         bool awaitingResponse;
         bool resourceLimitExceeded;
+        bool webTransportDataStream;
+        std::uint64_t webTransportSessionId;
         bool frameOrderError; // DATA before HEADERS, or a control frame on this stream
         RequestStream_()
             : accountedBytes(0),
@@ -272,6 +421,8 @@ private:
               responded(false),
               awaitingResponse(false),
               resourceLimitExceeded(false),
+              webTransportDataStream(false),
+              webTransportSessionId(0),
               frameOrderError(false) {}
     };
 
@@ -1083,7 +1234,8 @@ private:
         return true;
     }
 
-    bool handleUniStream_(std::uint64_t streamId, const SwByteArray& chunk, SwString* error) {
+    bool handleUniStream_(std::uint64_t streamId, const SwByteArray& chunk,
+                          bool fin, SwString* error) {
         UniStream_& stream = m_uniStreams[streamId];
         // Non-control streams are intentionally ignored in this static-QPACK
         // implementation. Once their type is known, discard new bytes without
@@ -1091,7 +1243,8 @@ private:
         // carry a frame whose declared payload never completes; charge every
         // retained byte before appending so readStream() flow-credit cannot turn
         // that partial frame into an unbounded connection-lifetime allocation.
-        if (stream.typeKnown && stream.type != streamTypeControl()) {
+        if (stream.typeKnown && stream.type != streamTypeControl() &&
+            stream.type != SwWebTransportSession::uniStreamType()) {
             clearError_(error);
             return true;
         }
@@ -1125,6 +1278,35 @@ private:
                 return false;
             }
             synchronizeUniStreamAccounting_(stream);
+            return true;
+        }
+        if (stream.type == SwWebTransportSession::uniStreamType()) {
+            if (!stream.webTransportSessionKnown) {
+                std::size_t sessionOffset = 0;
+                std::uint64_t sessionId = 0;
+                if (!SwQuicVarIntCodec::decode(
+                        stream.buffer, sessionOffset, sessionId, nullptr)) {
+                    return true;
+                }
+                if (!hasWebTransportSession(sessionId)) {
+                    setError_(error,
+                              "WebTransport unidirectional stream references an unknown session");
+                    return false;
+                }
+                stream.webTransportSessionKnown = true;
+                stream.webTransportSessionId = sessionId;
+                stream.buffer = stream.buffer.mid(
+                    static_cast<int>(sessionOffset),
+                    static_cast<int>(stream.buffer.size() - sessionOffset));
+                synchronizeUniStreamAccounting_(stream);
+            }
+            if ((!stream.buffer.isEmpty() || fin) && m_webTransportStreamHandler) {
+                m_webTransportStreamHandler(
+                    stream.webTransportSessionId, streamId,
+                    stream.buffer, false, fin);
+            }
+            releaseUniStreamStorage_(stream);
+            clearError_(error);
             return true;
         }
         // Push (0x01) is server-initiated so it never arrives here; QPACK
@@ -1176,7 +1358,14 @@ private:
                 for (std::size_t i = 0; i < frame.settings().size(); ++i) {
                     if (frame.settings()[i].first ==
                         SwHttp3Frame::settingEnableWebTransport()) {
-                        m_peerEnableWebTransport = (frame.settings()[i].second != 0);
+                        m_peerEnableWebTransport = (frame.settings()[i].second == 1);
+                    } else if (frame.settings()[i].first ==
+                               SwHttp3Frame::settingH3Datagram()) {
+                        m_peerH3Datagram = (frame.settings()[i].second == 1);
+                    } else if (frame.settings()[i].first ==
+                               settingEnableConnectProtocol()) {
+                        m_peerEnableConnectProtocol =
+                            (frame.settings()[i].second == 1);
                     } else if (frame.settings()[i].first ==
                                SwHttp3Frame::settingMaxFieldSectionSize()) {
                         m_peerMaxFieldSectionSize = frame.settings()[i].second;
@@ -1201,6 +1390,18 @@ private:
             return true;
         }
         RequestStream_& state = m_requestStreams[streamId];
+        if (state.webTransportDataStream) {
+            if ((!chunk.isEmpty() || fin) && m_webTransportStreamHandler) {
+                m_webTransportStreamHandler(
+                    state.webTransportSessionId, streamId, chunk, true, fin);
+            }
+            if (fin) {
+                releaseRequestStorage_(state);
+                m_requestStreams.erase(streamId);
+            }
+            clearError_(error);
+            return true;
+        }
         // Completed request streams remain as tiny tombstones because pump()
         // may scan historical QUIC streams. Never recreate or refill their
         // request buffers after a response has been queued.
@@ -1228,6 +1429,56 @@ private:
                 streamId, state,
                 swHttpTextResponse(503, SwString("Request buffering limit exceeded")),
                 true, error);
+        }
+
+        // A peer-created bidirectional WebTransport stream starts with the
+        // WT_STREAM signal (0x41) and the CONNECT stream/session ID. Classify
+        // it before feeding bytes to the HTTP/3 frame decoder.
+        if (!state.headersDecoded && state.fields.empty() && state.body.isEmpty() &&
+            !state.buffer.isEmpty()) {
+            std::size_t prefixOffset = 0;
+            std::uint64_t signal = 0;
+            if (!SwQuicVarIntCodec::decode(
+                    state.buffer, prefixOffset, signal, nullptr)) {
+                if (fin) {
+                    setError_(error, "Truncated WebTransport stream signal");
+                    return false;
+                }
+                return true;
+            }
+            if (signal == SwWebTransportSession::bidiStreamFrameType()) {
+                std::uint64_t sessionId = 0;
+                if (!SwQuicVarIntCodec::decode(
+                        state.buffer, prefixOffset, sessionId, nullptr)) {
+                    if (fin) {
+                        setError_(error, "Truncated WebTransport session id");
+                        return false;
+                    }
+                    return true;
+                }
+                if (!hasWebTransportSession(sessionId)) {
+                    setError_(error,
+                              "WebTransport bidirectional stream references an unknown session");
+                    return false;
+                }
+                state.webTransportDataStream = true;
+                state.webTransportSessionId = sessionId;
+                const SwByteArray payload = state.buffer.mid(
+                    static_cast<int>(prefixOffset),
+                    static_cast<int>(state.buffer.size() - prefixOffset));
+                state.buffer = SwByteArray();
+                synchronizeRequestAccounting_(state);
+                if ((!payload.isEmpty() || fin) && m_webTransportStreamHandler) {
+                    m_webTransportStreamHandler(
+                        sessionId, streamId, payload, true, fin);
+                }
+                if (fin) {
+                    releaseRequestStorage_(state);
+                    m_requestStreams.erase(streamId);
+                }
+                clearError_(error);
+                return true;
+            }
         }
 
         std::size_t offset = 0;
@@ -1324,8 +1575,21 @@ private:
                 true, error);
         }
 
+        // Ordinary HTTP requests are complete at FIN. An extended CONNECT is
+        // deliberately long-lived: dispatch it as soon as its complete
+        // HEADERS frame and the peer SETTINGS are available, without waiting
+        // for FIN (which terminates a WebTransport session).
         if (!fin) {
-            return true;
+            if (!state.headersDecoded || !state.buffer.isEmpty() ||
+                !state.body.isEmpty() || !m_peerSettingsReceived) {
+                return true;
+            }
+            SwHttpRequest candidate;
+            bool candidateMalformed = false;
+            if (!fieldsToRequest_(state.fields, state.body, candidate,
+                                  candidateMalformed) || candidateMalformed) {
+                return true;
+            }
         }
 
         // A FIN makes the byte sequence final. Any undecoded suffix therefore
@@ -1393,16 +1657,33 @@ private:
         }
 
         if (isConnect) {
+            const SwQuicTransportParameters& peerTransport =
+                m_connection->peerTransportParameters();
+            const bool webTransportNegotiated =
+                m_peerEnableWebTransport && m_peerEnableConnectProtocol &&
+                m_peerH3Datagram && m_connection->hasPeerTransportParameters() &&
+                peerTransport.maxDatagramFrameSize > 0 &&
+                peerTransport.resetStreamAt;
             // WebTransport Extended CONNECT (RFC 9220): the request stream ID
             // is the session ID.
-            const bool accept = m_webTransportHandler
-                                    ? m_webTransportHandler(request, streamId)
-                                    : false;
+            SwString selectedProtocol;
+            bool accept = false;
+            if (webTransportNegotiated && m_webTransportProtocolHandler) {
+                accept = m_webTransportProtocolHandler(
+                    request, streamId, selectedProtocol);
+            } else if (webTransportNegotiated && m_webTransportHandler) {
+                accept = m_webTransportHandler(request, streamId);
+            }
             (void)sessionProtocol;
             SwHttpResponse response;
             response.status = accept ? 200 : 404;
             response.reason = swHttpStatusReason(response.status);
+            if (accept && !selectedProtocol.isEmpty()) {
+                response.headers[SwString("wt-protocol")] =
+                    SwString("\"") + selectedProtocol + SwString("\"");
+            }
             const bool sent = finishRequestStream_(streamId, state, response, !accept, error);
+            if (sent && accept) m_webTransportSessions[streamId] = true;
             swHttpCleanupMultipartTemporaryFiles(request);
             return sent;
         }
@@ -1479,6 +1760,12 @@ private:
         std::vector<std::pair<SwByteArray, SwByteArray> > fields;
         pushStatus_(fields, response.status);
 
+        std::vector<std::pair<SwByteArray, SwByteArray> > applicationFields;
+        appendHeaderMap_(response.headers, applicationFields);
+        for (std::size_t i = 0; i < applicationFields.size(); ++i) {
+            fields.push_back(applicationFields[i]);
+        }
+
         std::uint64_t fieldSectionBytes = 0;
         if (!fieldSectionSize_(fields, fieldSectionBytes) ||
             fieldSectionBytes > m_peerMaxFieldSectionSize) {
@@ -1502,6 +1789,19 @@ private:
                             int status) {
         fields.push_back(std::make_pair(SwByteArray(":status"),
                                         SwByteArray(SwString::number(status).toStdString())));
+    }
+
+    void closeWebTransportSession_(std::uint64_t sessionId) {
+        if (m_webTransportSessions.erase(sessionId) == 0) return;
+        std::map<std::uint64_t, RequestStream_>::iterator connectState =
+            m_requestStreams.find(sessionId);
+        if (connectState != m_requestStreams.end()) {
+            releaseRequestStorage_(connectState->second);
+            m_requestStreams.erase(connectState);
+        }
+        if (m_webTransportSessionClosedHandler) {
+            m_webTransportSessionClosedHandler(sessionId);
+        }
     }
 
     static bool fieldLineSize_(
@@ -1782,7 +2082,7 @@ private:
                 if (seenProtocol) { outMalformed = true; return false; }
                 seenProtocol = true;
                 hasProtocolPseudo = true;
-                isWebTransport = (value == SwString("webtransport"));
+                isWebTransport = (value == SwString("webtransport-h3"));
             } else if (isPseudo) {
                 outMalformed = true; // unknown pseudo-header
                 return false;
@@ -1857,6 +2157,8 @@ private:
     std::uint64_t m_nextServerUniStreamId;
     bool m_controlStreamOpened;
     bool m_peerSettingsReceived;
+    bool m_peerH3Datagram;
+    bool m_peerEnableConnectProtocol;
     bool m_peerEnableWebTransport;
     std::uint64_t m_peerMaxFieldSectionSize =
         (std::numeric_limits<std::uint64_t>::max)();
@@ -1868,6 +2170,10 @@ private:
     AsyncRequestHandler m_asyncRequestHandler;
     AsyncResponseReadyHandler m_asyncResponseReadyHandler;
     WebTransportHandler m_webTransportHandler;
+    WebTransportProtocolHandler m_webTransportProtocolHandler;
+    WebTransportDatagramHandler m_webTransportDatagramHandler;
+    WebTransportStreamHandler m_webTransportStreamHandler;
+    WebTransportSessionClosedHandler m_webTransportSessionClosedHandler;
     PendingBytesReserveHandler m_pendingBytesReserveHandler;
     PendingBytesReleaseHandler m_pendingBytesReleaseHandler;
     SwHttpLimits m_limits;
@@ -1875,6 +2181,7 @@ private:
     std::map<std::uint64_t, UniStream_> m_uniStreams;
     std::map<std::uint64_t, RequestStream_> m_requestStreams;
     std::map<std::uint64_t, ResponseStream_> m_responseStreams;
+    std::map<std::uint64_t, bool> m_webTransportSessions;
     std::map<std::uint64_t, std::uint64_t> m_completedRequestRanges;
     std::size_t m_responseSchedulingCursor = 0;
 };
