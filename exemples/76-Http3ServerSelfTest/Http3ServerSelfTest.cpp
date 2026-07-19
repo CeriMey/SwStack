@@ -1314,6 +1314,80 @@ bool testHttp3MultipartExpansionUsesPendingBudget() {
                        "multipart expansion budget rejection did not return 503");
 }
 
+bool testWebTransportDatagramBackpressureDefaults() {
+    SwString error;
+    SwQuicConnection connection(SwQuicConnection::Role::Server);
+    connection.setMaxPendingDatagramFrames(65536U);
+    connection.setMaxPendingDatagramBytes(64U * 1024U * 1024U);
+    for (int i = 0; i < 600; ++i) {
+        connection.queueFrame(SwQuicConnection::Level::Application,
+                              SwQuicFrame::ping());
+    }
+
+    SwHttp3Server server(&connection);
+    if (!requireTrue(
+            connection.maxPendingDatagramFrames() == 65536U &&
+                connection.maxPendingDatagramBytes() ==
+                    64U * 1024U * 1024U &&
+                connection.datagramQueueOverflowPolicy() ==
+                    SwQuicConnection::DatagramQueueOverflowPolicy::RejectNewest,
+            "generic HTTP/3 constructor changed the DATAGRAM queue contract")) {
+        return false;
+    }
+    server.setWebTransportDatagramQueueLimits(
+        SwHttp3Server::defaultMaxPendingWebTransportDatagrams(),
+        SwHttp3Server::defaultMaxPendingWebTransportDatagramBytes());
+    if (!requireTrue(
+            connection.maxPendingDatagramFrames() ==
+                SwHttp3Server::defaultMaxPendingWebTransportDatagrams(),
+            "WebTransport did not apply its DATAGRAM frame cap") ||
+        !requireTrue(
+            connection.maxPendingDatagramBytes() ==
+                SwHttp3Server::defaultMaxPendingWebTransportDatagramBytes(),
+            "WebTransport did not apply its DATAGRAM byte cap") ||
+        !requireTrue(
+            connection.datagramQueueOverflowPolicy() ==
+                SwQuicConnection::DatagramQueueOverflowPolicy::DropOldest,
+            "WebTransport did not enable stale DATAGRAM shedding")) {
+        return false;
+    }
+    for (std::size_t i = 0;
+         i < SwHttp3Server::defaultMaxPendingWebTransportDatagrams() + 1U;
+         ++i) {
+        if (!connection.queueDatagramFrame(SwByteArray("x"), &error)) {
+            return false;
+        }
+    }
+    const SwHttp3Server::WebTransportDatagramQueueStats stats =
+        server.webTransportDatagramQueueStats();
+    const SwQuicConnection::DiagnosticStats transportStats =
+        connection.diagnosticStats(SwQuicConnection::Level::Application, 0);
+    if (!requireTrue(
+            stats.pendingFrames ==
+                SwHttp3Server::defaultMaxPendingWebTransportDatagrams() &&
+                stats.pendingBytes == stats.pendingFrames &&
+                stats.droppedFrames == 1,
+            "HTTP/3 DATAGRAM frame cap/drop statistics are incorrect") ||
+        !requireTrue(transportStats.pendingReliableFrames == 600,
+                     "HTTP/3 DATAGRAM pressure consumed reliable frame capacity")) {
+        return false;
+    }
+
+    SwQuicConnection byteConnection(SwQuicConnection::Role::Server);
+    SwHttp3Server byteServer(&byteConnection);
+    byteServer.setWebTransportDatagramQueueLimits(8, 4);
+    if (!byteConnection.queueDatagramFrame(SwByteArray("old"), &error) ||
+        !byteConnection.queueDatagramFrame(SwByteArray("new"), &error)) {
+        return false;
+    }
+    const SwHttp3Server::WebTransportDatagramQueueStats byteStats =
+        byteServer.webTransportDatagramQueueStats();
+    return requireTrue(byteStats.pendingFrames == 1 &&
+                           byteStats.pendingBytes == 3 &&
+                           byteStats.droppedFrames == 1,
+                       "HTTP/3 DATAGRAM byte cap did not shed the stale frame");
+}
+
 } // namespace
 
 int main() {
@@ -1327,7 +1401,8 @@ int main() {
         !testHttp3SequentialStreamCreditAndRequestBudgets() ||
         !testHttp3CreditWaitsForEveryResponseByteAck() ||
         !testHttp3PartialRequestResetAndImmediateRejection() ||
-        !testHttp3MultipartExpansionUsesPendingBudget()) {
+        !testHttp3MultipartExpansionUsesPendingBudget() ||
+        !testWebTransportDatagramBackpressureDefaults()) {
         return 1;
     }
     std::cout << "Http3ServerSelfTest passed" << std::endl;

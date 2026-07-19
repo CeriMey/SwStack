@@ -73,6 +73,19 @@ public:
     typedef std::function<void(std::uint64_t sessionId)>
         WebTransportSessionClosedHandler;
 
+    struct WebTransportDatagramQueueStats {
+        std::size_t pendingFrames = 0;
+        std::size_t pendingBytes = 0;
+        std::uint64_t droppedFrames = 0;
+    };
+
+    static std::size_t defaultMaxPendingWebTransportDatagrams() {
+        return 2048U;
+    }
+    static std::size_t defaultMaxPendingWebTransportDatagramBytes() {
+        return 2U * 1024U * 1024U;
+    }
+
     static std::uint64_t streamTypeControl() { return 0x00; }
     static std::uint64_t settingEnableConnectProtocol() { return 0x08; }
 
@@ -83,8 +96,7 @@ public:
           m_peerSettingsReceived(false),
           m_peerH3Datagram(false),
           m_peerEnableConnectProtocol(false),
-          m_peerEnableWebTransport(false) {
-    }
+          m_peerEnableWebTransport(false) {}
 
     ~SwHttp3Server();
 
@@ -111,6 +123,27 @@ public:
     void setWebTransportSessionClosedHandler(
         const WebTransportSessionClosedHandler& handler) {
         m_webTransportSessionClosedHandler = handler;
+    }
+
+    void setWebTransportDatagramQueueLimits(std::size_t maximumFrames,
+                                            std::size_t maximumBytes) {
+        if (!m_connection) return;
+        m_connection->setMaxPendingDatagramFrames(maximumFrames);
+        m_connection->setMaxPendingDatagramBytes(maximumBytes);
+        // This policy is opt-in with the WebTransport queue budget. Generic
+        // HTTP/3 DATAGRAM users retain their configured limits and historical
+        // RejectNewest behavior.
+        m_connection->setDatagramQueueOverflowPolicy(
+            SwQuicConnection::DatagramQueueOverflowPolicy::DropOldest);
+    }
+
+    WebTransportDatagramQueueStats webTransportDatagramQueueStats() const {
+        WebTransportDatagramQueueStats stats;
+        if (!m_connection) return stats;
+        stats.pendingFrames = m_connection->pendingDatagramFrameCount();
+        stats.pendingBytes = m_connection->pendingDatagramFrameBytes();
+        stats.droppedFrames = m_connection->droppedOutgoingDatagramFrames();
+        return stats;
     }
 
     bool hasWebTransportSession(std::uint64_t sessionId) const {

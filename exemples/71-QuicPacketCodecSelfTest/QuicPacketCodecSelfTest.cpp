@@ -1569,12 +1569,27 @@ bool testDatagramNegotiationAndQueueBounds() {
     peer.maxDatagramFrameSize = 64;
     sender.applyPeerTransportParameters(peer);
     sender.setMaxPendingDatagramFrames(2);
+    for (int i = 0; i < 8; ++i) {
+        sender.queueFrame(SwQuicConnection::Level::Application,
+                          SwQuicFrame::ping());
+    }
     if (!requireTrue(sender.queueDatagramFrame(SwByteArray("one"), &error),
                      "negotiated DATAGRAM 1 was rejected") ||
         !requireTrue(sender.queueDatagramFrame(SwByteArray("two"), &error),
                      "negotiated DATAGRAM 2 was rejected") ||
         !requireTrue(!sender.queueDatagramFrame(SwByteArray("three"), &error),
-                     "DATAGRAM queue bound was not enforced") ||
+                     "DATAGRAM queue bound was not enforced")) {
+        return false;
+    }
+    const SwQuicConnection::DiagnosticStats queueStats =
+        sender.diagnosticStats(SwQuicConnection::Level::Application, 0);
+    if (!requireTrue(queueStats.pendingReliableFrames == 8,
+                     "reliable frames were charged to the DATAGRAM bound") ||
+        !requireTrue(queueStats.pendingDatagramFrames == 2 &&
+                         queueStats.pendingDatagramBytes == 6,
+                     "DATAGRAM pending queue statistics are incorrect") ||
+        !requireTrue(queueStats.droppedOutgoingDatagramFrames == 1,
+                     "DATAGRAM queue overflow was not counted") ||
         !requireTrue(!SwQuicConnection(SwQuicConnection::Role::Client)
                           .queueDatagramFrame(
                               SwByteArray(SwQuicLimits::maximumUdpPayloadBytes(), 'x'),
@@ -1608,6 +1623,37 @@ bool testDatagramNegotiationAndQueueBounds() {
     }
     return requireTrue(rejected,
                        "unnegotiated incoming DATAGRAM frame should be rejected");
+}
+
+bool testDatagramQueueDoesNotStarveStreams() {
+    SwString error;
+    SwQuicConnection client(SwQuicConnection::Role::Client);
+    SwQuicConnection server(SwQuicConnection::Role::Server);
+    if (!setupAppPair(client, server, SwByteArray("priocli1"),
+                      SwByteArray("priosrv1"), &error)) {
+        return false;
+    }
+
+    client.setMaxPendingDatagramFrames(8);
+    client.setMaxPendingDatagramBytes(8U * 1024U);
+    client.setMaxDatagramsPerBuild(1);
+    for (int i = 0; i < 8; ++i) {
+        if (!client.queueDatagramFrame(SwByteArray(1000, 'd'), &error)) {
+            return false;
+        }
+    }
+    // This reliable stream write is intentionally queued after the best-effort
+    // burst. It must still be present in the first emitted QUIC packet.
+    if (!client.sendStreamData(0, SwByteArray("control-first"), false, &error)) {
+        return false;
+    }
+    SwVector<SwByteArray> wire;
+    if (!client.buildDatagrams(2700, wire, &error) || wire.size() != 1 ||
+        !server.receiveDatagram(wire[0], 2700, &error)) {
+        return false;
+    }
+    return requireTrue(server.readStream(0) == SwByteArray("control-first"),
+                       "queued DATAGRAM frames starved a reliable stream");
 }
 
 bool testDatagramReceiveBackpressureAndConnectionIdLimit() {
@@ -1961,6 +2007,7 @@ int main() {
         !testStreamSendBackpressureBound() ||
         !testUnstagedStreamBytesUnderFlowControl() ||
         !testDatagramNegotiationAndQueueBounds() ||
+        !testDatagramQueueDoesNotStarveStreams() ||
         !testDatagramReceiveBackpressureAndConnectionIdLimit() ||
         !testResetStreamFinalSizeAccounting() ||
         !testPtoDoesNotRetransmitStreamDataAfterReset() ||

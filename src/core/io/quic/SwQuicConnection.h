@@ -63,6 +63,15 @@ public:
         Application = 2
     };
 
+    // QUIC DATAGRAM is deliberately unreliable. Generic users keep the
+    // historical reject-newest behaviour, while latency-sensitive transports
+    // such as WebTransport can prefer fresh data by shedding the oldest
+    // datagram without affecting reliable stream/control frames.
+    enum class DatagramQueueOverflowPolicy {
+        RejectNewest,
+        DropOldest
+    };
+
     static std::size_t kLevelCount() { return 3; }
     static std::size_t kMaxUdpPayload() { return SwQuicLimits::maximumUdpPayloadBytes(); }
     static std::uint8_t kPacketNumberLength() { return 4; }
@@ -203,6 +212,12 @@ public:
         space.rxKeys = SwQuicInitialKeys();
         space.txKeys = SwQuicInitialKeys();
         space.pendingFrames.clear();
+        if (level == Level::Application) {
+            m_droppedOutgoingDatagramFrames +=
+                static_cast<std::uint64_t>(m_pendingDatagramFrames.size());
+            m_pendingDatagramFrames.clear();
+            m_pendingDatagramFrameBytes = 0;
+        }
         space.sentPackets.clear();
         space.ackTracker.clear();
         space.hasAckDeadline = false;
@@ -455,6 +470,32 @@ public:
     }
     void setMaxPendingDatagramFrames(std::size_t maximum) {
         m_maxPendingDatagramFrames = maximum;
+        enforcePendingDatagramLimits_();
+    }
+    void setMaxPendingDatagramBytes(std::size_t maximum) {
+        m_maxPendingDatagramBytes = maximum;
+        enforcePendingDatagramLimits_();
+    }
+    void setDatagramQueueOverflowPolicy(DatagramQueueOverflowPolicy policy) {
+        m_datagramQueueOverflowPolicy = policy;
+    }
+    std::size_t maxPendingDatagramFrames() const {
+        return m_maxPendingDatagramFrames;
+    }
+    std::size_t maxPendingDatagramBytes() const {
+        return m_maxPendingDatagramBytes;
+    }
+    DatagramQueueOverflowPolicy datagramQueueOverflowPolicy() const {
+        return m_datagramQueueOverflowPolicy;
+    }
+    std::size_t pendingDatagramFrameCount() const {
+        return m_pendingDatagramFrames.size();
+    }
+    std::size_t pendingDatagramFrameBytes() const {
+        return m_pendingDatagramFrameBytes;
+    }
+    std::uint64_t droppedOutgoingDatagramFrames() const {
+        return m_droppedOutgoingDatagramFrames;
     }
     // Upper bound imposed by the currently selected underlay/virtual carrier.
     // QUIC's peer max_udp_payload_size is also honoured; this local bound lets
@@ -478,6 +519,13 @@ public:
         for (SwDequeue<SwQuicFrame>::const_iterator it =
                  application.pendingFrames.begin();
              it != application.pendingFrames.end(); ++it) {
+            if (frameEncodedSize_(*it) > applicationBudget) {
+                return false;
+            }
+        }
+        for (SwDequeue<SwQuicFrame>::const_iterator it =
+                 m_pendingDatagramFrames.begin();
+             it != m_pendingDatagramFrames.end(); ++it) {
             if (frameEncodedSize_(*it) > applicationBudget) {
                 return false;
             }
@@ -779,13 +827,11 @@ public:
             setError_(error, "QUIC DATAGRAM does not fit the negotiated packet size");
             return false;
         }
-        Space_& app = space_(Level::Application);
-        if (m_maxPendingDatagramFrames > 0 &&
-            app.pendingFrames.size() >= m_maxPendingDatagramFrames) {
-            setError_(error, "QUIC DATAGRAM pending queue is full");
+        if (!reservePendingDatagram_(static_cast<std::size_t>(data.size()), error)) {
             return false;
         }
-        app.pendingFrames.push_back(SwQuicFrame::datagram(data));
+        m_pendingDatagramFrames.push_back(SwQuicFrame::datagram(data));
+        m_pendingDatagramFrameBytes += static_cast<std::size_t>(data.size());
         ++m_queuedDatagramFrames;
         if (error) {
             *error = SwString();
@@ -809,13 +855,12 @@ public:
             setError_(error, "QUIC DATAGRAM does not fit the negotiated packet size");
             return false;
         }
-        Space_& app = space_(Level::Application);
-        if (m_maxPendingDatagramFrames > 0 &&
-            app.pendingFrames.size() >= m_maxPendingDatagramFrames) {
-            setError_(error, "QUIC DATAGRAM pending queue is full");
+        const std::size_t dataSize = static_cast<std::size_t>(data.size());
+        if (!reservePendingDatagram_(dataSize, error)) {
             return false;
         }
-        app.pendingFrames.push_back(SwQuicFrame::datagram(std::move(data)));
+        m_pendingDatagramFrames.push_back(SwQuicFrame::datagram(std::move(data)));
+        m_pendingDatagramFrameBytes += dataSize;
         ++m_queuedDatagramFrames;
         clearError_(error);
         return true;
@@ -824,6 +869,12 @@ public:
     // Queue an arbitrary frame at an encryption level (CRYPTO during the
     // handshake, control frames, ...).
     void queueFrame(Level level, const SwQuicFrame& frame) {
+        if (level == Level::Application &&
+            frame.type() == SwQuicFrame::Type::Datagram) {
+            SwString ignored;
+            (void)queueDatagramFrame(frame.data(), &ignored);
+            return;
+        }
         space_(level).pendingFrames.push_back(frame);
     }
 
@@ -1270,6 +1321,9 @@ public:
 
     struct DiagnosticStats {
         std::size_t pendingFrames = 0;
+        std::size_t pendingReliableFrames = 0;
+        std::size_t pendingDatagramFrames = 0;
+        std::size_t pendingDatagramBytes = 0;
         std::size_t sentPackets = 0;
         std::size_t ackElicitingSinceAck = 0;
         std::size_t probesPending = 0;
@@ -1287,13 +1341,20 @@ public:
         std::uint64_t queuedDatagramFrames = 0;
         std::uint64_t encodedDatagramFrames = 0;
         std::uint64_t receivedDatagramFrames = 0;
+        std::uint64_t droppedOutgoingDatagramFrames = 0;
         std::uint64_t droppedReceivedDatagrams = 0;
     };
 
     DiagnosticStats diagnosticStats(Level level, std::uint64_t nowMs) const {
         const Space_& space = space_(level);
         DiagnosticStats stats;
-        stats.pendingFrames = space.pendingFrames.size();
+        stats.pendingReliableFrames = space.pendingFrames.size();
+        stats.pendingDatagramFrames =
+            level == Level::Application ? m_pendingDatagramFrames.size() : 0;
+        stats.pendingDatagramBytes =
+            level == Level::Application ? m_pendingDatagramFrameBytes : 0;
+        stats.pendingFrames = stats.pendingReliableFrames +
+                              stats.pendingDatagramFrames;
         stats.sentPackets = space.sentPackets.size();
         stats.ackElicitingSinceAck = space.ackElicitingSinceAck;
         stats.probesPending = space.probesPending;
@@ -1311,6 +1372,7 @@ public:
         stats.queuedDatagramFrames = m_queuedDatagramFrames;
         stats.encodedDatagramFrames = m_encodedDatagramFrames;
         stats.receivedDatagramFrames = m_receivedDatagramFrames;
+        stats.droppedOutgoingDatagramFrames = m_droppedOutgoingDatagramFrames;
         stats.droppedReceivedDatagrams = m_droppedReceivedDatagrams;
         return stats;
     }
@@ -1421,6 +1483,78 @@ private:
 
     Space_& space_(Level level) { return m_spaces[static_cast<std::size_t>(level)]; }
     const Space_& space_(Level level) const { return m_spaces[static_cast<std::size_t>(level)]; }
+
+    bool hasPendingFrames_(Level level, const Space_& space) const {
+        return !space.pendingFrames.empty() ||
+               (level == Level::Application && !m_pendingDatagramFrames.empty());
+    }
+
+    bool pendingDatagramLimitExceeded_(std::size_t nextBytes) const {
+        if (m_maxPendingDatagramFrames > 0 &&
+            m_pendingDatagramFrames.size() >= m_maxPendingDatagramFrames) {
+            return true;
+        }
+        return m_maxPendingDatagramBytes > 0 &&
+               (nextBytes > m_maxPendingDatagramBytes ||
+                m_pendingDatagramFrameBytes >
+                    m_maxPendingDatagramBytes - nextBytes);
+    }
+
+    void dropOldestPendingDatagram_() {
+        if (m_pendingDatagramFrames.empty()) return;
+        const std::size_t bytes = static_cast<std::size_t>(
+            m_pendingDatagramFrames.front().data().size());
+        m_pendingDatagramFrameBytes = bytes > m_pendingDatagramFrameBytes
+                                          ? 0
+                                          : m_pendingDatagramFrameBytes - bytes;
+        m_pendingDatagramFrames.pop_front();
+        ++m_droppedOutgoingDatagramFrames;
+    }
+
+    void enforcePendingDatagramLimits_() {
+        while (!m_pendingDatagramFrames.empty() &&
+               ((m_maxPendingDatagramFrames > 0 &&
+                 m_pendingDatagramFrames.size() >
+                     m_maxPendingDatagramFrames) ||
+                (m_maxPendingDatagramBytes > 0 &&
+                 m_pendingDatagramFrameBytes >
+                     m_maxPendingDatagramBytes))) {
+            dropOldestPendingDatagram_();
+        }
+    }
+
+    bool reservePendingDatagram_(std::size_t bytes, SwString* error) {
+        if (m_maxPendingDatagramBytes > 0 &&
+            bytes > m_maxPendingDatagramBytes) {
+            ++m_droppedOutgoingDatagramFrames;
+            setError_(error,
+                      "QUIC DATAGRAM exceeds the pending queue byte limit");
+            return false;
+        }
+        while (pendingDatagramLimitExceeded_(bytes)) {
+            if (m_datagramQueueOverflowPolicy !=
+                    DatagramQueueOverflowPolicy::DropOldest ||
+                m_pendingDatagramFrames.empty()) {
+                ++m_droppedOutgoingDatagramFrames;
+                setError_(error, "QUIC DATAGRAM pending queue is full");
+                return false;
+            }
+            dropOldestPendingDatagram_();
+        }
+        clearError_(error);
+        return true;
+    }
+
+    void restorePendingFrame_(Level level, SwQuicFrame&& frame) {
+        if (level == Level::Application &&
+            frame.type() == SwQuicFrame::Type::Datagram) {
+            m_pendingDatagramFrameBytes +=
+                static_cast<std::size_t>(frame.data().size());
+            m_pendingDatagramFrames.push_front(std::move(frame));
+            return;
+        }
+        space_(level).pendingFrames.push_front(std::move(frame));
+    }
 
     // On PTO, resend the retransmittable frames of the oldest unacknowledged
     // packet in the space so a lost packet is recovered directly; if none carry
@@ -2852,9 +2986,9 @@ private:
         bool ackWanted = !space.ackTracker.isEmpty() &&
                          space.ackTracker.ackElicitingPending() &&
                          (ackDue || level != Level::Application ||
-                          !space.pendingFrames.empty());
+                          hasPendingFrames_(level, space));
 
-        while ((!space.pendingFrames.empty() || ackWanted) &&
+        while ((hasPendingFrames_(level, space) || ackWanted) &&
                (m_maxDatagramsPerBuild == 0 ||
                 outDatagrams.size() < m_maxDatagramsPerBuild) &&
                (m_pacingRatePerMillisecond == 0 || m_pacingTokens > 0)) {
@@ -2889,8 +3023,12 @@ private:
             }
 
             const std::size_t payloadBudget = packetPayloadBudget_(level);
-            while (!space.pendingFrames.empty()) {
-                const SwQuicFrame& next = space.pendingFrames.front();
+            while (hasPendingFrames_(level, space)) {
+                const bool fromDatagramQueue = space.pendingFrames.empty();
+                SwDequeue<SwQuicFrame>& pendingQueue = fromDatagramQueue
+                    ? m_pendingDatagramFrames
+                    : space.pendingFrames;
+                const SwQuicFrame& next = pendingQueue.front();
                 const std::size_t nextSize = frameEncodedSize_(next);
                 if (nextSize > payloadBudget ||
                     payloadSize > payloadBudget - nextSize) {
@@ -2912,9 +3050,18 @@ private:
                     }
                     ackEliciting = true;
                 }
-                frames.push_back(std::move(space.pendingFrames.front()));
+                const std::size_t datagramBytes = fromDatagramQueue
+                    ? static_cast<std::size_t>(next.data().size())
+                    : 0;
+                frames.push_back(std::move(pendingQueue.front()));
                 payloadSize += nextSize;
-                space.pendingFrames.pop_front();
+                pendingQueue.pop_front();
+                if (fromDatagramQueue) {
+                    m_pendingDatagramFrameBytes =
+                        datagramBytes > m_pendingDatagramFrameBytes
+                            ? 0
+                            : m_pendingDatagramFrameBytes - datagramBytes;
+                }
             }
 
             if (frames.empty()) {
@@ -2932,7 +3079,7 @@ private:
                 // committed yet, so the next flush will rebuild it exactly.
                 for (std::size_t i = frames.size(); i-- > 0;) {
                     if (carriesGeneratedAck && i == 0) continue;
-                    space.pendingFrames.push_front(std::move(frames[i]));
+                    restorePendingFrame_(level, std::move(frames[i]));
                 }
                 return false;
             }
@@ -2945,6 +3092,8 @@ private:
                 for (std::size_t i = frames.size(); i-- > 0;) {
                     if (isRetransmittableFrame_(frames[i].type())) {
                         space.pendingFrames.push_front(frames[i]);
+                    } else if (frames[i].type() == SwQuicFrame::Type::Datagram) {
+                        ++m_droppedOutgoingDatagramFrames;
                     }
                 }
                 break;
@@ -2967,7 +3116,7 @@ private:
                 ackWanted = false;
             }
 
-            if (space.pendingFrames.empty()) {
+            if (!hasPendingFrames_(level, space)) {
                 break;
             }
             if (!m_congestion.canSend(64) && space.probesPending == 0) {
@@ -3423,8 +3572,14 @@ private:
     std::uint64_t m_queuedDatagramFrames = 0;
     std::uint64_t m_encodedDatagramFrames = 0;
     std::uint64_t m_receivedDatagramFrames = 0;
+    SwDequeue<SwQuicFrame> m_pendingDatagramFrames;
+    std::size_t m_pendingDatagramFrameBytes = 0;
+    std::uint64_t m_droppedOutgoingDatagramFrames = 0;
     std::size_t m_maxDatagramsPerBuild = 0;
     std::size_t m_maxPendingDatagramFrames = 0;
+    std::size_t m_maxPendingDatagramBytes = 0;
+    DatagramQueueOverflowPolicy m_datagramQueueOverflowPolicy =
+        DatagramQueueOverflowPolicy::RejectNewest;
     std::size_t m_maximumUdpPayloadSize = SwQuicLimits::maximumUdpPayloadBytes();
     std::size_t m_pacingRatePerMillisecond = 0;
     std::size_t m_pacingMaximumBurst = 0;
