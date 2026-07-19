@@ -93,6 +93,11 @@ target_compile_definitions(SwMiniz PUBLIC MINIZ_NO_STDIO MINIZ_NO_ARCHIVE_APIS)
 set_target_properties(SwMiniz PROPERTIES POSITION_INDEPENDENT_CODE ON)
 link_libraries(SwMiniz)
 
+# Third-party: portable ML-KEM-768 implementation used by the QUIC TLS 1.3
+# X25519MLKEM768 group.  It is independent from the system OpenSSL version.
+add_subdirectory(src/core/third_party/mlkem)
+link_libraries(SwMlKem)
+
 add_library(SwQuicCore INTERFACE)
 target_include_directories(SwQuicCore INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -113,7 +118,7 @@ target_include_directories(SwQuicCore INTERFACE
 # SwAny, which uses C++17 `if constexpr`. Isolated QUIC primitives remain
 # C++11-compatible, but consumers of this aggregate need the honest standard.
 target_compile_features(SwQuicCore INTERFACE cxx_std_17)
-target_link_libraries(SwQuicCore INTERFACE SwMiniz Threads::Threads ${CMAKE_DL_LIBS})
+target_link_libraries(SwQuicCore INTERFACE SwMiniz SwMlKem Threads::Threads ${CMAKE_DL_LIBS})
 
 if(SW_ENABLE_QUIC)
     target_link_libraries(SwQuicCore INTERFACE OpenSSL::Crypto)
@@ -129,6 +134,11 @@ else()
     # headers. A target which actually includes SwHttpApp/QUIC still needs to
     # configure with SW_ENABLE_QUIC=ON because those public headers use OpenSSL.
     target_compile_definitions(SwQuicCore INTERFACE SW_QUIC_DEPENDENCIES_DISABLED=1)
+endif()
+
+option(SW_BUILD_AUTH "Build the generic authentication module" ${SW_ENABLE_QUIC})
+if(SW_BUILD_AUTH)
+    add_subdirectory(src/core/auth)
 endif()
 
 add_subdirectory(tools/SwInstallerPack)

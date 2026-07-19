@@ -4,6 +4,7 @@
 #include "SwVector.h"
 #include "SwByteArray.h"
 #include "SwString.h"
+#include "quic/SwQuicHybridKex.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -29,6 +30,8 @@ public:
     // Parsed ServerHello view.
     struct ServerHello {
         std::uint16_t cipherSuite;
+        std::uint16_t selectedGroup;
+        SwByteArray serverKeyShare;
         SwByteArray serverX25519Public;
         bool selectedTls13;
         bool isHelloRetryRequest;
@@ -36,6 +39,7 @@ public:
 
         ServerHello()
             : cipherSuite(0),
+              selectedGroup(0),
               selectedTls13(false),
               isHelloRetryRequest(false),
               selectedPreSharedKey(false) {}
@@ -79,6 +83,7 @@ public:
         SwByteArray random;              // 32-byte client random
         SwByteArray legacySessionId;     // echoed verbatim in ServerHello
         SwByteArray clientX25519Public;  // client key_share for group x25519
+        SwByteArray clientX25519MlKem768KeyShare; // complete hybrid client share
         SwByteArray transportParameters; // extension 0x0039 body
         SwByteArray serverName;          // SNI host, if present
         SwVector<SwByteArray> alpnProtocols; // offered ALPN protocols
@@ -90,6 +95,7 @@ public:
         SwVector<std::uint8_t> serverCertificateTypes; // RFC 7250 extension 20
         bool offersAes128GcmSha256;      // cipher suite 0x1301 offered
         bool offersX25519;               // supported group 0x001d offered
+        bool offersX25519MlKem768;       // supported group 0x11ec offered
         bool hasTransportParameters;
         bool hasAlpn;
         bool hasPreSharedKey;            // pre_shared_key extension present
@@ -101,6 +107,7 @@ public:
             : pskBindersTotalLength(0),
               offersAes128GcmSha256(false),
               offersX25519(false),
+              offersX25519MlKem768(false),
               hasTransportParameters(false),
               hasAlpn(false),
               hasPreSharedKey(false),
@@ -207,12 +214,16 @@ public:
             if (extType == 0x0000) {
                 parseServerNameExtension_(chBody, dataStart, extLen, out.serverName);
             } else if (extType == 0x000a) {
-                parseSupportedGroupsExtension_(chBody, dataStart, extLen, out.offersX25519);
+                parseSupportedGroupsExtension_(chBody, dataStart, extLen,
+                                               out.offersX25519,
+                                               out.offersX25519MlKem768);
             } else if (extType == 0x0010) {
                 parseAlpnOfferExtension_(chBody, dataStart, extLen, out.alpnProtocols);
                 out.hasAlpn = true;
             } else if (extType == 0x0033) {
-                parseClientKeyShareExtension_(chBody, dataStart, extLen, out.clientX25519Public);
+                parseClientKeyShareExtension_(chBody, dataStart, extLen,
+                                              out.clientX25519Public,
+                                              out.clientX25519MlKem768KeyShare);
             } else if (extType == 0x0039) {
                 out.transportParameters =
                     chBody.mid(static_cast<int>(dataStart), static_cast<int>(extLen));
@@ -349,13 +360,19 @@ public:
                 }
                 const std::uint16_t group = readU16_(shBody, dataStart);
                 const std::uint16_t keyLen = readU16_(shBody, dataStart + 2);
-                if (static_cast<std::size_t>(4) + keyLen > extLen) {
-                    setError_(error, "ServerHello key_share key_exchange is truncated");
+                if (static_cast<std::size_t>(4) + keyLen != extLen) {
+                    setError_(error, "ServerHello key_share has an invalid length");
                     return false;
                 }
+                if (out.selectedGroup != 0) {
+                    setError_(error, "ServerHello carries duplicate key_share extensions");
+                    return false;
+                }
+                out.selectedGroup = group;
+                out.serverKeyShare =
+                    shBody.mid(static_cast<int>(dataStart + 4), static_cast<int>(keyLen));
                 if (group == 0x001d) {
-                    out.serverX25519Public =
-                        shBody.mid(static_cast<int>(dataStart + 4), static_cast<int>(keyLen));
+                    out.serverX25519Public = out.serverKeyShare;
                 }
             } else if (extType == 0x0029) {
                 // pre_shared_key in ServerHello: the server accepted a PSK.
@@ -779,7 +796,8 @@ private:
     static void parseSupportedGroupsExtension_(const SwByteArray& data,
                                                std::size_t start,
                                                std::uint16_t length,
-                                               bool& outOffersX25519) {
+                                               bool& outOffersX25519,
+                                               bool& outOffersX25519MlKem768) {
         if (length < 2) {
             return;
         }
@@ -788,8 +806,11 @@ private:
             return;
         }
         for (std::size_t i = 0; i + 1 < listLength; i += 2) {
-            if (readU16_(data, start + 2 + i) == 0x001d) {
+            const std::uint16_t group = readU16_(data, start + 2 + i);
+            if (group == SwQuicHybridKex::x25519Group()) {
                 outOffersX25519 = true;
+            } else if (group == SwQuicHybridKex::x25519MlKem768Group()) {
+                outOffersX25519MlKem768 = true;
             }
         }
     }
@@ -894,7 +915,8 @@ private:
     static void parseClientKeyShareExtension_(const SwByteArray& data,
                                               std::size_t start,
                                               std::uint16_t length,
-                                              SwByteArray& outX25519) {
+                                              SwByteArray& outX25519,
+                                              SwByteArray& outX25519MlKem768) {
         if (length < 2) {
             return;
         }
@@ -911,8 +933,12 @@ private:
             if (keyStart + keyLength > end) {
                 return;
             }
-            if (group == 0x001d && keyLength == 32) {
+            if (group == SwQuicHybridKex::x25519Group() && keyLength == 32) {
                 outX25519 = data.mid(static_cast<int>(keyStart), 32);
+            } else if (group == SwQuicHybridKex::x25519MlKem768Group() &&
+                       keyLength == SwQuicHybridKex::clientKeyShareSize()) {
+                outX25519MlKem768 = data.mid(static_cast<int>(keyStart),
+                                             static_cast<int>(keyLength));
             }
             pos = keyStart + keyLength;
         }

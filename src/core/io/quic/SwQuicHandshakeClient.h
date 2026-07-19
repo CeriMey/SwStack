@@ -12,7 +12,9 @@
 #include "quic/SwQuicFrame.h"
 #include "quic/SwQuicFrameCodec.h"
 #include "quic/SwQuicInitialSecrets.h"
+#include "quic/SwQuicHybridKex.h"
 #include "quic/SwQuicLimits.h"
+#include "quic/SwQuicMlKem768.h"
 #include "quic/SwQuicPacketCodec.h"
 #include "quic/SwQuicPacketHeader.h"
 #include "quic/SwQuicPacketKeys.h"
@@ -191,6 +193,13 @@ public:
         return true;
     }
     const SwByteArray& applicationProtocol() const { return m_applicationProtocol; }
+    std::uint16_t negotiatedKeyExchangeGroup() const { return m_negotiatedKeyExchangeGroup; }
+    bool setHybridKeyExchangeEnabled(bool enabled) {
+        if (m_state != State::Idle) return false;
+        m_enableHybridKeyExchange = enabled;
+        return true;
+    }
+    bool hybridKeyExchangeEnabled() const { return m_enableHybridKeyExchange; }
 
     const SwByteArray& clientEphemeralPublicKey() const { return m_clientPublicKey; }
     const SwQuicInitialKeys& clientHandshakeKeys() const { return m_clientHandshakeKeys; }
@@ -224,10 +233,27 @@ public:
             m_exporterMasterSecret, label, context, length, out, error);
     }
 
-    // Generates the ephemeral key material and connection IDs, builds the TLS
-    // ClientHello and the protected QUIC Initial datagram to send first.
+    // Compatibility overload for callers that transport a whole QUIC flight
+    // in one UDP datagram. New path-aware callers should use the vector form.
     bool start(const SwString& serverName,
                SwByteArray& outInitialDatagram,
+               SwString* error = nullptr) {
+        SwVector<SwByteArray> flight;
+        if (!start(serverName, flight, error)) {
+            outInitialDatagram.clear();
+            return false;
+        }
+        outInitialDatagram.clear();
+        for (std::size_t i = 0; i < flight.size(); ++i) {
+            outInitialDatagram.append(flight[i]);
+        }
+        return true;
+    }
+
+    // Generates ephemeral key material and a bounded Initial flight. A hybrid
+    // ClientHello spans multiple independently protected QUIC Initial packets.
+    bool start(const SwString& serverName,
+               SwVector<SwByteArray>& outInitialDatagrams,
                SwString* error = nullptr) {
         m_serverName = serverName;
 
@@ -236,14 +262,14 @@ public:
              m_credential.certificateType != SwQuicCertificateType::RawPublicKey ||
              m_credential.signatureScheme != 0x0807 ||
              !m_subjectPublicKeyInfoVerifier)) {
-            outInitialDatagram.clear();
+            outInitialDatagrams.clear();
             setError_(error,
                       "RFC 7250 requires an Ed25519 client RPK and peer verifier");
             return fail_(error);
         }
 
         if (m_resuming && (m_subjectPublicKeyInfoVerifier || m_requireRawPublicKeys)) {
-            outInitialDatagram.clear();
+            outInitialDatagrams.clear();
             setError_(error,
                       "TLS resumption is disabled with SPKI pinning until tickets are identity-bound");
             return fail_(error);
@@ -259,6 +285,13 @@ public:
         if (!SwQuicX25519::derivePublicKey(m_clientPrivateKey, m_clientPublicKey, error)) {
             return fail_(error);
         }
+        if (m_enableHybridKeyExchange &&
+            !SwQuicMlKem768::keyPair(m_clientMlKemPublicKey,
+                                     m_clientMlKemPrivateKey, error)) {
+            return fail_(error);
+        }
+        const SwByteArray* mlKemPublicKey = m_enableHybridKeyExchange
+            ? &m_clientMlKemPublicKey : nullptr;
 
         SwByteArray dcidBytes;
         SwByteArray scidBytes;
@@ -292,7 +325,7 @@ public:
                     serverName, m_sourceConnectionId, m_clientPublicKey, m_clientRandom,
                     m_resumptionTicket.ticket, m_resumptionTicket.ticketAgeAdd,
                     m_resumptionTicket.resumptionPsk, m_clientHelloMessage, m_earlyKeys,
-                    error, &m_localTransportParameters)) {
+                    error, &m_localTransportParameters, mlKemPublicKey)) {
                 return fail_(error);
             }
             m_hasEarlyKeys = true;
@@ -304,7 +337,8 @@ public:
                                                            m_clientHelloMessage,
                                                            error,
                                                            m_requireRawPublicKeys,
-                                                           &m_localTransportParameters)) {
+                                                           &m_localTransportParameters,
+                                                           mlKemPublicKey)) {
             return fail_(error);
         }
 
@@ -313,13 +347,13 @@ public:
         options.destinationConnectionId = m_originalDestinationConnectionId;
         options.sourceConnectionId = m_sourceConnectionId;
         options.packetNumber = m_clientInitialPacketNumber;
-        if (!SwQuicClientInitialBuilder::buildFromClientHello(options,
-                                                              m_clientHelloMessage,
-                                                              outInitialDatagram,
-                                                              error)) {
+        if (!SwQuicClientInitialBuilder::buildFlightFromClientHello(
+                options, m_clientHelloMessage, outInitialDatagrams,
+                maximumInitialDatagramSize_(), error)) {
             return fail_(error);
         }
-        ++m_clientInitialPacketNumber;
+        m_clientInitialPacketNumber +=
+            static_cast<std::uint64_t>(outInitialDatagrams.size());
 
         // Coalesce a 0-RTT packet carrying the early application data behind the
         // Initial, protected with the early keys.
@@ -328,11 +362,11 @@ public:
             if (!buildZeroRttPacket_(m_earlyData, zeroRttPacket, error)) {
                 return fail_(error);
             }
-            if (outInitialDatagram.size() + zeroRttPacket.size() > 2048) {
-                setError_(error, "Coalesced Initial and 0-RTT flight exceeds UDP receive budget");
+            if (zeroRttPacket.size() > maximumInitialDatagramSize_()) {
+                setError_(error, "0-RTT packet exceeds the QUIC path datagram cap");
                 return fail_(error);
             }
-            outInitialDatagram.append(zeroRttPacket);
+            outInitialDatagrams.push_back(zeroRttPacket);
         }
 
         m_state = State::WaitServerHello;
@@ -440,6 +474,11 @@ public:
     }
 
 private:
+    // The Initial flight is emitted before some transports can push their
+    // live path MTU into the established connection.  Use QUIC's universal
+    // 1200-byte floor here so the first flight is valid on every admitted path.
+    static std::size_t maximumInitialDatagramSize_() { return 1200; }
+
     class SecretGuard_ {
     public:
         explicit SecretGuard_(SwByteArray& secret) : m_secret(secret) {}
@@ -479,6 +518,7 @@ private:
 
     void discardHandshakeSecrets_() noexcept {
         m_clientPrivateKey.secureClear();
+        m_clientMlKemPrivateKey.secureClear();
         m_handshakeSecret.secureClear();
         m_clientHandshakeTrafficSecret.secureClear();
         m_serverHandshakeTrafficSecret.secureClear();
@@ -576,24 +616,27 @@ private:
         options.sourceConnectionId = m_sourceConnectionId;
         options.token = m_retryToken;
         options.packetNumber = m_clientInitialPacketNumber;
-        SwByteArray retriedInitial;
-        if (!SwQuicClientInitialBuilder::buildFromClientHello(
-                options, m_clientHelloMessage, retriedInitial, error)) {
+        SwVector<SwByteArray> retriedInitials;
+        if (!SwQuicClientInitialBuilder::buildFlightFromClientHello(
+                options, m_clientHelloMessage, retriedInitials,
+                maximumInitialDatagramSize_(), error)) {
             return false;
         }
-        ++m_clientInitialPacketNumber;
+        m_clientInitialPacketNumber +=
+            static_cast<std::uint64_t>(retriedInitials.size());
 
         if (m_resuming && !m_earlyData.isEmpty()) {
             SwByteArray zeroRttPacket;
             if (!buildZeroRttPacket_(m_earlyData, zeroRttPacket, error)) return false;
-            if (retriedInitial.size() + zeroRttPacket.size() > 2048) {
-                setError_(error,
-                          "Retried Initial and 0-RTT flight exceeds UDP receive budget");
+            if (zeroRttPacket.size() > maximumInitialDatagramSize_()) {
+                setError_(error, "Retried 0-RTT packet exceeds the QUIC path datagram cap");
                 return false;
             }
-            retriedInitial.append(zeroRttPacket);
+            retriedInitials.push_back(zeroRttPacket);
         }
-        outDatagrams.push_back(retriedInitial);
+        for (std::size_t i = 0; i < retriedInitials.size(); ++i) {
+            outDatagrams.push_back(retriedInitials[i]);
+        }
         consumed = static_cast<std::size_t>(packet.size());
         clearError_(error);
         return true;
@@ -671,19 +714,48 @@ private:
             setError_(error, "ServerHello did not negotiate TLS 1.3 via supported_versions");
             return false;
         }
-        if (serverHello.serverX25519Public.size() != 32) {
-            setError_(error, "ServerHello does not carry an X25519 key share");
+        // Derive the selected classical or hybrid key-exchange secret. For the
+        // hybrid group the TLS input is ML-KEM shared_secret || X25519 shared_secret.
+        SwByteArray keyExchangeSecret;
+        SecretGuard_ keyExchangeSecretGuard(keyExchangeSecret);
+        if (serverHello.selectedGroup == SwQuicHybridKex::x25519MlKem768Group()) {
+            SwByteArray mlKemCiphertext;
+            SwByteArray serverX25519Public;
+            SwByteArray mlKemSecret;
+            SecretGuard_ mlKemSecretGuard(mlKemSecret);
+            SwByteArray x25519Secret;
+            SecretGuard_ x25519SecretGuard(x25519Secret);
+            if (!SwQuicHybridKex::splitServerKeyShare(
+                    serverHello.serverKeyShare, mlKemCiphertext,
+                    serverX25519Public, error) ||
+                !SwQuicMlKem768::decapsulate(m_clientMlKemPrivateKey,
+                                             mlKemCiphertext,
+                                             mlKemSecret, error) ||
+                !SwQuicX25519::computeSharedSecret(m_clientPrivateKey,
+                                                   serverX25519Public,
+                                                   x25519Secret, error) ||
+                !SwQuicHybridKex::combineSecrets(mlKemSecret, x25519Secret,
+                                                 keyExchangeSecret, error)) {
+                return false;
+            }
+        } else if (serverHello.selectedGroup == SwQuicHybridKex::x25519Group()) {
+            if (serverHello.serverKeyShare.size() !=
+                    SwQuicHybridKex::x25519PublicKeySize() ||
+                !SwQuicX25519::computeSharedSecret(m_clientPrivateKey,
+                                                   serverHello.serverKeyShare,
+                                                   keyExchangeSecret, error)) {
+                if (error && error->isEmpty()) {
+                    setError_(error, "ServerHello carries an invalid X25519 key share");
+                }
+                return false;
+            }
+        } else {
+            setError_(error, "ServerHello selected an unsupported key-exchange group");
             return false;
         }
-
-        // ECDHE and the handshake key schedule (transcript = ClientHello || ServerHello).
-        SwByteArray ecdhe;
-        SecretGuard_ ecdheGuard(ecdhe);
-        if (!SwQuicX25519::computeSharedSecret(m_clientPrivateKey, serverHello.serverX25519Public,
-                                               ecdhe, error)) {
-            return false;
-        }
+        m_negotiatedKeyExchangeGroup = serverHello.selectedGroup;
         m_clientPrivateKey.secureClear();
+        m_clientMlKemPrivateKey.secureClear();
 
         m_serverHelloMessage = rawMessage_(0x02, messages[0].body);
         SwByteArray transcriptChSh;
@@ -701,7 +773,8 @@ private:
                                                      earlySecret, error)
             : SwTls13KeySchedule::earlySecret(earlySecret, error);
         if (!earlyOk ||
-            !SwTls13KeySchedule::handshakeSecret(earlySecret, ecdhe, m_handshakeSecret, error) ||
+            !SwTls13KeySchedule::handshakeSecret(earlySecret, keyExchangeSecret,
+                                                 m_handshakeSecret, error) ||
             !SwTls13KeySchedule::clientHandshakeTrafficSecret(m_handshakeSecret, thChSh,
                                                               m_clientHandshakeTrafficSecret, error) ||
             !SwTls13KeySchedule::serverHandshakeTrafficSecret(m_handshakeSecret, thChSh,
@@ -1548,7 +1621,11 @@ private:
 
     SwByteArray m_clientPrivateKey;
     SwByteArray m_clientPublicKey;
+    SwByteArray m_clientMlKemPrivateKey;
+    SwByteArray m_clientMlKemPublicKey;
     SwByteArray m_clientRandom;
+    std::uint16_t m_negotiatedKeyExchangeGroup = 0;
+    bool m_enableHybridKeyExchange = true;
 
     SwQuicConnectionId m_originalDestinationConnectionId;
     SwQuicConnectionId m_sourceConnectionId;
@@ -1623,6 +1700,7 @@ public:
 #if defined(SW_QUIC_ENABLE_SECRET_LIFETIME_TEST_HOOKS)
     bool transientSecretsDiscardedForTest() const {
         return m_clientPrivateKey.isEmpty() &&
+               m_clientMlKemPrivateKey.isEmpty() &&
                m_handshakeSecret.isEmpty() &&
                m_clientHandshakeTrafficSecret.isEmpty() &&
                m_serverHandshakeTrafficSecret.isEmpty() &&

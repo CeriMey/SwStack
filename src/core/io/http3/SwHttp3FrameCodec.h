@@ -46,8 +46,11 @@ public:
     static std::uint64_t settingMaxFieldSectionSize() { return 0x06; }
     static std::uint64_t settingQpackBlockedStreams() { return 0x07; }
     static std::uint64_t settingH3Datagram() { return 0x33; }
-    // SETTINGS_WT_ENABLED, draft-ietf-webtrans-http3-16 section 9.2.
-    static std::uint64_t settingEnableWebTransport() { return 0x2c7cf000; }
+    // Chromium/QUICHE still ships both interoperable WebTransport-over-H3
+    // wire versions.  Advertise both so a browser with draft-07 disabled can
+    // fall back to draft-02 instead of rejecting the HTTP/3 session.
+    static std::uint64_t settingEnableWebTransportDraft02() { return 0x2b603742; }
+    static std::uint64_t settingEnableWebTransport() { return 0xc671706a; }
 
     typedef std::pair<std::uint64_t, std::uint64_t> Setting;
     typedef std::vector<Setting> SettingList;

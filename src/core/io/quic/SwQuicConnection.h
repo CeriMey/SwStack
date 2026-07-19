@@ -23,6 +23,8 @@
 #include "quic/SwQuicTransportParameters.h"
 
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
 #include <cstdint>
 #include <limits>
 #include <vector>
@@ -67,6 +69,7 @@ public:
     static std::uint64_t kLocalAckDelayExponent() { return 3; }
     static std::uint64_t kLocalMaxAckDelayMs() { return 25; }
     static std::size_t kMaxPathControlEvents() { return 4; }
+    static std::size_t kMaxInspectedPathPacketNumbers() { return 256; }
     static std::size_t kMaxNewTokens_() { return 64; }
 
     // Événements de validation extraits d'un paquet déjà authentifié. Le
@@ -263,12 +266,60 @@ public:
         return received;
     }
 
+    // Authenticates and decodes one established 1-RTT packet without
+    // committing packet numbers, ACK/loss state, streams, flow control or
+    // idle activity. A path driver uses this before admitting a new remote
+    // tuple. Non-path frames are reported but deliberately left unacknowledged
+    // so QUIC retransmits them after address validation succeeds.
+    bool inspectDatagramPathEvents(const SwByteArray& datagram,
+                                   std::uint64_t nowMs,
+                                   PathControlEvents& pathEvents,
+                                   bool& hadNonPathFrames,
+                                   SwString* error = nullptr,
+                                   bool* authenticatedOut = nullptr,
+                                   std::uint64_t* authenticatedBytesOut = nullptr) {
+        pathEvents.clear();
+        hadNonPathFrames = false;
+        if (authenticatedOut) *authenticatedOut = false;
+        if (authenticatedBytesOut) *authenticatedBytesOut = 0;
+        if (datagram.isEmpty() ||
+            (static_cast<std::uint8_t>(datagram.constData()[0]) & 0x80U) != 0) {
+            setError_(error, "Path inspection requires a 1-RTT short header");
+            return false;
+        }
+
+        PathControlEvents* const previousEvents = m_pathControlEventsOut;
+        const bool previousInspect = m_inspectPathControlOnly;
+        const bool previousNonPath = m_inspectedNonPathFrames;
+        const bool previousReplay = m_inspectedPathPacketReplay;
+        m_pathControlEventsOut = &pathEvents;
+        m_inspectPathControlOnly = true;
+        m_inspectedNonPathFrames = false;
+        m_inspectedPathPacketReplay = false;
+        bool authenticated = false;
+        bool* const authenticatedResult = authenticatedOut
+            ? authenticatedOut : &authenticated;
+        const bool received = receiveDatagramImpl_(
+            datagram, nowMs, error, authenticatedResult,
+            authenticatedBytesOut);
+        hadNonPathFrames = m_inspectedNonPathFrames;
+        m_pathControlEventsOut = previousEvents;
+        m_inspectPathControlOnly = previousInspect;
+        m_inspectedNonPathFrames = previousNonPath;
+        m_inspectedPathPacketReplay = previousReplay;
+        if (!received || !*authenticatedResult) {
+            pathEvents.clear();
+            hadNonPathFrames = false;
+        }
+        return received;
+    }
+
     bool receiveDatagramImpl_(const SwByteArray& datagram,
                               std::uint64_t nowMs,
                               SwString* error,
                               bool* authenticatedOut,
                               std::uint64_t* authenticatedBytesOut) {
-        m_touchedStreams.clear();
+        if (!m_inspectPathControlOnly) m_touchedStreams.clear();
         if (authenticatedOut) {
             *authenticatedOut = false;
         }
@@ -294,18 +345,22 @@ public:
             // portant un CID observable d'augmenter la surface de réflexion.
             // PATH_RESPONSE peut valider le chemin pendant receivePacket_() :
             // dans ce cas le budget vient d'être levé et n'a plus à croître.
-            if (authenticated && !m_pathValidated) {
+            if (authenticated && !m_pathValidated &&
+                !m_inspectPathControlOnly) {
                 m_bytesReceivedThisPath += static_cast<std::uint64_t>(datagram.size());
             }
             if (authenticatedOut) {
                 *authenticatedOut = authenticated;
             }
             if (authenticatedBytesOut && authenticated) {
-                *authenticatedBytesOut = static_cast<std::uint64_t>(datagram.size());
+                *authenticatedBytesOut =
+                    m_inspectPathControlOnly && m_inspectedPathPacketReplay
+                        ? 0
+                        : static_cast<std::uint64_t>(datagram.size());
             }
             // Un paquet au CID visible mais non authentifié ne doit pas maintenir
             // artificiellement la connexion en vie (idle-timeout DoS).
-            if (authenticated) {
+            if (authenticated && !m_inspectPathControlOnly) {
                 m_lastNetworkActivityMs = nowMs;
                 m_hasNetworkActivity = true;
             }
@@ -345,7 +400,8 @@ public:
         // paquets effectivement ouverts par l'AEAD sont crédités. Un paquet
         // long inconnu/sans clé ou un suffixe sauté ne peut donc augmenter le
         // budget d'un paquet authentifié qui le précède.
-        if (authenticatedBytes > 0 && !m_pathValidated) {
+        if (authenticatedBytes > 0 && !m_pathValidated &&
+            !m_inspectPathControlOnly) {
             m_bytesReceivedThisPath += authenticatedBytes;
         }
         if (authenticatedOut) {
@@ -354,7 +410,7 @@ public:
         if (authenticatedBytesOut) {
             *authenticatedBytesOut = authenticatedBytes;
         }
-        if (authenticatedBytes > 0) {
+        if (authenticatedBytes > 0 && !m_inspectPathControlOnly) {
             m_lastNetworkActivityMs = nowMs;
             m_hasNetworkActivity = true;
         }
@@ -1458,6 +1514,18 @@ private:
                                                                  plaintext,
                                                                  error,
                                                                  largest)) {
+                if (std::getenv("VIGIL_QUIC_TRACE") != nullptr) {
+                    const SwString reason = error ? *error : SwString();
+                    std::fprintf(stderr,
+                                 "QUIC_1RTT_DROP dcid_len=%zu packet_bytes=%zu "
+                                 "largest_rx=%llu reason=%s\n",
+                                 m_localConnectionId.size(), packet.size(),
+                                 static_cast<unsigned long long>(
+                                     space.hasLargestReceivedPn
+                                         ? space.largestReceivedPn : 0),
+                                 reason.c_str());
+                    std::fflush(stderr);
+                }
                 // Undecryptable packet: discard silently, do not fail the
                 // datagram (RFC 9000 12.2). It is the last packet anyway.
                 clearError_(error);
@@ -1633,6 +1701,71 @@ private:
         SwVector<SwQuicFrame> frames;
         if (!SwQuicFrameCodec::decodeFrames(payload, frames, error)) {
             return false;
+        }
+
+        if (m_inspectPathControlOnly) {
+            bool replay = m_hasLargestInspectedPathPacketNumber &&
+                          packetNumber <= m_largestInspectedPathPacketNumber &&
+                          m_largestInspectedPathPacketNumber - packetNumber >=
+                              static_cast<std::uint64_t>(
+                                  kMaxInspectedPathPacketNumbers());
+            for (std::uint64_t inspected : m_inspectedPathPacketNumbers) {
+                if (inspected == packetNumber) {
+                    replay = true;
+                    break;
+                }
+            }
+            if (replay) {
+                m_inspectedPathPacketReplay = true;
+                clearError_(error);
+                return true;
+            }
+            m_inspectedPathPacketReplay = false;
+            if (!m_hasLargestInspectedPathPacketNumber ||
+                packetNumber > m_largestInspectedPathPacketNumber) {
+                m_largestInspectedPathPacketNumber = packetNumber;
+                m_hasLargestInspectedPathPacketNumber = true;
+            }
+            for (std::size_t i = 0; i < frames.size(); ++i) {
+                const SwQuicFrame::Type type = frames[i].type();
+                if (type == SwQuicFrame::Type::Padding) continue;
+                if (type == SwQuicFrame::Type::PathChallenge) {
+                    if (m_pathControlEventsOut &&
+                        m_pathControlEventsOut->challenges.size() <
+                            kMaxPathControlEvents()) {
+                        m_pathControlEventsOut->challenges.push_back(
+                            frames[i].data());
+                    }
+                    continue;
+                }
+                if (type == SwQuicFrame::Type::PathResponse) {
+                    if (m_pathControlEventsOut &&
+                        m_pathControlEventsOut->responses.size() <
+                            kMaxPathControlEvents()) {
+                        m_pathControlEventsOut->responses.push_back(
+                            frames[i].data());
+                    }
+                    continue;
+                }
+                m_inspectedNonPathFrames = true;
+            }
+            // Keep exact duplicate detection for the current bounded reordering
+            // window. The high-water mark above permanently rejects older PNs,
+            // so FIFO eviction can never make a stale packet acceptable again.
+            SwDequeue<std::uint64_t> retainedInspected;
+            for (std::uint64_t inspected : m_inspectedPathPacketNumbers) {
+                if (inspected <= m_largestInspectedPathPacketNumber &&
+                    m_largestInspectedPathPacketNumber - inspected >=
+                        static_cast<std::uint64_t>(
+                            kMaxInspectedPathPacketNumbers())) {
+                    continue;
+                }
+                retainedInspected.push_back(inspected);
+            }
+            m_inspectedPathPacketNumbers = std::move(retainedInspected);
+            m_inspectedPathPacketNumbers.push_back(packetNumber);
+            clearError_(error);
+            return true;
         }
 
         Space_& space = space_(level);
@@ -3318,6 +3451,12 @@ private:
     std::uint64_t m_nextLocalCidSequence = 1; // sequence 0 = the initial CID
     SwMap<std::uint64_t, SwByteArray> m_issuedConnectionIds;
     PathControlEvents* m_pathControlEventsOut = nullptr; // non-owning, seulement pendant receive
+    bool m_inspectPathControlOnly = false;
+    bool m_inspectedNonPathFrames = false;
+    bool m_inspectedPathPacketReplay = false;
+    bool m_hasLargestInspectedPathPacketNumber = false;
+    std::uint64_t m_largestInspectedPathPacketNumber = 0;
+    SwDequeue<std::uint64_t> m_inspectedPathPacketNumbers;
 };
 
 #endif

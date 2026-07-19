@@ -125,6 +125,24 @@ public:
                          SwJsonValue* outSubject,
                          SwString* outError = nullptr) const;
 
+public slots:
+    void publishSessionCreated(const SwHttpAuthAccount& account,
+                               const SwHttpAuthSession& session,
+                               const SwJsonValue& subject) {
+        emit sessionCreated(account, session, subject);
+    }
+
+signals:
+    DECLARE_SIGNAL(sessionCreated,
+                   const SwHttpAuthAccount&,
+                   const SwHttpAuthSession&,
+                   const SwJsonValue&)
+    DECLARE_SIGNAL(emailVerified, const SwHttpAuthAccount&, const SwJsonValue&)
+    DECLARE_SIGNAL(emailChanged, const SwHttpAuthAccount&, const SwJsonValue&)
+    DECLARE_SIGNAL(passwordChanged, const SwHttpAuthAccount&, const SwJsonValue&)
+    DECLARE_SIGNAL(mfaTotpEnabled, const SwHttpAuthAccount&, const SwJsonValue&)
+    DECLARE_SIGNAL(mfaTotpDisabled, const SwHttpAuthAccount&, const SwJsonValue&)
+
 private:
     struct ThrottleState_ {
         int failures = 0;
@@ -619,9 +637,7 @@ inline SwDbStatus SwHttpAuthService::login(const SwString& email,
         SwString subjectError;
         (void)loadSubjectView(account.subjectId, &identity.subject, &subjectError);
     }
-    if (m_hooks.onSessionCreated) {
-        m_hooks.onSessionCreated(account, session, identity.subject);
-    }
+    emit sessionCreated(account, session, identity.subject);
     if (outIdentity) {
         *outIdentity = identity;
     }
@@ -722,9 +738,7 @@ inline SwDbStatus SwHttpAuthService::verifyTotpLogin(const SwString& challengeTo
         SwString subjectError;
         (void)loadSubjectView(account.subjectId, &identity.subject, &subjectError);
     }
-    if (m_hooks.onSessionCreated) {
-        m_hooks.onSessionCreated(account, session, identity.subject);
-    }
+    emit sessionCreated(account, session, identity.subject);
     if (outIdentity) {
         *outIdentity = identity;
     }
@@ -908,9 +922,7 @@ inline SwDbStatus SwHttpAuthService::confirmTotpSetup(const SwString& rawToken,
         SwString subjectError;
         (void)loadSubjectView(refreshedAccount.subjectId, &identity.subject, &subjectError);
     }
-    if (m_hooks.onMfaTotpEnabled) {
-        m_hooks.onMfaTotpEnabled(refreshedAccount, identity.subject);
-    }
+    emit mfaTotpEnabled(refreshedAccount, identity.subject);
     if (outIdentity) {
         *outIdentity = identity;
     }
@@ -975,9 +987,7 @@ inline SwDbStatus SwHttpAuthService::disableTotp(const SwString& rawToken,
         SwString subjectError;
         (void)loadSubjectView(refreshedAccount.subjectId, &identity.subject, &subjectError);
     }
-    if (m_hooks.onMfaTotpDisabled) {
-        m_hooks.onMfaTotpDisabled(refreshedAccount, identity.subject);
-    }
+    emit mfaTotpDisabled(refreshedAccount, identity.subject);
     if (outIdentity) {
         *outIdentity = identity;
     }
@@ -1216,9 +1226,7 @@ inline SwDbStatus SwHttpAuthService::verifyEmail(const SwString& code,
         (void)loadSubjectView(account.subjectId, &subjectView, &subjectError);
     }
 
-    if (m_hooks.onEmailVerified) {
-        m_hooks.onEmailVerified(account, subjectView);
-    }
+    emit emailVerified(account, subjectView);
     if (outAccount) {
         *outAccount = account;
     }
@@ -1338,11 +1346,11 @@ inline SwDbStatus SwHttpAuthService::resetPassword(const SwString& code,
     }
 
     status = m_store.getAccountById(account.accountId, &account);
-    if (status.ok() && m_hooks.onPasswordChanged) {
+    if (status.ok()) {
         SwJsonValue subjectView;
         SwString subjectError;
         (void)loadSubjectView(account.subjectId, &subjectView, &subjectError);
-        m_hooks.onPasswordChanged(account, subjectView);
+        emit passwordChanged(account, subjectView);
     }
     return status.ok() ? SwDbStatus::success() : status;
 }
@@ -1407,9 +1415,7 @@ inline SwDbStatus SwHttpAuthService::changePassword(const SwString& rawToken,
     if (outIdentity) {
         *outIdentity = refreshed;
     }
-    if (m_hooks.onPasswordChanged) {
-        m_hooks.onPasswordChanged(updatedAccount, refreshed.subject);
-    }
+    emit passwordChanged(updatedAccount, refreshed.subject);
     return SwDbStatus::success();
 }
 
@@ -1615,12 +1621,10 @@ inline SwDbStatus SwHttpAuthService::confirmEmailChange(const SwString& rawToken
         return status;
     }
 
-    if (m_hooks.onEmailChanged) {
-        SwJsonValue currentSubject;
-        SwString subjectError;
-        (void)loadSubjectView(updatedAccount.subjectId, &currentSubject, &subjectError);
-        m_hooks.onEmailChanged(updatedAccount, currentSubject);
-    }
+    SwJsonValue currentSubject;
+    SwString subjectError;
+    (void)loadSubjectView(updatedAccount.subjectId, &currentSubject, &subjectError);
+    emit emailChanged(updatedAccount, currentSubject);
 
     SwHttpAuthIdentity refreshed;
     refreshed.authenticated = true;

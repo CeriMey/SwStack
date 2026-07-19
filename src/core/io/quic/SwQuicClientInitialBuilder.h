@@ -63,8 +63,81 @@ public:
             return false;
         }
 
+        return buildFragment_(options, 0, clientHello, outPacket, error);
+    }
+
+    // Splits a large ClientHello into independently protected Initial packets.
+    // Every packet is a complete UDP datagram, padded to RFC 9000's 1200-byte
+    // minimum and capped for paths (such as Vigil's carrier) with a lower MTU.
+    static bool buildFlightFromClientHello(const Options& options,
+                                           const SwByteArray& clientHello,
+                                           SwVector<SwByteArray>& outPackets,
+                                           std::size_t maximumDatagramSize = 1350,
+                                           SwString* error = nullptr) {
+        outPackets.clear();
+        if (options.destinationConnectionId.isEmpty() ||
+            options.sourceConnectionId.isEmpty()) {
+            setError_(error, "QUIC Initial connection IDs are missing");
+            return false;
+        }
+        if (clientHello.isEmpty()) {
+            setError_(error, "TLS ClientHello is empty");
+            return false;
+        }
+        if (maximumDatagramSize < minimumInitialDatagramSize_()) {
+            setError_(error, "QUIC Initial datagram cap is smaller than 1200 bytes");
+            return false;
+        }
+
+        std::size_t offset = 0;
+        std::uint64_t packetNumber = options.packetNumber;
+        while (offset < clientHello.size()) {
+            // 96 bytes safely covers the long header, CRYPTO frame, packet
+            // number and AEAD tag for valid QUIC connection IDs and tokens.
+            std::size_t chunkSize = maximumDatagramSize > 96
+                ? maximumDatagramSize - 96 : 1;
+            chunkSize = (std::min)(chunkSize, clientHello.size() - offset);
+
+            Options fragmentOptions = options;
+            fragmentOptions.packetNumber = packetNumber;
+            SwByteArray packet;
+            for (;;) {
+                const SwByteArray fragment = clientHello.mid(
+                    static_cast<int>(offset), static_cast<int>(chunkSize));
+                if (!buildFragment_(fragmentOptions,
+                                    static_cast<std::uint64_t>(offset),
+                                    fragment, packet, error)) {
+                    outPackets.clear();
+                    return false;
+                }
+                if (packet.size() <= maximumDatagramSize) break;
+                const std::size_t excess = packet.size() - maximumDatagramSize;
+                if (chunkSize <= excess) {
+                    outPackets.clear();
+                    setError_(error, "QUIC Initial metadata exceeds the datagram cap");
+                    return false;
+                }
+                chunkSize -= excess;
+            }
+
+            outPackets.push_back(packet);
+            offset += chunkSize;
+            ++packetNumber;
+        }
+
+        if (error) *error = SwString();
+        return true;
+    }
+
+private:
+    static bool buildFragment_(const Options& options,
+                               std::uint64_t cryptoOffset,
+                               const SwByteArray& cryptoData,
+                               SwByteArray& outPacket,
+                               SwString* error) {
+
         SwVector<SwQuicFrame> frames;
-        frames.push_back(SwQuicFrame::crypto(0, clientHello));
+        frames.push_back(SwQuicFrame::crypto(cryptoOffset, cryptoData));
 
         SwByteArray plaintext;
         if (!SwQuicFrameCodec::encodeFrames(frames, plaintext, error)) {
@@ -119,8 +192,6 @@ public:
         }
         return true;
     }
-
-private:
     static std::size_t minimumInitialDatagramSize_() { return 1200; }
     static std::uint8_t packetNumberLength_() { return 2; }
 

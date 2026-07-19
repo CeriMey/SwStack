@@ -150,21 +150,11 @@ using SwHttpAuthLoadSubjectHook =
     std::function<bool(const SwString&, SwJsonValue&, SwString&)>;
 using SwHttpAuthDeliverMailHook =
     std::function<bool(const SwHttpAuthOutgoingMail&, SwString&)>;
-using SwHttpAuthLifecycleHook =
-    std::function<void(const SwHttpAuthAccount&, const SwJsonValue&)>;
-using SwHttpAuthSessionLifecycleHook =
-    std::function<void(const SwHttpAuthAccount&, const SwHttpAuthSession&, const SwJsonValue&)>;
 
 struct SwHttpAuthHooks {
     SwHttpAuthRegisterSubjectHook registerSubject;
     SwHttpAuthLoadSubjectHook loadSubject;
     SwHttpAuthDeliverMailHook deliverMail;
-    SwHttpAuthSessionLifecycleHook onSessionCreated;
-    SwHttpAuthLifecycleHook onEmailVerified;
-    SwHttpAuthLifecycleHook onEmailChanged;
-    SwHttpAuthLifecycleHook onPasswordChanged;
-    SwHttpAuthLifecycleHook onMfaTotpEnabled;
-    SwHttpAuthLifecycleHook onMfaTotpDisabled;
 };
 
 namespace swHttpAuthDetail {
@@ -185,7 +175,7 @@ inline bool splitEmail(const SwString& email, SwString& outLocalPart, SwString& 
     outDomain.clear();
     const SwString normalized = normalizeEmail(email);
     const int atPos = normalized.indexOf("@");
-    if (atPos <= 0 || atPos >= normalized.size() - 1) {
+    if (atPos <= 0 || static_cast<std::size_t>(atPos + 1) >= normalized.size()) {
         return false;
     }
     if (normalized.indexOf("@", atPos + 1) >= 0) {

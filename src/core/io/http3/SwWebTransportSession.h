@@ -46,6 +46,8 @@ public:
     static SwHttp3Frame::SettingList requiredClientSettings() {
         SwHttp3Frame::SettingList list;
         list.push_back(std::make_pair(SwHttp3Frame::settingH3Datagram(), std::uint64_t(1)));
+        list.push_back(std::make_pair(SwHttp3Frame::settingEnableWebTransportDraft02(),
+                                      std::uint64_t(1)));
         list.push_back(std::make_pair(SwHttp3Frame::settingEnableWebTransport(), std::uint64_t(1)));
         list.push_back(std::make_pair(settingEnableConnectProtocol(), std::uint64_t(1)));
         return list;
@@ -72,7 +74,7 @@ public:
 
         std::vector<std::pair<SwByteArray, SwByteArray> > headers;
         headers.push_back(std::make_pair(SwByteArray(":method"), SwByteArray("CONNECT")));
-        headers.push_back(std::make_pair(SwByteArray(":protocol"), SwByteArray("webtransport-h3")));
+        headers.push_back(std::make_pair(SwByteArray(":protocol"), SwByteArray("webtransport")));
         headers.push_back(std::make_pair(SwByteArray(":scheme"), SwByteArray("https")));
         headers.push_back(std::make_pair(SwByteArray(":authority"), req.authority));
         headers.push_back(std::make_pair(SwByteArray(":path"), req.path));

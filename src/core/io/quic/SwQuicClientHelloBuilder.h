@@ -5,6 +5,7 @@
 #include "SwString.h"
 #include "quic/SwQuicConnectionId.h"
 #include "quic/SwQuicInitialSecrets.h"
+#include "quic/SwQuicHybridKex.h"
 #include "quic/SwQuicLimits.h"
 #include "quic/SwQuicPacketKeys.h"
 #include "quic/SwQuicTransportParameters.h"
@@ -51,7 +52,8 @@ public:
                              SwByteArray& outClientHello,
                              SwString* error = nullptr,
                              bool rawPublicKey = false,
-                             const SwQuicTransportParameters* localParameters = nullptr) {
+                             const SwQuicTransportParameters* localParameters = nullptr,
+                             const SwByteArray* mlKemPublicKey = nullptr) {
         const SwString& host = serverName;
         if (host.empty() || host.size() > 255) {
             setError_(error, "Invalid QUIC TLS server name");
@@ -98,6 +100,13 @@ public:
 
         SwByteArray supportedGroups;
         SwByteArray groupList;
+        if (mlKemPublicKey) {
+            if (mlKemPublicKey->size() != SwQuicHybridKex::mlKemPublicKeySize()) {
+                setError_(error, "ML-KEM-768 public key must be 1184 bytes");
+                return false;
+            }
+            appendU16_(groupList, SwQuicHybridKex::x25519MlKem768Group());
+        }
         appendU16_(groupList, 0x001d);
         appendU16_(groupList, 0x0017);
         appendU16_(supportedGroups, static_cast<std::uint16_t>(groupList.size()));
@@ -150,6 +159,16 @@ public:
         SwByteArray keyShare;
         SwByteArray keyShareEntries;
         const SwByteArray x25519 = x25519Public32;
+        if (mlKemPublicKey) {
+            SwByteArray hybridShare;
+            if (!SwQuicHybridKex::buildClientKeyShare(
+                    *mlKemPublicKey, x25519, hybridShare, error)) {
+                return false;
+            }
+            appendU16_(keyShareEntries, SwQuicHybridKex::x25519MlKem768Group());
+            appendU16_(keyShareEntries, static_cast<std::uint16_t>(hybridShare.size()));
+            keyShareEntries.append(hybridShare);
+        }
         appendU16_(keyShareEntries, 0x001d);
         appendU16_(keyShareEntries, static_cast<std::uint16_t>(x25519.size()));
         keyShareEntries.append(x25519);
@@ -194,7 +213,8 @@ public:
                                         SwByteArray& outClientHello,
                                         SwQuicInitialKeys& outEarlyKeys,
                                         SwString* error = nullptr,
-                                        const SwQuicTransportParameters* localParameters = nullptr) {
+                                        const SwQuicTransportParameters* localParameters = nullptr,
+                                        const SwByteArray* mlKemPublicKey = nullptr) {
         const SwString& host = serverName;
         if (host.empty() || host.size() > 255) {
             setError_(error, "Invalid QUIC TLS server name");
@@ -224,7 +244,7 @@ public:
 
         SwByteArray extensions;
         if (!appendClientExtensions_(host, initialSourceConnectionId,
-                                     x25519Public32, localParameters,
+                                     x25519Public32, mlKemPublicKey, localParameters,
                                      extensions, error)) return false;
 
         // psk_key_exchange_modes: psk_dhe_ke(1).
@@ -392,10 +412,12 @@ private:
 
     // The common ClientHello extensions shared by the fresh and resumption
     // handshakes: SNI, supported_groups, signature_algorithms, ALPN,
-    // supported_versions, key_share (x25519), and QUIC transport parameters.
+    // supported_versions, key_share (X25519MLKEM768 when supplied, plus
+    // X25519 fallback), and QUIC transport parameters.
     static bool appendClientExtensions_(const SwString& host,
                                         const SwQuicConnectionId& initialSourceConnectionId,
                                         const SwByteArray& x25519Public32,
+                                        const SwByteArray* mlKemPublicKey,
                                         const SwQuicTransportParameters* localParameters,
                                         SwByteArray& extensions,
                                         SwString* error) {
@@ -410,6 +432,13 @@ private:
 
         SwByteArray supportedGroups;
         SwByteArray groupList;
+        if (mlKemPublicKey) {
+            if (mlKemPublicKey->size() != SwQuicHybridKex::mlKemPublicKeySize()) {
+                setError_(error, "ML-KEM-768 public key must be 1184 bytes");
+                return false;
+            }
+            appendU16_(groupList, SwQuicHybridKex::x25519MlKem768Group());
+        }
         appendU16_(groupList, 0x001d);
         appendU16_(groupList, 0x0017);
         appendU16_(supportedGroups, static_cast<std::uint16_t>(groupList.size()));
@@ -447,6 +476,16 @@ private:
 
         SwByteArray keyShare;
         SwByteArray keyShareEntries;
+        if (mlKemPublicKey) {
+            SwByteArray hybridShare;
+            if (!SwQuicHybridKex::buildClientKeyShare(
+                    *mlKemPublicKey, x25519Public32, hybridShare, error)) {
+                return false;
+            }
+            appendU16_(keyShareEntries, SwQuicHybridKex::x25519MlKem768Group());
+            appendU16_(keyShareEntries, static_cast<std::uint16_t>(hybridShare.size()));
+            keyShareEntries.append(hybridShare);
+        }
         appendU16_(keyShareEntries, 0x001d);
         appendU16_(keyShareEntries, static_cast<std::uint16_t>(x25519Public32.size()));
         keyShareEntries.append(x25519Public32);

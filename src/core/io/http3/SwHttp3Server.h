@@ -198,6 +198,24 @@ public:
     std::size_t responseStreamStateCount() const {
         return m_responseStreams.size();
     }
+    SwString firstPendingRequestDiagnostic() const {
+        if (m_requestStreams.empty()) return SwString("none");
+        const RequestStream_& state = m_requestStreams.begin()->second;
+        SwString out = SwString("headers=") +
+            SwString(state.headersDecoded ? "1" : "0") +
+            SwString(" buffer=") + SwString(std::to_string(state.buffer.size())) +
+            SwString(" body=") + SwString(std::to_string(state.body.size())) +
+            SwString(" fields=") + SwString(std::to_string(state.fields.size()));
+        for (std::size_t i = 0; i < state.fields.size(); ++i) {
+            const SwByteArray& name = state.fields[i].first;
+            if (name.isEmpty() || !name.constData() || name.constData()[0] != ':') {
+                continue;
+            }
+            out += SwString(" ") + SwString(name.toStdString()) + SwString("=") +
+                   SwString(state.fields[i].second.toStdString());
+        }
+        return out;
+    }
 
     // Feed a bounded, fair window of response DATA frames into QUIC. The
     // method is intentionally public for socket drivers: ACK-only datagrams
@@ -1213,6 +1231,8 @@ private:
         }
         settings.push_back(std::make_pair(SwHttp3Frame::settingH3Datagram(), std::uint64_t(1)));
         settings.push_back(std::make_pair(settingEnableConnectProtocol(), std::uint64_t(1)));
+        settings.push_back(std::make_pair(
+            SwHttp3Frame::settingEnableWebTransportDraft02(), std::uint64_t(1)));
         settings.push_back(std::make_pair(SwHttp3Frame::settingEnableWebTransport(),
                                           std::uint64_t(1)));
 
@@ -1357,8 +1377,21 @@ private:
                 m_peerSettingsReceived = true;
                 for (std::size_t i = 0; i < frame.settings().size(); ++i) {
                     if (frame.settings()[i].first ==
-                        SwHttp3Frame::settingEnableWebTransport()) {
-                        m_peerEnableWebTransport = (frame.settings()[i].second == 1);
+                        SwHttp3Frame::settingEnableWebTransportDraft02()) {
+                        m_peerEnableWebTransport =
+                            m_peerEnableWebTransport ||
+                            (frame.settings()[i].second > 0);
+                        // Draft-02 predates SETTINGS_ENABLE_CONNECT_PROTOCOL;
+                        // its WebTransport setting is itself the peer opt-in
+                        // for the extended CONNECT request.
+                        m_peerEnableConnectProtocol =
+                            m_peerEnableConnectProtocol ||
+                            (frame.settings()[i].second > 0);
+                    } else if (frame.settings()[i].first ==
+                               SwHttp3Frame::settingEnableWebTransport()) {
+                        m_peerEnableWebTransport =
+                            m_peerEnableWebTransport ||
+                            (frame.settings()[i].second > 0);
                     } else if (frame.settings()[i].first ==
                                SwHttp3Frame::settingH3Datagram()) {
                         m_peerH3Datagram = (frame.settings()[i].second == 1);
@@ -1581,12 +1614,16 @@ private:
         // for FIN (which terminates a WebTransport session).
         if (!fin) {
             if (!state.headersDecoded || !state.buffer.isEmpty() ||
-                !state.body.isEmpty() || !m_peerSettingsReceived) {
+                !m_peerSettingsReceived) {
                 return true;
             }
             SwHttpRequest candidate;
+            // DATA following an Extended CONNECT HEADERS section carries
+            // capsules and may arrive in the same flight. Inspect a copy so
+            // version/routing validation cannot consume those early bytes.
+            SwByteArray candidateBody = state.body;
             bool candidateMalformed = false;
-            if (!fieldsToRequest_(state.fields, state.body, candidate,
+            if (!fieldsToRequest_(state.fields, candidateBody, candidate,
                                   candidateMalformed) || candidateMalformed) {
                 return true;
             }
@@ -1662,8 +1699,7 @@ private:
             const bool webTransportNegotiated =
                 m_peerEnableWebTransport && m_peerEnableConnectProtocol &&
                 m_peerH3Datagram && m_connection->hasPeerTransportParameters() &&
-                peerTransport.maxDatagramFrameSize > 0 &&
-                peerTransport.resetStreamAt;
+                peerTransport.maxDatagramFrameSize > 0;
             // WebTransport Extended CONNECT (RFC 9220): the request stream ID
             // is the session ID.
             SwString selectedProtocol;
@@ -2082,7 +2118,7 @@ private:
                 if (seenProtocol) { outMalformed = true; return false; }
                 seenProtocol = true;
                 hasProtocolPseudo = true;
-                isWebTransport = (value == SwString("webtransport-h3"));
+                isWebTransport = (value == SwString("webtransport"));
             } else if (isPseudo) {
                 outMalformed = true; // unknown pseudo-header
                 return false;

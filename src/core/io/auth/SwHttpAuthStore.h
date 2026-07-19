@@ -104,6 +104,42 @@ public:
         return status;
     }
 
+    SwDbStatus createAccountWithoutPassword(const SwString& email,
+                                             const SwString& subjectId,
+                                             SwHttpAuthAccount* createdOut = nullptr) {
+        SwMutexLocker locker(&m_mutex);
+        SW_HTTP_AUTH_RETURN_IF_NOT_OPEN_();
+
+        SwString localPart;
+        SwString domain;
+        const SwString normalizedEmail = swHttpAuthDetail::normalizeEmail(email);
+        if (!swHttpAuthDetail::splitEmail(normalizedEmail, localPart, domain)) {
+            return SwDbStatus(SwDbStatus::InvalidArgument, "Invalid email address");
+        }
+
+        SwHttpAuthAccount existing;
+        if (loadAccountByEmailLocked_(normalizedEmail, existing).ok()) {
+            return SwDbStatus(SwDbStatus::Busy, "Account already exists");
+        }
+
+        SwHttpAuthAccount account;
+        account.accountId = swHttpAuthDetail::generateId("account");
+        account.subjectId = subjectId.trimmed();
+        account.email = normalizedEmail;
+        account.passwordHash.clear();
+        account.emailVerifiedAt.clear();
+        account.passwordResetRequired = true;
+        account.suspended = false;
+        account.createdAt = swHttpAuthDetail::currentIsoTimestamp();
+        account.updatedAt = account.createdAt;
+
+        const SwDbStatus status = writeAccountLocked_(account);
+        if (status.ok() && createdOut) {
+            *createdOut = account;
+        }
+        return status;
+    }
+
     SwDbStatus createImportedAccount(const SwHttpAuthAccount& importedAccount,
                                      SwHttpAuthAccount* createdOut = nullptr) {
         SwMutexLocker locker(&m_mutex);

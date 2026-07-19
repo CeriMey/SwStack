@@ -232,6 +232,14 @@ public:
         m_socket = sslSocket ? static_cast<SwAbstractSocket*>(sslSocket) : new SwTcpSocket(this);
         if (sslSocket) {
             sslSocket->setPeerHostName(m_host);
+            // This client speaks HTTP/1.1 only. Advertising that fact is
+            // required by shared TLS ingresses that route protocols by ALPN;
+            // peers without ALPN support may still negotiate an empty value.
+            if (!sslSocket->setApplicationProtocol(SwByteArray("http/1.1"))) {
+                cleanupSocket_();
+                emit errorOccurred(-2);
+                return false;
+            }
             if (!m_trustedCaFile.isEmpty()) {
                 sslSocket->setTrustedCaFile(m_trustedCaFile);
             }

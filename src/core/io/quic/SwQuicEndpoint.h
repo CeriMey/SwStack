@@ -138,17 +138,15 @@ public:
             fail_(SwString("QUIC client requires a peer-key verifier"));
             return false;
         }
-        SwByteArray initial;
+        SwVector<SwByteArray> initialFlight;
         SwString err;
-        if (!m_hsClient->start(m_peerAddr, initial, &err)) {
+        if (!m_hsClient->start(m_peerAddr, initialFlight, &err)) {
             fail_(err);
             return false;
         }
         m_localCid = m_hsClient->sourceConnectionId();
-        SwVector<SwByteArray> out;
-        out.push_back(initial);
-        rememberHandshakeFlight_(out);
-        if (!emit_(out)) {
+        rememberHandshakeFlight_(initialFlight);
+        if (!emit_(initialFlight)) {
             fail_(SwString("QUIC UDP send queue is unavailable or full"));
             return false;
         }

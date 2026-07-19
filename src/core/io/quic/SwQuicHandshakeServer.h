@@ -12,7 +12,9 @@
 #include "quic/SwQuicFrame.h"
 #include "quic/SwQuicFrameCodec.h"
 #include "quic/SwQuicInitialSecrets.h"
+#include "quic/SwQuicHybridKex.h"
 #include "quic/SwQuicLimits.h"
+#include "quic/SwQuicMlKem768.h"
 #include "quic/SwQuicPacketProtector.h"
 #include "quic/SwQuicPacketKeys.h"
 #include "quic/SwQuicRandom.h"
@@ -125,6 +127,13 @@ public:
     // reuses an AEAD nonce already spent on HANDSHAKE_DONE.
     std::uint64_t serverApplicationPacketNumber() const { return m_serverApplicationPacketNumber; }
     const SwByteArray& negotiatedAlpn() const { return m_negotiatedAlpn; }
+    std::uint16_t negotiatedKeyExchangeGroup() const { return m_negotiatedKeyExchangeGroup; }
+    bool setHybridKeyExchangeEnabled(bool enabled) {
+        if (m_state != State::Idle) return false;
+        m_enableHybridKeyExchange = enabled;
+        return true;
+    }
+    bool hybridKeyExchangeEnabled() const { return m_enableHybridKeyExchange; }
     bool setApplicationProtocol(const SwByteArray& protocol) {
         if (m_state != State::Idle || protocol.isEmpty() || protocol.size() > 255) return false;
         m_applicationProtocol = protocol;
@@ -562,8 +571,14 @@ private:
             setError_(error, "Client did not offer TLS_AES_128_GCM_SHA256");
             return false;
         }
-        if (clientHello.clientX25519Public.size() != 32) {
-            setError_(error, "ClientHello has no X25519 key share");
+        const bool hasHybridShare =
+            m_enableHybridKeyExchange && clientHello.offersX25519MlKem768 &&
+            clientHello.clientX25519MlKem768KeyShare.size() ==
+                SwQuicHybridKex::clientKeyShareSize();
+        const bool hasX25519Share =
+            clientHello.offersX25519 && clientHello.clientX25519Public.size() == 32;
+        if (!hasHybridShare && !hasX25519Share) {
+            setError_(error, "ClientHello has no supported key share");
             return false;
         }
         // ALPN: QUIC requires a negotiated application protocol (RFC 9001 8.1).
@@ -629,6 +644,10 @@ private:
         m_clientHelloMessage = rawMessage_(0x01, messages[0].body);
         m_clientRandomSessionId = clientHello.legacySessionId;
         m_clientX25519Public = clientHello.clientX25519Public;
+        m_clientX25519MlKem768KeyShare = clientHello.clientX25519MlKem768KeyShare;
+        m_negotiatedKeyExchangeGroup = hasHybridShare
+            ? SwQuicHybridKex::x25519MlKem768Group()
+            : SwQuicHybridKex::x25519Group();
 
         if (!SwQuicTransportParameters::decode(clientHello.transportParameters,
                                                m_peerParams, error)) {
@@ -733,12 +752,40 @@ private:
         if (!SwQuicX25519::derivePublicKey(serverPrivate, serverPublic, error)) {
             return false;
         }
-        SwByteArray ecdhe;
-        SecretGuard_ ecdheGuard(ecdhe);
-        if (!SwQuicX25519::computeSharedSecret(serverPrivate, m_clientX25519Public, ecdhe, error)) {
+        SwByteArray clientX25519Public = m_clientX25519Public;
+        SwByteArray mlKemPublicKey;
+        if (m_negotiatedKeyExchangeGroup ==
+                SwQuicHybridKex::x25519MlKem768Group() &&
+            !SwQuicHybridKex::splitClientKeyShare(
+                m_clientX25519MlKem768KeyShare, mlKemPublicKey,
+                clientX25519Public, error)) {
+            return false;
+        }
+        SwByteArray x25519Secret;
+        SecretGuard_ x25519SecretGuard(x25519Secret);
+        if (!SwQuicX25519::computeSharedSecret(serverPrivate, clientX25519Public,
+                                               x25519Secret, error)) {
             return false;
         }
         serverPrivate.secureClear();
+
+        SwByteArray serverKeyShare = serverPublic;
+        SwByteArray keyExchangeSecret = x25519Secret;
+        SecretGuard_ keyExchangeSecretGuard(keyExchangeSecret);
+        if (m_negotiatedKeyExchangeGroup ==
+                SwQuicHybridKex::x25519MlKem768Group()) {
+            SwByteArray mlKemCiphertext;
+            SwByteArray mlKemSecret;
+            SecretGuard_ mlKemSecretGuard(mlKemSecret);
+            if (!SwQuicMlKem768::encapsulate(mlKemPublicKey, mlKemCiphertext,
+                                             mlKemSecret, error) ||
+                !SwQuicHybridKex::buildServerKeyShare(
+                    mlKemCiphertext, serverPublic, serverKeyShare, error) ||
+                !SwQuicHybridKex::combineSecrets(
+                    mlKemSecret, x25519Secret, keyExchangeSecret, error)) {
+                return false;
+            }
+        }
 
         // The server chooses its own connection ID (the client's future DCID).
         SwByteArray scidBytes;
@@ -749,7 +796,8 @@ private:
 
         // ServerHello.
         SwByteArray serverHelloBody;
-        buildServerHelloBody_(serverPublic, serverHelloBody);
+        buildServerHelloBody_(m_negotiatedKeyExchangeGroup,
+                              serverKeyShare, serverHelloBody);
         m_serverHelloMessage = rawMessage_(0x02, serverHelloBody);
 
         // Handshake secrets from transcript ClientHello || ServerHello.
@@ -766,7 +814,8 @@ private:
             ? SwTls13KeySchedule::earlySecretWithPsk(m_resumptionPsk, earlySecret, error)
             : SwTls13KeySchedule::earlySecret(earlySecret, error);
         if (!earlyOk ||
-            !SwTls13KeySchedule::handshakeSecret(earlySecret, ecdhe, m_handshakeSecret, error) ||
+            !SwTls13KeySchedule::handshakeSecret(earlySecret, keyExchangeSecret,
+                                                 m_handshakeSecret, error) ||
             !SwTls13KeySchedule::clientHandshakeTrafficSecret(m_handshakeSecret, thChSh,
                                                               m_clientHandshakeTrafficSecret, error) ||
             !SwTls13KeySchedule::serverHandshakeTrafficSecret(m_handshakeSecret, thChSh,
@@ -876,39 +925,67 @@ private:
             return false;
         }
 
-        // The Initial coalesces with the first Handshake packet; pad it so that
-        // first ack-eliciting datagram reaches 1200 bytes (RFC 9000 14.1).
-        const std::size_t firstHsSize =
-            handshakePackets.empty() ? 0 : handshakePackets[0].size();
-        std::size_t minInitialPlaintext = 0;
-        if (firstHsSize < 1200) {
-            minInitialPlaintext = 1200 - firstHsSize;
-        }
+        // Build a standards-compliant standalone Initial first. A hybrid
+        // ServerHello can already consume almost the entire nested-carrier
+        // MTU, so coalescing a Handshake packet unconditionally can create a
+        // 1500+ byte datagram even when max_udp_payload_size is 1350.
         SwByteArray initialPacket;
-        if (!buildServerInitialPacket_(m_serverHelloMessage, minInitialPlaintext,
+        if (!buildServerInitialPacket_(
+                m_serverHelloMessage,
+                SwQuicLimits::minimumInitialUdpPayloadBytes(),
                                        initialPacket, error)) {
             return false;
         }
 
-        // Datagram 1: Initial + first Handshake packet. Further Handshake
-        // packets go in their own datagrams (each already < 1200 bytes).
+        const std::size_t wireCeiling = static_cast<std::size_t>(
+            m_localParams.maxUdpPayloadSize);
+        if (initialPacket.size() > wireCeiling) {
+            setError_(error, "QUIC server Initial exceeds max_udp_payload_size");
+            return false;
+        }
+
+        // Coalesce only when the complete UDP datagram remains under the
+        // advertised path ceiling. Otherwise send Handshake packets in their
+        // own datagrams; QUIC does not require them to be coalesced.
         SwVector<SwByteArray> datagrams;
         SwByteArray first = initialPacket;
-        if (!handshakePackets.empty()) {
+        std::size_t firstHandshake = 0;
+        if (!handshakePackets.empty() &&
+            handshakePackets[0].size() <= wireCeiling - first.size()) {
             first.append(handshakePackets[0]);
+            firstHandshake = 1;
         }
         datagrams.push_back(first);
-        for (std::size_t i = 1; i < handshakePackets.size(); ++i) {
+        for (std::size_t i = firstHandshake; i < handshakePackets.size(); ++i) {
+            if (handshakePackets[i].size() > wireCeiling) {
+                setError_(error,
+                          "QUIC server Handshake packet exceeds max_udp_payload_size");
+                return false;
+            }
             datagrams.push_back(handshakePackets[i]);
         }
 
         // Anti-amplification: the whole flight must not exceed 3x the bytes
         // received from the still-unvalidated client address (RFC 9000 8.1).
+        // A valid Retry token proves return routability before the handshake
+        // starts (RFC 9000 8.1.2), so that address is already validated and
+        // the cap must not reject certificate/hybrid flights larger than 3x
+        // the retried Initial.
         std::uint64_t flightBytes = 0;
         for (std::size_t i = 0; i < datagrams.size(); ++i) {
             flightBytes += static_cast<std::uint64_t>(datagrams[i].size());
         }
-        if (m_bytesSentToClient + flightBytes > 3 * m_bytesReceivedFromClient) {
+        if (std::getenv("VIGIL_QUIC_TRACE") != nullptr) {
+            std::fprintf(stderr,
+                         "QUIC_RETRY_AMPLIFICATION_CHECK retry=%d received=%llu sent=%llu flight=%llu\n",
+                         m_retryUsed ? 1 : 0,
+                         static_cast<unsigned long long>(m_bytesReceivedFromClient),
+                         static_cast<unsigned long long>(m_bytesSentToClient),
+                         static_cast<unsigned long long>(flightBytes));
+            std::fflush(stderr);
+        }
+        if (!m_retryUsed &&
+            m_bytesSentToClient + flightBytes > 3 * m_bytesReceivedFromClient) {
             setError_(error, "QUIC server flight would exceed the 3x anti-amplification limit");
             return false;
         }
@@ -921,7 +998,9 @@ private:
         return true;
     }
 
-    void buildServerHelloBody_(const SwByteArray& serverPublic, SwByteArray& outBody) {
+    void buildServerHelloBody_(std::uint16_t selectedGroup,
+                               const SwByteArray& serverKeyShare,
+                               SwByteArray& outBody) {
         outBody.clear();
         appendU16_(outBody, 0x0303);
         outBody.append(m_serverRandom);
@@ -935,11 +1014,11 @@ private:
         SwByteArray selectedVersion;
         appendU16_(selectedVersion, 0x0304);
         appendExtension_(extensions, 0x002b, selectedVersion);
-        // key_share: server KeyShareEntry x25519.
+        // key_share: the selected classical or hybrid server KeyShareEntry.
         SwByteArray keyShare;
-        appendU16_(keyShare, 0x001d);
-        appendU16_(keyShare, static_cast<std::uint16_t>(serverPublic.size()));
-        keyShare.append(serverPublic);
+        appendU16_(keyShare, selectedGroup);
+        appendU16_(keyShare, static_cast<std::uint16_t>(serverKeyShare.size()));
+        keyShare.append(serverKeyShare);
         appendExtension_(extensions, 0x0033, keyShare);
         // pre_shared_key: selected_identity 0 (we only offered one PSK).
         if (m_resuming) {
@@ -1070,7 +1149,7 @@ private:
     }
 
     bool buildServerInitialPacket_(const SwByteArray& serverHelloMessage,
-                                   std::size_t minPlaintextSize,
+                                   std::size_t minPacketSize,
                                    SwByteArray& outPacket,
                                    SwString* error) {
         SwVector<SwQuicFrame> frames;
@@ -1085,17 +1164,18 @@ private:
             return false;
         }
 
-        // PADDING frames (a run of 0x00 bytes) to expand the coalesced
-        // datagram to 1200 bytes (RFC 9000 14.1).
-        while (plaintext.size() < minPlaintextSize) {
+        const std::uint8_t pnLen = 4;
+        SwByteArray headerBytes;
+        for (;;) {
+            const std::uint64_t protectedLength = static_cast<std::uint64_t>(
+                plaintext.size() + SwQuicPacketProtector::kTagLength);
+            buildLongHeader_(0xc0, protectedLength, pnLen,
+                             m_serverInitialPacketNumber, true, headerBytes);
+            const std::size_t packetSize = headerBytes.size() +
+                plaintext.size() + SwQuicPacketProtector::kTagLength;
+            if (packetSize >= minPacketSize) break;
             plaintext.append(static_cast<char>(0));
         }
-
-        const std::uint8_t pnLen = 4;
-        const std::uint64_t protectedLength =
-            static_cast<std::uint64_t>(plaintext.size() + SwQuicPacketProtector::kTagLength);
-        SwByteArray headerBytes;
-        buildLongHeader_(0xc0, protectedLength, pnLen, m_serverInitialPacketNumber, true, headerBytes);
 
         if (!SwQuicPacketProtector::protectLongHeader(m_serverInitialKeys,
                                                       m_serverInitialPacketNumber, pnLen,
@@ -1570,6 +1650,9 @@ private:
     SwByteArray m_serverRandom;
     SwByteArray m_clientRandomSessionId;
     SwByteArray m_clientX25519Public;
+    SwByteArray m_clientX25519MlKem768KeyShare;
+    std::uint16_t m_negotiatedKeyExchangeGroup = 0;
+    bool m_enableHybridKeyExchange = true;
 
     SwByteArray m_clientInitialCrypto;
     SwQuicStream m_clientInitialCryptoReassembly;
