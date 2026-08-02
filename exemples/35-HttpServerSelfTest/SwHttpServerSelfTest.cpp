@@ -177,6 +177,7 @@ private:
     SwByteArray m_multipartPayload;
     SwString m_staticRoot = SW_HTTP_SERVER_SELFTEST_STATIC_ROOT;
     SwString m_staticFileName = "http_selftest_large.bin";
+    SwString m_staticMp4FileName = "http_selftest_video.mp4";
     bool m_caseDone = false;
 
     SwTimer m_timeout;
@@ -242,7 +243,7 @@ private slots:
 
 private:
     void runNextCase_() {
-        if (m_caseIndex >= 15) {
+        if (m_caseIndex >= 16) {
             swDebug() << "[HttpServerSelfTest] PASS all cases";
             m_server->close();
             m_app->exit(0);
@@ -339,6 +340,10 @@ private:
         }
         if (index == 14) {
             partsOut.append("POST /echo HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 11\r\nExpect: unsupported-feature\r\nConnection: close\r\n\r\n");
+            return true;
+        }
+        if (index == 15) {
+            partsOut.append("GET /static/http_selftest_video.mp4 HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
             return true;
         }
         return false;
@@ -552,6 +557,15 @@ private:
             }
             return true;
         }
+        if (m_caseIndex == 15) {
+            if (parsed.statusCode != 200 ||
+                parsed.headers.value("content-type", SwString()) != "video/mp4" ||
+                parsed.body != m_staticFixture) {
+                fail_("MP4 static response MIME type or body mismatch");
+                return false;
+            }
+            return true;
+        }
         return false;
     }
 
@@ -612,6 +626,23 @@ private:
             fail_("fixture file not visible after write");
             return false;
         }
+
+        const SwString mp4Path = absRoot + "/" + m_staticMp4FileName;
+        SwFile mp4File(mp4Path);
+        if (!mp4File.openBinary(SwFile::Write)) {
+            fail_("unable to prepare MP4 static fixture");
+            return false;
+        }
+        if (!mp4File.write(m_staticFixture)) {
+            mp4File.close();
+            fail_("unable to write MP4 static fixture");
+            return false;
+        }
+        mp4File.close();
+        if (!swFilePlatform().isFile(mp4Path)) {
+            fail_("MP4 fixture file not visible after write");
+            return false;
+        }
         return true;
     }
 
@@ -635,6 +666,11 @@ private:
 };
 
 int main(int argc, char* argv[]) {
+    if (swHttpGuessMimeType("MOVIE.MP4") != "video/mp4") {
+        swError() << "[HttpServerSelfTest] FAIL: MP4 MIME mapping mismatch";
+        return 1;
+    }
+
     if (!runSwHttpParserLimitSelfTest()) {
         return 1;
     }

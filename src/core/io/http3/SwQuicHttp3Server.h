@@ -15,6 +15,7 @@
 #include "quic/SwQuicConnection.h"
 #include "quic/SwQuicHandshakeServer.h"
 #include "quic/SwQuicRandom.h"
+#include "quic/SwQuicRetry.h"
 #include "quic/SwQuicServerCredential.h"
 #include "quic/SwQuicSessionTicket.h"
 
@@ -134,6 +135,24 @@ public:
         m_ticketStore.setMaxEntries(maximum);
     }
     void setHttpLimits(const SwHttpLimits& limits) { m_httpLimits = limits; }
+
+    // Stateless address validation via Retry (RFC 9000 8.1.2). When enabled,
+    // a new Initial arriving without a token is answered with a Retry packet
+    // -- allocating NO server state -- once `pendingHandshakeThreshold`
+    // handshakes are already in progress (0 = validate every new connection).
+    // The address token binds the client address, the original DCID and the
+    // Retry SCID under an HMAC key minted per listen(), and expires after
+    // `tokenMaxAgeSeconds`. This is the anti-DoS gate against Initial floods:
+    // an attacker must prove return routability before costing a handshake.
+    void setAddressValidation(bool enabled,
+                              std::size_t pendingHandshakeThreshold = 0,
+                              std::uint64_t tokenMaxAgeSeconds = 30) {
+        m_addressValidationEnabled = enabled;
+        m_retryPendingThreshold = pendingHandshakeThreshold;
+        m_retryTokenMaxAgeSeconds = tokenMaxAgeSeconds ? tokenMaxAgeSeconds : 30;
+    }
+    bool addressValidationEnabled() const { return m_addressValidationEnabled; }
+    std::uint64_t retryPacketsSent() const { return m_retryPacketsSent; }
     // Optional cross-transport budget. Configure before listen(); the driver
     // still tracks its own H3 usage for diagnostics while the external gate can
     // combine that usage with TCP/TLS sessions.
@@ -188,6 +207,15 @@ public:
             setError_(error, bindError);
             return false;
         }
+        // Fresh Retry-token key per listener: a token can never authorise
+        // state on a listener other than the one that minted it.
+        SwString keyError;
+        if (!SwQuicRandom::fill(m_retryKey, 32, &keyError)) {
+            m_socket.close();
+            setError_(error, keyError);
+            return false;
+        }
+        m_retryPacketsSent = 0;
         if (error) {
             *error = SwString();
         }
@@ -200,6 +228,61 @@ public:
             return;
         }
         closeNow_();
+    }
+
+    // Graceful shutdown (RFC 9114 5.2): GOAWAY every established session and
+    // refuse new connections while the socket keeps draining in-flight work.
+    // poll()/timers keep running; each connection is closed with H3_NO_ERROR
+    // once its requests are answered and the responses are acknowledged.
+    // Observe completion with isDrained(), then call close().
+    void beginGracefulShutdown() {
+        if (m_draining) {
+            return;
+        }
+        m_draining = true;
+        for (std::map<std::string, Client_>::iterator it = m_clients.begin();
+             it != m_clients.end(); ++it) {
+            Client_& client = it->second;
+            if (!client.established) {
+                // A handshake completing mid-drain would open a session that
+                // can never be served; fail it now so purge reclaims it.
+                client.failed = true;
+                continue;
+            }
+            if (!client.http3 || !client.connection) {
+                continue;
+            }
+            SwString error;
+            if (!client.http3->initiateGracefulShutdown(&error) ||
+                !flushConnection_(client, &error)) {
+                client.failed = true;
+                if (!error.isEmpty()) serverError(error);
+            }
+        }
+        advanceGracefulShutdown_();
+        armTimer_();
+    }
+
+    bool gracefulShutdownInitiated() const { return m_draining; }
+
+    // True once every session has finished its in-flight requests and had its
+    // CONNECTION_CLOSE initiated. The remaining transport-level draining is
+    // time-bounded; close() can follow safely.
+    bool isDrained() const {
+        if (!m_draining) {
+            return false;
+        }
+        for (std::map<std::string, Client_>::const_iterator it = m_clients.begin();
+             it != m_clients.end(); ++it) {
+            const Client_& client = it->second;
+            if (client.failed || !client.established || !client.connection) {
+                continue;
+            }
+            if (client.connection->state() == SwQuicConnection::State::Open) {
+                return false;
+            }
+        }
+        return true;
     }
 
     bool isListening() const { return m_socket.isOpen(); }
@@ -250,6 +333,7 @@ public:
 
         if (!m_closePending) {
             fireTimers_();
+            advanceGracefulShutdown_();
             purgeClients_(nowMs_());
             armTimer_();
         }
@@ -350,6 +434,18 @@ private:
             // long as an async request or queued completion exists.
             next = 25;
         }
+        if (m_draining && (next < 0 || next > 25)) {
+            // Drain progress (last ACK arriving, session becoming idle) is
+            // observed from poll(); keep a fallback tick until fully drained.
+            for (std::map<std::string, Client_>::const_iterator it = m_clients.begin();
+                 it != m_clients.end(); ++it) {
+                if (it->second.established && it->second.connection &&
+                    it->second.connection->state() == SwQuicConnection::State::Open) {
+                    next = 25;
+                    break;
+                }
+            }
+        }
         return next;
     }
 
@@ -371,6 +467,7 @@ private:
 
     void closeNow_() {
         m_closePending = false;
+        m_draining = false;
         if (m_tickTimer) m_tickTimer->stop();
         invalidateAsyncCompletionCycle_();
         m_socket.close();
@@ -508,6 +605,37 @@ private:
                static_cast<std::size_t>(datagram.size()) >= 7 + dcidLength + scidLength;
     }
 
+    // Extracts the source connection id and the token from a client Initial
+    // whose outer geometry isValidInitial_() already vetted.
+    static bool parseInitialScidAndToken_(const SwByteArray& datagram,
+                                          SwByteArray& outScid,
+                                          SwByteArray& outToken) {
+        outScid = SwByteArray();
+        outToken = SwByteArray();
+        const std::size_t dcidLength =
+            static_cast<std::uint8_t>(datagram.constData()[5]);
+        std::size_t offset = 6 + dcidLength;
+        const std::size_t scidLength =
+            static_cast<std::uint8_t>(datagram.constData()[offset]);
+        ++offset;
+        if (static_cast<std::size_t>(datagram.size()) < offset + scidLength) {
+            return false;
+        }
+        outScid = datagram.mid(static_cast<int>(offset),
+                               static_cast<int>(scidLength));
+        offset += scidLength;
+        std::uint64_t tokenLength = 0;
+        if (!SwQuicVarIntCodec::decode(datagram, offset, tokenLength, nullptr) ||
+            tokenLength > static_cast<std::uint64_t>(datagram.size()) - offset) {
+            return false;
+        }
+        if (tokenLength > 0) {
+            outToken = datagram.mid(static_cast<int>(offset),
+                                    static_cast<int>(tokenLength));
+        }
+        return true;
+    }
+
     std::size_t pendingHandshakeCount_() const {
         std::size_t count = 0;
         for (std::map<std::string, Client_>::const_iterator it = m_clients.begin();
@@ -571,10 +699,83 @@ private:
         const std::string& key = connectionKey;
         std::map<std::string, Client_>::iterator it = m_clients.find(key);
         if (it == m_clients.end()) {
+            if (m_draining) {
+                setError_(error, SwString("QUIC HTTP/3 server is draining (graceful shutdown)"));
+                return false;
+            }
             if (!isValidInitial_(datagram)) {
                 setError_(error, SwString("Unroutable QUIC packet is not a valid Initial"));
                 return false;
             }
+
+            // Stateless address validation (RFC 9000 8.1.2): under handshake
+            // pressure a tokenless Initial gets a Retry and allocates nothing;
+            // a token-bearing Initial must authenticate before costing state.
+            bool retryValidated = false;
+            SwByteArray retryOdcidBytes;
+            SwByteArray retryScidBytes;
+            if (m_addressValidationEnabled) {
+                SwByteArray clientScid;
+                SwByteArray token;
+                if (!parseInitialScidAndToken_(datagram, clientScid, token)) {
+                    setError_(error, SwString("QUIC Initial token parsing failed"));
+                    return false;
+                }
+                const SwByteArray addressBytes(endpointKey.data(),
+                                               static_cast<int>(endpointKey.size()));
+                const SwByteArray incomingDcid(destinationConnectionId.data(),
+                                               static_cast<int>(destinationConnectionId.size()));
+                const std::uint64_t nowSeconds = nowMs_() / 1000;
+                if (token.isEmpty()) {
+                    if (pendingHandshakeCount_() >= m_retryPendingThreshold) {
+                        // Mint the 8-byte Retry SCID the client must come back
+                        // with; the token binds it, so this path stays stateless.
+                        SwByteArray mintedScid;
+                        SwString retryError;
+                        if (!SwQuicRandom::fill(mintedScid, 8, &retryError)) {
+                            setError_(error, retryError);
+                            return false;
+                        }
+                        const SwByteArray retryToken = SwQuicRetry::mintAddressToken(
+                            m_retryKey, addressBytes, incomingDcid, mintedScid,
+                            nowSeconds);
+                        SwByteArray retryPacket;
+                        if (retryToken.isEmpty() ||
+                            !SwQuicRetry::buildRetryPacket(incomingDcid, clientScid,
+                                                           mintedScid, retryToken,
+                                                           retryPacket, &retryError)) {
+                            setError_(error, retryError.isEmpty()
+                                ? SwString("QUIC Retry token minting failed") : retryError);
+                            return false;
+                        }
+                        if (m_socket.writeDatagramCached(
+                                retryPacket.constData(),
+                                static_cast<int64_t>(retryPacket.size()),
+                                sender, senderPort) !=
+                            static_cast<int64_t>(retryPacket.size())) {
+                            setError_(error, m_socket.errorString());
+                            return false;
+                        }
+                        ++m_retryPacketsSent;
+                        if (error) {
+                            *error = SwString();
+                        }
+                        return true; // no state allocated for this Initial
+                    }
+                } else {
+                    SwQuicRetry::AddressToken validated;
+                    if (!SwQuicRetry::validateAddressToken(
+                            m_retryKey, addressBytes, incomingDcid, token,
+                            nowSeconds, m_retryTokenMaxAgeSeconds, validated)) {
+                        setError_(error, SwString("QUIC Retry token validation failed"));
+                        return false;
+                    }
+                    retryValidated = true;
+                    retryOdcidBytes = validated.originalDestinationConnectionId;
+                    retryScidBytes = validated.retrySourceConnectionId;
+                }
+            }
+
             if ((m_maxClients > 0 && m_clients.size() >= m_maxClients) ||
                 (m_maxPendingHandshakes > 0 &&
                  pendingHandshakeCount_() >= m_maxPendingHandshakes)) {
@@ -585,6 +786,22 @@ private:
             it->second.createdMs = nowMs_();
             it->second.lastActivityMs = it->second.createdMs;
             if (hasConnectionId) m_connectionIdIndex[destinationConnectionId] = key;
+            if (retryValidated) {
+                // The handshake must know the pre-Retry ODCID and the Retry
+                // SCID: they feed the authenticating transport parameters
+                // (RFC 9000 18.2) and select the Initial key generation.
+                SwQuicConnectionId odcid;
+                SwQuicConnectionId retryScid;
+                SwString cidError;
+                if (!SwQuicConnectionId::fromBytes(retryOdcidBytes, odcid, &cidError) ||
+                    !SwQuicConnectionId::fromBytes(retryScidBytes, retryScid, &cidError) ||
+                    !it->second.handshake.setRetryContext(odcid, retryScid)) {
+                    it->second.failed = true;
+                    setError_(error, cidError.isEmpty()
+                        ? SwString("QUIC Retry context installation failed") : cidError);
+                    return false;
+                }
+            }
         }
         Client_& client = it->second;
         const bool addressChanged =
@@ -930,6 +1147,7 @@ private:
             deliverAsyncCompletion_(completion);
             if (m_closePending || cycle != m_asyncCompletionCycle) break;
         }
+        advanceGracefulShutdown_();
         armTimer_();
     }
 
@@ -962,6 +1180,37 @@ private:
         if (!flushConnection_(it->second, &error)) {
             it->second.failed = true;
             if (!error.isEmpty()) serverError(error);
+        }
+    }
+
+    // During a graceful shutdown, close each session once its HTTP/3 work is
+    // done AND the transport confirmed delivery of every queued byte (GOAWAY,
+    // final responses). CONNECTION_CLOSE with H3_NO_ERROR then ends it.
+    void advanceGracefulShutdown_() {
+        if (!m_draining) {
+            return;
+        }
+        for (std::map<std::string, Client_>::iterator it = m_clients.begin();
+             it != m_clients.end(); ++it) {
+            Client_& client = it->second;
+            if (!client.established || client.failed ||
+                !client.connection || !client.http3) {
+                continue;
+            }
+            if (client.connection->state() != SwQuicConnection::State::Open) {
+                continue;
+            }
+            if (!client.http3->isDrained() ||
+                client.connection->hasUnacknowledgedSendData()) {
+                continue;
+            }
+            client.connection->close(0x100 /* H3_NO_ERROR */,
+                                     SwString("graceful shutdown"));
+            SwString error;
+            if (!flushConnection_(client, &error)) {
+                client.failed = true;
+                if (!error.isEmpty()) serverError(error);
+            }
         }
     }
 
@@ -1036,6 +1285,12 @@ private:
     bool m_polling = false;
     bool m_closePending = false;
     bool m_automaticPolling = false;
+    bool m_draining = false;
+    bool m_addressValidationEnabled = false;
+    std::size_t m_retryPendingThreshold = 0;
+    std::uint64_t m_retryTokenMaxAgeSeconds = 30;
+    std::uint64_t m_retryPacketsSent = 0;
+    SwByteArray m_retryKey;
     std::size_t m_maxClients = 4096;
     std::size_t m_maxPendingHandshakes = 1024;
     std::uint64_t m_handshakeTimeoutMs = 10000;

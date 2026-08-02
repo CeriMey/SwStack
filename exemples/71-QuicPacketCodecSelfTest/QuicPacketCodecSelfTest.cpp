@@ -1974,6 +1974,138 @@ bool testAmplificationWithheldNoPhantomBytes() {
     return requireTrue(!rest.empty(), "withheld stream frames were lost, not resent");
 }
 
+// RFC 9001 section 6: 1-RTT key update. The initiator flips the Key Phase
+// bit; the peer detects the new generation, follows it for its own sends, and
+// still accepts reordered packets protected with the previous-phase keys.
+bool testKeyUpdate() {
+    SwString error;
+    SwQuicConnection client(SwQuicConnection::Role::Client);
+    SwQuicConnection server(SwQuicConnection::Role::Server);
+    if (!setupAppPair(client, server, SwByteArray("kupdcli1"), SwByteArray("kupdsrv1"),
+                      &error)) {
+        std::cerr << error << std::endl;
+        return false;
+    }
+    client.setHandshakeConfirmed(true);
+    server.setHandshakeConfirmed(true);
+    if (!requireTrue(client.keyUpdateAvailable() && server.keyUpdateAvailable(),
+                     "key update must be available with secret-bearing keys")) {
+        return false;
+    }
+
+    std::uint64_t now = 7000;
+    SwByteArray serverReceived;
+
+    // Phase 0 traffic; the server's delayed ACK satisfies the RFC 9001 6.1
+    // precondition on the client side.
+    if (!requireTrue(client.sendStreamData(0, SwByteArray("before"), false, &error),
+                     "key update initial send failed") ||
+        !requireTrue(pumpTo(client, server, now, &error), "key update c->s failed")) {
+        std::cerr << error << std::endl;
+        return false;
+    }
+    serverReceived.append(server.readStream(0));
+
+    // Before any current-phase packet is acknowledged, initiating is refused.
+    SwString refused;
+    if (!requireTrue(!client.initiateKeyUpdate(&refused),
+                     "key update must be refused before a current-phase ACK")) {
+        return false;
+    }
+    now += 30; // past the local max_ack_delay so the server flushes its ACK
+    if (!requireTrue(pumpTo(server, client, now, &error), "key update ack s->c failed")) {
+        std::cerr << error << std::endl;
+        return false;
+    }
+
+    // Capture an old-phase datagram, then update and send a new-phase one.
+    SwVector<SwByteArray> oldWire;
+    if (!requireTrue(client.sendStreamData(0, SwByteArray("old"), false, &error),
+                     "key update old-phase send failed") ||
+        !requireTrue(client.buildDatagrams(now, oldWire, &error),
+                     "key update old-phase build failed") ||
+        !requireTrue(!oldWire.empty(), "old-phase datagram missing")) {
+        std::cerr << error << std::endl;
+        return false;
+    }
+    if (!requireTrue(client.initiateKeyUpdate(&error), "client key update refused")) {
+        std::cerr << error << std::endl;
+        return false;
+    }
+    if (!requireTrue(client.currentKeyPhase() && client.keyUpdateCount() == 1,
+                     "client key phase did not flip")) {
+        return false;
+    }
+    SwVector<SwByteArray> newWire;
+    if (!requireTrue(client.sendStreamData(0, SwByteArray("new"), false, &error),
+                     "key update new-phase send failed") ||
+        !requireTrue(client.buildDatagrams(now, newWire, &error),
+                     "key update new-phase build failed") ||
+        !requireTrue(!newWire.empty(), "new-phase datagram missing")) {
+        std::cerr << error << std::endl;
+        return false;
+    }
+
+    // Deliver the NEW phase first: the server must detect and follow the
+    // update the moment the flipped Key Phase bit authenticates.
+    for (std::size_t i = 0; i < newWire.size(); ++i) {
+        if (!requireTrue(server.receiveDatagram(newWire[i], now, &error),
+                         "server rejected the new-phase datagram")) {
+            std::cerr << error << std::endl;
+            return false;
+        }
+    }
+    if (!requireTrue(server.keyUpdateCount() == 1 && server.currentKeyPhase(),
+                     "server did not follow the key update")) {
+        return false;
+    }
+    // ...then the reordered OLD-phase datagram must still decrypt through the
+    // retained previous-generation receive keys (RFC 9001 6.4).
+    for (std::size_t i = 0; i < oldWire.size(); ++i) {
+        if (!requireTrue(server.receiveDatagram(oldWire[i], now, &error),
+                         "server rejected the reordered old-phase datagram")) {
+            std::cerr << error << std::endl;
+            return false;
+        }
+    }
+    serverReceived.append(server.readStream(0));
+    if (!requireTrue(serverReceived == SwByteArray("beforeoldnew"),
+                     "stream bytes were lost across the key update")) {
+        return false;
+    }
+
+    // The server answers in the new phase; the client reads it with its
+    // current keys. The client's ACK then lets the server run a second,
+    // server-initiated update, rolling the phase bit back to 0.
+    if (!requireTrue(server.sendStreamData(0, SwByteArray("resp"), false, &error),
+                     "server response send failed") ||
+        !requireTrue(pumpTo(server, client, now, &error), "response s->c failed") ||
+        !requireTrue(client.readStream(0) == SwByteArray("resp"),
+                     "client lost the new-phase response")) {
+        std::cerr << error << std::endl;
+        return false;
+    }
+    now += 30;
+    if (!requireTrue(pumpTo(client, server, now, &error), "second ack c->s failed")) {
+        std::cerr << error << std::endl;
+        return false;
+    }
+    if (!requireTrue(server.initiateKeyUpdate(&error), "server key update refused")) {
+        std::cerr << error << std::endl;
+        return false;
+    }
+    if (!requireTrue(server.sendStreamData(0, SwByteArray("2nd"), false, &error),
+                     "second-generation send failed") ||
+        !requireTrue(pumpTo(server, client, now, &error), "second-generation s->c failed")) {
+        std::cerr << error << std::endl;
+        return false;
+    }
+    return requireTrue(client.keyUpdateCount() == 2 && !client.currentKeyPhase(),
+                       "second key update did not roll the phase back") &&
+           requireTrue(client.readStream(0) == SwByteArray("2nd"),
+                       "client lost the second-generation data");
+}
+
 }
 
 int main() {
@@ -2012,7 +2144,8 @@ int main() {
         !testResetStreamFinalSizeAccounting() ||
         !testPtoDoesNotRetransmitStreamDataAfterReset() ||
         !testPersistentCongestionCollapsesWindow() ||
-        !testAmplificationWithheldNoPhantomBytes()) {
+        !testAmplificationWithheldNoPhantomBytes() ||
+        !testKeyUpdate()) {
         return 1;
     }
 

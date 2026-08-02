@@ -8,10 +8,12 @@
 // QUIC transport.
 
 #include "core/io/http3/SwHttp3Connection.h"
+#include "core/io/http3/SwHttp3FrameCodec.h"
 #include "core/io/http3/SwHttp3Server.h"
 #include "core/io/quic/SwQuicConnection.h"
 #include "core/io/quic/SwQuicConnectionId.h"
 #include "core/io/quic/SwQuicInitialSecrets.h"
+#include "core/io/quic/SwQuicVarIntCodec.h"
 #include "core/types/SwVector.h"
 
 #include <cstdint>
@@ -1388,6 +1390,200 @@ bool testWebTransportDatagramBackpressureDefaults() {
                        "HTTP/3 DATAGRAM byte cap did not shed the stale frame");
 }
 
+// RFC 9114 5.2: server GOAWAY and graceful drain. In-flight requests keep
+// completing, request streams at or above the announced ID are rejected with
+// H3_REQUEST_REJECTED, the client observes the GOAWAY on the control stream,
+// and the drain state machine reports completion down to the transport ACKs.
+bool testGoawayGracefulShutdown() {
+    SwString error;
+
+    SwQuicConnectionId clientCid;
+    SwQuicConnectionId serverCid;
+    if (!SwQuicConnectionId::fromBytes(SwByteArray("gaclient"), clientCid, &error) ||
+        !SwQuicConnectionId::fromBytes(SwByteArray("gaserver"), serverCid, &error)) {
+        std::cerr << error.toStdString() << std::endl;
+        return false;
+    }
+    SwQuicInitialKeys clientKeys;
+    SwQuicInitialKeys serverKeys;
+    if (!SwQuicInitialSecrets::deriveV1(serverCid, clientKeys, serverKeys, &error)) {
+        std::cerr << error.toStdString() << std::endl;
+        return false;
+    }
+    SwQuicConnection client(SwQuicConnection::Role::Client);
+    SwQuicConnection server(SwQuicConnection::Role::Server);
+    client.setLocalConnectionId(clientCid);
+    client.setPeerConnectionId(serverCid);
+    server.setLocalConnectionId(serverCid);
+    server.setPeerConnectionId(clientCid);
+    client.setLevelKeys(SwQuicConnection::Level::Application, serverKeys, clientKeys);
+    server.setLevelKeys(SwQuicConnection::Level::Application, clientKeys, serverKeys);
+    SwQuicTransportParameters clientParameters;
+    clientParameters.initialMaxData = 262144;
+    clientParameters.initialMaxStreamDataBidiLocal = 262144;
+    clientParameters.initialMaxStreamDataBidiRemote = 262144;
+    clientParameters.initialMaxStreamDataUni = 262144;
+    clientParameters.initialMaxStreamsBidi = 100;
+    clientParameters.initialMaxStreamsUni = 100;
+    SwQuicTransportParameters serverParameters = clientParameters;
+    client.applyLocalTransportParameters(clientParameters);
+    client.applyPeerTransportParameters(serverParameters);
+    server.applyLocalTransportParameters(serverParameters);
+    server.applyPeerTransportParameters(clientParameters);
+
+    SwHttp3Server h3Server(&server);
+    int handlerCalls = 0;
+    h3Server.setRequestHandler([&](const SwHttpRequest&) -> SwHttpResponse {
+        ++handlerCalls;
+        SwHttpResponse response;
+        response.status = 200;
+        response.body = SwByteArray("ok");
+        return response;
+    });
+
+    std::uint64_t now = 900;
+    if (!requireTrue(h3Server.start(&error), "goaway h3 server start failed") ||
+        !requireTrue(!h3Server.gracefulShutdownInitiated(),
+                     "shutdown must not be initiated at start")) {
+        std::cerr << error.toStdString() << std::endl;
+        return false;
+    }
+
+    SwHttp3Frame::SettingList clientSettings;
+    SwByteArray controlStream;
+    if (!requireTrue(SwHttp3Connection::buildControlStream(clientSettings, controlStream, &error),
+                     "goaway client control stream build failed") ||
+        !requireTrue(client.sendStreamData(2, controlStream, false, &error),
+                     "goaway client control stream send failed")) {
+        std::cerr << error.toStdString() << std::endl;
+        return false;
+    }
+
+    // Request 1 on stream 0: a full round trip before the shutdown.
+    SwHttp3Connection::Request request;
+    request.method = SwByteArray("GET");
+    request.scheme = SwByteArray("https");
+    request.authority = SwByteArray("example.test");
+    request.path = SwByteArray("/one");
+    SwByteArray requestStream;
+    if (!requireTrue(SwHttp3Connection::buildRequest(request, requestStream, &error),
+                     "goaway request one build failed") ||
+        !requireTrue(client.sendStreamData(0, requestStream, true, &error),
+                     "goaway request one send failed") ||
+        !requireTrue(transfer(client, server, now, &error), "goaway c->s one failed") ||
+        !requireTrue(h3Server.pump(&error), "goaway pump one failed") ||
+        !requireTrue(handlerCalls == 1, "request one was not dispatched") ||
+        !requireTrue(transfer(server, client, now, &error), "goaway s->c one failed")) {
+        std::cerr << error.toStdString() << std::endl;
+        return false;
+    }
+    SwHttp3Connection::Response responseOne;
+    if (!requireTrue(SwHttp3Connection::parseResponse(client.readStream(0), responseOne, &error),
+                     "goaway response one parse failed") ||
+        !requireTrue(responseOne.status == SwByteArray("200"), "response one status mismatch")) {
+        std::cerr << error.toStdString() << std::endl;
+        return false;
+    }
+
+    // Request 2 on stream 4 stays in flight: HEADERS sent, FIN withheld.
+    request.path = SwByteArray("/two");
+    SwByteArray requestTwo;
+    if (!requireTrue(SwHttp3Connection::buildRequest(request, requestTwo, &error),
+                     "goaway request two build failed") ||
+        !requireTrue(client.sendStreamData(4, requestTwo, false, &error),
+                     "goaway request two send failed") ||
+        !requireTrue(transfer(client, server, now, &error), "goaway c->s two failed") ||
+        !requireTrue(h3Server.pump(&error), "goaway pump two failed") ||
+        !requireTrue(handlerCalls == 1, "half-closed request must not dispatch")) {
+        std::cerr << error.toStdString() << std::endl;
+        return false;
+    }
+
+    // GOAWAY: the largest request stream seen is 4, so the announced ID is 8.
+    if (!requireTrue(h3Server.initiateGracefulShutdown(&error), "goaway initiation failed") ||
+        !requireTrue(h3Server.gracefulShutdownInitiated(), "shutdown flag not set") ||
+        !requireTrue(h3Server.goawayStreamId() == 8, "goaway stream id mismatch") ||
+        !requireTrue(!h3Server.isDrained(), "drain must wait for the in-flight request") ||
+        !requireTrue(transfer(server, client, now, &error), "goaway s->c frame failed")) {
+        std::cerr << error.toStdString() << std::endl;
+        return false;
+    }
+
+    // The client decodes SETTINGS then GOAWAY(8) on the server control stream.
+    const SwByteArray control = client.readStream(3);
+    std::size_t controlOffset = 0;
+    std::uint64_t streamType = 1;
+    if (!requireTrue(SwQuicVarIntCodec::decode(control, controlOffset, streamType, &error) &&
+                         streamType == 0,
+                     "server control stream type mismatch")) {
+        return false;
+    }
+    bool sawGoaway = false;
+    std::uint64_t goawayId = 0;
+    while (controlOffset < control.size()) {
+        SwHttp3Frame frame;
+        if (!requireTrue(SwHttp3FrameCodec::decodeFrame(control, controlOffset, frame, &error),
+                         "server control stream frame decode failed")) {
+            std::cerr << error.toStdString() << std::endl;
+            return false;
+        }
+        if (frame.type() == SwHttp3Frame::Type::GoAway) {
+            sawGoaway = true;
+            goawayId = frame.id();
+        }
+    }
+    if (!requireTrue(sawGoaway && goawayId == 8, "client did not observe GOAWAY(8)")) {
+        return false;
+    }
+
+    // The in-flight request still completes after the GOAWAY.
+    if (!requireTrue(client.sendStreamData(4, SwByteArray(), true, &error),
+                     "goaway request two fin failed") ||
+        !requireTrue(transfer(client, server, now, &error), "goaway c->s fin failed") ||
+        !requireTrue(h3Server.pump(&error), "goaway pump fin failed") ||
+        !requireTrue(handlerCalls == 2, "in-flight request was not dispatched") ||
+        !requireTrue(transfer(server, client, now, &error), "goaway s->c two failed")) {
+        std::cerr << error.toStdString() << std::endl;
+        return false;
+    }
+    SwHttp3Connection::Response responseTwo;
+    if (!requireTrue(SwHttp3Connection::parseResponse(client.readStream(4), responseTwo, &error),
+                     "goaway response two parse failed") ||
+        !requireTrue(responseTwo.status == SwByteArray("200"), "response two status mismatch") ||
+        !requireTrue(h3Server.isDrained(), "session must be drained after the last response")) {
+        std::cerr << error.toStdString() << std::endl;
+        return false;
+    }
+
+    // A post-GOAWAY request on stream 8 is rejected without dispatch.
+    request.path = SwByteArray("/three");
+    SwByteArray requestThree;
+    if (!requireTrue(SwHttp3Connection::buildRequest(request, requestThree, &error),
+                     "goaway request three build failed") ||
+        !requireTrue(client.sendStreamData(8, requestThree, true, &error),
+                     "goaway request three send failed") ||
+        !requireTrue(transfer(client, server, now, &error), "goaway c->s three failed") ||
+        !requireTrue(h3Server.pump(&error), "goaway pump three failed") ||
+        !requireTrue(handlerCalls == 2, "post-GOAWAY request must not dispatch") ||
+        !requireTrue(transfer(server, client, now, &error), "goaway s->c reject failed") ||
+        !requireTrue(client.isStreamReceiveReset(8),
+                     "rejected stream must be reset toward the client") ||
+        !requireTrue(h3Server.isDrained(), "rejection must not block the drain")) {
+        std::cerr << error.toStdString() << std::endl;
+        return false;
+    }
+
+    // Transport-side drain gate: once the client acknowledged everything the
+    // server has no unacknowledged send data left and can close gracefully.
+    now += 30;
+    if (!requireTrue(transfer(client, server, now, &error), "goaway final ack failed")) {
+        std::cerr << error.toStdString() << std::endl;
+        return false;
+    }
+    return requireTrue(!server.hasUnacknowledgedSendData(),
+                       "server still holds unacknowledged send data after final ACK");
+}
+
 } // namespace
 
 int main() {
@@ -1402,7 +1598,8 @@ int main() {
         !testHttp3CreditWaitsForEveryResponseByteAck() ||
         !testHttp3PartialRequestResetAndImmediateRejection() ||
         !testHttp3MultipartExpansionUsesPendingBudget() ||
-        !testWebTransportDatagramBackpressureDefaults()) {
+        !testWebTransportDatagramBackpressureDefaults() ||
+        !testGoawayGracefulShutdown()) {
         return 1;
     }
     std::cout << "Http3ServerSelfTest passed" << std::endl;

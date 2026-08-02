@@ -673,9 +673,12 @@ inline SwString replaceTemplatePlaceholders(const SwString& source,
     return rendered;
 }
 
-inline SwString replaceUrlTemplateToken(const SwString& source, const SwString& token) {
+inline SwString replaceUrlTemplateToken(const SwString& source,
+                                        const SwString& token,
+                                        const SwString& email = SwString()) {
     SwString rendered = source;
     rendered.replace("{{token}}", token);
+    rendered.replace("{{email}}", urlEncodeComponent(email.trimmed()));
     return rendered;
 }
 

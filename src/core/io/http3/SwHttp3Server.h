@@ -272,6 +272,63 @@ public:
         return ensureControlStream_(error);
     }
 
+    // Graceful shutdown (RFC 9114 5.2): emit GOAWAY on our control stream.
+    // Requests already being processed complete normally; new request streams
+    // at or above the announced ID are rejected with H3_REQUEST_REJECTED so
+    // the client can retry them on another connection. WebTransport data
+    // streams keep flowing: their lifetime is their CONNECT session's.
+    bool initiateGracefulShutdown(SwString* error = nullptr) {
+        if (!m_connection) {
+            setError_(error, "HTTP/3 server has no QUIC connection");
+            return false;
+        }
+        if (!ensureControlStream_(error)) {
+            return false;
+        }
+        if (m_goawaySent) {
+            clearError_(error);
+            return true;
+        }
+        m_goawayStreamId = m_haveRequestStream
+            ? m_largestRequestStreamId + 4
+            : std::uint64_t(0);
+        SwByteArray frameBytes;
+        if (!SwHttp3FrameCodec::encodeFrame(SwHttp3Frame::goAway(m_goawayStreamId),
+                                            frameBytes, error) ||
+            !m_connection->sendStreamData(m_localControlStreamId, frameBytes,
+                                          false, error)) {
+            return false;
+        }
+        m_goawaySent = true;
+        clearError_(error);
+        return true;
+    }
+
+    bool gracefulShutdownInitiated() const { return m_goawaySent; }
+    std::uint64_t goawayStreamId() const { return m_goawayStreamId; }
+    bool peerGoawayReceived() const { return m_peerGoawayReceived; }
+
+    // True once every accepted request has been answered and fully handed to
+    // QUIC and no WebTransport session is alive. Only meaningful after
+    // initiateGracefulShutdown(); the owning driver then closes the QUIC
+    // connection (after the transport confirms delivery).
+    bool isDrained() const {
+        if (!m_goawaySent) {
+            return false;
+        }
+        for (std::map<std::uint64_t, RequestStream_>::const_iterator it =
+                 m_requestStreams.begin();
+             it != m_requestStreams.end(); ++it) {
+            if (it->second.webTransportDataStream) {
+                continue; // owned by its session, counted below
+            }
+            if (!it->second.responded) {
+                return false; // still buffering or awaiting a response
+            }
+        }
+        return m_responseStreams.empty() && m_webTransportSessions.empty();
+    }
+
     // Advance: read newly-arrived stream bytes and act on them.
     bool pump(SwString* error = nullptr) {
         if (!m_connection) {
@@ -517,6 +574,7 @@ private:
     static std::uint64_t h3ExcessiveLoad_() { return 0x107; }
     static std::uint64_t h3RequestCancelled_() { return 0x10c; }
     static std::uint64_t h3InternalError_() { return 0x102; }
+    static std::uint64_t h3RequestRejected_() { return 0x10b; }
 
     bool abortRequestStream_(std::uint64_t streamId,
                              std::uint64_t applicationErrorCode,
@@ -1284,6 +1342,7 @@ private:
         }
 
         m_controlStreamOpened = true;
+        m_localControlStreamId = controlStreamId;
         return true;
     }
 
@@ -1440,6 +1499,12 @@ private:
             } else if (!m_peerSettingsReceived) {
                 setError_(error, "First HTTP/3 control-stream frame is not SETTINGS (H3_MISSING_SETTINGS)");
                 return false;
+            } else if (frame.type() == SwHttp3Frame::Type::GoAway) {
+                // Client GOAWAY (RFC 9114 5.2): it will open no further
+                // requests and identifies the last push it accepts. This
+                // server never pushes, so recording the intent suffices;
+                // in-flight requests keep completing.
+                m_peerGoawayReceived = true;
             }
         }
         buffer = buffer.mid(static_cast<int>(offset),
@@ -1454,6 +1519,13 @@ private:
                               SwString* error) {
         if (isCompletedRequestStream_(streamId)) {
             return true;
+        }
+        // GOAWAY announces "largest seen + 4": every client bidi stream that
+        // reached this session counts, including WebTransport data streams,
+        // since the next request ID is necessarily above them all.
+        if (!m_haveRequestStream || streamId > m_largestRequestStreamId) {
+            m_largestRequestStreamId = streamId;
+            m_haveRequestStream = true;
         }
         RequestStream_& state = m_requestStreams[streamId];
         if (state.webTransportDataStream) {
@@ -1545,6 +1617,15 @@ private:
                 clearError_(error);
                 return true;
             }
+        }
+
+        // RFC 9114 5.2: after our GOAWAY, requests on streams at or above the
+        // announced ID are not processed. H3_REQUEST_REJECTED tells the client
+        // no application processing happened, so it can safely retry the
+        // request on a new connection. In-flight requests (below the ID by
+        // construction) keep completing normally.
+        if (m_goawaySent && streamId >= m_goawayStreamId && !state.headersDecoded) {
+            return abortRequestStream_(streamId, h3RequestRejected_(), false, error);
         }
 
         std::size_t offset = 0;
@@ -2234,6 +2315,12 @@ private:
     bool m_haveControlStream = false;
     std::uint64_t m_controlStreamId = 0;
     std::size_t m_requestsHandled = 0;
+    std::uint64_t m_localControlStreamId = 0;
+    bool m_goawaySent = false;
+    std::uint64_t m_goawayStreamId = 0;
+    bool m_haveRequestStream = false;
+    std::uint64_t m_largestRequestStreamId = 0;
+    bool m_peerGoawayReceived = false;
 
     RequestHandler m_requestHandler;
     AsyncRequestHandler m_asyncRequestHandler;

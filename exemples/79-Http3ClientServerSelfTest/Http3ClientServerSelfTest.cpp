@@ -70,6 +70,11 @@ int main() {
         std::cerr << error.toStdString() << std::endl;
         return 1;
     }
+    // Force stateless address validation (RFC 9000 8.1.2): every new
+    // connection must survive a Retry round trip before the server allocates
+    // handshake state. Both requests below therefore exercise the full
+    // Retry -> token -> validated-handshake path end to end.
+    server.setAddressValidation(true, 0);
     const uint16_t port = server.localPort();
 
     // Poll the server on a background thread while the client's event loop runs.
@@ -144,6 +149,12 @@ int main() {
         std::cerr << "FAIL: test timed out" << std::endl;
     }
     if (result != 0 || !ok) {
+        return 1;
+    }
+    // Each request opened its own connection, and address validation was
+    // mandatory: the server must have issued one Retry per connection.
+    if (!requireTrue(server.retryPacketsSent() >= 2,
+                     "server did not issue a Retry per new connection")) {
         return 1;
     }
     std::cout << "Http3ClientServerSelfTest passed" << std::endl;

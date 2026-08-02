@@ -305,6 +305,7 @@ sw_add_example_subdirectory(exemples/66-MediaTransportEndToEndSelfTest ON)
   sw_add_example_subdirectory(exemples/96-SrtMediaSelfTest ON)
   sw_add_example_subdirectory(exemples/97-SrtFileStreamer OFF)
   sw_add_example_subdirectory(exemples/98-Http3LoadBench OFF)
+  sw_add_example_subdirectory(exemples/99-SwLocalSocketSelfTest OFF)
   sw_add_example_subdirectory(sandbox/SwMainWindowApplication OFF)
 endif()
 

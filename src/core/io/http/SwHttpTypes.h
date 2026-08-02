@@ -355,6 +355,7 @@ inline SwString swHttpGuessMimeType(const SwString& path) {
     if (lower.endsWith(".gif")) return "image/gif";
     if (lower.endsWith(".webp")) return "image/webp";
     if (lower.endsWith(".ico")) return "image/x-icon";
+    if (lower.endsWith(".mp4")) return "video/mp4";
     if (lower.endsWith(".pdf")) return "application/pdf";
     if (lower.endsWith(".zip")) return "application/zip";
     return "application/octet-stream";

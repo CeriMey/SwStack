@@ -808,7 +808,14 @@ protected:
     }
 
     virtual bool handleTransportWritableEvent_() {
+        const std::uint64_t transportGeneration = m_transportGeneration;
+        const std::shared_ptr<SocketLifetimeGuard> guard = m_lifetimeGuard;
         tryFlushWriteBuffer_();
+        if (!guard->alive.load(std::memory_order_acquire) ||
+            m_transportGeneration != transportGeneration) {
+            return false;
+        }
+        updateDispatcherInterest_();
         return true;
     }
 

@@ -163,10 +163,14 @@ public:
      * @brief Starts the timer with the previously set interval.
      */
     void start() {
-        // ✅ si on n'est pas dans le thread d'affinité du timer, on forward
-        if (threadHandle() && ThreadHandle::currentThread() != threadHandle()) {
+        // ✅ si on n'est pas dans le thread d'affinité du timer, on forward.
+        // Évaluer l'affinité UNE seule fois : threadHandle() peut devenir null
+        // entre un check et un second appel si le thread propriétaire se
+        // désenregistre en concurrence (TOCTOU → postTask sur nullptr).
+        ThreadHandle* const affinity = threadHandle();
+        if (affinity && ThreadHandle::currentThread() != affinity) {
             SwPointer<SwTimer> self(this);
-            if (!threadHandle()->postTaskOnLaneReliable([self]() {
+            if (!affinity->postTaskOnLaneReliable([self]() {
                 if (!self) {
                     return;
                 }
@@ -208,9 +212,13 @@ public:
      * @brief Starts the timer with a given interval in milliseconds.
      */
     void start(int ms) {
-        if (threadHandle() && ThreadHandle::currentThread() != threadHandle()) {
+        // Évaluer l'affinité UNE seule fois : threadHandle() peut devenir null
+        // entre un check et un second appel si le thread propriétaire se
+        // désenregistre en concurrence (TOCTOU → postTask sur nullptr).
+        ThreadHandle* const affinity = threadHandle();
+        if (affinity && ThreadHandle::currentThread() != affinity) {
             SwPointer<SwTimer> self(this);
-            if (!threadHandle()->postTaskOnLaneReliable([self, ms]() {
+            if (!affinity->postTaskOnLaneReliable([self, ms]() {
                 if (!self) {
                     return;
                 }
@@ -229,10 +237,15 @@ public:
      * @brief Stops the timer.
      */
     void stop() {
-        // ✅ stop doit aussi s'exécuter dans le thread du timer
-        if (threadHandle() && ThreadHandle::currentThread() != threadHandle()) {
+        // ✅ stop doit aussi s'exécuter dans le thread du timer.
+        // Évaluer l'affinité UNE seule fois : threadHandle() peut devenir null
+        // entre un check et un second appel si le thread propriétaire se
+        // désenregistre en concurrence (TOCTOU → postTask sur nullptr). Un
+        // thread mort après la capture = tâche queued perdue, comme Qt.
+        ThreadHandle* const affinity = threadHandle();
+        if (affinity && ThreadHandle::currentThread() != affinity) {
             SwPointer<SwTimer> self(this);
-            if (!threadHandle()->postTaskOnLaneReliable([self]() {
+            if (!affinity->postTaskOnLaneReliable([self]() {
                 if (!self) {
                     return;
                 }

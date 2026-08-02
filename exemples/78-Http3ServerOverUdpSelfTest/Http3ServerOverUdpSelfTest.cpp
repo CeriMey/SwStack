@@ -82,15 +82,19 @@ bool testHttp3ServerOverUdp() {
     handshake.setVerifyPeer(true);
     handshake.setVerifyCertificateChain(false);
 
-    SwByteArray clientInitial;
-    if (!requireTrue(handshake.start(SwString("localhost"), clientInitial, &error),
+    // The hybrid ClientHello flight spans several Initial datagrams; each one
+    // must travel as its own UDP datagram.
+    SwVector<SwByteArray> clientInitialFlight;
+    if (!requireTrue(handshake.start(SwString("localhost"), clientInitialFlight, &error),
                      "client handshake start failed")) {
         std::cerr << error.toStdString() << std::endl;
         return false;
     }
-    clientSocket.writeDatagram(clientInitial.constData(),
-                               static_cast<int64_t>(clientInitial.size()),
-                               SwString("127.0.0.1"), serverPort);
+    for (std::size_t i = 0; i < clientInitialFlight.size(); ++i) {
+        clientSocket.writeDatagram(clientInitialFlight[i].constData(),
+                                   static_cast<int64_t>(clientInitialFlight[i].size()),
+                                   SwString("127.0.0.1"), serverPort);
+    }
 
     // Drive the handshake to completion over UDP.
     const std::uint64_t deadline = nowMs() + 10000;

@@ -145,6 +145,16 @@ public:
         m_applicationProtocolSelector = std::move(selector);
         return true;
     }
+    // Stateless reset (RFC 9000 10.3) : l'endpoint proprietaire de la cle
+    // statique fournit le jeton du SCID que ce handshake vient de choisir.
+    // Le jeton part dans les transport parameters ; l'endpoint pourra alors
+    // repondre a un CID oublie sans aucun etat de connexion.
+    using StatelessResetTokenProvider = std::function<SwByteArray(const SwByteArray& cidBytes)>;
+    bool setStatelessResetTokenProvider(StatelessResetTokenProvider provider) {
+        if (m_state != State::Idle) return false;
+        m_statelessResetTokenProvider = std::move(provider);
+        return true;
+    }
     const SwByteArray& applicationProtocol() const { return m_applicationProtocol; }
     bool hasPeerTransportParameters() const { return m_hasPeerParams; }
     const SwQuicTransportParameters& peerTransportParameters() const { return m_peerParams; }
@@ -792,6 +802,17 @@ private:
         if (!SwQuicRandom::fill(scidBytes, 8, error) ||
             !SwQuicConnectionId::fromBytes(scidBytes, m_serverConnectionId, error)) {
             return false;
+        }
+
+        // Apres la substitution eventuelle des transport parameters par la
+        // policy ALPN : le jeton du SCID fraichement choisi doit partir quel
+        // que soit le jeu de parametres retenu.
+        if (m_statelessResetTokenProvider) {
+            const SwByteArray resetToken = m_statelessResetTokenProvider(scidBytes);
+            if (resetToken.size() == 16) {
+                m_localParams.statelessResetToken = resetToken;
+                m_localParams.hasStatelessResetToken = true;
+            }
         }
 
         // ServerHello.
@@ -1632,6 +1653,7 @@ private:
     bool m_hasPeerParams = false;
     SwByteArray m_applicationProtocol{SwByteArray("h3")};
     ApplicationProtocolSelector m_applicationProtocolSelector;
+    StatelessResetTokenProvider m_statelessResetTokenProvider;
 
     SwQuicConnectionId m_originalDestinationConnectionId;
     SwQuicConnectionId m_initialProtectionDestinationConnectionId;

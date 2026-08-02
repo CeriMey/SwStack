@@ -21,7 +21,9 @@
 #include "core/io/quic/SwTls13KeySchedule.h"
 #include "core/io/quic/SwTls13Messages.h"
 
+#include <cstdint>
 #include <iostream>
+#include <map>
 #include "core/types/SwVector.h"
 
 namespace {
@@ -179,24 +181,57 @@ bool testFullLoopbackHandshake() {
         return false;
     }
 
-    SwQuicPacketHeader chHeader;
-    SwByteArray chPayload;
-    if (!requireTrue(SwQuicPacketProtector::unprotectInitial(clientInitialKeys, clientInitial,
-                                                            chHeader, chPayload, nullptr, &error),
-                     "server failed to unprotect client Initial")) {
-        std::cerr << error << std::endl;
-        return false;
-    }
-    SwVector<SwQuicFrame> chFrames;
-    if (!SwQuicFrameCodec::decodeFrames(chPayload, chFrames, &error)) {
-        std::cerr << error << std::endl;
-        return false;
-    }
+    // The hybrid (X25519MLKEM768) ClientHello spans several Initial packets;
+    // the legacy start() overload concatenates that flight into one blob.
+    // Unprotect every packet and reassemble the CRYPTO stream by offset --
+    // hashing a partial ClientHello would diverge the whole key schedule.
     SwByteArray clientHelloMessage;
-    for (std::size_t i = 0; i < chFrames.size(); ++i) {
-        if (chFrames[i].type() == SwQuicFrame::Type::Crypto) {
-            clientHelloMessage = chFrames[i].data();
-            break;
+    {
+        std::map<std::uint64_t, SwByteArray> cryptoByOffset;
+        SwByteArray remaining = clientInitial;
+        std::uint64_t largestPn = 0;
+        bool havePn = false;
+        while (!remaining.isEmpty()) {
+            SwQuicPacketHeader chHeader;
+            SwByteArray chPayload;
+            std::size_t consumed = 0;
+            if (!requireTrue(SwQuicPacketProtector::unprotectInitial(
+                                 clientInitialKeys, remaining, chHeader, chPayload,
+                                 &consumed, &error, havePn ? &largestPn : nullptr),
+                             "server failed to unprotect a client Initial packet")) {
+                std::cerr << error << std::endl;
+                return false;
+            }
+            if (!havePn || chHeader.packetNumber() > largestPn) {
+                largestPn = chHeader.packetNumber();
+            }
+            havePn = true;
+            SwVector<SwQuicFrame> chFrames;
+            if (!SwQuicFrameCodec::decodeFrames(chPayload, chFrames, &error)) {
+                std::cerr << error << std::endl;
+                return false;
+            }
+            for (std::size_t i = 0; i < chFrames.size(); ++i) {
+                if (chFrames[i].type() == SwQuicFrame::Type::Crypto) {
+                    cryptoByOffset[chFrames[i].offset()] = chFrames[i].data();
+                }
+            }
+            if (consumed == 0 || consumed >= remaining.size()) {
+                break;
+            }
+            remaining = remaining.mid(static_cast<int>(consumed),
+                                      static_cast<int>(remaining.size() - consumed));
+        }
+        std::uint64_t expectedOffset = 0;
+        for (std::map<std::uint64_t, SwByteArray>::const_iterator fragment =
+                 cryptoByOffset.begin();
+             fragment != cryptoByOffset.end(); ++fragment) {
+            if (!requireTrue(fragment->first == expectedOffset,
+                             "client CRYPTO stream has a gap")) {
+                return false;
+            }
+            clientHelloMessage.append(fragment->second);
+            expectedOffset += static_cast<std::uint64_t>(fragment->second.size());
         }
     }
     if (!requireTrue(!clientHelloMessage.isEmpty(), "client Initial carried no ClientHello")) {

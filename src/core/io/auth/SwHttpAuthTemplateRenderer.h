@@ -21,7 +21,8 @@ public:
     }
 
     static SwString renderUrl(const SwString& urlTemplate,
-                              const SwString& token) {
-        return swHttpAuthDetail::replaceUrlTemplateToken(urlTemplate, token);
+                              const SwString& token,
+                              const SwString& email = SwString()) {
+        return swHttpAuthDetail::replaceUrlTemplateToken(urlTemplate, token, email);
     }
 };

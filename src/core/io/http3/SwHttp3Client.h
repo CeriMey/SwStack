@@ -181,16 +181,22 @@ public:
             m_handshake->setResumption(m_resumptionTicket, m_requestStream);
         }
 
-        SwByteArray initial;
-        if (!m_handshake->start(host, initial, &error)) {
+        // A hybrid (X25519MLKEM768) ClientHello spans several independently
+        // protected Initial datagrams. They MUST go out as separate UDP
+        // datagrams: concatenating them exceeds the receiver's per-datagram
+        // buffer and the QUIC max_udp_payload_size.
+        SwVector<SwByteArray> initialFlight;
+        if (!m_handshake->start(host, initialFlight, &error)) {
             return startFailed_(error);
         }
 
         m_host = host;
         m_port = port;
         m_timeoutMs = timeoutMs;
-        if (!sendDatagram_(initial, error)) {
-            return startFailed_(error);
+        for (std::size_t i = 0; i < initialFlight.size(); ++i) {
+            if (!sendDatagram_(initialFlight[i], error)) {
+                return startFailed_(error);
+            }
         }
 
         m_deadlineAt = nowMs_() + static_cast<std::uint64_t>(timeoutMs);

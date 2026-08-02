@@ -38,6 +38,7 @@
 #include "quic/SwQuicHandshakeClient.h"
 #include "quic/SwQuicHandshakeServer.h"
 #include "quic/SwQuicServerCredential.h"
+#include "quic/SwQuicStatelessReset.h"
 #include "quic/SwQuicVarIntCodec.h"
 
 #include <chrono>
@@ -159,7 +160,9 @@ public:
     // connection's established() signal and re-emits connectionAccepted(conn).
     void initServer(SendSink sink, const SwString& fromAddr, std::uint16_t fromPort,
                     const SwString& alpn, SwQuicAuthMode authMode,
-                    const SwQuicServerCredential& credential) {
+                    const SwQuicServerCredential& credential,
+                    SwQuicHandshakeServer::StatelessResetTokenProvider resetTokenProvider =
+                        SwQuicHandshakeServer::StatelessResetTokenProvider()) {
         m_sink = std::move(sink);
         m_peerAddr = fromAddr;
         m_peerPort = fromPort;
@@ -177,6 +180,10 @@ public:
             return;
         }
         m_hsServer->setCredential(credential);
+        if (resetTokenProvider) {
+            (void)m_hsServer->setStatelessResetTokenProvider(
+                std::move(resetTokenProvider));
+        }
     }
 
     bool hasLocalCid() const { return !m_localCid.isEmpty(); }
@@ -892,7 +899,10 @@ public:
                 std::make_shared<SwQuicConnectionHandle>();
             wireConnection_(conn, true);
             conn->initServer(m_sink, fromAddr, fromPort, m_listenAlpn, m_listenAuth,
-                             m_credential);
+                             m_credential,
+                             [this](const SwByteArray& cidBytes) {
+                                 return statelessResetTokenForCid(cidBytes);
+                             });
             m_byPeer[peerK] = conn;
             m_connections.push_back(conn);
             // The client's original DCID remains a routing alias for Initial
@@ -904,7 +914,28 @@ public:
             return;
         }
 
-        // 4) Fail-closed: unroutable packet, dropped silently.
+        // 4) Paquet non routable. Un short header d'assez de taille recoit un
+        // Stateless Reset (RFC 9000 10.3) : sans lui, un pair dont on a purge
+        // l'etat (idle timeout) retransmet dans le vide jusqu'a son propre
+        // timeout. Long headers et miettes restent droppes fail-closed.
+        maybeSendStatelessReset_(dg, dcid, fromAddr, fromPort);
+    }
+
+    // Jeton statique du CID : deterministe pour toute la vie du process, donc
+    // valable meme apres la purge de la connexion qui a emis ce CID.
+    SwByteArray statelessResetTokenForCid(const SwByteArray& cidBytes) const {
+        return SwQuicStatelessReset::deriveToken(m_statelessResetKey, cidBytes);
+    }
+
+    // Purge test/ops : oublie toutes les connexions sans le moindre paquet de
+    // fermeture — simule exactement la perte d'etat (idle purge, restart).
+    std::size_t dropAllConnectionsSilently() {
+        const std::size_t dropped = m_connections.size();
+        m_byPeer.clear();
+        m_byCid.clear();
+        m_connections.clear();
+        timerDeadlineChanged();
+        return dropped;
     }
 
     void onTick() {
@@ -1025,6 +1056,41 @@ private:
         return count;
     }
 
+    void maybeSendStatelessReset_(const SwByteArray& trigger,
+                                  const SwString& dcid,
+                                  const SwString& fromAddr,
+                                  std::uint16_t fromPort) {
+        if (!m_listening || !m_sink || dcid.empty()) return;
+        // Short header seulement : un long header non routable est du bruit de
+        // handshake, jamais le symptome d'un etat purge.
+        if (trigger.size() <
+                static_cast<int>(SwQuicStatelessReset::kMinTriggerLength) ||
+            (static_cast<std::uint8_t>(trigger.constData()[0]) & 0x80U) != 0) {
+            return;
+        }
+        // Garde-fou anti-reflexion : budget global par seconde. Le reset est
+        // deja strictement plus court que son declencheur (amplification < 1).
+        const std::uint64_t now = nowMs_();
+        if (now - m_statelessResetWindowStartMs >= 1000) {
+            m_statelessResetWindowStartMs = now;
+            m_statelessResetsInWindow = 0;
+        }
+        if (m_statelessResetsInWindow >= kMaxStatelessResetsPerSecond) return;
+
+        const SwByteArray cidBytes(dcid.data(),
+                                   static_cast<std::size_t>(dcid.size()));
+        SwByteArray reset;
+        if (!SwQuicStatelessReset::buildPacket(
+                statelessResetTokenForCid(cidBytes),
+                static_cast<std::size_t>(trigger.size()), reset)) {
+            return;
+        }
+        if (m_sink(reinterpret_cast<const std::uint8_t*>(reset.constData()),
+                   static_cast<std::size_t>(reset.size()), fromAddr, fromPort)) {
+            ++m_statelessResetsInWindow;
+        }
+    }
+
     void eraseIndexes_(const std::shared_ptr<SwQuicConnectionHandle>& conn) {
         for (SwMap<SwString, std::shared_ptr<SwQuicConnectionHandle>>::iterator it =
                  m_byPeer.begin(); it != m_byPeer.end();) {
@@ -1091,6 +1157,13 @@ private:
     SwQuicAuthMode m_listenAuth = SwQuicAuthMode::RawPublicKey;
     std::function<bool(const SwByteArray& spkiDer)> m_verifyPeerKey; // X.509/SPKI decision hook
     SwQuicServerCredential m_credential;
+
+    // Stateless reset (RFC 9000 10.3) : cle statique du process — les jetons
+    // derives survivent a la purge des connexions, c'est tout l'interet.
+    static constexpr std::size_t kMaxStatelessResetsPerSecond = 32;
+    SwByteArray m_statelessResetKey = SwQuicRandom::bytes(32);
+    std::uint64_t m_statelessResetWindowStartMs = 0;
+    std::size_t m_statelessResetsInWindow = 0;
 
     SwMap<SwString, std::shared_ptr<SwQuicConnectionHandle>> m_byPeer;
     SwMap<SwString, std::shared_ptr<SwQuicConnectionHandle>> m_byCid;

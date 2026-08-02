@@ -360,7 +360,6 @@ public:
         if (type_ == Type::Boolean) return boolValue_ ? "true" : "false";
         if (type_ == Type::Integer) return SwString::number(static_cast<long long>(intValue_));
         if (type_ == Type::Double) return SwString::number(doubleValue_);
-        if (type_ == Type::Null) return "null";
         return defaultValue;
     }
 

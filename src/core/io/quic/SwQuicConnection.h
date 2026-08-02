@@ -8,6 +8,7 @@
 #include "SwByteArray.h"
 #include "SwString.h"
 #include "quic/SwQuicAckTracker.h"
+#include "quic/SwQuicStatelessReset.h"
 #include "quic/SwQuicCongestionControl.h"
 #include "quic/SwQuicFlowControl.h"
 #include "quic/SwQuicFrame.h"
@@ -16,6 +17,7 @@
 #include "quic/SwQuicLimits.h"
 #include "quic/SwQuicPacketCodec.h"
 #include "quic/SwQuicPacketHeader.h"
+#include "quic/SwQuicPacketKeys.h"
 #include "quic/SwQuicPacketProtector.h"
 #include "quic/SwQuicRandom.h"
 #include "quic/SwQuicStream.h"
@@ -199,6 +201,20 @@ public:
         space.txKeys = txKeys;
         space.hasRxKeys = true;
         space.hasTxKeys = true;
+        if (level == Level::Application) {
+            // Precompute the next-generation 1-RTT keys (RFC 9001 6.1) so a
+            // peer-initiated key update decrypts on arrival. Legacy self-test
+            // keys may carry no traffic secret; key update is then simply
+            // unavailable on this connection.
+            m_keyPhase = false;
+            m_hasPrevRxKeys = false;
+            m_currentPhaseFirstTxPn = space.nextTxPn;
+            m_currentPhaseTxAcked = false;
+            m_keyUpdateCount = 0;
+            m_hasNextKeys =
+                deriveNextGenerationKeys_(rxKeys, m_nextRxKeys, nullptr) &&
+                deriveNextGenerationKeys_(txKeys, m_nextTxKeys, nullptr);
+        }
     }
 
     bool hasLevelKeys(Level level) const { return space_(level).hasRxKeys; }
@@ -217,6 +233,11 @@ public:
                 static_cast<std::uint64_t>(m_pendingDatagramFrames.size());
             m_pendingDatagramFrames.clear();
             m_pendingDatagramFrameBytes = 0;
+            m_hasNextKeys = false;
+            m_hasPrevRxKeys = false;
+            m_nextRxKeys = SwQuicInitialKeys();
+            m_nextTxKeys = SwQuicInitialKeys();
+            m_prevRxKeys = SwQuicInitialKeys();
         }
         space.sentPackets.clear();
         space.ackTracker.clear();
@@ -241,6 +262,36 @@ public:
         for (std::size_t i = 0; i < kLevelCount(); ++i) {
             m_spaces[i].loss.setHandshakeConfirmed(confirmed);
         }
+    }
+
+    // ---- 1-RTT key update (RFC 9001 section 6) -----------------------------
+
+    bool currentKeyPhase() const { return m_keyPhase; }
+    std::uint64_t keyUpdateCount() const { return m_keyUpdateCount; }
+    // False when the installed 1-RTT keys carry no traffic secret (legacy
+    // self-test keys): a key update can then be neither sent nor followed.
+    bool keyUpdateAvailable() const { return m_hasNextKeys; }
+
+    // Initiate a key update: subsequent 1-RTT packets flip the Key Phase bit
+    // and use the next-generation keys. Only allowed once the handshake is
+    // confirmed (RFC 9001 6.2) and after a packet protected with the current
+    // keys has been acknowledged (RFC 9001 6.1).
+    bool initiateKeyUpdate(SwString* error = nullptr) {
+        Space_& space = space_(Level::Application);
+        if (!m_handshakeConfirmed) {
+            setError_(error, "QUIC key update before handshake confirmation");
+            return false;
+        }
+        if (!space.hasRxKeys || !space.hasTxKeys || !m_hasNextKeys) {
+            setError_(error, "QUIC key update requires 1-RTT keys derived from traffic secrets");
+            return false;
+        }
+        if (!m_currentPhaseTxAcked) {
+            setError_(error,
+                      "QUIC key update requires an acknowledged packet in the current key phase");
+            return false;
+        }
+        return advanceKeyPhase_(error);
     }
 
     // ---- receive path -----------------------------------------------------
@@ -353,6 +404,21 @@ public:
             std::size_t consumed = 0;
             bool authenticated = false;
             if (!receivePacket_(datagram, nowMs, consumed, authenticated, error)) {
+                return false;
+            }
+            // RFC 9000 10.3.1 : un datagramme 1-RTT qu'aucune clé n'ouvre et
+            // dont la fin porte un jeton de reset annoncé par le pair signifie
+            // que celui-ci a perdu tout état. Mourir immédiatement (draining,
+            // sans rien émettre) épargne au pilote des retransmissions vers un
+            // trou noir jusqu'au timeout. Volontairement AVANT le test
+            // m_inspectPathControlOnly : un jeton valide authentifie la mort
+            // de la connexion quelle que soit l'adresse source.
+            if (!authenticated && isPeerStatelessReset_(datagram)) {
+                m_state = State::Draining;
+                m_closeErrorCode = 0;
+                m_closeReason = SwString("QUIC stateless reset received");
+                armDrainTimer_(nowMs);
+                setError_(error, "QUIC stateless reset received");
                 return false;
             }
             // Seuls des octets authentifiés créditent le budget 3x du chemin
@@ -876,6 +942,31 @@ public:
             return;
         }
         space_(level).pendingFrames.push_back(frame);
+    }
+
+    // True while some send stream still holds bytes that were not yet
+    // packetized, or sent bytes/FIN not yet acknowledged by the peer. Drivers
+    // use it to delay a graceful CONNECTION_CLOSE until queued responses and
+    // control-stream frames actually reached the peer.
+    bool hasUnacknowledgedSendData() const {
+        for (SwMap<std::uint64_t, SendStream_>::const_iterator it = m_sendStreams.begin();
+             it != m_sendStreams.end(); ++it) {
+            const SendStream_& stream = it->second;
+            if (stream.resetQueued || stream.resetAcked) {
+                continue; // a reset supersedes data delivery on this stream
+            }
+            const std::size_t stored = static_cast<std::size_t>(stream.buffer.size());
+            if (stream.bufferOffset < stored) {
+                return true; // queued bytes not yet handed to a packet
+            }
+            if (stream.contiguousAckedOffset < stream.nextOffset) {
+                return true; // sent bytes still unacknowledged (or lost)
+            }
+            if (stream.finQueued && !stream.finAcked) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // Initiate connection close: a CONNECTION_CLOSE goes out on the next
@@ -1458,6 +1549,54 @@ private:
         }
     }
 
+    // ---- 1-RTT key update internals (RFC 9001 section 6) -------------------
+
+    static bool deriveNextGenerationKeys_(const SwQuicInitialKeys& current,
+                                          SwQuicInitialKeys& outNext,
+                                          SwString* error) {
+        if (current.secret.isEmpty()) {
+            setError_(error, "QUIC traffic secret unavailable for key update");
+            return false;
+        }
+        SwByteArray nextSecret;
+        if (!SwQuicPacketKeys::nextGeneration(current.secret, nextSecret, error) ||
+            !SwQuicPacketKeys::deriveAes128(nextSecret, outNext, error)) {
+            return false;
+        }
+        // RFC 9001 6.1: header protection is NOT updated by a key update.
+        outNext.headerProtectionKey = current.headerProtectionKey;
+        return true;
+    }
+
+    // Move both directions one generation forward: our send keys MUST follow
+    // the peer's phase (RFC 9001 6.2). The old receive keys stay available for
+    // reordered previous-phase packets until the next update replaces them
+    // (RFC 9001 6.5 suggests dropping them after 3 PTO; the next update is the
+    // hard bound applied here).
+    bool advanceKeyPhase_(SwString* error) {
+        Space_& space = space_(Level::Application);
+        SwQuicInitialKeys followingRx;
+        SwQuicInitialKeys followingTx;
+        if (!deriveNextGenerationKeys_(m_nextRxKeys, followingRx, error) ||
+            !deriveNextGenerationKeys_(m_nextTxKeys, followingTx, error)) {
+            return false;
+        }
+        m_prevRxKeys = space.rxKeys;
+        m_hasPrevRxKeys = true;
+        space.rxKeys = m_nextRxKeys;
+        space.txKeys = m_nextTxKeys;
+        m_nextRxKeys = followingRx;
+        m_nextTxKeys = followingTx;
+        m_keyPhase = !m_keyPhase;
+        ++m_keyUpdateCount;
+        m_currentPhaseFirstTxPn = space.nextTxPn;
+        m_currentPhaseTxAcked = false;
+        if (error) {
+            *error = SwString();
+        }
+        return true;
+    }
+
     static void clearError_(SwString* error) {
         if (error) {
             *error = SwString();
@@ -1469,6 +1608,29 @@ private:
             deadline = candidate;
         }
         any = true;
+    }
+
+    // Un datagramme non authentifié est-il un Stateless Reset du pair ?
+    // Jetons candidats : celui des transport parameters du handshake (le CID
+    // choisi par le serveur) et ceux appris via NEW_CONNECTION_ID.
+    bool isPeerStatelessReset_(const SwByteArray& datagram) const {
+        if (datagram.size() <
+            static_cast<int>(SwQuicStatelessReset::kMinResetLength)) {
+            return false;
+        }
+        if (m_hasPeerParams && m_peerParams.hasStatelessResetToken &&
+            SwQuicStatelessReset::matchesToken(datagram,
+                                               m_peerParams.statelessResetToken)) {
+            return true;
+        }
+        for (SwMap<std::uint64_t, SwByteArray>::const_iterator it =
+                 m_peerStatelessResetTokens.begin();
+             it != m_peerStatelessResetTokens.end(); ++it) {
+            if (SwQuicStatelessReset::matchesToken(datagram, it->second)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     static std::uint64_t combineIdleTimeouts_(std::uint64_t local, std::uint64_t peer) {
@@ -1640,14 +1802,35 @@ private:
             SwByteArray plaintext;
             const std::uint64_t* largest =
                 space.hasLargestReceivedPn ? &space.largestReceivedPn : nullptr;
-            if (!SwQuicPacketProtector::unprotectShortHeader1Rtt(space.rxKeys,
-                                                                 packet,
-                                                                 m_localConnectionId.size(),
-                                                                 packetNumber,
-                                                                 keyPhase,
-                                                                 plaintext,
-                                                                 error,
-                                                                 largest)) {
+            bool decrypted = SwQuicPacketProtector::unprotectShortHeader1Rtt(
+                space.rxKeys, packet, m_localConnectionId.size(), packetNumber,
+                keyPhase, plaintext, error, largest);
+            bool peerAdvancedKeyPhase = false;
+            if (!decrypted && m_hasNextKeys && m_handshakeConfirmed) {
+                // RFC 9001 6.3: trial-decrypt with the next-generation keys.
+                // Header protection is generation-invariant, so only the AEAD
+                // key differs; success on a flipped Key Phase bit means the
+                // peer initiated (or already followed) a key update.
+                SwString trialError;
+                decrypted = SwQuicPacketProtector::unprotectShortHeader1Rtt(
+                    m_nextRxKeys, packet, m_localConnectionId.size(), packetNumber,
+                    keyPhase, plaintext, &trialError, largest);
+                if (decrypted && keyPhase == m_keyPhase) {
+                    decrypted = false; // same-phase traffic must use current keys
+                }
+                peerAdvancedKeyPhase = decrypted;
+            }
+            if (!decrypted && m_hasPrevRxKeys) {
+                // Reordered packet from the previous key phase (RFC 9001 6.4).
+                SwString trialError;
+                decrypted = SwQuicPacketProtector::unprotectShortHeader1Rtt(
+                    m_prevRxKeys, packet, m_localConnectionId.size(), packetNumber,
+                    keyPhase, plaintext, &trialError, largest);
+                if (decrypted && keyPhase == m_keyPhase) {
+                    decrypted = false;
+                }
+            }
+            if (!decrypted) {
                 if (std::getenv("VIGIL_QUIC_TRACE") != nullptr) {
                     const SwString reason = error ? *error : SwString();
                     std::fprintf(stderr,
@@ -1668,6 +1851,14 @@ private:
             if (packetNumberAlreadyConsumed_(Level::Application, packetNumber)) {
                 clearError_(error);
                 return true;
+            }
+            if (peerAdvancedKeyPhase) {
+                // Authenticated, non-replayed packet of the next key phase:
+                // follow the peer (RFC 9001 6.2) so our subsequent sends use
+                // the same phase, and precompute the generation after it.
+                if (!advanceKeyPhase_(error)) {
+                    return false;
+                }
             }
             outAuthenticated = true;
             return processDecodedPacket_(Level::Application, packetNumber, plaintext,
@@ -2238,6 +2429,17 @@ private:
 
         m_ptoCount = 0;
         space.probesPending = 0; // the peer responded: no probe owed
+
+        // RFC 9001 6.1 precondition for initiating a key update: a packet
+        // protected with the current-generation keys has been acknowledged.
+        if (level == Level::Application && !m_currentPhaseTxAcked) {
+            for (std::size_t i = 0; i < result.newlyAcked.size(); ++i) {
+                if (result.newlyAcked[i] >= m_currentPhaseFirstTxPn) {
+                    m_currentPhaseTxAcked = true;
+                    break;
+                }
+            }
+        }
 
         for (std::size_t i = 0; i < result.newlyAcked.size(); ++i) {
             SwMap<std::uint64_t, SentRecord_>::iterator it =
@@ -3354,7 +3556,7 @@ private:
             if (level == Level::Application) {
                 return SwQuicPacketProtector::protectShortHeader1Rtt(
                     space.txKeys, m_peerConnectionId, packetNumber,
-                    kPacketNumberLength(), false, false, payload, packet, error);
+                    kPacketNumberLength(), false, m_keyPhase, payload, packet, error);
             }
             if (space.hasTxKeys) {
                 SwByteArray header;
@@ -3554,6 +3756,17 @@ private:
     SwMap<std::uint64_t, bool> m_localOpenedStreams;
     SwVector<std::uint64_t> m_touchedStreams;
     std::size_t m_streamSchedulingCursor = 0;
+
+    // ---- 1-RTT key update state (RFC 9001 section 6) ----
+    bool m_keyPhase = false;              // Key Phase bit of the current generation
+    bool m_hasNextKeys = false;           // next-generation keys precomputed
+    bool m_hasPrevRxKeys = false;         // previous-generation receive keys kept
+    bool m_currentPhaseTxAcked = false;   // a current-phase packet was acknowledged
+    std::uint64_t m_currentPhaseFirstTxPn = 0;
+    std::uint64_t m_keyUpdateCount = 0;
+    SwQuicInitialKeys m_nextRxKeys;
+    SwQuicInitialKeys m_nextTxKeys;
+    SwQuicInitialKeys m_prevRxKeys;
     std::size_t m_maxStreamReassemblyBytes = 1024 * 1024;
     std::size_t m_maxStreamReassemblyFragments = 1024;
     std::size_t m_bufferedStreamSendBytes = 0;

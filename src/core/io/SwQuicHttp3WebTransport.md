@@ -551,12 +551,58 @@ reprise apres ACK et ordonnancement equitable entre les streams. Le self-test
 `HttpAppHttp3SelfTest` valide notamment un fichier de plus de 17 Mio sans le
 materialiser dans le writer HTTP/3.
 
+Mise a jour 2026-07-20 : key update 1-RTT et arret gracieux GOAWAY.
+
+Key update 1-RTT (RFC 9001 section 6) dans `SwQuicConnection` : les cles de la
+generation suivante sont precalculees a l'installation des cles Application
+(`quic ku`, header protection inchangee), le bit Key Phase est emis et detecte
+par dechiffrement d'essai (generation suivante puis precedente pour les
+paquets reordonnes), l'endpoint suit un update initie par le pair et peut en
+initier un via `initiateKeyUpdate()` (garde RFC 9001 6.1 : un paquet de la
+phase courante doit avoir ete acquitte). Valide par `testKeyUpdate` dans
+`exemples/71` : double update bidirectionnel + paquet ancien-phase reordonne.
+
+Arret gracieux HTTP/3 (RFC 9114 5.2) : `SwHttp3Server::initiateGracefulShutdown()`
+emet GOAWAY (plus grand stream vu + 4) sur le control stream ; les requetes en
+vol se terminent, les streams de requete au-dela de l'ID annonce sont rejetes
+avec `H3_REQUEST_REJECTED` (0x10b), les streams WebTransport restent lies a
+leur session ; le GOAWAY client est enregistre (`peerGoawayReceived()`).
+`SwQuicHttp3Server::beginGracefulShutdown()` draine chaque session puis ferme
+avec `H3_NO_ERROR` quand `SwHttp3Server::isDrained()` et
+`SwQuicConnection::hasUnacknowledgedSendData()` confirment la remise ; les
+nouvelles connexions sont refusees pendant le drain.
+`SwHttpApp::closeGraceful()` utilise ce chemin pour HTTP/3 en parallele du
+drain HTTP/1.x. Valide par `testGoawayGracefulShutdown` dans `exemples/76`.
+
+Mise a jour 2026-07-20 (suite) : vol Initial hybride sur socket, Retry branche.
+
+Correctif transport reel : depuis le KEX hybride X25519MLKEM768, le vol
+Initial client s'etale sur plusieurs datagrammes. `SwHttp3Client` (et le test
+78) utilisaient l'overload de compatibilite `start(host, SwByteArray&)` qui
+concatene le vol en un seul datagramme UDP : le recepteur tronquait a
+`maxDatagramSize` (2048) et le handshake echouait systematiquement sur socket
+reelle. Le client de production emet desormais chaque datagramme du vol
+separement (`start(host, SwVector<SwByteArray>&)`). L'echafaudage d'ex.74
+reassemble aussi le ClientHello multi-paquets par offset CRYPTO avant de le
+hacher. Valide : ex.74, 78, 79, 82 repassent (stress 3x stable).
+
+Retry / validation d'adresse sans etat (RFC 9000 8.1.2) branche dans
+`SwQuicHttp3Server::setAddressValidation(enabled, seuil, ageMax)` : au-dela de
+`seuil` handshakes en cours (0 = toujours), un Initial sans token recoit un
+paquet Retry (via `SwQuicRetry`, token HMAC lie adresse+ODCID+SCID Retry, cle
+regeneree par listen()) sans aucune allocation d'etat ; un Initial avec token
+est authentifie avant de couter un handshake, et le contexte Retry
+(`setRetryContext`) alimente les transport parameters. Compteur
+`retryPacketsSent()`. Valide par ex.79 avec validation forcee (chaque
+connexion passe par Retry -> token -> handshake).
+
 Ce qui reste hors de cette compatibilite HTTP/3 de base :
 
 - QPACK dynamique et ses streams d'instructions (la table statique utilisee
   ici est interoperable) ;
-- Retry cote serveur et key update 1-RTT ;
 - agilite de suites (ChaCha20-Poly1305, AES-256) ; seul AES-128-GCM est gere ;
+- priorites RFC 9218 (round-robin equitable seulement) ;
+- rotation de la cle de token Retry sur un listener longue duree ;
 - validation navigateur WebTransport separee : le GET HTTP/3 Chrome ne vaut
   pas validation complete d'une session WebTransport.
 

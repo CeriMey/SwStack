@@ -171,7 +171,8 @@ private:
                                         SwString* outError);
     SwString buildChallengeUrl_(const SwString& purpose,
                                 const SwString& rawToken,
-                                const SwString& configuredTemplate) const;
+                                const SwString& configuredTemplate,
+                                const SwString& email = SwString()) const;
     bool sendMail_(const SwHttpAuthOutgoingMail& mail, SwString* outError);
     bool sendViaMailService_(const SwHttpAuthOutgoingMail& mail, SwString* outError);
     static SwByteArray buildMimeMessage_(const SwMailConfig& mailConfig, const SwHttpAuthOutgoingMail& mail);
@@ -543,12 +544,6 @@ inline SwDbStatus SwHttpAuthService::login(const SwString& email,
         }
         return SwDbStatus(SwDbStatus::NotFound, "Invalid credentials");
     }
-    if (account.suspended) {
-        if (outError) {
-            *outError = "Account suspended";
-        }
-        return SwDbStatus(SwDbStatus::Busy, "Account suspended");
-    }
     if (account.passwordResetRequired) {
         if (!password.trimmed().isEmpty()) {
             if (outError) {
@@ -567,6 +562,15 @@ inline SwDbStatus SwHttpAuthService::login(const SwString& email,
             *outError = "Invalid credentials";
         }
         return SwDbStatus(SwDbStatus::NotFound, "Invalid credentials");
+    }
+    // Vérifié APRÈS le mot de passe : révéler "Account suspended" à un simple
+    // devineur de mots de passe fuiterait l'existence et l'état du compte
+    // (énumération). Seul un appelant ayant fourni le bon mot de passe l'apprend.
+    if (account.suspended) {
+        if (outError) {
+            *outError = "Account suspended";
+        }
+        return SwDbStatus(SwDbStatus::Busy, "Account suspended");
     }
     if (!swHttpAuthDetail::isModernPasswordHash(account.passwordHash)) {
         const SwDbStatus upgradeStatus = m_store.setAccountPassword(account.accountId, password);
@@ -1289,11 +1293,15 @@ inline SwDbStatus SwHttpAuthService::resetPassword(const SwString& code,
         outError->clear();
     }
 
-    if (code.trimmed().isEmpty() || token.trimmed().isEmpty()) {
+    // Code OU token suffit : les deux arrivent dans le meme email, exiger les
+    // deux n'ajoute aucune preuve et bloque la saisie du code seul (reglages,
+    // page reset ouverte sans le lien). S'ils sont fournis tous les deux,
+    // lookupChallenge_ verifie leur correspondance.
+    if (code.trimmed().isEmpty() && token.trimmed().isEmpty()) {
         if (outError) {
-            *outError = "Reset code and token required";
+            *outError = "Reset code or token required";
         }
-        return SwDbStatus(SwDbStatus::InvalidArgument, "Reset code and token required");
+        return SwDbStatus(SwDbStatus::InvalidArgument, "Reset code or token required");
     }
 
     SwHttpAuthChallenge challenge;
@@ -1850,7 +1858,7 @@ inline SwDbStatus SwHttpAuthService::sendChallengeForAccount_(const SwHttpAuthAc
         normalizedPurpose == "verify_email" ? m_config.mail.verificationTemplate : m_config.mail.resetPasswordTemplate;
     const SwString configuredTemplate =
         normalizedPurpose == "verify_email" ? m_config.mail.verificationUrlTemplate : m_config.mail.resetPasswordUrlTemplate;
-    const SwString url = buildChallengeUrl_(normalizedPurpose, rawToken, configuredTemplate);
+    const SwString url = buildChallengeUrl_(normalizedPurpose, rawToken, configuredTemplate, account.email);
     const SwHttpAuthRenderedTemplate rendered =
         SwHttpAuthTemplateRenderer::render(mailTemplate, challenge.code, url);
 
@@ -1887,9 +1895,10 @@ inline SwDbStatus SwHttpAuthService::sendChallengeForAccount_(const SwHttpAuthAc
 
 inline SwString SwHttpAuthService::buildChallengeUrl_(const SwString& purpose,
                                                       const SwString& rawToken,
-                                                      const SwString& configuredTemplate) const {
+                                                      const SwString& configuredTemplate,
+                                                      const SwString& email) const {
     if (!configuredTemplate.trimmed().isEmpty()) {
-        return SwHttpAuthTemplateRenderer::renderUrl(configuredTemplate.trimmed(), rawToken);
+        return SwHttpAuthTemplateRenderer::renderUrl(configuredTemplate.trimmed(), rawToken, email);
     }
     const SwString baseUrl = swHttpAuthDetail::normalizeBaseUrl(m_config.publicBaseUrl);
     if (baseUrl.isEmpty()) {

@@ -62,6 +62,37 @@ public:
 #endif
         return value;
     }
+
+#if !defined(_WIN32)
+    void resetDispatcherInterestObservations() {
+        m_dispatcherInterestUpdateCount = 0;
+        m_lastDispatcherInterest = SwIoDispatcher::None;
+    }
+
+    std::size_t dispatcherInterestUpdateCount() const {
+        return m_dispatcherInterestUpdateCount;
+    }
+
+    bool lastDispatcherInterestIncludesWritable() const {
+        return (m_lastDispatcherInterest & SwIoDispatcher::Writable) != 0;
+    }
+
+    bool dispatchWritableEventForTest() {
+        return handleTransportWritableEvent_();
+    }
+
+protected:
+    SwIoDispatcher::EventMask desiredDispatcherEvents_() const override {
+        const SwIoDispatcher::EventMask events = SwTcpSocket::desiredDispatcherEvents_();
+        ++m_dispatcherInterestUpdateCount;
+        m_lastDispatcherInterest = events;
+        return events;
+    }
+
+private:
+    mutable std::size_t m_dispatcherInterestUpdateCount = 0;
+    mutable SwIoDispatcher::EventMask m_lastDispatcherInterest = SwIoDispatcher::None;
+#endif
 };
 
 template <typename Predicate>
@@ -280,7 +311,7 @@ void testTcpBackpressureAndDeferredShutdown(SwCoreApplication& app) {
     assert(server.listen("127.0.0.1", 0));
     assert(server.localPort() != 0);
 
-    SwTcpSocket client;
+    InspectableTcpSocket client;
     client.setSendBufferSize(4096);
     client.setWriteBufferWatermarks(128U * 1024U, 32U * 1024U);
 
@@ -324,6 +355,10 @@ void testTcpBackpressureAndDeferredShutdown(SwCoreApplication& app) {
     }
     assert(sawWouldBlock);
     assert(client.state() == SwAbstractSocket::ConnectedState);
+#if !defined(_WIN32)
+    assert(client.bytesToWrite() > 0);
+    assert(client.lastDispatcherInterestIncludesWritable());
+#endif
 
     assert(client.shutdownWrite());
     assert(client.tryWrite("x", 1) == SwTcpSocket::WriteResult::WriteClosed);
@@ -348,6 +383,16 @@ void testTcpBackpressureAndDeferredShutdown(SwCoreApplication& app) {
     assert(client.bytesToWrite() == 0);
     assert(readyWriteSeen);
     assert(peer->isRemoteClosed());
+#if !defined(_WIN32)
+    assert(!client.lastDispatcherInterestIncludesWritable());
+
+    // Exercise the writable handler directly: it owns the responsibility for
+    // recalculating the epoll mask after every flush, including an empty one.
+    client.resetDispatcherInterestObservations();
+    assert(client.dispatchWritableEventForTest());
+    assert(client.dispatcherInterestUpdateCount() == 1);
+    assert(!client.lastDispatcherInterestIncludesWritable());
+#endif
 
     // Complete the opposite half-close. Both sockets may now release their native handles.
     assert(peer->shutdownWrite());

@@ -524,11 +524,41 @@ public:
      * @details The method stops accepting new work first, then waits until the active operations drain or the timeout expires.
      */
     bool closeGraceful(int timeoutMs = 5000) {
-        // QUIC graceful GOAWAY/draining is not exposed by the transport yet;
-        // stop accepting UDP traffic before draining HTTP/1.x sessions.
+        // HTTP/3 first: GOAWAY every session and refuse new connections, then
+        // let both stacks drain in parallel -- the HTTP/1.x wait below runs
+        // the event loop that also drives the QUIC timers.
+        m_http3Server.beginGracefulShutdown();
+        const bool httpDrained = m_server.closeGraceful(timeoutMs);
+        bool http3Drained = m_http3Server.isDrained();
+        if (!http3Drained && m_http3Server.isListening()) {
+            SwEventLoop loop;
+            SwTimer probe;
+            SwTimer timeout;
+            bool timedOut = false;
+            SwObject::connect(&probe, &SwTimer::timeout, &loop, [this, &loop]() {
+                SwString ignored;
+                m_http3Server.poll(0, &ignored);
+                if (m_http3Server.isDrained()) {
+                    loop.quit();
+                }
+            });
+            if (timeoutMs >= 0) {
+                timeout.setSingleShot(true);
+                SwObject::connect(&timeout, &SwTimer::timeout, &loop,
+                                  [&loop, &timedOut]() {
+                    timedOut = true;
+                    loop.quit();
+                });
+                timeout.start(timeoutMs);
+            }
+            probe.start(10);
+            loop.exec();
+            (void)timedOut;
+            http3Drained = m_http3Server.isDrained();
+        }
         m_http3Server.setAutomaticPollingEnabled(false);
         m_http3Server.close();
-        return m_server.closeGraceful(timeoutMs);
+        return httpDrained && http3Drained;
     }
 
     /**
