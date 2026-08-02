@@ -544,6 +544,13 @@ private:
         }
     }
 
+    static bool dispatchUnixTerminationRequest_() {
+        if (!unixTerminateRequested_().exchange(false, std::memory_order_acq_rel)) {
+            return false;
+        }
+        return requestProcessTermination();
+    }
+
     static void unixWatchdogPreemptSignalHandler_(int /*signalNumber*/, siginfo_t* /*info*/, void* uctx) {
 #if defined(__ANDROID__)
          (void)uctx;
@@ -702,6 +709,7 @@ public:
      * Disables high-precision timers and performs necessary cleanup.
      */
     virtual ~SwCoreApplication() {
+        releaseOrderedProcessTermination();
         detachAllTelemetrySessions();
         detachAllProfilerSessions();
         desactiveWatchDog();
@@ -745,6 +753,70 @@ public:
                 kv.second->quit();
                 requested = true;
             }
+        }
+        return requested;
+    }
+
+    /**
+     * @brief Claims process termination for this application instance.
+     *
+     * By default, an operating-system termination request stops every
+     * registered SwCoreApplication. A process composition root can opt into
+     * ordered teardown by claiming termination ownership: SIGINT, SIGTERM and
+     * Windows console shutdown then stop only this instance first, leaving
+     * subordinate runtimes alive until the owner explicitly tears them down.
+     *
+     * Exactly one live instance can own process termination at a time. Calling
+     * this method again on the current owner is idempotent.
+     */
+    bool claimOrderedProcessTermination() {
+        RegistryLock_ lock(instanceRegistryMutex());
+        SwCoreApplication*& owner = orderedProcessTerminationOwner_();
+        if (owner && owner != this) {
+            return false;
+        }
+        owner = this;
+        return true;
+    }
+
+    /**
+     * @brief Releases ordered process termination ownership held by this instance.
+     */
+    void releaseOrderedProcessTermination() {
+        RegistryLock_ lock(instanceRegistryMutex());
+        if (orderedProcessTerminationOwner_() == this) {
+            orderedProcessTerminationOwner_() = nullptr;
+        }
+    }
+
+    /**
+     * @brief Reports whether this instance owns ordered process termination.
+     */
+    bool ownsOrderedProcessTermination() const {
+        RegistryLock_ lock(instanceRegistryMutex());
+        return orderedProcessTerminationOwner_() == this;
+    }
+
+    /**
+     * @brief Dispatches an operating-system termination request.
+     *
+     * When an ordered owner exists, only that runtime is asked to quit. The
+     * legacy quit-all behavior remains the fallback for every application that
+     * does not explicitly claim ownership.
+     */
+    static bool requestProcessTermination() {
+        RegistryLock_ lock(instanceRegistryMutex());
+        SwCoreApplication* owner = orderedProcessTerminationOwner_();
+        if (owner) {
+            owner->quit();
+            return true;
+        }
+
+        bool requested = false;
+        for (auto& kv : instanceRegistry()) {
+            if (!kv.second) continue;
+            kv.second->quit();
+            requested = true;
         }
         return requested;
     }
@@ -1610,8 +1682,7 @@ public:
      */
     std::int64_t processEvent(bool waitForEvent = false) {
 #if !defined(_WIN32)
-         if (unixTerminateRequested_().load(std::memory_order_relaxed)) {
-             (void)SwCoreApplication::requestQuitAllInstances();
+         if (dispatchUnixTerminationRequest_()) {
              if (!running.load(std::memory_order_relaxed)) {
                  return 0;
              }
@@ -2346,6 +2417,11 @@ private:
         return registry;
     }
 
+    static SwCoreApplication*& orderedProcessTerminationOwner_() {
+        static SwCoreApplication* owner = nullptr;
+        return owner;
+    }
+
     static RegistryMutex_& instanceRegistryObserversMutex_() {
         static RegistryMutex_* observersMutex = new RegistryMutex_();
         return *observersMutex;
@@ -2409,6 +2485,9 @@ private:
 
         {
             RegistryLock_ lock(instanceRegistryMutex());
+            if (orderedProcessTerminationOwner_() == app) {
+                orderedProcessTerminationOwner_() = nullptr;
+            }
             std::map<std::thread::id, SwCoreApplication*>::iterator it =
                 instanceRegistry().find(std::this_thread::get_id());
             if (it != instanceRegistry().end() && it->second == app) {
@@ -3092,7 +3171,7 @@ private:
                     if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
                     break;
                 }
-                (void)SwCoreApplication::requestQuitAllInstances();
+                (void)dispatchUnixTerminationRequest_();
                 return;
             }
             base = 2;
@@ -3140,7 +3219,7 @@ static BOOL WINAPI ConsoleHandler(DWORD ctrlType) {
     case CTRL_SHUTDOWN_EVENT:
     {
         // Arrêt propre de l'application
-        const bool requested = SwCoreApplication::requestQuitAllInstances();
+        const bool requested = SwCoreApplication::requestProcessTermination();
             // Appeler quit pour stopper la boucle d'événements proprement
         // On retourne TRUE pour indiquer qu'on a géré l'événement
         // If no SwCoreApplication is registered, keep the default OS behavior (terminate).
