@@ -23,7 +23,7 @@
 #else
 #include <arpa/inet.h>
 #include <netinet/in.h>
-#include <sys/select.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
@@ -310,6 +310,7 @@ private:
             return false;
         }
 
+#if defined(_WIN32)
         fd_set readSet;
         FD_ZERO(&readSet);
         FD_SET(sock, &readSet);
@@ -317,6 +318,14 @@ private:
         timeout.tv_sec = m_timeoutMs / 1000;
         timeout.tv_usec = (m_timeoutMs % 1000) * 1000;
         const int ready = ::select(static_cast<int>(sock) + 1, &readSet, nullptr, nullptr, &timeout);
+#else
+        // select() plafonne a FD_SETSIZE (1024) et FD_SET() avorte le
+        // processus au-dela ; poll() accepte n'importe quel numero de fd.
+        struct pollfd pfd {};
+        pfd.fd = sock;
+        pfd.events = POLLIN;
+        const int ready = ::poll(&pfd, 1, m_timeoutMs);
+#endif
         if (ready <= 0) {
             if (outError) {
                 *outError = "DNS query timeout";

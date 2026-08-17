@@ -703,6 +703,12 @@ public:
             return false;
         }
         data_ = static_cast<const char*>(mem);
+        // Le mapping reste valide apres close() du descripteur (POSIX) : ne
+        // retenir aucun fd par table, sinon des centaines de .sst mmapes
+        // occupent toute la plage [0, FD_SETSIZE) et le premier FD_SET() d'une
+        // socket recue au-dela avorte le processus (__fdelt_chk).
+        ::close(fd_);
+        fd_ = -1;
 #endif
         return true;
     }

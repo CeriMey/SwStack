@@ -191,6 +191,23 @@ public:
         }
     }
 
+    // Filet de securite au boot : une table sortie du manifest dont la
+    // suppression a echoue (crash entre persist et remove, ou Windows qui
+    // refuse d'effacer un fichier encore mappe par un snapshot) ne serait
+    // sinon plus jamais candidate a la suppression.
+    void removeOrphanTableFilesLocked() {
+        SwHash<SwString, bool> live;
+        for (std::size_t i = 0; i < db_.manifest_.tables.size(); ++i) {
+            live[db_.manifest_.tables[i].fileName] = true;
+        }
+        const SwList<SwString> tableFiles = swDbPlatform::listFiles(db_.tableDir_, "L", ".sst");
+        for (std::size_t i = 0; i < tableFiles.size(); ++i) {
+            if (!live.contains(swDbPlatform::fileName(tableFiles[i]))) {
+                (void)swDbPlatform::removeFile(tableFiles[i]);
+            }
+        }
+    }
+
 private:
     SwEmbeddedDb& db_;
 };
@@ -212,4 +229,8 @@ inline SwDbStatus SwEmbeddedDb::writeTableFile_(const swEmbeddedDbDetail::TableM
 
 inline void SwEmbeddedDb::cleanupCoveredWalFilesLocked_() {
     swEmbeddedDbDetail::TableWriter_(*this).cleanupCoveredWalFilesLocked();
+}
+
+inline void SwEmbeddedDb::removeOrphanTableFilesLocked_() {
+    swEmbeddedDbDetail::TableWriter_(*this).removeOrphanTableFilesLocked();
 }

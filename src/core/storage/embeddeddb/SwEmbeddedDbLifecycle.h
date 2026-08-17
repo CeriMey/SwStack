@@ -68,6 +68,13 @@ public:
         if (!db_.options_.readOnly) {
             SwEmbeddedDbLock_ lock(db_.mutex_);
             db_.publishShmNotificationLocked_();
+            // Le stock de tables et de WAL laisse par les cycles open/close
+            // precedents ne se resorbe qu'ici : le flush du close() court sous
+            // closing_ et saute compaction et menage, et une base qui reste
+            // sous le seuil de rotation memtable ne flushe jamais a chaud.
+            db_.cleanupCoveredWalFilesLocked_();
+            db_.removeOrphanTableFilesLocked_();
+            db_.compactL0Locked_();
         }
         return SwDbStatus::success();
     }

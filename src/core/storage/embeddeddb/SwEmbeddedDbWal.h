@@ -130,7 +130,13 @@ public:
             if (sequence <= db_.manifest_.maxSequence) {
                 continue;
             }
-            db_.mutable_.walId = walId;
+            // walId trace le plus ANCIEN journal dont des donnees vivent dans
+            // cette memtable : c'est lui qui borne replayFromWalId et protege
+            // les WAL non couverts de la suppression. Le replay visite les
+            // journaux en ordre croissant ; ne jamais avancer ce curseur ici.
+            if (db_.mutable_.walId == 0 || walId < db_.mutable_.walId) {
+                db_.mutable_.walId = walId;
+            }
             db_.applyBatchLocked_(sequence, batch);
             db_.lastVisibleSequence_ = std::max(db_.lastVisibleSequence_, sequence);
         }

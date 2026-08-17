@@ -216,7 +216,12 @@ public:
             db_.invalidateWriterReadCacheLocked_();
         }
         db_.applyGeneration_ += 1;
-        db_.mutable_.walId = db_.manifest_.activeWalId;
+        // walId trace le plus ANCIEN journal couvert par cette memtable (il
+        // borne replayFromWalId) : une memtable rejouee au boot peut porter
+        // des donnees d'un journal anterieur a l'actif, ne pas l'avancer.
+        if (db_.mutable_.walId == 0 || db_.manifest_.activeWalId < db_.mutable_.walId) {
+            db_.mutable_.walId = db_.manifest_.activeWalId;
+        }
         if (db_.mutable_.minSeq == 0 || sequence < db_.mutable_.minSeq) {
             db_.mutable_.minSeq = sequence;
         }
@@ -356,7 +361,12 @@ public:
 
     void applyBatchLockedMutable(unsigned long long sequence, SwDbWriteBatch& batch) {
         db_.applyGeneration_ += 1;
-        db_.mutable_.walId = db_.manifest_.activeWalId;
+        // walId trace le plus ANCIEN journal couvert par cette memtable (il
+        // borne replayFromWalId) : une memtable rejouee au boot peut porter
+        // des donnees d'un journal anterieur a l'actif, ne pas l'avancer.
+        if (db_.mutable_.walId == 0 || db_.manifest_.activeWalId < db_.mutable_.walId) {
+            db_.mutable_.walId = db_.manifest_.activeWalId;
+        }
         if (db_.mutable_.minSeq == 0 || sequence < db_.mutable_.minSeq) {
             db_.mutable_.minSeq = sequence;
         }

@@ -79,8 +79,8 @@ static constexpr const char* kSwLogCategory_SwUdpSocket = "sw.core.io.swudpsocke
 #include <netdb.h>
 #include <net/if.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
-#include <sys/select.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -1702,18 +1702,24 @@ private:
         if (!isSocketValid()) {
             return false;
         }
+#if defined(_WIN32)
         fd_set readSet;
         FD_ZERO(&readSet);
         FD_SET(m_socket, &readSet);
         timeval timeout{};
         timeout.tv_sec = timeoutMs / 1000;
         timeout.tv_usec = (timeoutMs % 1000) * 1000;
-#if defined(_WIN32)
         const int ready = ::select(0, &readSet, nullptr, nullptr, &timeout);
-#else
-        const int ready = ::select(m_socket + 1, &readSet, nullptr, nullptr, &timeout);
-#endif
         return ready > 0 && FD_ISSET(m_socket, &readSet);
+#else
+        // select() plafonne a FD_SETSIZE (1024) et FD_SET() avorte le
+        // processus au-dela ; poll() accepte n'importe quel numero de fd.
+        struct pollfd pfd{};
+        pfd.fd = m_socket;
+        pfd.events = POLLIN;
+        const int ready = ::poll(&pfd, 1, timeoutMs);
+        return ready > 0 && (pfd.revents & (POLLIN | POLLERR | POLLHUP)) != 0;
+#endif
     }
 
     bool pendingEmptyLocked_() const {

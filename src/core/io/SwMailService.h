@@ -24,6 +24,7 @@
 #if !defined(_WIN32)
 #include <fcntl.h>
 #include <netdb.h>
+#include <poll.h>
 #endif
 
 class SwMailService;
@@ -580,6 +581,7 @@ private:
     }
 
     bool waitReadable_(int timeoutMs) {
+#if defined(_WIN32)
         fd_set readSet;
         FD_ZERO(&readSet);
         FD_SET(m_socket, &readSet);
@@ -588,9 +590,19 @@ private:
         timeout.tv_usec = (timeoutMs % 1000) * 1000;
         const int rc = ::select(static_cast<int>(m_socket) + 1, &readSet, nullptr, nullptr, &timeout);
         return rc > 0;
+#else
+        // select() plafonne a FD_SETSIZE (1024) et FD_SET() avorte le
+        // processus au-dela ; poll() accepte n'importe quel numero de fd.
+        struct pollfd pfd {};
+        pfd.fd = m_socket;
+        pfd.events = POLLIN;
+        const int rc = ::poll(&pfd, 1, timeoutMs);
+        return rc > 0 && (pfd.revents & POLLNVAL) == 0;
+#endif
     }
 
     bool waitWritable_(int timeoutMs) {
+#if defined(_WIN32)
         fd_set writeSet;
         FD_ZERO(&writeSet);
         FD_SET(m_socket, &writeSet);
@@ -599,6 +611,13 @@ private:
         timeout.tv_usec = (timeoutMs % 1000) * 1000;
         const int rc = ::select(static_cast<int>(m_socket) + 1, nullptr, &writeSet, nullptr, &timeout);
         return rc > 0;
+#else
+        struct pollfd pfd {};
+        pfd.fd = m_socket;
+        pfd.events = POLLOUT;
+        const int rc = ::poll(&pfd, 1, timeoutMs);
+        return rc > 0 && (pfd.revents & POLLNVAL) == 0;
+#endif
     }
 
     bool readLine_(int timeoutMs, SwString& outLine, SwString& outError) {
@@ -2859,9 +2878,33 @@ inline bool SwMailService::processQueueBatch_() {
     for (std::size_t i = 0; i < items.size(); ++i) {
         SwString error;
         SwMailQueueItem item = items[i];
+        const long long claimedAtMs = swMailDetail::currentEpochMs();
+        if (claimedAtMs >= item.expireAtMs) {
+            // L'expiration doit tomber ici aussi : un item dont chaque
+            // tentative tue le processus n'atteint jamais requeueOrBounce_.
+            requeueOrBounce_(item, item.lastError.isEmpty() ? SwString("Queue item expired") : item.lastError);
+            continue;
+        }
+        // La tentative est comptee et persistee AVANT l'envoi : si le
+        // processus meurt pendant la livraison, l'item revient au boot avec
+        // son backoff arme au lieu d'etre re-du immediatement.
+        item.attemptCount += 1;
+        item.updatedAtMs = claimedAtMs;
+        item.nextAttemptAtMs = claimedAtMs +
+                               static_cast<long long>(m_config.queueRetryBaseMs) *
+                                   static_cast<long long>(std::max(1, item.attemptCount));
+        const SwDbStatus claimStatus = m_store.storeQueueItem(item);
+        if (!claimStatus.ok()) {
+            // Sans claim durable (disque plein...), un crash pendant l'envoi
+            // ramene la boucle de re-tentative immediate ; la livraison
+            // continue quand meme, mais la perte de la garantie doit se voir.
+            swCWarning(kSwLogCategory_SwMail) << "[SwMailService] queue claim persist failed id="
+                                              << item.id.toStdString()
+                                              << " error=" << claimStatus.message().toStdString();
+        }
         swCDebug(kSwLogCategory_SwMail) << "[SwMailService] processing queue item id="
                                         << item.id.toStdString()
-                                        << " attempt=" << item.attemptCount + 1
+                                        << " attempt=" << item.attemptCount
                                         << " rcptCount=" << item.envelope.rcptTo.size();
         if (deliverQueueItem_(item, error)) {
             (void)m_store.removeQueueItem(item.id);
@@ -3088,7 +3131,8 @@ inline bool SwMailService::deliverRemoteSmtp_(const SwString& relayHost,
 }
 
 inline void SwMailService::requeueOrBounce_(SwMailQueueItem& item, const SwString& errorMessage) {
-    item.attemptCount += 1;
+    // La tentative a deja ete comptee au claim (processQueueBatch_) ; ne pas
+    // recompter ici.
     item.updatedAtMs = swMailDetail::currentEpochMs();
     item.lastError = errorMessage;
     if (item.updatedAtMs >= item.expireAtMs) {

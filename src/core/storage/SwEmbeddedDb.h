@@ -677,9 +677,10 @@ private:
                            const SwByteArray& blockPayload,
                            SwList<swEmbeddedDbDetail::BlockIndexEntry_>& blocks);
     void cleanupCoveredWalFilesLocked_();
+    void removeOrphanTableFilesLocked_();
     void compactL0Locked_();
-    void runL0Compaction_(SwList<swEmbeddedDbDetail::TableMeta_> primaryL0,
-                          SwHash<SwString, SwList<swEmbeddedDbDetail::TableMeta_> > indexL0);
+    void runL0Compaction_(SwList<swEmbeddedDbDetail::TableMeta_> primaryTables,
+                          SwHash<SwString, SwList<swEmbeddedDbDetail::TableMeta_> > indexTables);
     void scheduleBlobGcLocked_();
     void runBlobGc_();
     void removeTablesLocked_(const SwList<swEmbeddedDbDetail::TableMeta_>& toRemove);

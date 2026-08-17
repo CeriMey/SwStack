@@ -2309,6 +2309,12 @@ public:
                 item.nextAttemptAtMs = swMailDetail::currentEpochMs();
                 item.updatedAtMs = item.nextAttemptAtMs;
                 item.lastError.clear();
+                // Le geste admin prime sur l'age de l'item : sans cette
+                // extension, un item deja expire serait bounce au claim
+                // suivant sans qu'aucune tentative ne soit refaite.
+                item.expireAtMs = std::max(
+                    item.expireAtMs,
+                    item.updatedAtMs + static_cast<long long>(service->config().queueMaxAgeMs));
                 const SwDbStatus writeStatus = service->store().storeQueueItem(item);
                 if (!writeStatus.ok()) {
                     ctx.json(makeJsonMessage("error", writeStatus.message()), 400);
