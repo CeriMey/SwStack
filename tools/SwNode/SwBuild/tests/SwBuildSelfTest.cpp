@@ -115,15 +115,11 @@ static void testSanitizeForFileLeaf() {
     check("slashes replaced",
           swbuild::sanitizeForFileLeaf("a/b\\c") == "a_b_c");
 
-    check("colons and spaces replaced",
-          swbuild::sanitizeForFileLeaf("C: foo") == "C_ foo".isEmpty() ? false : true);
-
-    // More specific check
     SwString s = swbuild::sanitizeForFileLeaf("C: foo");
-    check("colons replaced detail", s == "C_ foo");
+    check("colons and spaces replaced", s == "C__foo");
 
     check("quotes replaced",
-          swbuild::sanitizeForFileLeaf("he said \"hi\" and 'bye'") == "he said _hi_ and _bye_");
+          swbuild::sanitizeForFileLeaf("he said \"hi\" and 'bye'") == "he_said__hi__and__bye_");
 
     check("clean leaf unchanged",
           swbuild::sanitizeForFileLeaf("hello_world.txt") == "hello_world.txt");

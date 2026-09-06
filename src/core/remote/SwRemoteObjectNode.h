@@ -233,6 +233,7 @@ inline void noBootstrap_(int, char**) {}
                                                                                                                \
         sw::node::detail::applyOptions_(app, options);                                                         \
                                                                                                                \
+        SwRemoteObject::ConfigRootScope configScope(configRoot);                                             \
         NodeType node(sys, ns, name, nullptr);                                                                 \
         if (!configRoot.isEmpty()) {                                                                           \
             node.setConfigRootDirectory(configRoot);                                                           \

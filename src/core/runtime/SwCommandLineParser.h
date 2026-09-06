@@ -98,6 +98,52 @@ public:
         }
     }
 
+    /** Parse a complete argv list without printing or exiting the process.
+     * Unknown options, missing values and values on flags are errors. Explicit
+     * empty values (--namespace=) are valid. Aliases share their last value.
+     */
+    bool parse(const SwList<SwString>& arguments) {
+        parsedOptions.clear();
+        positionalArguments.clear();
+        errorMessage = SwString();
+        bool positionalOnly = false;
+        for (std::size_t index = 1; index < arguments.size(); ++index) {
+            const auto& argument = arguments[index];
+            if (positionalOnly || !argument.startsWith("-") || argument == "-") {
+                positionalArguments.append(argument);
+                continue;
+            }
+            if (argument == "--") { positionalOnly = true; continue; }
+            const auto text = argument.mid(argument.startsWith("--") ? 2 : 1);
+            const auto separator = text.indexOf('=');
+            const bool explicitValue = separator != std::string::npos;
+            const auto name = explicitValue ? text.left(static_cast<int>(separator)) : text;
+            const SwCommandLineOption* found = nullptr;
+            for (const auto& option : options) {
+                if (option.getNames().contains(name)) { found = &option; break; }
+            }
+            if (!found) { errorMessage = SwString("Unknown option: ") + argument; return false; }
+            SwString value;
+            if (found->isValueRequired()) {
+                if (explicitValue) value = text.mid(static_cast<int>(separator + 1));
+                else {
+                    if (index + 1 == arguments.size() || arguments[index + 1].startsWith("--")) {
+                        errorMessage = SwString("Option --") + name + " requires a value";
+                        return false;
+                    }
+                    value = arguments[++index];
+                }
+            } else if (explicitValue) {
+                errorMessage = SwString("Option --") + name + " does not take a value";
+                return false;
+            }
+            parsedOptions[found->getNames().first()] = value;
+        }
+        return true;
+    }
+
+    bool parse(const SwCoreApplication& app) { return parse(app.arguments()); }
+
     // Traiter les arguments à partir de SwCoreApplication
     /**
      * @brief Performs the `process` operation.
@@ -209,9 +255,10 @@ public:
         result += "Options:\n";
 
         for (const auto& option : options) {
-            SwString names = SwString("--") + option.getNames().first();
-            if (option.getNames().size() > 1) {
-                names += SwString(", -") + option.getNames().last();
+            SwString names;
+            for (const auto& name : option.getNames()) {
+                if (!names.isEmpty()) names += ", ";
+                names += (name.size() == 1 ? SwString("-") : SwString("--")) + name;
             }
             if (!option.getValueName().isEmpty()) {
                 names += SwString(" <") + option.getValueName() + ">";

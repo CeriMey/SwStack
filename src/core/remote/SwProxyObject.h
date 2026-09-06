@@ -553,6 +553,7 @@ private:
         void name(std::function<void(const Ret&)> onOk, int timeoutMs = 2000) {                   \
             swIpcRpcClient_##name##_.callAsync(std::move(onOk), timeoutMs);                       \
         }                                                                                         \
+        auto& name##Rpc() { return swIpcRpcClient_##name##_; } \
         SwString name##LastError() const {                                                        \
             return swIpcRpcClient_##name##_.lastError();                                          \
         }                                                                                         \
@@ -584,6 +585,7 @@ private:
         void name(const T1& a0, std::function<void(const Ret&)> onOk, int timeoutMs = 2000) {     \
             swIpcRpcClient_##name##_.callAsync(a0, std::move(onOk), timeoutMs);                    \
         }                                                                                         \
+        auto& name##Rpc() { return swIpcRpcClient_##name##_; } \
         SwString name##LastError() const {                                                        \
             return swIpcRpcClient_##name##_.lastError();                                          \
         }                                                                                         \
@@ -616,6 +618,7 @@ private:
         void name(const T1& a0, const T2& a1, std::function<void(const Ret&)> onOk, int timeoutMs = 2000) { \
             swIpcRpcClient_##name##_.callAsync(a0, a1, std::move(onOk), timeoutMs);                \
         }                                                                                         \
+        auto& name##Rpc() { return swIpcRpcClient_##name##_; } \
         SwString name##LastError() const {                                                        \
             return swIpcRpcClient_##name##_.lastError();                                          \
         }                                                                                         \
@@ -649,6 +652,7 @@ private:
         void name(const T1& a0, const T2& a1, const T3& a2, std::function<void(const Ret&)> onOk, int timeoutMs = 2000) { \
             swIpcRpcClient_##name##_.callAsync(a0, a1, a2, std::move(onOk), timeoutMs);            \
         }                                                                                         \
+        auto& name##Rpc() { return swIpcRpcClient_##name##_; } \
         SwString name##LastError() const {                                                        \
             return swIpcRpcClient_##name##_.lastError();                                          \
         }                                                                                         \
@@ -683,6 +687,7 @@ private:
         void name(const T1& a0, const T2& a1, const T3& a2, const T4& a3, std::function<void(const Ret&)> onOk, int timeoutMs = 2000) { \
             swIpcRpcClient_##name##_.callAsync(a0, a1, a2, a3, std::move(onOk), timeoutMs);        \
         }                                                                                         \
+        auto& name##Rpc() { return swIpcRpcClient_##name##_; } \
         SwString name##LastError() const {                                                        \
             return swIpcRpcClient_##name##_.lastError();                                          \
         }                                                                                         \
@@ -718,6 +723,7 @@ private:
         void name(const T1& a0, const T2& a1, const T3& a2, const T4& a3, const T5& a4, std::function<void(const Ret&)> onOk, int timeoutMs = 2000) { \
             swIpcRpcClient_##name##_.callAsync(a0, a1, a2, a3, a4, std::move(onOk), timeoutMs);    \
         }                                                                                         \
+        auto& name##Rpc() { return swIpcRpcClient_##name##_; } \
         SwString name##LastError() const {                                                        \
             return swIpcRpcClient_##name##_.lastError();                                          \
         }                                                                                         \
@@ -754,6 +760,7 @@ private:
         void name(const T1& a0, const T2& a1, const T3& a2, const T4& a3, const T5& a4, const T6& a5, std::function<void(const Ret&)> onOk, int timeoutMs = 2000) { \
             swIpcRpcClient_##name##_.callAsync(a0, a1, a2, a3, a4, a5, std::move(onOk), timeoutMs); \
         }                                                                                         \
+        auto& name##Rpc() { return swIpcRpcClient_##name##_; } \
         SwString name##LastError() const {                                                        \
             return swIpcRpcClient_##name##_.lastError();                                          \
         }                                                                                         \
@@ -793,6 +800,7 @@ private:
         void name(std::function<void(bool ok)> onDone, int timeoutMs = 2000) {                    \
             swIpcRpcClient_##name##_.callAsync(std::move(onDone), timeoutMs);                      \
         }                                                                                         \
+        auto& name##Rpc() { return swIpcRpcClient_##name##_; } \
         SwString name##LastError() const {                                                        \
             return swIpcRpcClient_##name##_.lastError();                                          \
         }                                                                                         \
@@ -824,6 +832,7 @@ private:
         void name(const T1& a0, std::function<void(bool ok)> onDone, int timeoutMs = 2000) {      \
             swIpcRpcClient_##name##_.callAsync(a0, std::move(onDone), timeoutMs);                  \
         }                                                                                         \
+        auto& name##Rpc() { return swIpcRpcClient_##name##_; } \
         SwString name##LastError() const {                                                        \
             return swIpcRpcClient_##name##_.lastError();                                          \
         }                                                                                         \
@@ -856,6 +865,7 @@ private:
         void name(const T1& a0, const T2& a1, std::function<void(bool ok)> onDone, int timeoutMs = 2000) { \
             swIpcRpcClient_##name##_.callAsync(a0, a1, std::move(onDone), timeoutMs);               \
         }                                                                                          \
+        auto& name##Rpc() { return swIpcRpcClient_##name##_; } \
         SwString name##LastError() const {                                                         \
             return swIpcRpcClient_##name##_.lastError();                                           \
         }                                                                                          \
@@ -889,6 +899,7 @@ private:
         void name(const T1& a0, const T2& a1, const T3& a2, std::function<void(bool ok)> onDone, int timeoutMs = 2000) { \
             swIpcRpcClient_##name##_.callAsync(a0, a1, a2, std::move(onDone), timeoutMs);           \
         }                                                                                          \
+        auto& name##Rpc() { return swIpcRpcClient_##name##_; } \
         SwString name##LastError() const {                                                         \
             return swIpcRpcClient_##name##_.lastError();                                           \
         }                                                                                          \
@@ -923,6 +934,7 @@ private:
         void name(const T1& a0, const T2& a1, const T3& a2, const T4& a3, std::function<void(bool ok)> onDone, int timeoutMs = 2000) { \
             swIpcRpcClient_##name##_.callAsync(a0, a1, a2, a3, std::move(onDone), timeoutMs);       \
         }                                                                                          \
+        auto& name##Rpc() { return swIpcRpcClient_##name##_; } \
         SwString name##LastError() const {                                                         \
             return swIpcRpcClient_##name##_.lastError();                                           \
         }                                                                                          \
@@ -958,6 +970,7 @@ private:
         void name(const T1& a0, const T2& a1, const T3& a2, const T4& a3, const T5& a4, std::function<void(bool ok)> onDone, int timeoutMs = 2000) { \
             swIpcRpcClient_##name##_.callAsync(a0, a1, a2, a3, a4, std::move(onDone), timeoutMs);   \
         }                                                                                          \
+        auto& name##Rpc() { return swIpcRpcClient_##name##_; } \
         SwString name##LastError() const {                                                         \
             return swIpcRpcClient_##name##_.lastError();                                           \
         }                                                                                          \
@@ -994,6 +1007,7 @@ private:
         void name(const T1& a0, const T2& a1, const T3& a2, const T4& a3, const T5& a4, const T6& a5, std::function<void(bool ok)> onDone, int timeoutMs = 2000) { \
             swIpcRpcClient_##name##_.callAsync(a0, a1, a2, a3, a4, a5, std::move(onDone), timeoutMs); \
         }                                                                                          \
+        auto& name##Rpc() { return swIpcRpcClient_##name##_; } \
         SwString name##LastError() const {                                                         \
             return swIpcRpcClient_##name##_.lastError();                                           \
         }                                                                                          \

@@ -325,10 +325,10 @@ private:
                     ::shm_unlink(nameA.c_str());
                     throw std::runtime_error("ShmMappingDyn: createBytes=0");
                 }
-                if (::ftruncate(fd, static_cast<off_t>(createBytes)) != 0) {
+                if (sw::ipc::detail::reserveSharedMemory_(fd, static_cast<off_t>(createBytes)) != 0) {
                     ::close(fd);
                     ::shm_unlink(nameA.c_str());
-                    throw std::runtime_error("ftruncate(shm) failed");
+                    throw std::runtime_error("Cannot reserve shared memory (check /dev/shm capacity)");
                 }
             } else if (errno == EEXIST) {
                 fd = ::shm_open(nameA.c_str(), O_RDWR, 0666);

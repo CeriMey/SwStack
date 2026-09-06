@@ -58,7 +58,8 @@ class SwRemoteObjectComponentRegistry {
     typedef SwRemoteObject* (*CreateFn)(const SwString& sysName,
                                         const SwString& nameSpace,
                                         const SwString& objectName,
-                                        SwObject* parent);
+                                        SwObject* parent,
+                                        const SwString& configRoot);
 
     typedef void (*DestroyFn)(SwRemoteObject* instance);
 

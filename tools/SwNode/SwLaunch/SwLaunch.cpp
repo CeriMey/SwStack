@@ -1,5 +1,6 @@
 #include "SwCoreApplication.h"
 #include "SwLaunchCrash.h"
+#include "SwLaunchArguments.h"
 #include "SwDebug.h"
 #include "SwDir.h"
 #include "SwEventLoop.h"
@@ -8,6 +9,7 @@
 #include "SwHttpServer.h"
 #include "SwJsonDocument.h"
 #include "SwLaunchDeploySupport.h"
+#include "SwLaunchIdentity.h"
 #include "SwLaunchRemoteControl.h"
 #include "SwLaunchTraceConfig.h"
 #include "SwLaunchVersion.h"
@@ -210,11 +212,11 @@ Goal:
   Launch a standalone executable under SwLaunch supervision.
 
 Required fields per node:
-  - ns
   - name
   - executable
 
 Useful optional fields:
+  - ns (empty or absent selects the root namespace)
   - workingDirectory
   - duration_ms
   - config_file
@@ -226,6 +228,7 @@ What SwLaunch does:
   - resolves the executable path
   - generates a temporary child config file when params/options/config_root are provided
   - starts the process with --sys --ns --name and child config arguments
+  - arguments: optional array of extra argv strings, passed without shell parsing
   - supervises restart and disconnect behavior if enabled
 )");
     }
@@ -1159,6 +1162,12 @@ class LaunchContainerProcess : public SwObject {
         args.append(SwString("--config_file=%1").arg(childConfigPath));
         args.append(SwString("--duration_ms=%1").arg(SwString::number(durationMs_)));
 
+        SwString argumentError;
+        if (!swLaunchAppendArguments_(spec_, args, argumentError)) {
+            swError() << "[launcher]" << argumentError;
+            return false;
+        }
+
         swDebug() << "[launcher] start container=" << id_
                   << " exe=" << exePath_
                   << " wd=" << workingDir_
@@ -1491,6 +1500,12 @@ class LaunchNodeProcess : public SwObject {
         }
         args.append(SwString("--duration_ms=%1").arg(SwString::number(durationMs_)));
 
+        SwString argumentError;
+        if (!swLaunchAppendArguments_(spec_, args, argumentError)) {
+            swError() << "[launcher]" << argumentError;
+            return false;
+        }
+
         swDebug() << "[launcher] start node=" << id_
                   << " exe=" << exePath_
                   << " wd=" << workingDir_
@@ -1563,12 +1578,12 @@ class LaunchNodeProcess : public SwObject {
         sys_ = sys;
         nodeNs_ = ns;
         nodeName_ = name;
-        id_ = nodeNs_ + "/" + nodeName_;
+        id_ = swLaunchRuntimeId_(nodeNs_, nodeName_);
         exePath_ = resolveExecutablePath_(baseDir_, exe, preferWindowsExe_);
         configRoot_ = spec_.contains("config_root") ? SwString(spec_["config_root"].toString()) : SwString();
 
-        if (nodeNs_.isEmpty() || nodeName_.isEmpty()) {
-            swError() << "[launcher] invalid node identity (need ns+name)";
+        if (!swLaunchIdentityValid_(nodeNs_, nodeName_, true)) {
+            swError() << "[launcher] invalid node identity (name is required; ns may be empty)";
             return false;
         }
         if (exePath_.isEmpty()) {

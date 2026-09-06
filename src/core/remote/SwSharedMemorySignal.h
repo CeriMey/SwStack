@@ -78,6 +78,9 @@
 #include <vector>
 #include <cstdlib>
 
+#include "SwIpcTypeName.h"
+#include "SwIpcScratchBuffer.h"
+#include "SwSharedMemoryAllocation.h"
 #include "SwEventLoop.h"
 #include "SwTimer.h"
 
@@ -776,7 +779,7 @@ private:
         int fd = ::shm_open(nameA.c_str(), O_RDWR | O_CREAT, 0666);
         if (fd < 0) return std::shared_ptr<Mapping>();
         ensureSharedMemoryPermissions_(fd);
-        if (::ftruncate(fd, sizeof(Layout)) != 0) {
+        if (sw::ipc::detail::reserveSharedMemory_(fd, sizeof(Layout)) != 0) {
             ::close(fd);
             return std::shared_ptr<Mapping>();
         }
@@ -1337,7 +1340,7 @@ private:
         int fd = ::shm_open(nameA.c_str(), O_RDWR | O_CREAT, 0666);
         if (fd < 0) return std::shared_ptr<Mapping>();
         ensureSharedMemoryPermissions_(fd);
-        if (::ftruncate(fd, sizeof(Layout)) != 0) {
+        if (sw::ipc::detail::reserveSharedMemory_(fd, sizeof(Layout)) != 0) {
             ::close(fd);
             return std::shared_ptr<Mapping>();
         }
@@ -1865,7 +1868,7 @@ private:
         int fd = ::shm_open(nameA.c_str(), O_RDWR | O_CREAT, 0666);
         if (fd < 0) return std::shared_ptr<Mapping>();
         ensureSharedMemoryPermissions_(fd);
-        if (::ftruncate(fd, sizeof(Layout)) != 0) {
+        if (sw::ipc::detail::reserveSharedMemory_(fd, sizeof(Layout)) != 0) {
             ::close(fd);
             return std::shared_ptr<Mapping>();
         }
@@ -2032,13 +2035,7 @@ inline uint64_t type_id() {
 
 template <class... Args>
 inline SwString type_name() {
-#if defined(__clang__) || defined(__GNUC__)
-    return SwString(__PRETTY_FUNCTION__);
-#elif defined(_MSC_VER)
-    return SwString(__FUNCSIG__);
-#else
-    return SwString("sw::ipc::detail::type_name<unknown>");
-#endif
+    return wireTupleName<Args...>();
 }
 
 struct Encoder {
@@ -2343,7 +2340,7 @@ struct LoopPollerDispatchRegistry {
         }
         if (s_fd < 0) return nullptr;
         ensureSharedMemoryPermissions_(s_fd);
-        if (::ftruncate(s_fd, static_cast<off_t>(sizeof(Table))) != 0) return nullptr;
+        if (sw::ipc::detail::reserveSharedMemory_(s_fd, static_cast<off_t>(sizeof(Table))) != 0) return nullptr;
         void* mem = ::mmap(NULL, sizeof(Table), PROT_READ | PROT_WRITE, MAP_SHARED, s_fd, 0);
         if (mem == MAP_FAILED) return nullptr;
         s_tbl = reinterpret_cast<Table*>(mem);
@@ -2931,10 +2928,10 @@ public:
         if (fd >= 0) {
             created = true;
             detail::ensureSharedMemoryPermissions_(fd);
-            if (::ftruncate(fd, sizeof(Layout)) != 0) {
+            if (sw::ipc::detail::reserveSharedMemory_(fd, sizeof(Layout)) != 0) {
                 ::close(fd);
                 ::shm_unlink(nameA.c_str());
-                throw std::runtime_error("ftruncate(shm) failed");
+                throw std::runtime_error("Cannot reserve shared memory (check /dev/shm capacity)");
             }
         } else if (errno == EEXIST) {
             fd = ::shm_open(nameA.c_str(), O_RDWR, 0666);
@@ -3164,10 +3161,10 @@ public:
         if (fd >= 0) {
             created = true;
             detail::ensureSharedMemoryPermissions_(fd);
-            if (::ftruncate(fd, sizeof(Layout)) != 0) {
+            if (sw::ipc::detail::reserveSharedMemory_(fd, sizeof(Layout)) != 0) {
                 ::close(fd);
                 ::shm_unlink(nameA.c_str());
-                throw std::runtime_error("ftruncate(shm) failed");
+                throw std::runtime_error("Cannot reserve shared memory (check /dev/shm capacity)");
             }
         } else if (errno == EEXIST) {
             fd = ::shm_open(nameA.c_str(), O_RDWR, 0666);
@@ -4188,7 +4185,7 @@ public:
         const uint32_t maxPayloadBytes = L->maxPayload;
         if (cap == 0u || maxPayloadBytes == 0u) return false;
 
-        std::vector<uint8_t> tmp(static_cast<size_t>(maxPayloadBytes), 0);
+        detail::ScratchBuffer tmp(static_cast<size_t>(maxPayloadBytes));
         detail::Encoder enc(tmp.data(), tmp.size());
         if (!detail::writeAll(enc, args...)) return false;
 
@@ -4798,10 +4795,10 @@ private:
         if (fd >= 0) {
             created = true;
             detail::ensureSharedMemoryPermissions_(fd);
-            if (::ftruncate(fd, static_cast<off_t>(expectedTotalSize)) != 0) {
+            if (sw::ipc::detail::reserveSharedMemory_(fd, static_cast<off_t>(expectedTotalSize)) != 0) {
                 ::close(fd);
                 ::shm_unlink(nameA.c_str());
-                throw std::runtime_error("ftruncate(shm) failed");
+                throw std::runtime_error("Cannot reserve shared memory (check /dev/shm capacity)");
             }
         } else if (errno == EEXIST) {
             fd = ::shm_open(nameA.c_str(), O_RDWR, 0666);
@@ -5667,14 +5664,17 @@ public:
     }
 
     // Ecriture : met a jour le cache, publie (self_, v) sur le latch, notifie localement.
-    void set(const T& v) {
+    bool set(const T& v) {
         {
             SwMutexLocker lk(mutex_);
-            if (cached_ == v) return; // pas de churn si inchange
+            if (published_ && cached_ == v) return true;
+            if (!latch_.publish(self_, v)) return false;
             cached_ = v;
+            published_ = true;
         }
-        latch_.publish(self_, v);  // last-writer-wins ; les autres convergent via LatestOnly
+        // Publication succeeded; observers may now use the new cache.  // last-writer-wins ; les autres convergent via LatestOnly
         if (notify_) notify_(v);   // emit local immediat (la NotifyFn gere le thread d'affinite)
+        return true;
     }
 
     const SwString& name() const { return name_; }
@@ -5696,6 +5696,7 @@ private:
     SwIpcSignal<uint64_t, T> latch_;
     mutable SwMutex mutex_;
     T cached_;
+    bool published_{false};
     uint64_t self_;
     std::shared_ptr<std::atomic_bool> alive_;
     NotifyFn notify_;

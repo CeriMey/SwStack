@@ -107,9 +107,9 @@ Changer le mode force un "restart" in-process: `onThreadingModeChanged_()` fait 
 ### Symbole exporte
 
 Le container charge une DLL/SO via `SwPluginLoader` puis cherche le symbole:
-- `sw::component::plugin::registerSymbolV1()` -> `"swRegisterRemoteObjectComponentsV1"`
+- `sw::component::plugin::registerSymbol()` -> `"swRegisterRemoteObjectComponents"`
 
-Il appelle ensuite la fonction `RegisterFnV1(registry*)` (cf `SwNode/SwComponentContainer/SwComponentContainer.cpp::loadPlugin_()`).
+Il appelle ensuite la fonction `RegisterFn(registry*)` (cf `SwNode/SwComponentContainer/SwComponentContainer.cpp::loadPlugin_()`).
 
 ### Enregistrer un composant dans un plugin
 
@@ -128,7 +128,7 @@ SW_REGISTER_COMPONENT_NODE(demo::MyComp);
 Notes:
 - le type publie est derive du nom C++ et normalise (ex: `demo::MyComp` -> `demo/MyComp`).
 - si tu veux un nom stable/explicite, utilise `SW_REGISTER_COMPONENT_NODE_AS(demo::MyComp, "demo/my_comp")`.
-- le plugin doit etre compile avec `SW_COMPONENT_PLUGIN=1` (fait automatiquement par le CMake du dossier `plugins/`) pour exporter `swRegisterRemoteObjectComponentsV1`.
+- le plugin doit etre compile avec `SW_COMPONENT_PLUGIN=1` (fait automatiquement par le CMake du dossier `plugins/`) pour exporter `swRegisterRemoteObjectComponents`.
 
 ## RPC exposees par le container
 

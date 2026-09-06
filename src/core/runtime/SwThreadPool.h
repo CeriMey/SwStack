@@ -1139,6 +1139,14 @@ public:
         return m_runningTasks + m_reservedThreads;
     }
 
+    // Running and idle worker runtimes currently assigned to this pool.
+    // Workers already retiring are excluded; unlike activeThreadCount(), idle
+    // workers are counted and reserved capacity is not.
+    int workerThreadCount() const {
+        SwMutexLocker locker(&m_mutex);
+        return static_cast<int>(m_workers.size());
+    }
+
     /**
      * @brief Returns the current queued Task Count.
      * @return The number of tasks currently waiting in worker queues.
@@ -1373,7 +1381,7 @@ private:
                                             ThreadPriority priority,
                                             QualityOfService qos) {
         SwCoreApplication* app = SwCoreApplication::instance(false);
-        if (app) {
+        if (app && taskStackSize > 0) {
             app->setEventFiberStackSize(taskStackSize);
         }
         applyCurrentThreadScheduling_(priority, qos);

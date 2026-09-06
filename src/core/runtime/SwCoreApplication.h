@@ -2296,6 +2296,9 @@ public:
      * @param defaultValue The default value if the argument is not found.
      * @return The value of the argument or `defaultValue` if not defined.
      */
+    /// Original command line, including argv[0], for schema-aware parsers.
+    const SwList<SwString>& arguments() const { return commandLineArguments_; }
+
     SwString getArgument(const SwString& key, const SwString& defaultValue = "") const {
         if (parsedArguments.contains(key)) {
             return parsedArguments[key];
@@ -2667,6 +2670,8 @@ protected:
      * @param argv Array of argument strings.
      */
     void parseArguments(int argc, char* argv[]) {
+        commandLineArguments_.clear();
+        for (int i = 0; i < argc; ++i) commandLineArguments_.append(argv[i] ? argv[i] : "");
         SwString lastKey = "";
         for (int i = 1; i < argc; ++i) {
             SwString arg = argv[i];
@@ -2989,6 +2994,7 @@ protected:
     int processingTimersDepth_ = 0;
     SwList<_T*> pendingTimerDeletes_;
     SwMap<SwString, SwString> parsedArguments; ///< Parsed command-line arguments.
+    SwList<SwString> commandLineArguments_;
     mutable RegistryMutex_ runtimeDescriptorMutex_;
     SwString runtimeKind_{"core"};
     SwString runtimeLabel_{};
@@ -3178,7 +3184,9 @@ private:
         }
         if (timerFd >= 0 && base < fds.size() && (fds[base].revents & POLLIN)) {
             uint64_t expirations = 0;
-            (void)::read(timerFd, &expirations, sizeof(expirations));
+            // Acknowledge the timer; retry if a signal interrupted the read.
+            while (::read(timerFd, &expirations, sizeof(expirations)) < 0 && errno == EINTR) {
+            }
         }
         (void)base;
 #endif

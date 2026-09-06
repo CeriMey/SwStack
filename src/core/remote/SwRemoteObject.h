@@ -124,6 +124,23 @@ class SwRemoteObject : public SwObject {
         SwString userPath;
     };
 
+    // Used by node/container entry points before the derived constructor runs.
+    class ConfigRootScope {
+    public:
+        explicit ConfigRootScope(const SwString& root) : previous_(constructionRoot_()) {
+            constructionRoot_() = root.isEmpty() ? SwString("systemConfig") : root;
+        }
+        ~ConfigRootScope() { constructionRoot_() = previous_; }
+        ConfigRootScope(const ConfigRootScope&) = delete;
+        ConfigRootScope& operator=(const ConfigRootScope&) = delete;
+    private:
+        SwString previous_;
+    };
+    static SwString& constructionRoot_() {
+        static thread_local SwString root("systemConfig");
+        return root;
+    }
+
     DECLARE_SIGNAL(configChanged, const SwJsonObject&)
     DECLARE_SIGNAL(configLoaded, const SwJsonObject&)
     DECLARE_SIGNAL(remoteConfigReceived, uint64_t, const SwJsonObject&)
@@ -145,7 +162,7 @@ class SwRemoteObject : public SwObject {
         : SwObject(parent),
           sysName_(sysName),
           nameSpace_(nameSpace),
-          configRoot_("systemConfig"),
+          configRoot_(constructionRoot_()),
           ipcRegistry_(sysName_, buildObjectFqn(nameSpace_, objectName)),
           shmConfig_(ipcRegistry_, SwString("__config__|") + objectName),
           alive_(new std::atomic_bool(true)) {
@@ -250,6 +267,7 @@ class SwRemoteObject : public SwObject {
         SwList<std::function<void()>> pending;
         {
             SwMutexLocker lk(mutex_);
+            flushUserDocSave_locked_();
             configRoot_ = rootDir.isEmpty() ? SwString("systemConfig") : rootDir;
             ensureConfigDirectories();
             loadConfig_locked();
@@ -257,7 +275,16 @@ class SwRemoteObject : public SwObject {
             mergedCopy = mergedDoc_.isObject() ? mergedDoc_.object() : SwJsonObject{};
         }
         for (size_t i = 0; i < pending.size(); ++i) pending[i]();
+        publishConfigSnapshot();
+        publishRegisteredConfigs_();
         emit configLoaded(mergedCopy);
+    }
+
+    // Explicit, observable publication for tools and application readiness.
+    bool publishConfigSnapshot() {
+        SwMutexLocker lk(mutex_);
+        return !shmConfigEnabled_ || shmConfig_.publish(
+            publisherId_, effectiveConfigJson_locked_(SwJsonDocument::JsonFormat::Compact));
     }
 
     /**
@@ -423,7 +450,7 @@ class SwRemoteObject : public SwObject {
             const SwString userPath = userConfigPath();
             const bool hasUserFile = SwFile::isFile(userPath);
             const bool hasUserOverrides = (userDoc_.isObject() && !userDoc_.object().isEmpty());
-            if (!hasUserFile && !hasUserOverrides && userTouchedPaths_.isEmpty()) {
+            if (!hasUserFile && !hasUserOverrides && userTouchedPaths_.isEmpty() && runtimeDoc_.object().isEmpty()) {
                 noOp = true;
             } else {
                 flushUserDocSave_locked_();
@@ -436,6 +463,7 @@ class SwRemoteObject : public SwObject {
 
                 if (ok) {
                     userDoc_.setObject(SwJsonObject{});
+                    runtimeDoc_.setObject(SwJsonObject{});
                     userTouchedPaths_.clear();
 
                     const SwJsonDocument prevMerged = mergedDoc_;
@@ -465,62 +493,42 @@ class SwRemoteObject : public SwObject {
     /**
       * @brief Set a user config key (path supports '/' nesting), save to disk, and publish via SHM.
       */
-	    bool setConfigValue(const SwString& path,
-	                        const SwJsonValue& value,
-	                        bool saveToDisk = true,
-	                        bool publishToShm = true) {
-	        SwJsonObject mergedCopy;
-	        SwList<std::function<void()>> pending;
-	        SwList<std::function<void()>> publishes;
-	        bool changed = false;
-	        {
-	            SwMutexLocker lk(mutex_);
-	            SwJsonDocument candidateDoc = userDoc_;
-	            ensureObjectRoot(candidateDoc);
-	            candidateDoc.find(path, true) = value;
-	            markConfigPathTouched_locked_(path);
-	
-	            const SwJsonValue baselineValue = baselineConfigValue_locked_();
-	            SwJsonValue prunedUserValue;
-	            SwJsonDocument nextUserDoc;
-	            if (buildUserOverrideValue_(candidateDoc.toJsonValue(), baselineValue, prunedUserValue, &userTouchedPaths_) &&
-	                prunedUserValue.isObject()) {
-	                nextUserDoc.setObject(prunedUserValue.toObject());
-	            } else {
-	                nextUserDoc.setObject(SwJsonObject{});
-	            }
-	
-	            if (userDoc_ != nextUserDoc) {
-	                userDoc_ = nextUserDoc;
-	                recomputeMerged_locked();
-	                changed = true;
-	
-	                if (saveToDisk) {
-	                    scheduleUserDocSave_locked_();
-	                }
-		                if (publishToShm && shmConfigEnabled_) {
-		                    shmConfig_.publish(publisherId_, effectiveConfigJson_locked_(SwJsonDocument::JsonFormat::Compact));
-		                }
-	
-	                mergedCopy = mergedDoc_.isObject() ? mergedDoc_.object() : SwJsonObject{};
-	                refreshRegisteredConfigs_locked_(pending);
-	                if (publishToShm) {
-	                    for (auto it = registeredConfigs_.begin(); it != registeredConfigs_.end(); ++it) {
-	                        const RegisteredConfigEntry& entry = it.value();
-	                        if (entry.configName == path && entry.publish) {
-	                            publishes.append(entry.publish);
-	                        }
-	                    }
-	                }
-	            } else {
-	                mergedCopy = mergedDoc_.isObject() ? mergedDoc_.object() : SwJsonObject{};
-	            }
-	        }
-	        for (size_t i = 0; i < publishes.size(); ++i) publishes[i]();
-	        for (size_t i = 0; i < pending.size(); ++i) pending[i]();
-	        if (changed) emit configChanged(mergedCopy);
-	        return true;
-	    }
+    bool setConfigValue(const SwString& path, const SwJsonValue& value,
+                        bool saveToDisk = true, bool publishToShm = true) {
+        if (path.isEmpty()) return false;
+        SwList<std::function<void()>> callbacks;
+        SwJsonObject merged;
+        bool changed = false;
+        bool published = true;
+        {
+            SwMutexLocker lock(mutex_);
+            const auto before = mergedDoc_;
+            if (saveToDisk) {
+                const auto previousUser = userDoc_;
+                userDoc_.find(path, true) = value;
+                markConfigPathTouched_locked_(path);
+                SwJsonObject runtime = runtimeDoc_.object();
+                removeConfigPath_(runtime, path);
+                runtimeDoc_.setObject(runtime);
+                if (previousUser != userDoc_) scheduleUserDocSave_locked_();
+            } else {
+                runtimeDoc_.find(path, true) = value;
+            }
+            recomputeMerged_locked();
+            changed = before != mergedDoc_;
+            if (changed) {
+                refreshRegisteredConfigs_locked_(callbacks);
+                if (publishToShm && shmConfigEnabled_) {
+                    published = shmConfig_.publish(publisherId_, effectiveConfigJson_locked_(SwJsonDocument::JsonFormat::Compact));
+                }
+            }
+            merged = mergedDoc_.object();
+        }
+        for (const auto& callback : callbacks) callback();
+        if (changed && publishToShm) publishRegisteredConfigs_();
+        if (changed) emit configChanged(merged);
+        return published;
+    }
 
     /**
      * @brief Performs the `enableSharedMemoryConfig` operation.
@@ -601,7 +609,11 @@ class SwRemoteObject : public SwObject {
 		            // Create the per-config IPC channel (used for explicit remote updates).
 		            const SwString sigName = SwString("__cfg__|") + configName;
 		            configSignal = ensureConfigSignal_(sigName);
-	
+                    entry.publish = [this, configSignal, &storage]() {
+                        configSignal->publish(publisherId_, valueToString_(storage));
+                    };
+                    registeredConfigs_[entry.fullName] = entry;
+
 		            // Publish an updated full config snapshot (includes defaults) so tools can query it via IPC.
 		            if (shmConfigEnabled_) {
 		                shmConfig_.publish(publisherId_, effectiveConfigJson_locked_(SwJsonDocument::JsonFormat::Compact));
@@ -626,7 +638,7 @@ class SwRemoteObject : public SwObject {
                      auto task = [this, alive, pubId, configName, &storage, next]() mutable {
                           if (!alive || !alive->load(std::memory_order_relaxed)) return;
                           if (storage == next) return;
-                          ipcUpdateConfig<T>(configName, next, ConfigSavePolicy::SaveToDisk);
+                          setConfigValue(configName, valueToJson_(next), true, true);
                           emit remoteConfigValueReceived(pubId, configName);
                       };
  
@@ -638,6 +650,7 @@ class SwRemoteObject : public SwObject {
                 },
                 /*fireInitial=*/false);
             storeIpcSubscription_(std::move(sub));
+            configSignal->publish(publisherId_, valueToString_(storage));
         }
     }
 
@@ -652,9 +665,9 @@ class SwRemoteObject : public SwObject {
     bool ipcUpdateConfig(const SwString& configName,
                          const T& value,
                          ConfigSavePolicy savePolicy = ConfigSavePolicy::SaveToDisk) {
-        // Local-only update: modifies this object's config (disk + merged) but does NOT push to other processes.
+        // Update the authoritative value and notify local and remote observers.
         const bool saveToDisk = (savePolicy == ConfigSavePolicy::SaveToDisk);
-        return setConfigValue(configName, valueToJson_(value), saveToDisk, /*publishToShm=*/false);
+        return setConfigValue(configName, valueToJson_(value), saveToDisk, /*publishToShm=*/true);
     }
 
     // Remote update: publish a config value to another object (no local file write on this side).
@@ -675,7 +688,7 @@ class SwRemoteObject : public SwObject {
         const SwString sigName = SwString("__cfg__|") + configName;
         sw::ipc::Registry reg(ns, obj);
         sw::ipc::Signal<uint64_t, SwString> sig(reg, sigName);
-        return sig.publish(publisherId_, valueToString_<T>(value));
+        return sig.publish(publisherId_, valueToString_(value));
     }
 
     // Bind a config value by full name: "ns/.../objectName#configPath" (configPath can contain '/')
@@ -1523,13 +1536,25 @@ class SwRemoteObject : public SwObject {
     bool writeDocToFile_locked(const SwJsonDocument& doc, const SwString& path, bool pretty) const {
         SwJsonDocument toWrite = doc;
         ensureObjectRoot(toWrite);
-        SwFile f(path);
-        SwDir::mkpathAbsolute(f.getDirectory(), /*normalizeInput=*/false);
-        if (!f.open(SwFile::Write)) return false;
+        SwFile destination(path);
+        if (!SwDir::mkpathAbsolute(destination.getDirectory(), false)) return false;
+        static std::atomic<uint64_t> sequence{0};
+        const SwString temporary = path + ".tmp." + SwString::number(sw::ipc::detail::currentPid()) +
+            "." + SwString::number(sequence.fetch_add(1));
+        SwFile file(temporary);
+        if (!file.open(SwFile::Write)) return false;
         const SwString json = toWrite.toJson(pretty ? SwJsonDocument::JsonFormat::Pretty
                                                     : SwJsonDocument::JsonFormat::Compact);
-        const bool ok = f.write(json + "\n");
-        f.close();
+        bool ok = file.write(json + "\n");
+        file.close();
+        if (ok) {
+#ifdef _WIN32
+            ok = ::MoveFileExW(temporary.toStdWString().c_str(), path.toStdWString().c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+#else
+            ok = std::rename(temporary.toStdString().c_str(), path.toStdString().c_str()) == 0;
+#endif
+        }
+        if (!ok) std::remove(temporary.toStdString().c_str());
         return ok;
     }
 	
@@ -1548,11 +1573,23 @@ class SwRemoteObject : public SwObject {
     /**
      * @brief Performs the `recomputeMerged_locked` operation.
      */
+    static void removeConfigPath_(SwJsonObject& object, const SwString& path) {
+        const std::string text = path.toStdString();
+        const auto slash = text.find('/');
+        if (slash == std::string::npos) { object.remove(path); return; }
+        const SwString key(text.substr(0, slash));
+        if (!object[key].isObject()) return;
+        auto child = object[key].toObject();
+        removeConfigPath_(child, SwString(text.substr(slash + 1)));
+        if (child.isEmpty()) object.remove(key); else object[key] = SwJsonValue(child);
+    }
+
     void recomputeMerged_locked() {
         SwJsonObject merged;
         if (globalDoc_.isObject()) mergeObjectDeep_(merged, globalDoc_.object());
         if (localDoc_.isObject())  mergeObjectDeep_(merged, localDoc_.object());
         if (userDoc_.isObject())   mergeObjectDeep_(merged, userDoc_.object());
+        if (runtimeDoc_.isObject()) mergeObjectDeep_(merged, runtimeDoc_.object());
         mergedDoc_.setObject(merged);
     }
 
@@ -1634,7 +1671,9 @@ class SwRemoteObject : public SwObject {
 	        if (changed) {
 	            for (size_t i = 0; i < pending.size(); ++i) pending[i]();
 	            emit configChanged(mergedCopy);
-	            emit remoteConfigReceived(remotePublisherId, mergedCopy);
+	            publishRegisteredConfigs_();
+                publishConfigSnapshot();
+                emit remoteConfigReceived(remotePublisherId, mergedCopy);
 	        }
 	    }
 
@@ -2012,10 +2051,12 @@ protected:
                         const Ret& value) {
         typedef sw::ipc::RingQueue<Capacity, uint64_t, bool, SwString, Ret> RespQueue;
         const SwString queueName = sw::ipc::rpcResponseQueueName(methodName, clientPid);
+        if (sw::ipc::detail::RpcResponseResources::deadClient(queueName)) return;
 
         std::shared_ptr<void> holder;
         {
             SwMutexLocker lk(rpcRespMutex_);
+            sw::ipc::detail::RpcResponseResources::prune(rpcRespValueQueues_, ipcRegistry_);
             auto it = rpcRespValueQueues_.find(queueName);
             if (it != rpcRespValueQueues_.end()) {
                 holder = it.value();
@@ -2028,7 +2069,9 @@ protected:
 
         RespQueue* resp = static_cast<RespQueue*>(holder.get());
         if (!resp) return;
-        (void)resp->push(callId, ok, err, value);
+        if (!resp->push(callId, ok, err, value)) {
+            (void)resp->push(callId, false, SwString("rpc: response queue full or payload too large"), Ret{});
+        }
     }
 
     template <typename Ret>
@@ -2060,10 +2103,12 @@ protected:
                        const SwString& err) {
         typedef sw::ipc::RingQueue<Capacity, uint64_t, bool, SwString> RespQueue;
         const SwString queueName = sw::ipc::rpcResponseQueueName(methodName, clientPid);
+        if (sw::ipc::detail::RpcResponseResources::deadClient(queueName)) return;
 
         std::shared_ptr<void> holder;
         {
             SwMutexLocker lk(rpcRespMutex_);
+            sw::ipc::detail::RpcResponseResources::prune(rpcRespVoidQueues_, ipcRegistry_);
             auto it = rpcRespVoidQueues_.find(queueName);
             if (it != rpcRespVoidQueues_.end()) {
                 holder = it.value();
@@ -2106,8 +2151,16 @@ protected:
                     uint32_t clientPid,
                     const SwString& /*clientInfo*/,
                     const A&... args) {
+        try {
         const Ret out = handlerFn(args...);
         rpcRespondValue_<Ret>(methodName, callId, clientPid, /*ok=*/true, SwString(), out);
+        } catch (const std::exception& e) {
+            const SwString error = SwString("rpc: handler exception: ") + SwString(e.what()).left(512);
+            rpcRespondValue_<Ret>(methodName, callId, clientPid, false, error, Ret{});
+        } catch (...) {
+            const SwString error("rpc: unknown handler exception");
+            rpcRespondValue_<Ret>(methodName, callId, clientPid, false, error, Ret{});
+        }
     }
 
     template <typename Ret, typename Handler, typename... A>
@@ -2118,8 +2171,16 @@ protected:
                     uint32_t clientPid,
                     const SwString& /*clientInfo*/,
                     const A&... args) {
+        try {
         handlerFn(args...);
         rpcRespondVoid_<Ret>(methodName, callId, clientPid, /*ok=*/true, SwString());
+        } catch (const std::exception& e) {
+            const SwString error = SwString("rpc: handler exception: ") + SwString(e.what()).left(512);
+            rpcRespondVoid_<Ret>(methodName, callId, clientPid, false, error);
+        } catch (...) {
+            const SwString error("rpc: unknown handler exception");
+            rpcRespondVoid_<Ret>(methodName, callId, clientPid, false, error);
+        }
     }
 
     template <typename Ret, typename Handler, typename... A>
@@ -2133,8 +2194,16 @@ protected:
         sw::ipc::RpcContext ctx;
         ctx.clientPid = clientPid;
         ctx.clientInfo = clientInfo;
+        try {
         const Ret out = handlerFn(ctx, args...);
         rpcRespondValue_<Ret>(methodName, callId, clientPid, /*ok=*/true, SwString(), out);
+        } catch (const std::exception& e) {
+            const SwString error = SwString("rpc: handler exception: ") + SwString(e.what()).left(512);
+            rpcRespondValue_<Ret>(methodName, callId, clientPid, false, error, Ret{});
+        } catch (...) {
+            const SwString error("rpc: unknown handler exception");
+            rpcRespondValue_<Ret>(methodName, callId, clientPid, false, error, Ret{});
+        }
     }
 
     template <typename Ret, typename Handler, typename... A>
@@ -2148,8 +2217,16 @@ protected:
         sw::ipc::RpcContext ctx;
         ctx.clientPid = clientPid;
         ctx.clientInfo = clientInfo;
+        try {
         handlerFn(ctx, args...);
         rpcRespondVoid_<Ret>(methodName, callId, clientPid, /*ok=*/true, SwString());
+        } catch (const std::exception& e) {
+            const SwString error = SwString("rpc: handler exception: ") + SwString(e.what()).left(512);
+            rpcRespondVoid_<Ret>(methodName, callId, clientPid, false, error);
+        } catch (...) {
+            const SwString error("rpc: unknown handler exception");
+            rpcRespondVoid_<Ret>(methodName, callId, clientPid, false, error);
+        }
     }
 
     template <size_t Capacity, typename Ret, typename... A, typename Fn>
@@ -2252,6 +2329,16 @@ protected:
         return new IpcConnection(context, std::move(holder));
     }
 
+    void publishRegisteredConfigs_() {
+        SwList<std::function<void()>> publications;
+        {
+            SwMutexLocker lk(mutex_);
+            for (auto it = registeredConfigs_.begin(); it != registeredConfigs_.end(); ++it)
+                if (it.value().publish) publications.append(it.value().publish);
+        }
+        for (const auto& publish : publications) publish();
+    }
+
     std::shared_ptr<ConfigIpcSignal> ensureConfigSignal_(const SwString& signalName) {
         auto it = configSignals_.find(signalName);
         if (it != configSignals_.end() && it->second) return it->second;
@@ -2262,7 +2349,7 @@ protected:
 
     template <typename T>
     static SwJsonValue valueToJson_(const T& v) {
-        return SwJsonValue(valueToString_<T>(v));
+        return SwJsonValue(valueToString_(v));
     }
 
     static SwJsonValue valueToJson_(const SwString& v) { return SwJsonValue(v); }
@@ -2392,7 +2479,7 @@ protected:
     template <typename T>
     static bool jsonToValue_(const SwJsonValue& j, T& out) {
         if (!j.isString()) return false;
-        return stringToValue_<T>(SwString(j.toString()), out);
+        return stringToValue_(SwString(j.toString()), out);
     }
 
     static bool jsonToValue_(const SwJsonValue& j, SwAny& out) {
@@ -2492,6 +2579,7 @@ protected:
     SwJsonDocument globalDoc_;
     SwJsonDocument localDoc_;
     SwJsonDocument userDoc_;
+    SwJsonDocument runtimeDoc_{SwJsonObject{}};
     SwJsonDocument mergedDoc_;
 	
 	    // Config paths that were explicitly set at least once (sticky persistence).
@@ -2588,7 +2676,7 @@ protected:
 //
 //   SW_IPC_PROPERTY(int, speed, 0)
 //     -> getter   : int speed() const
-//     -> setter   : void set_speed(const int& v)   (le preprocesseur ne peut pas capitaliser)
+//     -> setter   : bool set_speed(const int& v)   (le preprocesseur ne peut pas capitaliser)
 //     -> signal   : void speedChanged(const int&)  (signal local Qt, connectable normalement)
 //
 //   Pour un type a taille variable (SwString/SwByteArray/...), maxBytes est OBLIGATOIRE :
@@ -2604,7 +2692,7 @@ protected:
 public:                                                                                            \
     DECLARE_SIGNAL(name##Changed, const type&)                                                     \
     type name() const { return name##_property_.get(); }                                           \
-    void set_##name(const type& v) { name##_property_.set(v); }                                    \
+    bool set_##name(const type& v) { return name##_property_.set(v); }                                    \
 private:                                                                                           \
     ::sw::ipc::SwIpcProperty<type> name##_property_{                                               \
         this->ipcRegistry_, SwString(#name), (defaultVal),                                         \

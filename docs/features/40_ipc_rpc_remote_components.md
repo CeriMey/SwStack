@@ -66,7 +66,7 @@ Références:
 
 Principe:
 
-- une DLL/SO expose un symbole connu (ex: `swRegisterRemoteObjectComponentsV1`) et enregistre des factory functions dans un registry.
+- une DLL/SO expose un symbole connu (ex: `swRegisterRemoteObjectComponents`) et enregistre des factory functions dans un registry.
 - le container charge des plugins et instancie des composants à partir d’un JSON de composition.
 
 Références:

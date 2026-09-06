@@ -37,6 +37,7 @@
 
 
 #include <string>
+#include "SwString.h"
 
 #include "platform/SwPlatformSelector.h"
 
@@ -51,6 +52,8 @@ public:
     explicit SwFileInfo(const std::string& filePath = "") : m_filePath(filePath) {
         swFileInfoPlatform().normalizePath(m_filePath);
     }
+    explicit SwFileInfo(const SwString& filePath) : SwFileInfo(filePath.toStdString()) {}
+    explicit SwFileInfo(const char* filePath) : SwFileInfo(std::string(filePath ? filePath : "")) {}
 
     /**
      * @brief Destroys the `SwFileInfo` instance.
@@ -132,6 +135,14 @@ public:
      */
     std::string absoluteFilePath() const {
         return swFileInfoPlatform().absoluteFilePath(m_filePath);
+    }
+
+    /// Directory containing the file, resolving existing symbolic links.
+    std::string absolutePath() const {
+        const auto file = absoluteFilePath();
+        const auto slash = file.find_last_of("/\\");
+        if (slash == std::string::npos) return ".";
+        return file.substr(0, slash == 0 ? 1 : slash);
     }
 
     /**

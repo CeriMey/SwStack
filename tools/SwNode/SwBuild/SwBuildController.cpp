@@ -30,6 +30,7 @@ void SwBuildController::start() {
 
     if (projects_.isEmpty()) {
         swWarning() << "[SwBuild] no CMakeLists.txt found under scan root:" << options_.scanDirAbs();
+        succeeded_ = true;
         SwCoreApplication::instance()->exit(0);
         return;
     }
@@ -111,6 +112,7 @@ bool SwBuildController::discoverProjects_(SwString& errOut) {
 void SwBuildController::startCurrentStage_() {
     if (currentIndex_ >= projects_.size()) {
         swDebug() << "[SwBuild] done";
+        succeeded_ = true;
         SwCoreApplication::instance()->exit(0);
         return;
     }

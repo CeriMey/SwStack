@@ -156,6 +156,7 @@ set_target_properties(SwizioNodes PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # Top-level examples are selectable directly from CMake without relying on build.bat.
 # Default behavior stays close to the current tree: only WhatsApp is enabled by default.
+option(SW_BUILD_EXAMPLES "Configure top-level examples" ON)
 option(SW_BUILD_ALL_EXAMPLES "Build all top-level examples" OFF)
 
 # These targets include SwHttpApp or the native QUIC/TLS headers and therefore
@@ -187,6 +188,9 @@ set(SW_QUIC_DEPENDENT_EXAMPLES
 )
 
 function(sw_add_example_subdirectory example_dir default_enabled)
+    if(NOT SW_BUILD_EXAMPLES)
+        return()
+    endif()
     list(FIND SW_QUIC_DEPENDENT_EXAMPLES "${example_dir}" quic_example_index)
     if(NOT SW_ENABLE_QUIC AND NOT quic_example_index EQUAL -1)
         message(STATUS "Skipping ${example_dir}: SW_ENABLE_QUIC=OFF")

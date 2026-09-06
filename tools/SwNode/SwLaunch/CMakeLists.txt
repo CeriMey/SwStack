@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.10)
 include(${CMAKE_CURRENT_LIST_DIR}/SwLaunchVersion.cmake)
 project(SwLaunch VERSION ${SWLAUNCH_VERSION_CORE})
 
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(Git QUIET)

@@ -1,3 +1,6 @@
+#include "../SwApiRpcWire.h"
+#include "SwEventLoop.h"
+#include "SwIpcJsonCodec.h"
 #include "SwBridgeHttpServer.h"
 
 #include <array>
@@ -29,9 +32,55 @@ namespace {
 
 static SwJsonArray registryForTarget(const SwString& nameSpace, const SwString& objectName);
 
-static uint64_t parseHexU64(const std::string& s) {
-    return static_cast<uint64_t>(std::strtoull(s.c_str(), nullptr, 16));
+using namespace swapi::wire;
+static SwJsonArray argTypesToJson(const std::vector<std::string>& args) {
+    SwJsonArray a;
+    for (size_t i = 0; i < args.size(); ++i) {
+        a.append(SwJsonValue(args[i]));
+    }
+    return a;
 }
+
+struct SignalAccess {
+    static const size_t kMaxPayload = 4096;
+    typedef sw::ipc::ShmMapping<kMaxPayload> Mapping;
+    typedef sw::ipc::ShmLayout<kMaxPayload> Layout;
+
+    std::shared_ptr<Mapping> map;
+    SwString shmName;
+    uint64_t typeId{0};
+#if defined(_WIN32)
+    WinHandle mtx;
+#endif
+};
+
+static bool openSignalAccess(const RpcQueueInfo& info, SignalAccess& out, SwString& err) {
+    if (info.shmName.isEmpty() || info.typeId == 0) {
+        err = "signal: missing shmName/typeId in registry";
+        return false;
+    }
+
+    try {
+        out.map = SignalAccess::Mapping::openOrCreate(info.shmName, info.typeId);
+        out.shmName = info.shmName;
+        out.typeId = info.typeId;
+    } catch (const std::exception& e) {
+        err = SwString("signal: open mapping failed: ") + e.what();
+        return false;
+    } catch (...) {
+        err = "signal: open mapping failed";
+        return false;
+    }
+
+#if defined(_WIN32)
+    const std::string base = info.shmName.toStdString();
+    out.mtx = WinHandle(::OpenMutexA(SYNCHRONIZE, FALSE, (base + "_mtx").c_str()));
+#endif
+
+    return true;
+}
+
+
 
 static SwString computeAcceptKey(const SwString& clientKeyBase64) {
     static const char* kGuid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -718,463 +767,7 @@ static bool nodeInfoForTarget_(const SwString& domain, const SwString& object, b
     return true;
 }
 
-static std::vector<std::string> parseArgTypesFromTypeName(const std::string& typeName) {
-    // typeName() returns compiler-specific strings, e.g.:
-    // MSVC: "class SwString __cdecl sw::ipc::detail::type_name<int,class SwString>(void)"
-    // GCC/Clang: "... type_name() [with Args = int; Args = SwString]"
-    //
-    // We implement a best-effort parser for the MSVC-like "<...>" chunk.
-    std::vector<std::string> out;
-    const size_t lt = typeName.find('<');
-    const size_t gt = (lt == std::string::npos) ? std::string::npos : typeName.find('>', lt + 1);
-    if (lt == std::string::npos || gt == std::string::npos || gt <= lt + 1) return out;
-    std::string inside = typeName.substr(lt + 1, gt - lt - 1);
 
-    auto trimInPlace = [](std::string& s) {
-        while (!s.empty() && (s[0] == ' ' || s[0] == '\t')) s.erase(0, 1);
-        while (!s.empty() && (s[s.size() - 1] == ' ' || s[s.size() - 1] == '\t')) s.pop_back();
-    };
-
-    size_t start = 0;
-    while (start < inside.size()) {
-        size_t comma = inside.find(',', start);
-        if (comma == std::string::npos) comma = inside.size();
-        std::string token = inside.substr(start, comma - start);
-        trimInPlace(token);
-        // normalize MSVC tokens like "class SwString"
-        const std::string classPrefix = "class ";
-        const std::string structPrefix = "struct ";
-        if (token.find(classPrefix) == 0) token.erase(0, classPrefix.size());
-        if (token.find(structPrefix) == 0) token.erase(0, structPrefix.size());
-        trimInPlace(token);
-        if (!token.empty()) out.push_back(token);
-        start = comma + 1;
-    }
-    return out;
-}
-
-static SwJsonArray argTypesToJson(const std::vector<std::string>& args) {
-    SwJsonArray a;
-    for (size_t i = 0; i < args.size(); ++i) {
-        a.append(SwJsonValue(args[i]));
-    }
-    return a;
-}
-
-static bool isBoolType(const std::string& t) {
-    return t == "bool" || t == "BOOL";
-}
-static bool isIntType(const std::string& t) {
-    return t == "int" || t == "int32_t" || t == "signed int";
-}
-static bool isU32Type(const std::string& t) {
-    return t == "uint32_t" || t == "unsigned int" || t == "unsigned long";
-}
-static bool isU64Type(const std::string& t) {
-    return t == "uint64_t" || t == "unsigned __int64" || t == "unsigned long long";
-}
-static bool isFloatType(const std::string& t) {
-    return t == "double" || t == "float";
-}
-static bool isStringType(const std::string& t) {
-    return t == "SwString" || t == "class SwString" || t == "struct SwString";
-}
-static bool isBytesType(const std::string& t) {
-    return t == "SwByteArray" || t == "class SwByteArray" || t == "struct SwByteArray";
-}
-
-struct RpcQueueInfo {
-    SwString signal;
-    SwString shmName;
-    SwString typeName;
-    uint64_t typeId{0};
-};
-
-static bool findSignalInRegistryForTarget(const SwString& domain,
-                                         const SwString& object,
-                                         const SwString& signalName,
-                                         RpcQueueInfo& out) {
-    SwJsonArray entries = registryForTarget(domain, object);
-    for (size_t i = 0; i < entries.size(); ++i) {
-        const SwJsonValue v = entries[i];
-        if (!v.isObject()) continue;
-        const SwJsonObject o(v.toObject());
-        if (SwString(o["signal"].toString()) != signalName) continue;
-
-        out.signal = signalName;
-        out.shmName = SwString(o["shmName"].toString());
-        out.typeName = SwString(o["typeName"].toString());
-        out.typeId = parseHexU64(o["typeId"].toString().toStdString());
-        return true;
-    }
-    return false;
-}
-
-#if defined(_WIN32)
-struct WinHandle {
-    HANDLE h{NULL};
-    WinHandle() = default;
-    explicit WinHandle(HANDLE hh) : h(hh) {}
-    WinHandle(const WinHandle&) = delete;
-    WinHandle& operator=(const WinHandle&) = delete;
-    WinHandle(WinHandle&& o) noexcept : h(o.h) { o.h = NULL; }
-    WinHandle& operator=(WinHandle&& o) noexcept {
-        if (this == &o) return *this;
-        reset();
-        h = o.h;
-        o.h = NULL;
-        return *this;
-    }
-    ~WinHandle() { reset(); }
-    void reset() {
-        if (h) {
-            ::CloseHandle(h);
-            h = NULL;
-        }
-    }
-    explicit operator bool() const { return h != NULL; }
-};
-#endif
-
-struct RpcQueueAccess {
-    static const size_t kCapacity = 10;
-    static const size_t kMaxPayload = 4096;
-    typedef sw::ipc::ShmQueueLayout<kMaxPayload, kCapacity> Layout;
-    typedef sw::ipc::ShmMappingT<Layout> Mapping;
-
-    std::shared_ptr<Mapping> map;
-    SwString shmName;
-    uint64_t typeId{0};
-#if defined(_WIN32)
-    WinHandle mtx;
-    WinHandle evt;
-#endif
-};
-
-static bool openRpcQueueAccess(const RpcQueueInfo& info, RpcQueueAccess& out, SwString& err) {
-    if (info.shmName.isEmpty() || info.typeId == 0) {
-        err = "invalid rpc queue info (missing shmName/typeId)";
-        return false;
-    }
-
-    try {
-        out.shmName = info.shmName;
-        out.typeId = info.typeId;
-        out.map = RpcQueueAccess::Mapping::openOrCreate(info.shmName, info.typeId);
-    } catch (const std::exception& e) {
-        err = SwString("rpc: open SHM failed: ") + e.what();
-        return false;
-    }
-
-#if defined(_WIN32)
-    const std::string mtxName = (info.shmName + "_mtx").toStdString();
-    out.mtx = WinHandle(::CreateMutexA(NULL, FALSE, mtxName.c_str()));
-    if (!out.mtx) {
-        err = "rpc: CreateMutex failed";
-        return false;
-    }
-
-    const std::string evtName = (info.shmName + "_evt").toStdString();
-    out.evt = WinHandle(::CreateEventA(NULL, FALSE, FALSE, evtName.c_str()));
-    if (!out.evt) {
-        err = "rpc: CreateEvent failed";
-        return false;
-    }
-#endif
-
-    return true;
-}
-
-static bool rpcQueuePushRaw(RpcQueueAccess& q, const uint8_t* data, size_t size, SwString& err) {
-    if (!q.map) {
-        err = "rpc: queue not opened";
-        return false;
-    }
-    if (size > RpcQueueAccess::kMaxPayload) {
-        err = "rpc: payload too large";
-        return false;
-    }
-
-    RpcQueueAccess::Layout* L = q.map->layout();
-    if (!L) {
-        err = "rpc: invalid queue layout";
-        return false;
-    }
-
-    bool ok = false;
-
-#if defined(_WIN32)
-    ::WaitForSingleObject(q.mtx.h, INFINITE);
-    const uint64_t inFlight = (L->seq >= L->readSeq) ? (L->seq - L->readSeq) : 0;
-    if (inFlight < RpcQueueAccess::kCapacity) {
-        const uint64_t next = L->seq + 1;
-        RpcQueueAccess::Layout::Slot& slot = L->entries[next % RpcQueueAccess::kCapacity];
-        slot.seq = next;
-        slot.size = static_cast<uint32_t>(size);
-        if (slot.size <= RpcQueueAccess::kMaxPayload) {
-            if (slot.size != 0) std::memcpy(slot.data, data, slot.size);
-            L->seq = next;
-            ok = true;
-        }
-    }
-    ::ReleaseMutex(q.mtx.h);
-
-    if (ok && q.evt) {
-        (void)::SetEvent(q.evt.h);
-    }
-#else
-    pthread_mutex_lock(&L->mtx);
-    const uint64_t inFlight = (L->seq >= L->readSeq) ? (L->seq - L->readSeq) : 0;
-    if (inFlight < RpcQueueAccess::kCapacity) {
-        const uint64_t next = L->seq + 1;
-        RpcQueueAccess::Layout::Slot& slot = L->entries[next % RpcQueueAccess::kCapacity];
-        slot.seq = next;
-        slot.size = static_cast<uint32_t>(size);
-        if (slot.size <= RpcQueueAccess::kMaxPayload) {
-            if (slot.size != 0) std::memcpy(slot.data, data, slot.size);
-            L->seq = next;
-            ok = true;
-        }
-    }
-    if (ok) pthread_cond_broadcast(&L->cv);
-    pthread_mutex_unlock(&L->mtx);
-#endif
-
-    if (!ok) {
-        err = "rpc: request queue full (or payload too large)";
-        return false;
-    }
-    return true;
-}
-
-static bool rpcQueuePopOneRaw(RpcQueueAccess& q, std::vector<uint8_t>& out) {
-    out.clear();
-    if (!q.map) return false;
-    RpcQueueAccess::Layout* L = q.map->layout();
-    if (!L) return false;
-
-    bool have = false;
-
-#if defined(_WIN32)
-    ::WaitForSingleObject(q.mtx.h, INFINITE);
-    const uint64_t seq = L->seq;
-    uint64_t readSeq = L->readSeq;
-    if (readSeq < seq) {
-        const uint64_t next = readSeq + 1;
-        RpcQueueAccess::Layout::Slot& slot = L->entries[next % RpcQueueAccess::kCapacity];
-        const uint32_t sz = slot.size;
-        if (slot.seq == next && sz <= RpcQueueAccess::kMaxPayload) {
-            out.assign(slot.data, slot.data + sz);
-            have = true;
-        }
-        L->readSeq = next;
-    }
-    ::ReleaseMutex(q.mtx.h);
-#else
-    pthread_mutex_lock(&L->mtx);
-    const uint64_t seq = L->seq;
-    uint64_t readSeq = L->readSeq;
-    if (readSeq < seq) {
-        const uint64_t next = readSeq + 1;
-        RpcQueueAccess::Layout::Slot& slot = L->entries[next % RpcQueueAccess::kCapacity];
-        const uint32_t sz = slot.size;
-        if (slot.seq == next && sz <= RpcQueueAccess::kMaxPayload) {
-            out.assign(slot.data, slot.data + sz);
-            have = true;
-        }
-        L->readSeq = next;
-    }
-    pthread_mutex_unlock(&L->mtx);
-#endif
-
-    return have;
-}
-
-struct SignalAccess {
-    static const size_t kMaxPayload = 4096;
-    typedef sw::ipc::ShmMapping<kMaxPayload> Mapping;
-    typedef sw::ipc::ShmLayout<kMaxPayload> Layout;
-
-    std::shared_ptr<Mapping> map;
-    SwString shmName;
-    uint64_t typeId{0};
-#if defined(_WIN32)
-    WinHandle mtx;
-#endif
-};
-
-static bool openSignalAccess(const RpcQueueInfo& info, SignalAccess& out, SwString& err) {
-    if (info.shmName.isEmpty() || info.typeId == 0) {
-        err = "signal: missing shmName/typeId in registry";
-        return false;
-    }
-
-    try {
-        out.map = SignalAccess::Mapping::openOrCreate(info.shmName, info.typeId);
-        out.shmName = info.shmName;
-        out.typeId = info.typeId;
-    } catch (const std::exception& e) {
-        err = SwString("signal: open mapping failed: ") + e.what();
-        return false;
-    } catch (...) {
-        err = "signal: open mapping failed";
-        return false;
-    }
-
-#if defined(_WIN32)
-    const std::string base = info.shmName.toStdString();
-    out.mtx = WinHandle(::OpenMutexA(SYNCHRONIZE, FALSE, (base + "_mtx").c_str()));
-#endif
-
-    return true;
-}
-
-static bool encodeJsonArg(sw::ipc::detail::Encoder& enc, const std::string& type, const SwJsonValue& v, SwString& err) {
-    auto asBool = [](const SwJsonValue& v, bool& out) -> bool {
-        if (v.isBool()) { out = v.toBool(); return true; }
-        if (v.isInt()) { out = (v.toInt() != 0); return true; }
-        if (v.isString()) {
-            const std::string s = v.toString().toStdString();
-            out = (s == "1" || s == "true" || s == "TRUE" || s == "True");
-            return true;
-        }
-        return false;
-    };
-    auto asInt = [](const SwJsonValue& v, int& out) -> bool {
-        if (v.isInt()) { out = v.toInt(); return true; }
-        if (v.isDouble()) { out = static_cast<int>(v.toDouble()); return true; }
-        if (v.isString()) { out = std::atoi(v.toString().toStdString().c_str()); return true; }
-        if (v.isBool()) { out = v.toBool() ? 1 : 0; return true; }
-        return false;
-    };
-    auto asU32 = [](const SwJsonValue& v, uint32_t& out) -> bool {
-        if (v.isInt()) { out = static_cast<uint32_t>(v.toInt()); return true; }
-        if (v.isDouble()) { out = static_cast<uint32_t>(v.toDouble()); return true; }
-        if (v.isString()) {
-            const std::string s = v.toString().toStdString();
-            out = static_cast<uint32_t>(std::strtoul(s.c_str(), NULL, 10));
-            return true;
-        }
-        if (v.isBool()) { out = v.toBool() ? 1u : 0u; return true; }
-        return false;
-    };
-    auto asU64 = [](const SwJsonValue& v, uint64_t& out) -> bool {
-        if (v.isInt()) { out = static_cast<uint64_t>(v.toInt()); return true; }
-        if (v.isDouble()) { out = static_cast<uint64_t>(v.toDouble()); return true; }
-        if (v.isString()) {
-            const std::string s = v.toString().toStdString();
-            out = static_cast<uint64_t>(std::strtoull(s.c_str(), NULL, 10));
-            return true;
-        }
-        if (v.isBool()) { out = v.toBool() ? 1ull : 0ull; return true; }
-        return false;
-    };
-    auto asDouble = [](const SwJsonValue& v, double& out) -> bool {
-        if (v.isDouble()) { out = v.toDouble(); return true; }
-        if (v.isInt()) { out = static_cast<double>(v.toInt()); return true; }
-        if (v.isString()) { out = std::atof(v.toString().toStdString().c_str()); return true; }
-        if (v.isBool()) { out = v.toBool() ? 1.0 : 0.0; return true; }
-        return false;
-    };
-    auto asString = [](const SwJsonValue& v, SwString& out) -> bool {
-        if (v.isString()) { out = SwString(v.toString()); return true; }
-        if (v.isBool()) { out = v.toBool() ? "true" : "false"; return true; }
-        if (v.isInt()) { out = SwString(std::to_string(v.toInt())); return true; }
-        if (v.isDouble()) { std::ostringstream oss; oss << v.toDouble(); out = SwString(oss.str()); return true; }
-        return false;
-    };
-    auto asBytes = [](const SwJsonValue& v, SwByteArray& out) -> bool {
-        if (v.isString()) { out = SwByteArray(v.toString().toStdString()); return true; }
-        return false;
-    };
-
-    if (isBoolType(type)) {
-        bool x = false;
-        if (!asBool(v, x)) { err = "rpc: arg parse failed (bool)"; return false; }
-        return sw::ipc::detail::Codec<bool>::write(enc, x);
-    }
-    if (isIntType(type)) {
-        int x = 0;
-        if (!asInt(v, x)) { err = "rpc: arg parse failed (int)"; return false; }
-        return sw::ipc::detail::Codec<int>::write(enc, x);
-    }
-    if (isU32Type(type)) {
-        uint32_t x = 0;
-        if (!asU32(v, x)) { err = "rpc: arg parse failed (u32)"; return false; }
-        return sw::ipc::detail::Codec<uint32_t>::write(enc, x);
-    }
-    if (isU64Type(type)) {
-        uint64_t x = 0;
-        if (!asU64(v, x)) { err = "rpc: arg parse failed (u64)"; return false; }
-        return sw::ipc::detail::Codec<uint64_t>::write(enc, x);
-    }
-    if (isFloatType(type)) {
-        double x = 0.0;
-        if (!asDouble(v, x)) { err = "rpc: arg parse failed (double)"; return false; }
-        return sw::ipc::detail::Codec<double>::write(enc, x);
-    }
-    if (isStringType(type)) {
-        SwString x;
-        if (!asString(v, x)) { err = "rpc: arg parse failed (SwString)"; return false; }
-        return sw::ipc::detail::Codec<SwString>::write(enc, x);
-    }
-    if (isBytesType(type)) {
-        SwByteArray x;
-        if (!asBytes(v, x)) { err = "rpc: arg parse failed (SwByteArray)"; return false; }
-        return sw::ipc::detail::Codec<SwByteArray>::write(enc, x);
-    }
-
-    err = SwString("rpc: unsupported arg type: ") + type;
-    return false;
-}
-
-static bool decodeJsonValueByType(sw::ipc::detail::Decoder& dec, const std::string& type, SwJsonValue& out, SwString& err) {
-    if (isBoolType(type)) {
-        bool x = false;
-        if (!sw::ipc::detail::Codec<bool>::read(dec, x)) { err = "rpc: decode failed (bool)"; return false; }
-        out = SwJsonValue(x);
-        return true;
-    }
-    if (isIntType(type)) {
-        int x = 0;
-        if (!sw::ipc::detail::Codec<int>::read(dec, x)) { err = "rpc: decode failed (int)"; return false; }
-        out = SwJsonValue(x);
-        return true;
-    }
-    if (isU32Type(type)) {
-        uint32_t x = 0;
-        if (!sw::ipc::detail::Codec<uint32_t>::read(dec, x)) { err = "rpc: decode failed (u32)"; return false; }
-        out = SwJsonValue(static_cast<int>(x));
-        return true;
-    }
-    if (isU64Type(type)) {
-        uint64_t x = 0;
-        if (!sw::ipc::detail::Codec<uint64_t>::read(dec, x)) { err = "rpc: decode failed (u64)"; return false; }
-        out = SwJsonValue(std::to_string(x));
-        return true;
-    }
-    if (isFloatType(type)) {
-        double x = 0.0;
-        if (!sw::ipc::detail::Codec<double>::read(dec, x)) { err = "rpc: decode failed (double)"; return false; }
-        out = SwJsonValue(x);
-        return true;
-    }
-    if (isStringType(type)) {
-        SwString x;
-        if (!sw::ipc::detail::Codec<SwString>::read(dec, x)) { err = "rpc: decode failed (SwString)"; return false; }
-        out = SwJsonValue(x);
-        return true;
-    }
-    if (isBytesType(type)) {
-        SwByteArray x;
-        if (!sw::ipc::detail::Codec<SwByteArray>::read(dec, x)) { err = "rpc: decode failed (SwByteArray)"; return false; }
-        out = SwJsonValue(SwString(x.constData(), x.size()));
-        return true;
-    }
-
-    err = SwString("rpc: unsupported return type: ") + type;
-    return false;
-}
 
 
 static SwString findConfigDocSignalForTarget(const SwString& nameSpace, const SwString& objectName) {
@@ -2033,7 +1626,7 @@ void SwBridgeHttpServer::registerRoutes_() {
             int a0 = 0;
             if (!asInt(arr[0], a0)) { sendErrorJson_(ctx, 400, "arg0 int parse failed"); return; }
             sw::ipc::Signal<int> sig(reg, sigName); ok = sig.publish(a0);
-        } else if (argTypes.size() == 1 && isFloatType(argTypes[0])) {
+        } else if (argTypes.size() == 1 && argTypes[0] == "double") {
             double a0 = 0.0;
             if (!asDouble(arr[0], a0)) { sendErrorJson_(ctx, 400, "arg0 double parse failed"); return; }
             sw::ipc::Signal<double> sig(reg, sigName); ok = sig.publish(a0);
@@ -2069,7 +1662,7 @@ void SwBridgeHttpServer::registerRoutes_() {
             bool a0 = false; int a1 = 0; SwString a2;
             if (!asBool(arr[0], a0) || !asInt(arr[1], a1) || !asString(arr[2], a2)) { sendErrorJson_(ctx, 400, "args parse failed"); return; }
             sw::ipc::Signal<bool, int, SwString> sig(reg, sigName); ok = sig.publish(a0, a1, a2);
-        } else if (argTypes.size() == 3 && isIntType(argTypes[0]) && isFloatType(argTypes[1]) && isStringType(argTypes[2])) {
+        } else if (argTypes.size() == 3 && isIntType(argTypes[0]) && argTypes[1] == "double" && isStringType(argTypes[2])) {
             int a0 = 0; double a1 = 0.0; SwString a2;
             if (!asInt(arr[0], a0) || !asDouble(arr[1], a1) || !asString(arr[2], a2)) { sendErrorJson_(ctx, 400, "args parse failed"); return; }
             sw::ipc::Signal<int, double, SwString> sig(reg, sigName); ok = sig.publish(a0, a1, a2);
@@ -2086,6 +1679,14 @@ void SwBridgeHttpServer::registerRoutes_() {
     });
 
     app_.post("/api/rpc", [](SwHttpContext& ctx) {
+        // Raw queue replies are consumed by this request. Reject overlap explicitly
+        // while yielding to the HTTP loop, rather than stealing another reply.
+        static std::atomic_flag active = ATOMIC_FLAG_INIT;
+        if (active.test_and_set(std::memory_order_acquire)) {
+            sendErrorJson_(ctx, 503, "rpc: bridge busy; retry after current call");
+            return;
+        }
+        struct Guard { std::atomic_flag& flag; ~Guard() { flag.clear(std::memory_order_release); } } guard{active};
         static std::atomic<uint64_t> s_callId{1};
 
         SwJsonDocument d;
@@ -2100,7 +1701,7 @@ void SwBridgeHttpServer::registerRoutes_() {
             sendErrorJson_(ctx, 400, "missing field: target");
             return;
         }
-        const SwString method = obj["method"].toString();
+        SwString method = obj["method"].toString();
         if (method.isEmpty()) {
             sendErrorJson_(ctx, 400, "missing field: method");
             return;
@@ -2126,7 +1727,7 @@ void SwBridgeHttpServer::registerRoutes_() {
 
         const SwString reqSignal = SwString("__rpc__|") + method;
         RpcQueueInfo reqInfo;
-        if (!findSignalInRegistryForTarget(domain, oName, reqSignal, reqInfo)) {
+        if (!findRpcRequestQueueForMethod(domain, oName, method, reqInfo, method)) {
             sendErrorJson_(ctx, 404, "rpc request queue not found in registry (__rpc__|method)");
             return;
         }
@@ -2165,7 +1766,7 @@ void SwBridgeHttpServer::registerRoutes_() {
 
         RpcQueueAccess reqQ;
         SwString qErr;
-        if (!openRpcQueueAccess(reqInfo, reqQ, qErr)) {
+        if (!openRpcQueueAccess(reqInfo, rpcQueueCapacityFromQueueMethod(method), reqQ, qErr)) {
             sendErrorJson_(ctx, 500, qErr);
             return;
         }
@@ -2195,7 +1796,7 @@ void SwBridgeHttpServer::registerRoutes_() {
                 RpcQueueInfo respInfo;
                 if (findSignalInRegistryForTarget(domain, oName, respSignal, respInfo)) {
                     SwString openErr;
-                    if (!openRpcQueueAccess(respInfo, respQ, openErr)) {
+                    if (!openRpcQueueAccess(respInfo, rpcQueueCapacityFromQueueMethod(method), respQ, openErr)) {
                         sendErrorJson_(ctx, 500, openErr);
                         return;
                     }
@@ -2252,7 +1853,7 @@ void SwBridgeHttpServer::registerRoutes_() {
                 ::Sleep(1);
             }
 #else
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            SwEventLoop::swsleep(1);
 #endif
         }
 

@@ -54,12 +54,12 @@ namespace sw {
 namespace component {
 namespace plugin {
 
-inline const SwString& registerSymbolV1() {
-    static const SwString k("swRegisterRemoteObjectComponentsV1");
+inline const SwString& registerSymbol() {
+    static const SwString k("swRegisterRemoteObjectComponents");
     return k;
 }
 
-typedef bool (*RegisterFnV1)(SwRemoteObjectComponentRegistry* registry);
+typedef bool (*RegisterFn)(SwRemoteObjectComponentRegistry* registry);
 
 namespace detail {
 
@@ -144,7 +144,9 @@ inline SwString normalizeComponentTypeName(SwString raw) {
     static SwRemoteObject* SW_DETAIL_CONCAT_(swipc_create_, UniqueId)(const SwString& sysName,       \
                                                                      const SwString& nameSpace,      \
                                                                      const SwString& objectName,     \
-                                                                     SwObject* parent) {             \
+                                                                     SwObject* parent,              \
+                                                                     const SwString& configRoot) {             \
+        SwRemoteObject::ConfigRootScope configScope(configRoot);                                   \
         return new ClassType(sysName, nameSpace, objectName, parent);                                \
     }                                                                                                \
     static void SW_DETAIL_CONCAT_(swipc_destroy_, UniqueId)(SwRemoteObject* instance) {              \
@@ -164,7 +166,9 @@ inline SwString normalizeComponentTypeName(SwString raw) {
     static SwRemoteObject* SW_DETAIL_CONCAT_(swipc_create_, UniqueId)(const SwString& sysName,       \
                                                                      const SwString& nameSpace,      \
                                                                      const SwString& objectName,     \
-                                                                     SwObject* parent) {             \
+                                                                     SwObject* parent,              \
+                                                                     const SwString& configRoot) {             \
+        SwRemoteObject::ConfigRootScope configScope(configRoot);                                   \
         return new ClassType(sysName, nameSpace, objectName, parent);                                \
     }                                                                                                \
     static void SW_DETAIL_CONCAT_(swipc_destroy_, UniqueId)(SwRemoteObject* instance) {              \
@@ -179,10 +183,10 @@ inline SwString normalizeComponentTypeName(SwString raw) {
         &SW_DETAIL_CONCAT_(swipc_node_, UniqueId));                                                  \
     }
 
-// Default exported entry point (v1) for plugins.
+// Exported entry point for plugins (explicit construction config root).
 // Compiled only when SW_COMPONENT_PLUGIN is defined (set by the plugin CMake target).
 #ifdef SW_COMPONENT_PLUGIN
-SW_COMPONENT_PLUGIN_EXPORT bool swRegisterRemoteObjectComponentsV1(SwRemoteObjectComponentRegistry* registry) {
+SW_COMPONENT_PLUGIN_EXPORT bool swRegisterRemoteObjectComponents(SwRemoteObjectComponentRegistry* registry) {
     if (!registry) return false;
     ::sw::component::plugin::detail::ComponentNode* n = ::sw::component::plugin::detail::head();
     while (n) {

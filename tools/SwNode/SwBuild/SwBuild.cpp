@@ -49,5 +49,12 @@ int main(int argc, char* argv[]) {
     SwBuildController controller(options);
     controller.start();
 
-    return app.exec();
+    const int exitCode = app.exec();
+    // OS termination can quit the event loop with its default exit code (0).
+    // Only the controller completing every requested stage constitutes success.
+    if (exitCode == 0 && !controller.succeeded()) {
+        std::cerr << "[SwBuild] interrupted\n";
+        return 130;
+    }
+    return exitCode;
 }

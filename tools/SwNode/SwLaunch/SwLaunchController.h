@@ -1,4 +1,6 @@
 #pragma once
+#include "SwLaunchIdentity.h"
+#include "SwLaunchArguments.h"
 
 struct SwLaunchManagedUnitPlan {
     SwString kind;
@@ -144,7 +146,7 @@ static bool swLaunchReadTextFile_(const SwString& path, SwString& out, SwString&
 }
 
 static SwString swLaunchOwnerKey_(const SwString& kind, const SwString& ns, const SwString& name) {
-    return kind + ":" + ns + "/" + name;
+    return kind + ":" + swLaunchRuntimeId_(ns, name);
 }
 
 static bool swLaunchResolveManagedUnitPlan_(const SwString& kind,
@@ -161,6 +163,9 @@ static bool swLaunchResolveManagedUnitPlan_(const SwString& kind,
         return false;
     }
 
+    SwStringList extraArguments;
+    if (!swLaunchAppendArguments_(spec, extraArguments, errOut)) return false;
+
     SwString sys = defaultSys;
     if (spec.contains("sys")) sys = SwString(spec["sys"].toString());
     if (!sys.isEmpty() && sys != defaultSys) {
@@ -176,8 +181,9 @@ static bool swLaunchResolveManagedUnitPlan_(const SwString& kind,
     if (spec.contains("name")) name = SwString(spec["name"].toString());
     if (name.isEmpty() && spec.contains("object")) name = SwString(spec["object"].toString());
 
-    if (ns.isEmpty() || name.isEmpty()) {
-        errOut = SwString("unit identity requires ns/name for kind=") + kind;
+    if (!swLaunchIdentityValid_(ns, name, kind == "node")) {
+        errOut = kind == "node" ? SwString("node identity requires a name (ns may be empty)") :
+                                  SwString("container identity requires ns/name");
         return false;
     }
 
@@ -210,7 +216,7 @@ static bool swLaunchResolveManagedUnitPlan_(const SwString& kind,
 
     out.kind = kind;
     out.ownerKey = swLaunchOwnerKey_(kind, ns, name);
-    out.runtimeId = ns + "/" + name;
+    out.runtimeId = swLaunchRuntimeId_(ns, name);
     out.spec = spec;
     out.executablePath = exePath;
     out.workingDirectory = workingDir;

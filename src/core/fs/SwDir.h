@@ -183,7 +183,8 @@ public:
      * @details The returned value reflects the state currently stored by the instance.
      */
     SwString absolutePath() const {
-        return swDirPlatform().absolutePath(m_path);
+        const auto path = isAbsolutePath(m_path) ? m_path : currentPath() + "/" + m_path;
+        return swDirPlatform().absolutePath(path);
     }
 
     /**
@@ -196,10 +197,10 @@ public:
             swCError(kSwLogCategory_SwDir) << "Relative path cannot be empty.";
             return SwString();
         }
-        if (swDirPlatform().isDirectory(relativePath) || relativePath.startsWith("/") || relativePath.toStdString().find(':') != std::string::npos) {
-            return relativePath;
-        }
-        return swDirPlatform().absolutePath(m_path + relativePath);
+        if (isAbsolutePath(relativePath)) return swDirPlatform().absolutePath(relativePath);
+        auto base = absolutePath();
+        if (!base.endsWith("/") && !base.endsWith("\\")) base += "/";
+        return swDirPlatform().absolutePath(base + relativePath);
     }
 
     /**

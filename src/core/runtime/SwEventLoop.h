@@ -281,11 +281,30 @@ public:
      * @note This method integrates seamlessly with the fiber-based event loop system,
      *       enabling non-blocking delays.
      */
+    // Bounded synchronous wait, safe both before exec() and inside an event
+    // callback. Never recursively drive the scheduler from one of its fibers.
+    template<class Predicate>
+    static bool waitUntil(Predicate ready, int timeoutMs = 2000) {
+        const auto start = std::chrono::steady_clock::now();
+        while (!ready()) {
+            if (timeoutMs > 0 && std::chrono::steady_clock::now() - start >=
+                    std::chrono::milliseconds(timeoutMs)) return false;
+            SwCoreApplication* app = SwCoreApplication::instance(false);
+            if (app && GetCurrentFiber() != app->mainFiber) {
+                swsleep(1);
+            } else {
+                if (app) app->processEvent(false);
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+        return true;
+    }
+
     static void swsleep(int milliseconds) {
         SwCoreApplication* app = SwCoreApplication::instance(false);
         LPVOID current = GetCurrentFiber();
 
-        if (current == app->mainFiber) {
+        if (!app || current == app->mainFiber) {
             // If the event loop hasn't started yet (in the main fiber), use a blocking sleep
             std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));
         } else {

@@ -528,18 +528,18 @@ class SwComponentContainer : public SwRemoteObject {
             return true;
         }
 
-        void* sym = loader->resolve(sw::component::plugin::registerSymbolV1());
+        void* sym = loader->resolve(sw::component::plugin::registerSymbol());
         if (!sym) {
             if (errOut) {
                 *errOut = loader->errorString().isEmpty()
-                              ? (SwString("plugin missing symbol: ") + sw::component::plugin::registerSymbolV1())
+                              ? (SwString("plugin missing symbol: ") + sw::component::plugin::registerSymbol())
                               : loader->errorString();
             }
             (void)loader->unload();
             return false;
         }
 
-        sw::component::plugin::RegisterFnV1 fn = reinterpret_cast<sw::component::plugin::RegisterFnV1>(sym);
+        sw::component::plugin::RegisterFn fn = reinterpret_cast<sw::component::plugin::RegisterFn>(sym);
         if (!fn) {
             if (errOut) *errOut = SwString("invalid register function pointer");
             (void)loader->unload();
@@ -730,6 +730,7 @@ class SwComponentContainer : public SwRemoteObject {
             return nullptr;
         }
 
+        const SwString instanceRoot = configRootDirectory();
         SwRemoteObject* inst = nullptr;
 
         if (isThreadPerPlugin_() && !regEntry.pluginPath.isEmpty()) {
@@ -739,14 +740,14 @@ class SwComponentContainer : public SwRemoteObject {
                 const SwString nsCopy = effectiveNs;
                 const SwString objCopy = objectName;
                 const SwRemoteObjectComponentRegistry::CreateFn createFn = regEntry.create;
-                executeBlockingOnThread(th, [&inst, sysCopy, nsCopy, objCopy, createFn]() {
-                    inst = createFn(sysCopy, nsCopy, objCopy, nullptr);
+                executeBlockingOnThread(th, [&inst, sysCopy, nsCopy, objCopy, createFn, instanceRoot]() {
+                    inst = createFn(sysCopy, nsCopy, objCopy, nullptr, instanceRoot);
                 });
             }
         }
 
         if (!inst) {
-            inst = regEntry.create(sysName(), effectiveNs, objectName, this);
+            inst = regEntry.create(sysName(), effectiveNs, objectName, this, instanceRoot);
         }
         if (!inst) {
             if (errOut) *errOut = SwString("component factory returned null");
@@ -843,15 +844,18 @@ class SwComponentContainer : public SwRemoteObject {
 
     void applyParamsOnInstanceThread_(SwRemoteObject* inst, const SwJsonObject& params, bool publishToShm) {
         if (!inst) return;
+        const SwString root = configRootDirectory();
         ThreadHandle* targetThread = inst->threadHandle();
         ThreadHandle* currentThread = ThreadHandle::currentThread();
         if (!targetThread || targetThread == currentThread) {
+            inst->setConfigRootDirectory(root);
             applyParams_(inst, params, publishToShm);
             return;
         }
 
         const SwJsonObject paramsCopy = params;
-        executeBlockingOnThread(targetThread, [inst, paramsCopy, publishToShm]() {
+        executeBlockingOnThread(targetThread, [inst, paramsCopy, publishToShm, root]() {
+            inst->setConfigRootDirectory(root);
             applyParams_(inst, paramsCopy, publishToShm);
         });
     }

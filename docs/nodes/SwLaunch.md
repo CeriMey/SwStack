@@ -124,6 +124,12 @@ Le root JSON contient principalement:
 - `nodes`
 - `containers`
 
+Chaque node ou container accepte aussi un tableau `arguments`, par exemple
+`"arguments": ["--idle", "--config", "/opt/profiles/camera one.json"]`.
+Ces chaînes sont ajoutées aux arguments standards de l'enfant en conservant
+chaque élément comme un argument distinct, sans interprétation par un shell.
+Les autres types JSON et les chaînes contenant un octet NUL sont refusés.
+
 Le modele de verite de `SwLaunch` est un etat desire complet. Cela signifie qu'un `PUT /api/launch/state` remplace l'etat logique du launcher, il ne fait pas un patch partiel opportuniste.
 
 Le fichier peut etre modifie et repersiste par `SwLaunch` lui-meme si une mutation ou un deploiement reussit.

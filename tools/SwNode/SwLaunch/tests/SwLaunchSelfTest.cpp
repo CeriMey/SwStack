@@ -9,6 +9,8 @@
 #include "SwFile.h"
 #include "SwDir.h"
 #include "SwLaunchDeploySupport.h"
+#include "SwLaunchIdentity.h"
+#include "SwLaunchArguments.h"
 #include "SwStandardLocation.h"
 
 #include <iostream>
@@ -320,7 +322,38 @@ static void testDeploySupportHelpers() {
     (void)SwDir::removeRecursively(tempRoot);
 }
 
+static void testRootNodeIdentity() {
+    std::cout << "[suite] Root namespace node identity" << std::endl;
+    check("root video node accepted", swLaunchIdentityValid_("", "video", true));
+    check("root runtime ID has no leading slash", swLaunchRuntimeId_("", "video") == "video");
+    check("namespaced runtime ID preserved", swLaunchRuntimeId_("camera0", "video") == "camera0/video");
+    check("missing name rejected", !swLaunchIdentityValid_("", "", true));
+    check("namespaced missing name rejected", !swLaunchIdentityValid_("camera0", "", true));
+    check("container namespace still required", !swLaunchIdentityValid_("", "container", false));
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────
+
+static void testChildArguments() {
+    SwString error;
+    SwStringList arguments;
+    arguments.append("--name=video");
+    SwJsonObject spec;
+    check("absent child arguments preserve defaults", swLaunchAppendArguments_(spec, arguments, error) && arguments.size() == 1);
+    SwJsonArray extra;
+    extra.append(SwJsonValue("--idle"));
+    extra.append(SwJsonValue("profile with spaces.json"));
+    extra.append(SwJsonValue("$(literal); value"));
+    extra.append(SwJsonValue(""));
+    spec["arguments"] = SwJsonValue(extra);
+    check("child argument array accepted", swLaunchAppendArguments_(spec, arguments, error));
+    check("child argument boundaries preserved", arguments.size() == 5 && arguments[2] == "profile with spaces.json" && arguments[3] == "$(literal); value" && arguments[4].isEmpty());
+    extra.append(SwJsonValue(12));
+    spec["arguments"] = SwJsonValue(extra);
+    check("invalid child argument rejected without partial append", !swLaunchAppendArguments_(spec, arguments, error) && arguments.size() == 5);
+    spec["arguments"] = SwJsonValue("--idle");
+    check("shell command text rejected", !swLaunchAppendArguments_(spec, arguments, error));
+}
 
 int main(int argc, char** argv) {
     SwCoreApplication app(argc, argv);
@@ -338,6 +371,8 @@ int main(int argc, char** argv) {
     testSafeAccessors();
     testConfigLoadingEdgeCases();
     testDeploySupportHelpers();
+    testRootNodeIdentity();
+    testChildArguments();
 
     std::cout << std::endl;
     std::cout << "=== Results: " << sPassed << " passed, " << sFailed << " failed ===" << std::endl;

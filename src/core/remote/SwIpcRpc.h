@@ -48,6 +48,7 @@
 
 #include "SwEventLoop.h"
 #include "SwSharedMemorySignal.h"
+#include "SwIpcRpcRouter.h"
 #include "SwString.h"
 #include "SwTimer.h"
 
@@ -57,7 +58,7 @@
 #include <functional>
 #include <map>
 #include <memory>
-#include <mutex>
+#include "SwMutex.h"
 #include <thread>
 
 namespace sw {
@@ -124,678 +125,194 @@ inline SwString rpcResponseQueueName(const SwString& methodName, uint32_t client
 template <typename Ret, typename... Args>
 class RpcMethodClient {
 public:
-    /**
-     * @brief Constructs a `RpcMethodClient` instance.
-     * @param domain Value passed to the method.
-     * @param object Value passed to the method.
-     * @param methodName Value passed to the method.
-     * @param clientInfo Value passed to the method.
-     *
-     * @details The instance is initialized and prepared for immediate use.
-     */
-    RpcMethodClient(const SwString& domain,
-                    const SwString& object,
-                    const SwString& methodName,
+    using Result = RpcResult<Ret>;
+    using Completion = std::function<void(const Result&)>;
+    using Traits = RpcResultTraits<Ret>;
+    using Router = typename Traits::Router;
+
+    RpcMethodClient(const SwString& domain, const SwString& object, const SwString& method,
                     const SwString& clientInfo = SwString())
-        : reg_(domain, object),
-          method_(methodName),
-          clientInfo_(clientInfo),
-          alive_(new std::atomic_bool(true)),
-          pid_(detail::currentPid()) {
-        initQueues_();
-        startResponseListener_();
+        : registry_(domain, object), method_(method), clientInfo_(clientInfo),
+          state_(std::make_shared<State>()), pid_(detail::currentPid()) {
+        router_ = Router::get(domain, object, rpcResponseQueueName(method, pid_), rpcQueueCapacity());
+        switch (rpcQueueCapacity()) {
+#define SW_RPC_REQUEST_CAP(N) case N: initRequest<N>(); break
+            SW_RPC_REQUEST_CAP(10); SW_RPC_REQUEST_CAP(25); SW_RPC_REQUEST_CAP(50);
+            SW_RPC_REQUEST_CAP(100); SW_RPC_REQUEST_CAP(200); SW_RPC_REQUEST_CAP(500);
+            SW_RPC_REQUEST_CAP(1000);
+#undef SW_RPC_REQUEST_CAP
+            default: throw std::invalid_argument("unsupported RPC capacity");
+        }
     }
-
-    /**
-     * @brief Destroys the `RpcMethodClient` instance.
-     *
-     * @details Use this hook to release any resources that remain associated with the instance.
-     */
     ~RpcMethodClient() {
-        if (alive_) alive_->store(false, std::memory_order_release);
-        stopResponseListener_();
+        // Destruction suppresses callbacks. Explicit cancelAll() completes them.
+        SwMutexLocker lock(state_->mutex);
+        state_->closed = true;
+        for (const auto& entry : state_->pending) {
+            router_->remove(entry.first);
+            stopTimer(entry.second);
+        }
+        state_->pending.clear();
     }
-
-    /**
-     * @brief Constructs a `RpcMethodClient` instance.
-     *
-     * @details The instance is initialized and prepared for immediate use.
-     */
     RpcMethodClient(const RpcMethodClient&) = delete;
-    /**
-     * @brief Performs the `operator=` operation.
-     * @return The requested operator =.
-     */
     RpcMethodClient& operator=(const RpcMethodClient&) = delete;
 
-    /**
-     * @brief Returns the current last Error.
-     * @return The current last Error.
-     *
-     * @details The returned value reflects the state currently stored by the instance.
-     */
     SwString lastError() const {
-        std::lock_guard<RpcSpinMutex_> lk(mutex_);
-        return lastError_;
+        SwMutexLocker lock(state_->mutex);
+        return state_->lastError;
+    }
+    size_t pendingCount() const {
+        SwMutexLocker lock(state_->mutex);
+        return state_->pending.size();
+    }
+    Result callResult(const Args&... args, int timeoutMs = 2000) {
+        auto pending = begin(Completion(), args...);
+        SwEventLoop::waitUntil([pending]() {
+            detail::LoopPoller::instance().dispatch();
+            return pending->done.load(std::memory_order_acquire);
+        }, timeoutMs);
+        if (!pending->done.load(std::memory_order_acquire)) {
+            Result result; result.error = "rpc: timeout";
+            finish(state_, router_, pending, result);
+        }
+        return pending->result;
+    }
+    typename Traits::Return call(const Args&... args, int timeoutMs = 2000) {
+        return Traits::value(callResult(args..., timeoutMs));
     }
 
-    // Blocking call (fiber-friendly if SwCoreApplication is running).
-    /**
-     * @brief Performs the `call` operation.
-     * @param args Value passed to the method.
-     * @param timeoutMs Timeout expressed in milliseconds.
-     * @return The requested call.
-     */
-    Ret call(const Args&... args, int timeoutMs = 2000) {
-        clearLastError_();
-
-        const uint64_t callId = nextCallId_++;
-
-        Waiter waiter;
-        {
-            std::lock_guard<RpcSpinMutex_> lk(mutex_);
-            pending_[callId] = Pending(callId, &waiter);
-        }
-
-        if (!reqPush_ || !reqPush_(callId, pid_, clientInfo_, args...)) {
-            erasePending_(callId);
-            setLastError_("rpc: request queue full (or payload too large)");
-            return Ret();
-        }
-
-        waitForResponse_(waiter, timeoutMs);
-
-        // If still pending, it timed out (or app quit).
-        if (erasePending_(callId)) {
-            setLastError_("rpc: timeout");
-            return Ret();
-        }
-
-        if (!waiter.done) {
-            setLastError_("rpc: timeout");
-            return Ret();
-        }
-
-        if (!waiter.ok) {
-            setLastError_(waiter.error);
-            return Ret();
-        }
-
-        return waiter.value;
-    }
-
-    // Async call: onOk is called only on success.
-    /**
-     * @brief Performs the `callAsync` operation.
-     * @param args Value passed to the method.
-     * @param onOk Value passed to the method.
-     * @param timeoutMs Timeout expressed in milliseconds.
-     */
-    void callAsync(const Args&... args,
-                   std::function<void(const Ret&)> onOk,
-                   int timeoutMs = 2000) {
-        clearLastError_();
-        const uint64_t callId = nextCallId_++;
-
-        {
-            std::lock_guard<RpcSpinMutex_> lk(mutex_);
-            pending_[callId] = Pending(callId, std::move(onOk));
-        }
-
-        if (!reqPush_ || !reqPush_(callId, pid_, clientInfo_, args...)) {
-            erasePending_(callId);
-            setLastError_("rpc: request queue full (or payload too large)");
-            return;
-        }
-
+    // Always completes once while the client is alive; pending calls can be
+    // explicitly cancelled. An event loop is required for asynchronous calls.
+    uint64_t callAsyncResult(const Args&... args, Completion complete, int timeoutMs = 2000) {
         SwCoreApplication* app = SwCoreApplication::instance(false);
-        if (timeoutMs > 0 && app) {
-            const std::shared_ptr<std::atomic_bool> alive = alive_;
-            app->addTimer([this, alive, callId]() {
-                if (!alive || !alive->load(std::memory_order_acquire)) return;
-                (void)erasePending_(callId);
-            }, timeoutMs * 1000, /*singleShot=*/true);
+        if (!app) {
+            Result result; result.error = "rpc: asynchronous call requires an event loop";
+            { SwMutexLocker lock(state_->mutex); state_->lastError = result.error; }
+            if (complete) complete(result);
+            return 0;
         }
+        auto state = state_;
+        auto response = router_;
+        auto pending = begin(std::move(complete), args...);
+        if (timeoutMs > 0 && !pending->done.load(std::memory_order_acquire)) {
+            std::weak_ptr<State> weak = state;
+            std::weak_ptr<Router> router = response;
+            std::weak_ptr<Pending> weakPending = pending;
+            const int timer = app->addTimer([weak, router, weakPending]() {
+                auto pending = weakPending.lock();
+                if (!pending) return;
+                auto state = weak.lock(); auto response = router.lock();
+                if (!state || !response) return;
+                Result result; result.error = "rpc: timeout";
+                finish(state, response, pending, result);
+            }, static_cast<int64_t>(timeoutMs) * 1000, true);
+            SwMutexLocker lock(state->mutex);
+            if (state->closed || pending->done.load()) app->removeTimer(timer);
+            else pending->timer = timer;
+        }
+        return pending->id;
     }
-
+    template<class R = Ret>
+    typename std::enable_if<!std::is_void<R>::value, void>::type
+    callAsync(const Args&... args, typename RpcResultTraits<R>::Success onOk, int timeoutMs = 2000) {
+        callAsyncResult(args..., [onOk](const Result& r) { if (r.ok && onOk) onOk(r.value); }, timeoutMs);
+    }
+    template<class R = Ret>
+    typename std::enable_if<std::is_void<R>::value, void>::type
+    callAsync(const Args&... args, std::function<void(bool)> onDone, int timeoutMs = 2000) {
+        callAsyncResult(args..., [onDone](const Result& r) { if (onDone) onDone(r.ok); }, timeoutMs);
+    }
+    bool cancel(uint64_t id) {
+        std::shared_ptr<Pending> pending;
+        {
+            SwMutexLocker lock(state_->mutex);
+            auto it = state_->pending.find(id);
+            if (it == state_->pending.end()) return false;
+            pending = it->second;
+        }
+        Result result; result.error = "rpc: cancelled";
+        return finish(state_, router_, pending, result);
+    }
+    void cancelAll() {
+        auto state = state_; auto router = router_;
+        std::vector<std::shared_ptr<Pending>> pending;
+        { SwMutexLocker lock(state->mutex);
+          for (const auto& entry : state->pending) pending.push_back(entry.second); }
+        Result result; result.error = "rpc: cancelled";
+        for (const auto& call : pending) finish(state, router, call, result);
+    }
 private:
-    struct Waiter {
-        SwEventLoop loop;
-        bool done{false};
-        bool ok{false};
-        SwString error;
-        Ret value{};
-
-        /**
-         * @brief Performs the `wake` operation.
-         * @param okIn Value passed to the method.
-         * @param errIn Value passed to the method.
-         * @param vIn Value passed to the method.
-         */
-        void wake(bool okIn, const SwString& errIn, const Ret& vIn) {
-            done = true;
-            ok = okIn;
-            error = errIn;
-            value = vIn;
-            loop.quit();
-        }
-    };
-
     struct Pending {
-        uint64_t callId{0};
-        Waiter* waiter{nullptr};
-        /**
-         * @brief Performs the `function<void` operation.
-         * @return The requested function<void.
-         */
-        std::function<void(const Ret&)> onOk;
-
-        /**
-         * @brief Constructs a `Pending` instance.
-         *
-         * @details The instance is initialized and prepared for immediate use.
-         */
-        Pending() {}
-        /**
-         * @brief Constructs a `Pending` instance.
-         * @param id Value passed to the method.
-         * @param w Width value.
-         *
-         * @details The instance is initialized and prepared for immediate use.
-         */
-        Pending(uint64_t id, Waiter* w) : callId(id), waiter(w) {}
-        /**
-         * @brief Constructs a `Pending` instance.
-         * @param id Value passed to the method.
-         *
-         * @details The instance is initialized and prepared for immediate use.
-         */
-        Pending(uint64_t id, std::function<void(const Ret&)> cb) : callId(id), waiter(nullptr), onOk(std::move(cb)) {}
+        uint64_t id{0};
+        std::atomic_bool done{false};
+        Result result;
+        Completion complete;
+        int timer{0};
     };
-
-    template <size_t Capacity>
-    void initQueuesCap_() {
-        typedef RingQueue<Capacity, uint64_t, uint32_t, SwString, Args...> ReqQueue;
-        typedef RingQueue<Capacity, uint64_t, bool, SwString, Ret> RespQueue;
-
-        std::shared_ptr<ReqQueue> req(new ReqQueue(reg_, rpcRequestQueueName(method_)));
-        std::shared_ptr<RespQueue> resp(new RespQueue(reg_, rpcResponseQueueName(method_, pid_)));
-
-        reqHolder_ = req;
-        respHolder_ = resp;
-
-        reqPush_ = [req](uint64_t callId, uint32_t pid, const SwString& clientInfo, const Args&... argsIn) -> bool {
-            return req->push(callId, pid, clientInfo, argsIn...);
-        };
-
-#if defined(_WIN32)
-        respWakeEvent_ = [resp]() -> HANDLE { return resp->wakeEvent(); };
-#endif
-
-        startResponseListenerFn_ = [this, resp]() {
-            typedef typename RespQueue::Subscription SubT;
-            std::shared_ptr<SubT> sub(new SubT(resp->connect(
-                [this](uint64_t callId, bool ok, SwString err, Ret value) {
-                    onResponse_(callId, ok, err, value);
-                },
-                /*fireInitial=*/true)));
-            loopSubHolder_ = sub;
-            stopResponseListenerFn_ = [sub]() { sub->stop(); };
-        };
-    }
-
-    void initQueues_() {
-        const uint32_t cap = rpcQueueCapacity();
-        switch (cap) {
-            case 10u:  initQueuesCap_<10>(); break;
-            case 25u:  initQueuesCap_<25>(); break;
-            case 50u:  initQueuesCap_<50>(); break;
-            case 100u: initQueuesCap_<100>(); break;
-            case 200u: initQueuesCap_<200>(); break;
-            case 500u: initQueuesCap_<500>(); break;
-            case 1000u: initQueuesCap_<1000>(); break;
-            default:   initQueuesCap_<1000>(); break;
+    struct State {
+        SwMutex mutex;
+        bool closed{false};
+        SwString lastError;
+        std::map<uint64_t, std::shared_ptr<Pending>> pending;
+    };
+    static void stopTimer(const std::shared_ptr<Pending>& pending) {
+        if (pending->timer) {
+            if (auto app = SwCoreApplication::instance(false)) app->removeTimer(pending->timer);
+            pending->timer = 0;
         }
     }
-
-    void startResponseListener_() {
-        if (startResponseListenerFn_) {
-            startResponseListenerFn_();
-        }
-    }
-
-    void stopResponseListener_() {
-        if (stopResponseListenerFn_) {
-            stopResponseListenerFn_();
-            stopResponseListenerFn_ = std::function<void()>();
-        }
-        loopSubHolder_.reset();
-    }
-
-    void onResponse_(uint64_t callId, bool ok, const SwString& err, const Ret& value) {
-        Pending p;
+    static bool finish(const std::shared_ptr<State>& state, const std::shared_ptr<Router>& router,
+                       const std::shared_ptr<Pending>& pending, const Result& result) {
+        Completion complete;
         {
-            std::lock_guard<RpcSpinMutex_> lk(mutex_);
-            typename std::map<uint64_t, Pending>::iterator it = pending_.find(callId);
-            if (it == pending_.end()) return;
-            p = it->second;
-            pending_.erase(it);
+            SwMutexLocker lock(state->mutex);
+            if (state->closed || pending->done.load(std::memory_order_acquire)) return false;
+            router->remove(pending->id);
+            stopTimer(pending);
+            state->pending.erase(pending->id);
+            pending->result = result;
+            state->lastError = result.error;
+            complete = std::move(pending->complete);
+            pending->done.store(true, std::memory_order_release);
         }
-
-        if (p.waiter) {
-            p.waiter->wake(ok, err, value);
-        } else if (p.onOk) {
-            if (ok) p.onOk(value);
-        }
-    }
-
-    void waitForResponse_(Waiter& waiter, int timeoutMs) {
-        const auto t0 = std::chrono::steady_clock::now();
-        const auto deadline = (timeoutMs > 0) ? (t0 + std::chrono::milliseconds(timeoutMs)) : t0;
-        SwCoreApplication* app = SwCoreApplication::instance(false);
-
-        sw::ipc::detail::LoopPoller::instance().dispatch();
-
-        while (!waiter.done) {
-            if (timeoutMs > 0 && std::chrono::steady_clock::now() >= deadline) break;
-
-            if (app) {
-                (void)app->processEvent(false);
-            }
-
-#if defined(_WIN32)
-            HANDLE h = respWakeEvent_ ? respWakeEvent_() : NULL;
-            DWORD waitMs = 1;
-            if (timeoutMs > 0) {
-                const auto now = std::chrono::steady_clock::now();
-                const auto rem = (deadline > now)
-                    ? std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count()
-                    : 0;
-                waitMs = (rem > 0) ? static_cast<DWORD>(rem > 1 ? 1 : rem) : 0;
-            }
-            if (h) {
-                (void)::WaitForSingleObject(h, waitMs);
-            } else {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-#else
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-#endif
-
-            sw::ipc::detail::LoopPoller::instance().dispatch();
-        }
-    }
-
-    bool erasePending_(uint64_t callId) {
-        std::lock_guard<RpcSpinMutex_> lk(mutex_);
-        typename std::map<uint64_t, Pending>::iterator it = pending_.find(callId);
-        if (it == pending_.end()) return false;
-        pending_.erase(it);
+        if (complete) complete(result);
         return true;
     }
-
-    void setLastError_(const SwString& e) const {
-        std::lock_guard<RpcSpinMutex_> lk(mutex_);
-        lastError_ = e;
+    std::shared_ptr<Pending> begin(Completion complete, const Args&... args) {
+        auto pending = std::make_shared<Pending>();
+        pending->id = nextRpcCallId();
+        pending->complete = std::move(complete);
+        {
+            SwMutexLocker lock(state_->mutex);
+            state_->lastError.clear();
+            state_->pending[pending->id] = pending;
+        }
+        std::weak_ptr<State> weak = state_;
+        std::weak_ptr<Router> router = router_;
+        Traits::listen(*router_, pending->id, [weak, router, pending](const Result& result) {
+            auto state = weak.lock(); auto response = router.lock();
+            if (state && response) finish(state, response, pending, result);
+        });
+        if (!request_(pending->id, pid_, clientInfo_, args...)) {
+            Result result; result.error = "rpc: request queue full (or payload too large)";
+            finish(state_, router_, pending, result);
+        }
+        return pending;
     }
-
-    void clearLastError_() const {
-        std::lock_guard<RpcSpinMutex_> lk(mutex_);
-        lastError_.clear();
+    template<size_t Capacity> void initRequest() {
+        using Queue = RingQueue<Capacity, uint64_t, uint32_t, SwString, Args...>;
+        auto queue = std::make_shared<Queue>(registry_, rpcRequestQueueName(method_));
+        request_ = [queue](uint64_t id, uint32_t pid, const SwString& info, const Args&... args) {
+            return queue->push(id, pid, info, args...);
+        };
     }
-
-    Registry reg_;
+    Registry registry_;
     SwString method_;
     SwString clientInfo_;
-    std::shared_ptr<std::atomic_bool> alive_;
-    uint32_t pid_{0};
-
-    std::shared_ptr<void> reqHolder_;
-    std::shared_ptr<void> respHolder_;
-    std::shared_ptr<void> loopSubHolder_;
-    std::function<bool(uint64_t, uint32_t, const SwString&, const Args&...)> reqPush_;
-    std::function<void()> startResponseListenerFn_;
-    std::function<void()> stopResponseListenerFn_;
-#if defined(_WIN32)
-    std::function<HANDLE()> respWakeEvent_;
-#endif
-
-    mutable RpcSpinMutex_ mutex_;
-    mutable SwString lastError_;
-    std::map<uint64_t, Pending> pending_;
-    std::atomic<uint64_t> nextCallId_{1};
-};
-
-// void specialization (no return value on success)
-template <typename... Args>
-class RpcMethodClient<void, Args...> {
-public:
-    /**
-     * @brief Performs the `RpcMethodClient` operation.
-     * @param domain Value passed to the method.
-     * @param object Value passed to the method.
-     * @param methodName Value passed to the method.
-     * @param clientInfo Value passed to the method.
-     */
-    RpcMethodClient(const SwString& domain,
-                    const SwString& object,
-                    const SwString& methodName,
-                    const SwString& clientInfo = SwString())
-        : reg_(domain, object),
-          method_(methodName),
-          clientInfo_(clientInfo),
-          alive_(new std::atomic_bool(true)),
-          pid_(detail::currentPid()) {
-        initQueues_();
-        startResponseListener_();
-    }
-
-    /**
-     * @brief Destroys the `Args` instance.
-     *
-     * @details Use this hook to release any resources that remain associated with the instance.
-     */
-    ~RpcMethodClient() {
-        if (alive_) alive_->store(false, std::memory_order_release);
-        stopResponseListener_();
-    }
-
-    /**
-     * @brief Performs the `RpcMethodClient` operation.
-     */
-    RpcMethodClient(const RpcMethodClient&) = delete;
-    /**
-     * @brief Performs the `operator=` operation.
-     * @return The requested operator =.
-     */
-    RpcMethodClient& operator=(const RpcMethodClient&) = delete;
-
-    /**
-     * @brief Returns the current last Error.
-     * @return The current last Error.
-     *
-     * @details The returned value reflects the state currently stored by the instance.
-     */
-    SwString lastError() const {
-        std::lock_guard<RpcSpinMutex_> lk(mutex_);
-        return lastError_;
-    }
-
-    /**
-     * @brief Performs the `call` operation.
-     * @param args Value passed to the method.
-     * @param timeoutMs Timeout expressed in milliseconds.
-     * @return `true` on success; otherwise `false`.
-     */
-    bool call(const Args&... args, int timeoutMs = 2000) {
-        clearLastError_();
-
-        const uint64_t callId = nextCallId_++;
-
-        Waiter waiter;
-        {
-            std::lock_guard<RpcSpinMutex_> lk(mutex_);
-            pending_[callId] = Pending(callId, &waiter);
-        }
-
-        if (!reqPush_ || !reqPush_(callId, pid_, clientInfo_, args...)) {
-            erasePending_(callId);
-            setLastError_("rpc: request queue full (or payload too large)");
-            return false;
-        }
-
-        waitForResponse_(waiter, timeoutMs);
-
-        if (erasePending_(callId)) {
-            setLastError_("rpc: timeout");
-            return false;
-        }
-
-        if (!waiter.done) {
-            setLastError_("rpc: timeout");
-            return false;
-        }
-        if (!waiter.ok) {
-            setLastError_(waiter.error);
-            return false;
-        }
-        return true;
-    }
-
-    /**
-     * @brief Performs the `callAsync` operation.
-     * @param args Value passed to the method.
-     * @param onDone Value passed to the method.
-     * @param timeoutMs Timeout expressed in milliseconds.
-     */
-    void callAsync(const Args&... args, std::function<void(bool ok)> onDone, int timeoutMs = 2000) {
-        clearLastError_();
-        const uint64_t callId = nextCallId_++;
-        {
-            std::lock_guard<RpcSpinMutex_> lk(mutex_);
-            pending_[callId] = Pending(callId, std::move(onDone));
-        }
-
-        if (!reqPush_ || !reqPush_(callId, pid_, clientInfo_, args...)) {
-            erasePending_(callId);
-            setLastError_("rpc: request queue full (or payload too large)");
-            return;
-        }
-
-        SwCoreApplication* app = SwCoreApplication::instance(false);
-        if (timeoutMs > 0 && app) {
-            const std::shared_ptr<std::atomic_bool> alive = alive_;
-            app->addTimer([this, alive, callId]() {
-                if (!alive || !alive->load(std::memory_order_acquire)) return;
-                (void)erasePending_(callId);
-            }, timeoutMs * 1000, /*singleShot=*/true);
-        }
-    }
-
-private:
-    struct Waiter {
-        SwEventLoop loop;
-        bool done{false};
-        bool ok{false};
-        SwString error;
-
-        /**
-         * @brief Performs the `wake` operation.
-         * @param okIn Value passed to the method.
-         * @param errIn Value passed to the method.
-         */
-        void wake(bool okIn, const SwString& errIn) {
-            done = true;
-            ok = okIn;
-            error = errIn;
-            loop.quit();
-        }
-    };
-
-    struct Pending {
-        uint64_t callId{0};
-        Waiter* waiter{nullptr};
-        /**
-         * @brief Performs the `function<void` operation.
-         * @param ok Optional flag updated to report success.
-         * @return The requested function<void.
-         */
-        std::function<void(bool ok)> onDone;
-
-        /**
-         * @brief Constructs a `Pending` instance.
-         *
-         * @details The instance is initialized and prepared for immediate use.
-         */
-        Pending() {}
-        /**
-         * @brief Constructs a `Pending` instance.
-         * @param id Value passed to the method.
-         * @param w Width value.
-         *
-         * @details The instance is initialized and prepared for immediate use.
-         */
-        Pending(uint64_t id, Waiter* w) : callId(id), waiter(w) {}
-        /**
-         * @brief Constructs a `Pending` instance.
-         * @param id Value passed to the method.
-         *
-         * @details The instance is initialized and prepared for immediate use.
-         */
-        Pending(uint64_t id, std::function<void(bool)> cb) : callId(id), waiter(nullptr), onDone(std::move(cb)) {}
-    };
-
-    template <size_t Capacity>
-    void initQueuesCap_() {
-        typedef RingQueue<Capacity, uint64_t, uint32_t, SwString, Args...> ReqQueue;
-        typedef RingQueue<Capacity, uint64_t, bool, SwString> RespQueue;
-
-        std::shared_ptr<ReqQueue> req(new ReqQueue(reg_, rpcRequestQueueName(method_)));
-        std::shared_ptr<RespQueue> resp(new RespQueue(reg_, rpcResponseQueueName(method_, pid_)));
-
-        reqHolder_ = req;
-        respHolder_ = resp;
-
-        reqPush_ = [req](uint64_t callId, uint32_t pid, const SwString& clientInfo, const Args&... argsIn) -> bool {
-            return req->push(callId, pid, clientInfo, argsIn...);
-        };
-
-#if defined(_WIN32)
-        respWakeEvent_ = [resp]() -> HANDLE { return resp->wakeEvent(); };
-#endif
-
-        startResponseListenerFn_ = [this, resp]() {
-            typedef typename RespQueue::Subscription SubT;
-            std::shared_ptr<SubT> sub(new SubT(resp->connect(
-                [this](uint64_t callId, bool ok, SwString err) {
-                    onResponse_(callId, ok, err);
-                },
-                /*fireInitial=*/true)));
-            loopSubHolder_ = sub;
-            stopResponseListenerFn_ = [sub]() { sub->stop(); };
-        };
-    }
-
-    void initQueues_() {
-        const uint32_t cap = rpcQueueCapacity();
-        switch (cap) {
-            case 10u:  initQueuesCap_<10>(); break;
-            case 25u:  initQueuesCap_<25>(); break;
-            case 50u:  initQueuesCap_<50>(); break;
-            case 100u: initQueuesCap_<100>(); break;
-            case 200u: initQueuesCap_<200>(); break;
-            case 500u: initQueuesCap_<500>(); break;
-            case 1000u: initQueuesCap_<1000>(); break;
-            default:   initQueuesCap_<1000>(); break;
-        }
-    }
-
-    void startResponseListener_() {
-        if (startResponseListenerFn_) {
-            startResponseListenerFn_();
-        }
-    }
-
-    void stopResponseListener_() {
-        if (stopResponseListenerFn_) {
-            stopResponseListenerFn_();
-            stopResponseListenerFn_ = std::function<void()>();
-        }
-        loopSubHolder_.reset();
-    }
-
-    void onResponse_(uint64_t callId, bool ok, const SwString& err) {
-        Pending p;
-        {
-            std::lock_guard<RpcSpinMutex_> lk(mutex_);
-            typename std::map<uint64_t, Pending>::iterator it = pending_.find(callId);
-            if (it == pending_.end()) return;
-            p = it->second;
-            pending_.erase(it);
-        }
-
-        if (p.waiter) {
-            p.waiter->wake(ok, err);
-        } else if (p.onDone) {
-            p.onDone(ok);
-        }
-    }
-
-    void waitForResponse_(Waiter& waiter, int timeoutMs) {
-        const auto t0 = std::chrono::steady_clock::now();
-        const auto deadline = (timeoutMs > 0) ? (t0 + std::chrono::milliseconds(timeoutMs)) : t0;
-        SwCoreApplication* app = SwCoreApplication::instance(false);
-
-        sw::ipc::detail::LoopPoller::instance().dispatch();
-
-        while (!waiter.done) {
-            if (timeoutMs > 0 && std::chrono::steady_clock::now() >= deadline) break;
-
-            if (app) {
-                (void)app->processEvent(false);
-            }
-
-#if defined(_WIN32)
-            HANDLE h = respWakeEvent_ ? respWakeEvent_() : NULL;
-            DWORD waitMs = 1;
-            if (timeoutMs > 0) {
-                const auto now = std::chrono::steady_clock::now();
-                const auto rem = (deadline > now)
-                    ? std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count()
-                    : 0;
-                waitMs = (rem > 0) ? static_cast<DWORD>(rem > 1 ? 1 : rem) : 0;
-            }
-            if (h) {
-                (void)::WaitForSingleObject(h, waitMs);
-            } else {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-#else
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-#endif
-
-            sw::ipc::detail::LoopPoller::instance().dispatch();
-        }
-    }
-
-    bool erasePending_(uint64_t callId) {
-        std::lock_guard<RpcSpinMutex_> lk(mutex_);
-        typename std::map<uint64_t, Pending>::iterator it = pending_.find(callId);
-        if (it == pending_.end()) return false;
-        pending_.erase(it);
-        return true;
-    }
-
-    void setLastError_(const SwString& e) const {
-        std::lock_guard<RpcSpinMutex_> lk(mutex_);
-        lastError_ = e;
-    }
-
-    void clearLastError_() const {
-        std::lock_guard<RpcSpinMutex_> lk(mutex_);
-        lastError_.clear();
-    }
-
-    Registry reg_;
-    SwString method_;
-    SwString clientInfo_;
-    std::shared_ptr<std::atomic_bool> alive_;
-    uint32_t pid_{0};
-
-    std::shared_ptr<void> reqHolder_;
-    std::shared_ptr<void> respHolder_;
-    std::shared_ptr<void> loopSubHolder_;
-    std::function<bool(uint64_t, uint32_t, const SwString&, const Args&...)> reqPush_;
-    std::function<void()> startResponseListenerFn_;
-    std::function<void()> stopResponseListenerFn_;
-#if defined(_WIN32)
-    std::function<HANDLE()> respWakeEvent_;
-#endif
-
-    mutable RpcSpinMutex_ mutex_;
-    mutable SwString lastError_;
-    std::map<uint64_t, Pending> pending_;
-    std::atomic<uint64_t> nextCallId_{1};
+    std::shared_ptr<State> state_;
+    uint32_t pid_;
+    std::shared_ptr<Router> router_;
+    std::function<bool(uint64_t, uint32_t, const SwString&, const Args&...)> request_;
 };
 
 } // namespace ipc

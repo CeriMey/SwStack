@@ -83,6 +83,7 @@ static constexpr const char* kSwLogCategory_SwString = "sw.core.types.swstring";
 #include "SwByteArray.h"
 #include "SwChar.h"
 #include "Sw.h"
+#include "SwStringNumeric.h"
 
 
 class SwRegularExpression;
@@ -261,14 +262,6 @@ public:
      */
     char& operator[](size_t index) { return data_[index]; }
 
-    /**
-     * @brief Returns the current string.
-     * @return The current string.
-     *
-     * @details The returned value reflects the state currently stored by the instance.
-     */
-    operator std::string() const { return data_; }
-
     // MÃ©thodes de base
     /**
      * @brief Performs the `size` operation.
@@ -364,6 +357,15 @@ public:
      * @param capacity Value passed to the method.
      */
     void reserve(size_t capacity) { data_.reserve(capacity); }
+
+    // Complete unsigned conversion; 0 on failure, with optional success flag.
+    // Bases 2..36 are supported. Base 0 recognizes 0x, 0b and leading-zero octal.
+    unsigned int toUInt(bool* ok = nullptr, int base = 10) const {
+        return sw::detail::stringToUnsigned<unsigned int>(data_.data(), data_.size(), ok, base);
+    }
+    unsigned long long toULongLong(bool* ok = nullptr, int base = 10) const {
+        return sw::detail::stringToUnsigned<unsigned long long>(data_.data(), data_.size(), ok, base);
+    }
 
     /**
      * @brief Performs the `toInt` operation.

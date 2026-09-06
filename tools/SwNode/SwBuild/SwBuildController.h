@@ -14,6 +14,7 @@ public:
     explicit SwBuildController(const SwBuildOptions& options, SwObject* parent = nullptr);
 
     void start();
+    bool succeeded() const { return succeeded_; }
 
 private:
     enum class Stage {
@@ -47,6 +48,7 @@ private:
     SwList<SwBuildProject> projects_;
     int currentIndex_{0};
     Stage stage_{Stage::Configure};
+    bool succeeded_{false};
 
     SwProcess* process_{nullptr};
     SwFile* logFile_{nullptr};

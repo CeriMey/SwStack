@@ -14,7 +14,7 @@ enum VisitMark {
 
 bool SwBuildDependencyResolver::sort(SwList<SwBuildProject>& projects, SwString& errOut) const {
     errOut.clear();
-    if (projects.size() <= 1) return true;
+    if (projects.isEmpty()) return true;
 
     SwMap<SwString, SwBuildProject*> projectByDir;
     for (int i = 0; i < projects.size(); ++i) {
