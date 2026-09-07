@@ -47,6 +47,7 @@
  */
 
 
+#include "SwJsonStringScan.h"
 #include <string>
 #include <memory>
 #include <cmath>
@@ -389,34 +390,52 @@ public:
      * @brief Escapes a string so that it can be safely embedded in JSON output.
      */
     static SwString escapeString(const SwString& value) {
-        const std::string raw = value.toStdString();
         SwString result;
-        result.reserve(raw.size());
-        for (unsigned char c : raw) {
+        result.reserve(value.size());
+        appendEscapedString(result, value);
+        return result;
+    }
+
+    /** Append JSON-escaped bytes directly. Supports embedded NUL and self-append. */
+    static void appendEscapedString(SwString& output, const SwString& value) {
+        if (&output == &value) {
+            const SwString copy(value);
+            appendEscapedString(output, copy);
+            return;
+        }
+        const char* raw = value.constData();
+        const size_t size = value.size();
+        size_t i = 0;
+        while (i < size) {
+            const size_t span = swJsonDetail::ordinarySpan(raw + i, size - i);
+            if (span) output.append(raw + i, span);
+            i += span;
+            if (i == size) break;
+            const unsigned char c = static_cast<unsigned char>(raw[i++]);
             switch (c) {
-            case '\"': result += "\\\""; break;
-            case '\\': result += "\\\\"; break;
-            case '\b': result += "\\b"; break;
-            case '\f': result += "\\f"; break;
-            case '\n': result += "\\n"; break;
-            case '\r': result += "\\r"; break;
-            case '\t': result += "\\t"; break;
-            default:
-                if (c < 0x20) {
-                    static const char* hexDigits = "0123456789ABCDEF";
-                    result.append('\\');
-                    result.append('u');
-                    result.append('0');
-                    result.append('0');
-                    result.append(hexDigits[(c >> 4) & 0x0F]);
-                    result.append(hexDigits[c & 0x0F]);
-                } else {
-                    result.append(static_cast<char>(c));
-                }
+            case '"': output += "\\\""; break;
+            case '\\': output += "\\\\"; break;
+            case '\b': output += "\\b"; break;
+            case '\f': output += "\\f"; break;
+            case '\n': output += "\\n"; break;
+            case '\r': output += "\\r"; break;
+            case '\t': output += "\\t"; break;
+            default: {
+                static const char hex[] = "0123456789ABCDEF";
+                const char escaped[] = {'\\', 'u', '0', '0', hex[c >> 4], hex[c & 15]};
+                output.append(escaped, sizeof(escaped));
                 break;
             }
+            }
         }
-        return result;
+    }
+
+    /** Borrow the stored string, or an empty string for other types. The reference
+     * remains valid until this value is modified/destroyed. No conversion/copy.
+     */
+    const SwString& stringRef() const {
+        static const SwString empty;
+        return isString() ? stringValue_ : empty;
     }
 
     /**

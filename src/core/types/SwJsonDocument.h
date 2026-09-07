@@ -433,9 +433,8 @@ private:
         SwString childIndent = pretty ? SwString((indentLevel + 1) * 2, ' ') : SwString("");
 
         auto appendEscaped = [&](const SwString& raw) {
-            SwString escaped = SwJsonValue::escapeString(raw);
             output += "\"";
-            output += escaped;
+            SwJsonValue::appendEscapedString(output, raw);
             output += "\"";
         };
 
@@ -445,9 +444,9 @@ private:
 
         if (value.isString()) {
             if (encryptionKey.isEmpty()) {
-                appendEscaped(value.toString());
+                appendEscaped(value.stringRef());
             } else {
-                appendEncryptedScalar("string", value.toString());
+                appendEncryptedScalar("string", value.stringRef());
             }
         } else if (value.isBool()) {
             SwString boolStr = value.toBool() ? "true" : "false";
@@ -475,9 +474,8 @@ private:
                     first = false;
 
                     if (pretty) output += childIndent;
-                    SwString escapedKey = SwJsonValue::escapeString(pair.first);
                     output += "\"";
-                    output += escapedKey;
+                    SwJsonValue::appendEscapedString(output, pair.first);
                     output += "\": ";
                     generateJson(pair.second, output, pretty, indentLevel + 1, encryptionKey);
                 }
@@ -783,6 +781,10 @@ private:
         SwString result;
 
         while (index < jsonString.size()) {
+            const size_t span = swJsonDetail::ordinarySpan(jsonString.constData() + index, jsonString.size() - index);
+            if (span) result.append(jsonString.constData() + index, span);
+            index += span;
+            if (index == jsonString.size()) break;
             char c = jsonString[index];
             if (c == '\"') {
                 ++index;

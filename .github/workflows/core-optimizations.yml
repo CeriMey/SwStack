@@ -1,0 +1,35 @@
+name: Core portability and optimization tests
+on:
+  push:
+    paths: ['src/**', 'tests/core_optimizations/**', '.github/workflows/core-optimizations.yml']
+  pull_request:
+    paths: ['src/**', 'tests/core_optimizations/**', '.github/workflows/core-optimizations.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  core:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            configure: ''
+          - os: ubuntu-24.04-arm
+            configure: ''
+          - os: windows-2022
+            configure: '-A x64'
+          - os: windows-11-arm
+            configure: '-A ARM64'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+      - name: Configure
+        run: cmake -S tests/core_optimizations -B build/core-tests -DCMAKE_BUILD_TYPE=Release ${{ matrix.configure }}
+      - name: Build
+        run: cmake --build build/core-tests --config Release --parallel 4
+      - name: Test SIMD, scalar, JSON and transports
+        run: ctest --test-dir build/core-tests -C Release --output-on-failure

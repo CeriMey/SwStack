@@ -21,7 +21,9 @@ inline SwString indentation(int indentLevel)
 inline void appendJsonValue(const SwJsonValue& value, SwString& out, bool compact, int indentLevel)
 {
     if (value.isString()) {
-        out += SwString("\"") + SwJsonValue::escapeString(value.toString()) + "\"";
+        out += "\"";
+        SwJsonValue::appendEscapedString(out, value.stringRef());
+        out += "\"";
         return;
     }
     if (value.isBool()) {
@@ -109,7 +111,9 @@ inline SwString SwJsonObject::toJsonString(bool compact, int indentLevel) const
 
         if (!compact) out += SwString("\n") + childIndent;
 
-        out += SwString("\"") + SwJsonValue::escapeString(pair.first) + "\":";
+        out += "\"";
+        SwJsonValue::appendEscapedString(out, pair.first);
+        out += "\":";
         if (!compact) out += " ";
         swJsonDetail::appendJsonValue(pair.second, out, compact, indentLevel + 1);
     }
