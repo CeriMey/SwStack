@@ -38,6 +38,23 @@ auto subscription = changed.connect(&receiver, [&](const SwString& text) {
 bool accepted = changed.publishShared(values);
 ```
 
+The same owner can be emitted with the ordinary signal syntax. Inside a
+`SwRemoteObject`, a member declared with `SW_IPC_SIGNAL` or
+`SW_IPC_SIGNAL_SIZED` accepts both forms:
+
+```cpp
+emit changed(text);               // ordinary protected snapshot
+emit changed(values);             // retain the immutable tuple owner
+emit changed(std::move(values));  // transfer this handle to the shared path
+```
+
+The owner overload forwards directly to `publishShared` without copying the
+payload. It recognizes `SharedValues` and `std::shared_ptr<Values>`, including
+const handles and rvalues. The immutability contract below also applies to
+mutable tuple owners. Other argument types retain the ordinary overload,
+including braced values such as `emit countChanged({})`. To emit an empty owner
+and get `false`, use a typed empty `SharedValues` handle.
+
 Construct the tuple in place or move arguments into it to avoid copying while
 preparing the owner. For multiple arguments, use for example
 `SwIpcSignal<uint64_t, SwString>::Values`. Zero-argument signals use an empty

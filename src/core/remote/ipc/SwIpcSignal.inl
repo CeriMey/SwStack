@@ -200,6 +200,16 @@ public:
         return accepted;
     }
     bool operator()(const Args&... args) { return publish(args...); }
+    // Keep emit signal(owner) on the shared path without intercepting ordinary
+    // payload conversions or making emit signal({}) ambiguous.
+    template <class Owner>
+    typename std::enable_if<
+        std::is_same<typename std::decay<Owner>::type, SharedValues>::value ||
+        std::is_same<typename std::decay<Owner>::type, std::shared_ptr<Values>>::value,
+        bool>::type
+    operator()(Owner&& values) {
+        return publishShared(std::forward<Owner>(values));
+    }
     bool readLatest(Args&... args) const { return ring_.readLatest(args...); }
     uint32_t maxBytes() const { return ring_.maxPayload(); }
     uint32_t capacity() const { return ring_.capacity(); }

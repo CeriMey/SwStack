@@ -53,6 +53,8 @@ class Node : public SwRemoteObject {
 public:
     Node(const SwString& domain, const SwString& name) : SwRemoteObject(domain, "sharing", name) {}
     SW_IPC_SIGNAL_SIZED(data, 4096, SharedPayload);
+    bool send(const SharedPayload& value) { return emit data(value); }
+    bool sendOwned(const Signal::SharedValues& values) { return emit data(values); }
 };
 static void directAndNamed(const SwString& domain) {
     Node publisher(domain, "source"), receiver(domain, "receiver");
@@ -69,7 +71,7 @@ static void directAndNamed(const SwString& domain) {
     require(token && scoped, "named/scoped connection failed");
     SharedPayload input(42);
     SharedPayload::copies = SharedPayload::decoded = 0;
-    require(publisher.data.publish(input), "ordinary publication failed");
+    require(publisher.send(input), "ordinary SwRemoteObject emit failed");
     require(addresses.size() == 4 && SharedPayload::copies == 1 && SharedPayload::decoded == 0,
             "ordinary publication must capture once with no per-receiver copies");
     for (auto address : addresses)
@@ -77,10 +79,28 @@ static void directAndNamed(const SwString& domain) {
     addresses.clear();
     const auto shared = owned(42);
     SharedPayload::copies = 0;
-    require(publisher.data.publishShared(shared), "shared publication failed");
+    require(publisher.sendOwned(shared), "shared SwRemoteObject emit failed");
     require(addresses.size() == 4 && SharedPayload::copies == 0, "shared publication copied its payload");
     for (auto address : addresses)
         require(address == &std::get<0>(*shared), "shared publication did not preserve the original address");
+    addresses.clear();
+    auto mutableOwner = std::make_shared<Signal::Values>(SharedPayload(42));
+    SharedPayload::copies = 0;
+    require((emit publisher.data(mutableOwner)) && addresses.size() == 4 &&
+            SharedPayload::copies == 0, "mutable tuple owner was not recognized");
+    for (auto address : addresses)
+        require(address == &std::get<0>(*mutableOwner), "mutable owner payload was copied");
+    addresses.clear();
+    auto movedOwner = owned(42);
+    const auto originalAddress = &std::get<0>(*movedOwner);
+    require((emit publisher.data(std::move(movedOwner))) && !movedOwner &&
+            addresses.size() == 4 && SharedPayload::copies == 0, "rvalue owner was not moved");
+    for (auto address : addresses)
+        require(address == originalAddress, "rvalue owner lost its payload address");
+    const auto acceptedSequence = publisher.data.raw().sequence();
+    Signal::SharedValues nullOwner;
+    require(!(emit publisher.data(nullOwner)) &&
+            publisher.data.raw().sequence() == acceptedSequence, "empty emit owner was accepted");
     // A by-value slot still owns a private copy and can safely modify it.
     auto mutableSlot = publisher.data.connect([](SharedPayload value) { value.bytes[0] = 99; }, false);
     SharedPayload::copies = 0;
@@ -141,7 +161,7 @@ static void queuedOwnership(Registry& registry) {
         auto value = owned(i);
         expected.push_back(&std::get<0>(*value));
         if (i == 0) oldest = value;
-        require(replay.publishShared(value) && latest.publishShared(value), "queued publication failed");
+        require((emit replay(value)) && (emit latest(value)), "queued shared emit failed");
     }
     require(events == 0 && states == 0 && !oldest.expired(), "queued publication owner was released early");
     worker.release();
@@ -171,7 +191,7 @@ static void yieldAndReentrancy(Registry& registry) {
                 "yield/reentrant publication invalidated the active reference");
     }, false);
     SharedPayload::copies = SharedPayload::decoded = 0;
-    require(signal.publishShared(input), "yielding publication failed");
+    require((emit signal(input)), "yielding shared emit failed");
     require(received == std::vector<int>({1, 2}) && life.expired() &&
             SharedPayload::copies == 0 && SharedPayload::decoded == 0,
             "yield/reentrancy copied, retained or reordered publications");
@@ -239,12 +259,19 @@ static void tupleAndEmpty(Registry& registry) {
     auto connection = pair.connect([&](const int& number, const SwString& text) {
         called = &number == &std::get<0>(*value) && &text == &std::get<1>(*value);
     }, false);
-    require(pair.publishShared(value) && called, "multiple argument references were not preserved");
+    require((emit pair(value)) && called, "multiple argument references were not preserved");
     SwIpcSignal<> empty(registry, "empty");
     int calls = 0;
     auto noArgs = empty.connect([&] { ++calls; }, false);
-    require(empty.publishShared(std::make_shared<const SwIpcSignal<>::Values>()) &&
-            empty.publish() && calls == 2, "zero argument signal changed");
+    require((emit empty(std::make_shared<const SwIpcSignal<>::Values>())) &&
+            (emit empty()) && calls == 2, "zero argument signal changed");
+    SwIpcSignal<int> scalar(registry, "scalar_braces");
+    int observed = -1;
+    auto integer = scalar.connect([&](int number) { observed = number; }, false);
+    require((emit scalar({})) && observed == 0, "ordinary braced emit became ambiguous");
+    require((emit scalar(42)) && observed == 42, "ordinary scalar emit changed");
+    static_assert(!std::is_invocable<Signal&, std::shared_ptr<const std::tuple<SwString>>>::value,
+                  "an unrelated shared owner must not select the native publication overload");
 }
 int main(int argc, char** argv) {
     try {
