@@ -7,9 +7,10 @@ namespace sw { namespace ipc {
 // that a generic subscriber never creates a channel with guessed dimensions.
 template <class... Args>
 class NamedSignalConnection {
+    typedef typename SwIpcSignal<Args...>::Callback Callback;
     struct State : std::enable_shared_from_this<State> {
         State(const SwString& domain, const SwString& object, const SwString& leaf,
-              SwObject* receiver, std::function<void(Args...)> cb, bool initial)
+              SwObject* receiver, Callback cb, bool initial)
             : registry(domain, object), name(leaf), context(receiver), life(receiver->lifetimeToken()),
               callback(std::move(cb)), fireInitial(initial),
               eventsRegistry(domain, detail::registryEventsObjectName_()) {}
@@ -17,7 +18,7 @@ class NamedSignalConnection {
         SwString name;
         SwObject* context;
         std::weak_ptr<void> life;
-        std::function<void(Args...)> callback;
+        Callback callback;
         bool fireInitial;
         bool stopped{false}, attaching{false};
         std::recursive_mutex mutex;
@@ -75,7 +76,7 @@ class NamedSignalConnection {
     };
 public:
     NamedSignalConnection(const SwString& domain, const SwString& object, const SwString& leaf,
-                          SwObject* context, std::function<void(Args...)> callback, bool fireInitial)
+                          SwObject* context, Callback callback, bool fireInitial)
         : state_(std::make_shared<State>(domain, object, leaf, context, std::move(callback), fireInitial)) {
         state_->start();
     }

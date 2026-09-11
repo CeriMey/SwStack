@@ -1914,7 +1914,7 @@ protected:
             }
             sw::ipc::detail::ScopedSubscriberObject subScope(self->ipcRegistry_.object());
             std::shared_ptr<std::atomic_bool> alive = self ? self->alive_ : std::shared_ptr<std::atomic_bool>();
-            auto wrapped = [alive, cb](A... args) mutable {
+            auto wrapped = [alive, cb](const A&... args) mutable {
                 if (alive && alive->load(std::memory_order_relaxed)) cb(args...);
             };
             sw::ipc::NamedSignalConnection<A...> sub(ns, obj, leaf, self, wrapped, fireInitial);

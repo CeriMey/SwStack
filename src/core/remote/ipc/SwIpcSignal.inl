@@ -3,39 +3,43 @@
 // remains available while its subscribers drain, including reentrant emits.
 template <class... Args>
 class SwIpcSignal {
+public:
+    // SharedValues owns an immutable publication. References passed to slots
+    // remain valid until that invocation returns, including cooperative yields.
     typedef std::tuple<typename std::decay<Args>::type...> Values;
+    typedef std::shared_ptr<const Values> SharedValues;
+    typedef std::function<void(const typename std::decay<Args>::type&...)> Callback;
+private:
     typedef RingQueueDynamic<Args...> Ring;
     struct Subscriber;
-    struct Publication {
-        explicit Publication(const Args&... args) : values(args...) {}
-        Values values;
-    };
     struct Channel {
         std::shared_ptr<std::recursive_mutex> mutex{new std::recursive_mutex};
         std::vector<std::weak_ptr<Subscriber>> subscribers;
         std::vector<std::weak_ptr<std::function<void()>>> declarations;
         bool declared{false};
-        std::map<uint64_t, std::shared_ptr<Publication>> publications;
+        std::map<uint64_t, SharedValues> publications;
         uint64_t origin() const {
             return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(this)) ^
                 (static_cast<uint64_t>(detail::currentPid()) << 32);
         }
     };
     static std::shared_ptr<Channel> channel(const SwString& name) {
-        return detail::nativeSignalChannel<Channel>(name.toStdString());
+        // The native layout changed; older modules must use the compatible wire
+        // path instead of interpreting this channel with their previous layout.
+        return detail::nativeSignalChannel<Channel>(name.toStdString() + ":shared-values-v1");
     }
 
     struct Subscriber : std::enable_shared_from_this<Subscriber> {
         std::shared_ptr<Channel> channel;
         typename Ring::Subscription wire;
-        std::function<void(Args...)> callback;
+        Callback callback;
         std::atomic_bool active{true};
         SwObject* context{nullptr};
         std::weak_ptr<void> contextLife;
         std::thread::id subscribedThread;
         DeliveryMode mode{DeliveryMode::Replay};
         std::mutex queueMutex;
-        std::vector<Values> pending;
+        std::vector<SharedValues> pending;
         bool scheduled{false};
 
         bool live() const { return active.load() && (!context || !contextLife.expired()); }
@@ -58,7 +62,7 @@ class SwIpcSignal {
             return context ? context->postToAffinity(std::move(task)) :
                 detail::postNativeSignalThread(subscribedThread, std::move(task));
         }
-        bool deliver(Values values) {
+        bool deliver(const SharedValues& values) {
             if (!live()) return true;
             bool direct = false;
             {
@@ -66,13 +70,13 @@ class SwIpcSignal {
                 direct = !scheduled && onTargetThread();
                 if (!direct) {
                     if (wire.deliveryMode() == DeliveryMode::LatestOnly) pending.clear();
-                    pending.push_back(std::move(values));
+                    pending.push_back(values);
                     if (scheduled) return true;
                     scheduled = true;
                 }
             }
             if (direct) {
-                if (live()) detail::invokeWithTuple(callback, values);
+                if (live()) detail::invokeWithTuple(callback, *values);
                 return true;
             }
             if (post()) return true;
@@ -88,7 +92,7 @@ class SwIpcSignal {
                 return;
             }
             for (;;) {
-                std::vector<Values> batch;
+                std::vector<SharedValues> batch;
                 {
                     std::lock_guard<std::mutex> lock(queueMutex);
                     if (pending.empty()) { scheduled = false; return; }
@@ -104,7 +108,7 @@ class SwIpcSignal {
                         if (!post()) { active.store(false); pending.clear(); }
                         return;
                     }
-                    try { detail::invokeWithTuple(callback, values); }
+                    try { detail::invokeWithTuple(callback, *values); }
                     catch (...) {
                         std::lock_guard<std::mutex> lock(queueMutex);
                         scheduled = false;
@@ -175,49 +179,25 @@ public:
     SwIpcSignal& operator=(const SwIpcSignal&) = delete;
 
     bool publish(const Args&... args) {
-        return publishWithCommit({}, args...);
+        return publishImpl({}, nullptr, args...);
     }
     // Internal state owners commit their cache after successful publication,
     // before any observer runs. Commit must only update owned state; it must
     // not call observers or publish recursively while the channel is locked.
     bool publishWithCommit(std::function<void()> commit, const Args&... args) {
-        const auto local = channel_;
-        std::vector<std::shared_ptr<Subscriber>> subscribers;
-        std::shared_ptr<Publication> publication;
-        {
-            std::lock_guard<std::recursive_mutex> lock(*local->mutex);
-            auto& weak = local->subscribers;
-            for (auto it = weak.begin(); it != weak.end();) {
-                auto sub = it->lock();
-                if (!sub || !sub->live()) it = weak.erase(it);
-                else { subscribers.push_back(std::move(sub)); ++it; }
-            }
-            uint64_t sequence = 0;
-            if (subscribers.empty()) {
-                if (!ring_.pushAs(defaultMode_, args...)) return false;
-                if (commit) commit();
-                return true;
-            }
-            publication = std::make_shared<Publication>(args...);
-            // SHM remains published for external and late subscribers. Local
-            // receivers use the typed snapshot instead of copying/decoding SHM.
-            if (!ring_.pushStampedAs(defaultMode_, local->origin(), sequence, args...)) return false;
-            if (commit) commit();
-            local->publications[sequence] = publication;
-            // Retain the bounded native backlog while a reentrant emission is
-            // waiting behind the current callback. Replay cursors protect it
-            // from being overwritten before the corresponding drain.
-            while (!local->publications.empty() &&
-                   sequence - local->publications.begin()->first >= ring_.capacity())
-                local->publications.erase(local->publications.begin());
-        }
-        // Arbitrary callbacks must run outside the channel lock: concurrent
-        // callbacks on two channels may themselves publish to each other.
-        for (const auto& sub : subscribers) if (sub->live()) sub->wire.drain();
-        // Publication success describes the accepted SHM write. A receiver
-        // whose thread has stopped cannot undo that write or the owner commit;
-        // reporting failure here would cause callers to retry an accepted event.
-        return true;
+        return publishImpl(std::move(commit), nullptr, args...);
+    }
+    // Avoid the initial snapshot copy when the caller already owns immutable
+    // values. No mutable alias may modify them while retained by the signal or
+    // any receiver. The usual wire codec, payload bound and replay rules apply.
+    bool publishShared(SharedValues values) {
+        if (!values) return false;
+        bool accepted = false;
+        auto publish = [this, &values, &accepted](const Args&... args) {
+            accepted = publishImpl({}, &values, args...);
+        };
+        detail::invokeWithTuple(publish, *values);
+        return accepted;
     }
     bool operator()(const Args&... args) { return publish(args...); }
     bool readLatest(Args&... args) const { return ring_.readLatest(args...); }
@@ -248,6 +228,45 @@ public:
         return connectImpl(context, std::move(callback), mode, fireInitial, timeoutMs);
     }
 private:
+    bool publishImpl(std::function<void()> commit, const SharedValues* shared, const Args&... args) {
+        const auto local = channel_;
+        std::vector<std::shared_ptr<Subscriber>> subscribers;
+        SharedValues publication;
+        {
+            std::lock_guard<std::recursive_mutex> lock(*local->mutex);
+            auto& weak = local->subscribers;
+            for (auto it = weak.begin(); it != weak.end();) {
+                auto sub = it->lock();
+                if (!sub || !sub->live()) it = weak.erase(it);
+                else { subscribers.push_back(std::move(sub)); ++it; }
+            }
+            uint64_t sequence = 0;
+            if (subscribers.empty()) {
+                if (!ring_.pushAs(defaultMode_, args...)) return false;
+                if (commit) commit();
+                return true;
+            }
+            publication = shared ? *shared : std::make_shared<const Values>(args...);
+            // SHM remains published for external and late subscribers. Local
+            // receivers use the typed snapshot instead of copying/decoding SHM.
+            if (!ring_.pushStampedAs(defaultMode_, local->origin(), sequence, args...)) return false;
+            if (commit) commit();
+            local->publications[sequence] = std::move(publication);
+            // Retain the bounded native backlog while a reentrant emission is
+            // waiting behind the current callback. Replay cursors protect it
+            // from being overwritten before the corresponding drain.
+            while (!local->publications.empty() &&
+                   sequence - local->publications.begin()->first >= ring_.capacity())
+                local->publications.erase(local->publications.begin());
+        }
+        // Arbitrary callbacks must run outside the channel lock: concurrent
+        // callbacks on two channels may themselves publish to each other.
+        for (const auto& sub : subscribers) if (sub->live()) sub->wire.drain();
+        // Publication success describes the accepted SHM write. A receiver
+        // whose thread has stopped cannot undo that write or the owner commit;
+        // reporting failure here would cause callers to retry an accepted event.
+        return true;
+    }
     static uint32_t payloadSize(uint32_t requested) {
         if (!requested && !size::IpcWireBound<Args...>::bounded)
             throw std::invalid_argument("SwIpcSignal: variable-size types require maxBytes (SW_IPC_SIGNAL_SIZED)");
@@ -266,17 +285,20 @@ private:
         state->mode = mode;
         std::lock_guard<std::recursive_mutex> lock(*channel_->mutex);
         const std::weak_ptr<Subscriber> weak = state;
-        state->wire = ring_.connectStamped([weak](uint64_t, uint64_t, Args... args) {
-            if (auto sub = weak.lock()) sub->deliver(Values(args...));
+        state->wire = ring_.connectStamped([weak](uint64_t, uint64_t, typename std::decay<Args>::type&... args) {
+            if (auto sub = weak.lock())
+                sub->deliver(std::make_shared<const Values>(std::move(args)...));
         }, fireInitial, 0, mode, channel_->mutex,
         [weak](uint64_t sequence, uint64_t origin) -> std::function<void()> {
             auto sub = weak.lock();
             if (!sub || !sub->live() || origin != sub->channel->origin()) return {};
             const auto it = sub->channel->publications.find(sequence);
             if (it == sub->channel->publications.end()) return {};
-            const auto publication = it->second;
-            return [weak, publication]() {
-                if (auto live = weak.lock()) live->deliver(publication->values);
+            const auto& publication = it->second;
+            // The drain owns this short-lived message, not the channel. Retain
+            // its subscriber once; deliver() still rejects stopped connections.
+            return [sub, publication]() {
+                sub->deliver(publication);
             };
         });
         channel_->subscribers.push_back(state);

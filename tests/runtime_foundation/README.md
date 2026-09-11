@@ -58,3 +58,12 @@ This is a functional regression test, not a concurrency stress test, a latency
 benchmark or certification of crash recovery. Callbacks must obey application
 thread/lifetime rules. Cancellation can prevent a queued native handler from
 starting; it cannot undo an operation that has already begun executing.
+
+## Shared local signal values
+
+See [SwIpcSignal ownership and reference delivery](../../src/core/remote/SwIpcSignal.md).
+The signal_sharing test checks copy counts and addresses through direct, named,
+scoped and queued slots, including yields, affinity changes and cancellation.
+Build the optional sw_signal_sharing_bench target for performance comparisons.
+Use identical optimized compiler flags and alternate runs outside concurrent
+builds. Reported CPU time belongs to the benchmark process, not a video service.
