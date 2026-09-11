@@ -76,13 +76,17 @@ struct SwRuntimeTimingRecord {
     long long durationUs;
     unsigned long long threadId;
     SwFiberLane lane;
+    // Monotonic completion timestamp, captured by the producer, not when a
+    // monitor happens to drain the batch. Used to measure task cadence.
+    long long completedAtNs;
 
     SwRuntimeTimingRecord()
         : kind(SwRuntimeTimingKind::ManualScope),
           label(""),
           durationUs(0),
           threadId(0),
-          lane(SwFiberLane::Normal) {}
+          lane(SwFiberLane::Normal),
+          completedAtNs(0) {}
 };
 
 struct SwRuntimeCountersSnapshot {
@@ -838,6 +842,7 @@ inline void SwRuntimeProfilerSession::recordTiming(SwRuntimeTimingKind kind,
     record.durationUs = durationUs;
     record.threadId = currentThreadIdKey_;
     record.lane = lane;
+    record.completedAtNs = nowNs_();
     if (!tryPushRecord_(record)) {
         droppedRecords_.fetch_add(1, std::memory_order_relaxed);
     }
@@ -1026,12 +1031,11 @@ inline bool SwRuntimeProfilerSession::emitBatchIfNeeded() {
         return false;
     }
     SwList<SwRuntimeTimingRecord> batch = drainRecords();
-    if (batch.isEmpty()) {
-        return false;
-    }
+    // Empty batches also provide a monitor tick: sinks can finish a periodic
+    // summary after a burst without waiting for another task to run.
     const SwRuntimeCountersSnapshot snapshot = countersSnapshot();
     callSinkBatch_(batch, snapshot);
-    return true;
+    return !batch.isEmpty();
 }
 
 inline bool SwRuntimeProfilerSession::maybeEmitStall() {

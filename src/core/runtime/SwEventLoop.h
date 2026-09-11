@@ -225,6 +225,14 @@ public:
      *
      * @return The exit code set by `exit()` or 0 if `quit()` was called.
      */
+    // A completion adapter may suspend only a scheduled task, never the
+    // scheduler's own fiber or a thread without a SwStack runtime.
+    static bool canYieldCurrentTask() {
+        auto* app = SwCoreApplication::instance(false);
+        const auto current = GetCurrentFiber();
+        return app && current && current != app->mainFiber;
+    }
+
     int exec(int delay = 0) {
         if(running_) return -1; // return if already runing
         if (delay) {

@@ -511,8 +511,10 @@ public:
      * @details Use this hook to release any resources that remain associated with the instance.
      */
     ~SwThreadPool() override {
-        m_alive->store(false, std::memory_order_release);
+        // Completion callbacks must still decrement m_runningTasks while the
+        // destructor drains accepted work. Invalidate only after workers stop.
         shutdown_();
+        m_alive->store(false, std::memory_order_release);
     }
 
     /**
