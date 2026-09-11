@@ -46,23 +46,21 @@ template <> inline uint64_t type_id<swRealtimeDbDetail::ChangeNotice>() {
 template <> inline SwString type_name<swRealtimeDbDetail::ChangeNotice>() {
     return type_name<SwString>();
 }
-template <> struct Codec<swRealtimeDbDetail::ChangeNotice> {
-    static bool write(Encoder& encoder, const swRealtimeDbDetail::ChangeNotice& value) {
-        return value.batch() && Codec<SwString>::write(encoder, value.wire());
-    }
-    static bool read(Decoder& decoder, swRealtimeDbDetail::ChangeNotice& value) {
-        // Reject an invalid length before the string codec allocates its buffer.
-        auto probe = decoder;
-        uint32_t length = 0;
-        if (!probe.readPOD(length) || length > probe.cap - probe.pos) return false;
-        try {
-            SwString wire;
-            if (!Codec<SwString>::read(decoder, wire)) return false;
-            auto batch = std::make_shared<const swRealtimeDbDetail::ChangeBatch>(
-                swRealtimeDbDetail::parseObject(wire));
-            value = swRealtimeDbDetail::ChangeNotice(std::move(batch), std::move(wire));
-            return true;
-        } catch (const std::exception&) { return false; }
-    }
-};
 }}} // namespace sw::ipc::detail
+
+namespace swRealtimeDbDetail {
+inline const bool changeNoticeSerializationRegistered = [] {
+    SwAny::registerBinarySerialization<ChangeNotice>(
+        [](SwAny::BinaryWriter& writer, const ChangeNotice& value) {
+            return value.batch() && SwAny::serializeBinary(writer, value.wire());
+        },
+        [](SwAny::BinaryReader& reader, ChangeNotice& value) {
+            SwString wire;
+            if (!SwAny::deserializeBinary(reader, wire)) return false;
+            auto batch = std::make_shared<const ChangeBatch>(parseObject(wire));
+            value = ChangeNotice(std::move(batch), std::move(wire));
+            return true;
+        });
+    return true;
+}();
+} // namespace swRealtimeDbDetail

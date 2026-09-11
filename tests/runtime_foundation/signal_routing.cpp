@@ -12,12 +12,12 @@
 
 struct Payload { int value{0}; };
 static std::atomic<int> decoded{0};
-namespace sw { namespace ipc { namespace detail {
-template <> struct Codec<Payload> {
-    static bool write(Encoder& encoder, const Payload& value) { return encoder.writePOD(value.value); }
-    static bool read(Decoder& decoder, Payload& value) { ++decoded; return decoder.readPOD(value.value); }
-};
-}}}
+static const bool serializationRegistered = [] {
+    SwAny::registerBinarySerialization<Payload>(
+    [](SwAny::BinaryWriter& encoder, const Payload& value) { return encoder.writePOD(value.value); },
+    [](SwAny::BinaryReader& decoder, Payload& value) { ++decoded; return decoder.readPOD(value.value); });
+    return true;
+}();
 using namespace sw::ipc;
 static void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);

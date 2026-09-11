@@ -22,6 +22,10 @@ copies. By-value slots still receive independent copies and may modify them.
 A by-value `std::function<void(T)>` or lambda in application code introduces
 a copy even when the eventual consumer takes a reference.
 
+The per-publication receiver snapshot stores up to four subscriber owners
+inline; larger fanout uses one reserved overflow allocation. This removes
+transient receiver-list allocations without changing cancellation or lifetime.
+
 ## Publication from an existing owner
 
 `Values` is the tuple of the signal's decayed argument types. `SharedValues`
@@ -60,7 +64,7 @@ preparing the owner. For multiple arguments, use for example
 `SwIpcSignal<uint64_t, SwString>::Values`. Zero-argument signals use an empty
 tuple. A null owner is rejected without publishing.
 
-The signal still requires its ordinary codec and serialized payload bound.
+The signal still requires its SwAny serialization registration and payload bound.
 Neither a raw address nor the bytes of a `shared_ptr` form a portable wire
 representation.
 
@@ -97,7 +101,11 @@ record through the normal wire path.
 
 The native broker key contains a layout version to distinguish the previous
 channel layout. Rebuild consumers and plugins using these headers; this is
-not a binary hot-reload contract. Wire layout and type identity are unchanged.
+not a binary hot-reload contract. Native scalar/string/byte wire layouts and
+the realtime database ChangeNotice wire identity are unchanged. Custom records
+now use their SwAny registration; register the same representation at both ends.
+See [SwAny serialization](../types/SwAnySerialization.md) for registration,
+bounds and migration from explicit codecs.
 
 ## Verification
 

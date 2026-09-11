@@ -37,9 +37,9 @@ uint64_t SwBridgeRpcClient::call(const SwString& target, const SwString& request
         const uint32_t pid = sw::ipc::detail::currentPid();
         std::array<uint8_t, RpcQueueAccess::kMaxPayload> bytes;
         sw::ipc::detail::Encoder enc(bytes.data(), bytes.size());
-        if (!sw::ipc::detail::Codec<uint64_t>::write(enc, id) ||
-            !sw::ipc::detail::Codec<uint32_t>::write(enc, pid) ||
-            !sw::ipc::detail::Codec<SwString>::write(enc, clientInfo))
+        if (!SwAny::serializeBinary(enc, id) ||
+            !SwAny::serializeBinary(enc, pid) ||
+            !SwAny::serializeBinary(enc, clientInfo))
             throw std::runtime_error("rpc: request header exceeds IPC capacity");
         SwString error;
         for (size_t i = 0; i < args.size(); ++i)
@@ -94,9 +94,9 @@ void SwBridgeRpcClient::poll() {
             for (int budget = 0; budget < 256 && channel.response.map && rpcQueuePopOneRaw(channel.response, bytes); ++budget) {
                 sw::ipc::detail::Decoder dec(bytes.data(), bytes.size());
                 Result result;
-                if (!sw::ipc::detail::Codec<uint64_t>::read(dec, result.callId) ||
-                    !sw::ipc::detail::Codec<bool>::read(dec, result.ok) ||
-                    !sw::ipc::detail::Codec<SwString>::read(dec, result.error)) continue;
+                if (!SwAny::deserializeBinary(dec, result.callId) ||
+                    !SwAny::deserializeBinary(dec, result.ok) ||
+                    !SwAny::deserializeBinary(dec, result.error)) continue;
                 auto pending = channel.pending.find(result.callId);
                 if (pending == channel.pending.end()) continue; // Late reply to an expired/cancelled call.
                 result.method = channel.method;

@@ -238,20 +238,39 @@ public:
         return connectImpl(context, std::move(callback), mode, fireInitial, timeoutMs);
     }
 private:
+    // Most channels have only a few receivers. Keep their strong owners on the
+    // stack; preserve the same snapshot/lifetime semantics for arbitrary fanout.
+    struct SubscriberSnapshot {
+        std::array<std::shared_ptr<Subscriber>, 4> local;
+        std::vector<std::shared_ptr<Subscriber>> overflow;
+        size_t count{0};
+        void reserve(size_t size) {
+            if (size > local.size()) overflow.reserve(size - local.size());
+        }
+        void append(std::shared_ptr<Subscriber> value) {
+            if (count < local.size()) local[count] = std::move(value);
+            else overflow.push_back(std::move(value));
+            ++count;
+        }
+        const std::shared_ptr<Subscriber>& at(size_t index) const {
+            return index < local.size() ? local[index] : overflow[index - local.size()];
+        }
+    };
     bool publishImpl(std::function<void()> commit, const SharedValues* shared, const Args&... args) {
         const auto local = channel_;
-        std::vector<std::shared_ptr<Subscriber>> subscribers;
+        SubscriberSnapshot subscribers;
         SharedValues publication;
         {
             std::lock_guard<std::recursive_mutex> lock(*local->mutex);
             auto& weak = local->subscribers;
+            subscribers.reserve(weak.size());
             for (auto it = weak.begin(); it != weak.end();) {
                 auto sub = it->lock();
                 if (!sub || !sub->live()) it = weak.erase(it);
-                else { subscribers.push_back(std::move(sub)); ++it; }
+                else { subscribers.append(std::move(sub)); ++it; }
             }
             uint64_t sequence = 0;
-            if (subscribers.empty()) {
+            if (!subscribers.count) {
                 if (!ring_.pushAs(defaultMode_, args...)) return false;
                 if (commit) commit();
                 return true;
@@ -271,7 +290,10 @@ private:
         }
         // Arbitrary callbacks must run outside the channel lock: concurrent
         // callbacks on two channels may themselves publish to each other.
-        for (const auto& sub : subscribers) if (sub->live()) sub->wire.drain();
+        for (size_t index = 0; index < subscribers.count; ++index) {
+            const auto& sub = subscribers.at(index);
+            if (sub->live()) sub->wire.drain();
+        }
         // Publication success describes the accepted SHM write. A receiver
         // whose thread has stopped cannot undo that write or the owner commit;
         // reporting failure here would cause callers to retry an accepted event.

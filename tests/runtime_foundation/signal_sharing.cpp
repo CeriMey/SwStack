@@ -22,22 +22,22 @@ struct SharedPayload {
     SharedPayload& operator=(SharedPayload&&) = default;
 };
 std::atomic<int> SharedPayload::copies{0}, SharedPayload::decoded{0};
-namespace sw { namespace ipc { namespace detail {
-template <> struct Codec<SharedPayload> {
-    static bool write(Encoder& encoder, const SharedPayload& value) {
+static const bool serializationRegistered = [] {
+    SwAny::registerBinarySerialization<SharedPayload>(
+    [](SwAny::BinaryWriter& encoder, const SharedPayload& value) {
         const uint32_t size = static_cast<uint32_t>(value.bytes.size());
         return encoder.writePOD(value.value) && encoder.writePOD(size) &&
                encoder.writeBytes(value.bytes.data(), size);
-    }
-    static bool read(Decoder& decoder, SharedPayload& value) {
+    },
+    [](SwAny::BinaryReader& decoder, SharedPayload& value) {
         ++SharedPayload::decoded;
         uint32_t size = 0;
         if (!decoder.readPOD(value.value) || !decoder.readPOD(size) || size > decoder.cap - decoder.pos) return false;
         value.bytes.resize(size);
         return decoder.readBytes(value.bytes.data(), size);
-    }
-};
-}}}
+    });
+    return true;
+}();
 using namespace sw::ipc;
 using Signal = SwIpcSignal<SharedPayload>;
 static void require(bool value, const char* message) {
@@ -273,6 +273,29 @@ static void tupleAndEmpty(Registry& registry) {
     static_assert(!std::is_invocable<Signal&, std::shared_ptr<const std::tuple<SwString>>>::value,
                   "an unrelated shared owner must not select the native publication overload");
 }
+static void fanoutSnapshot(Registry& registry) {
+    for (int count : {1, 4, 5, 9}) {
+        Signal signal(registry, "fanout" + SwString::number(count), 16, 4096);
+        std::vector<Signal::Subscription> subscriptions;
+        std::vector<int> seen;
+        const auto owner = owned(42);
+        for (int index = 0; index < count; ++index) {
+            subscriptions.push_back(signal.connect([&, index](const SharedPayload& payload) {
+                require(&payload == &std::get<0>(*owner), "fanout lost shared owner");
+                seen.push_back(index);
+                if (index == 0 && count > 1) subscriptions.back().stop();
+            }, false));
+        }
+        SharedPayload::copies = SharedPayload::decoded = 0;
+        require(signal.publishShared(owner), "fanout publish");
+        require(seen.size() == static_cast<size_t>(count == 1 ? 1 : count - 1),
+                "snapshot did not respect callback cancellation");
+        for (size_t index = 0; index < seen.size(); ++index)
+            require(seen[index] == static_cast<int>(index), "fanout order changed");
+        require(SharedPayload::copies == 0 && SharedPayload::decoded == 0,
+                "fanout copied/decoded native payload");
+    }
+}
 int main(int argc, char** argv) {
     try {
         SwCoreApplication app(argc, argv);
@@ -286,6 +309,7 @@ int main(int argc, char** argv) {
         cancellation(registry);
         affinityDuringBatch(registry);
         tupleAndEmpty(registry);
+        fanoutSnapshot(registry);
         std::cout << "PASS signal shared addresses/copy counts, named/scoped, queued ownership, yield, replay, latest, cancellation and wire\n";
         return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

@@ -30,11 +30,11 @@ template<class T> bool encodeInteger(detail::Encoder& enc, const SwJsonValue& va
             static_cast<long double>(number) > std::numeric_limits<T>::max()) return false;
         parsed = static_cast<T>(number);
     } else return false;
-    return detail::Codec<T>::write(enc, parsed);
+    return SwAny::serializeBinary(enc, parsed);
 }
 template<class T> bool decodeInteger(detail::Decoder& dec, SwJsonValue& out) {
     T value{};
-    if (!detail::Codec<T>::read(dec, value)) return false;
+    if (!SwAny::deserializeBinary(dec, value)) return false;
     if constexpr (sizeof(T) == 8) out = SwJsonValue(std::to_string(value));
     else out = SwJsonValue(static_cast<long long>(value));
     return true;
@@ -48,11 +48,11 @@ template<class T> bool encodeFloat(detail::Encoder& enc, const SwJsonValue& valu
         catch (...) { return false; }
     } else return false;
     if (!std::isfinite(number) || std::abs(number) > std::numeric_limits<T>::max()) return false;
-    return detail::Codec<T>::write(enc, static_cast<T>(number));
+    return SwAny::serializeBinary(enc, static_cast<T>(number));
 }
 template<class T> bool decodeFloat(detail::Decoder& dec, SwJsonValue& out) {
     T value{};
-    if (!detail::Codec<T>::read(dec, value) || !std::isfinite(value)) return false;
+    if (!SwAny::deserializeBinary(dec, value) || !std::isfinite(value)) return false;
     out = SwJsonValue(static_cast<double>(value)); return true;
 }
 inline bool encode(detail::Encoder& enc, const std::string& type, const SwJsonValue& value, SwString& error) {
@@ -67,9 +67,9 @@ inline bool encode(detail::Encoder& enc, const std::string& type, const SwJsonVa
     if (type == "int") ok = encodeInteger<int>(enc, value);
     else if (type == "float") ok = encodeFloat<float>(enc, value);
     else if (type == "double") ok = encodeFloat<double>(enc, value);
-    else if (type == "bool" && value.isBool()) ok = detail::Codec<bool>::write(enc, value.toBool());
-    else if (type == "SwString" && value.isString()) ok = detail::Codec<SwString>::write(enc, value.toString());
-    else if (type == "SwByteArray" && value.isString()) ok = detail::Codec<SwByteArray>::write(enc, SwByteArray(value.toString().toStdString()));
+    else if (type == "bool" && value.isBool()) ok = SwAny::serializeBinary(enc, value.toBool());
+    else if (type == "SwString" && value.isString()) ok = SwAny::serializeBinary(enc, value.toString());
+    else if (type == "SwByteArray" && value.isString()) ok = SwAny::serializeBinary(enc, SwByteArray(value.toString().toStdString()));
     if (ok) error.clear();
     return ok;
 }
@@ -85,9 +85,9 @@ inline bool decode(detail::Decoder& dec, const std::string& type, SwJsonValue& o
     if (type == "int") ok = decodeInteger<int>(dec, out);
     else if (type == "float") ok = decodeFloat<float>(dec, out);
     else if (type == "double") ok = decodeFloat<double>(dec, out);
-    else if (type == "bool") { bool v{}; ok = detail::Codec<bool>::read(dec, v); if (ok) out = SwJsonValue(v); }
-    else if (type == "SwString") { SwString v; ok = detail::Codec<SwString>::read(dec, v); if (ok) out = SwJsonValue(v); }
-    else if (type == "SwByteArray") { SwByteArray v; ok = detail::Codec<SwByteArray>::read(dec, v); if (ok) out = SwJsonValue(SwString(v.constData(), v.size())); }
+    else if (type == "bool") { bool v{}; ok = SwAny::deserializeBinary(dec, v); if (ok) out = SwJsonValue(v); }
+    else if (type == "SwString") { SwString v; ok = SwAny::deserializeBinary(dec, v); if (ok) out = SwJsonValue(v); }
+    else if (type == "SwByteArray") { SwByteArray v; ok = SwAny::deserializeBinary(dec, v); if (ok) out = SwJsonValue(SwString(v.constData(), v.size())); }
     if (ok) error.clear();
     return ok;
 }

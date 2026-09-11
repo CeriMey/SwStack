@@ -35,24 +35,24 @@ static void codec() {
             "notification wire identity changed");
     uint8_t encoded[4096] = {}, ordinary[4096] = {};
     detail::Encoder typed(encoded, sizeof(encoded)), text(ordinary, sizeof(ordinary));
-    require(detail::Codec<ChangeNotice>::write(typed, notice) &&
-            detail::Codec<SwString>::write(text, notice.wire()) && typed.size() == text.size() &&
+    require(SwAny::serializeBinary(typed, notice) &&
+            SwAny::serializeBinary(text, notice.wire()) && typed.size() == text.size() &&
             std::memcmp(encoded, ordinary, typed.size()) == 0, "notification is not a SwString wire payload");
     detail::Decoder decoder(encoded, typed.size());
     ChangeNotice decoded;
-    require(detail::Codec<ChangeNotice>::read(decoder, decoded) && decoded.batch() &&
+    require(SwAny::deserializeBinary(decoder, decoded) && decoded.batch() &&
             decoded.batch()->revision() == 1 && !decoded.batch()->complete() &&
             decoded.batch().get() != notice.batch().get(), "wire decoder did not create the compact wakeup batch");
     for (const SwString malformed : {SwString("not-json"), SwString("{\"revision\":\"invalid\"}"), SwString("[]")}) {
         detail::Encoder invalid(encoded, sizeof(encoded));
-        require(detail::Codec<SwString>::write(invalid, malformed), "invalid fixture encode failed");
+        require(SwAny::serializeBinary(invalid, malformed), "invalid fixture encode failed");
         detail::Decoder input(encoded, invalid.size());
-        require(!detail::Codec<ChangeNotice>::read(input, decoded), "malformed wakeup was accepted");
+        require(!SwAny::deserializeBinary(input, decoded), "malformed wakeup was accepted");
     }
     const uint32_t impossible = UINT32_MAX;
     std::memcpy(encoded, &impossible, sizeof(impossible));
     detail::Decoder invalidLength(encoded, sizeof(impossible));
-    require(!detail::Codec<ChangeNotice>::read(invalidLength, decoded), "invalid wire length was accepted");
+    require(!SwAny::deserializeBinary(invalidLength, decoded), "invalid wire length was accepted");
 }
 static void direct(Registry& registry) {
     SwIpcSignal<ChangeNotice> signal(registry, "direct_notice", 1, 4096, DeliveryMode::LatestOnly);

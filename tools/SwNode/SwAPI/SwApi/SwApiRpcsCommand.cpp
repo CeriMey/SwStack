@@ -176,8 +176,8 @@ int SwApiRpcsCommand::cmdCall_() {
 
     std::array<uint8_t, RpcQueueAccess::kMaxPayload> tmp;
     sw::ipc::detail::Encoder enc(tmp.data(), tmp.size());
-    if (!sw::ipc::detail::Codec<uint64_t>::write(enc, callId) || !sw::ipc::detail::Codec<uint32_t>::write(enc, pid) ||
-        !sw::ipc::detail::Codec<SwString>::write(enc, clientInfo)) {
+    if (!SwAny::serializeBinary(enc, callId) || !SwAny::serializeBinary(enc, pid) ||
+        !SwAny::serializeBinary(enc, clientInfo)) {
         std::cerr << "swapi rpc call: encode header failed\n";
         return 3;
     }
@@ -244,8 +244,8 @@ int SwApiRpcsCommand::cmdCall_() {
                 uint64_t gotCallId = 0;
                 bool gotOk = false;
                 SwString gotErr;
-                if (!sw::ipc::detail::Codec<uint64_t>::read(dec, gotCallId) || !sw::ipc::detail::Codec<bool>::read(dec, gotOk) ||
-                    !sw::ipc::detail::Codec<SwString>::read(dec, gotErr)) {
+                if (!SwAny::deserializeBinary(dec, gotCallId) || !SwAny::deserializeBinary(dec, gotOk) ||
+                    !SwAny::deserializeBinary(dec, gotErr)) {
                     continue;
                 }
                 if (gotCallId != callId) continue;

@@ -17,22 +17,22 @@ struct BenchPayload {
 };
 size_t BenchPayload::copies = 0;
 static size_t encoded = 0, decoded = 0;
-namespace sw { namespace ipc { namespace detail {
-template <> struct Codec<BenchPayload> {
-    static bool write(Encoder& encoder, const BenchPayload& value) {
+static const bool serializationRegistered = [] {
+    SwAny::registerBinarySerialization<BenchPayload>(
+    [](SwAny::BinaryWriter& encoder, const BenchPayload& value) {
         ++encoded;
         const uint32_t size = static_cast<uint32_t>(value.bytes.size());
         return encoder.writePOD(size) && encoder.writeBytes(value.bytes.data(), size);
-    }
-    static bool read(Decoder& decoder, BenchPayload& value) {
+    },
+    [](SwAny::BinaryReader& decoder, BenchPayload& value) {
         ++decoded;
         uint32_t size = 0;
         if (!decoder.readPOD(size) || size > decoder.cap - decoder.pos) return false;
         value.bytes.resize(size);
         return decoder.readBytes(value.bytes.data(), size);
-    }
-};
-}}}
+    });
+    return true;
+}();
 using namespace sw::ipc;
 static double cpuNs() {
 #ifdef _WIN32

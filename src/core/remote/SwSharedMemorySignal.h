@@ -47,6 +47,7 @@
  *
  ***************************************************************************************************/
 
+#include "SwAny.h"
 #include "SwByteArray.h"
 #include "SwJsonArray.h"
 #include "SwJsonObject.h"
@@ -59,6 +60,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -2022,201 +2024,20 @@ inline SwString type_name() {
     return wireTupleName<Args...>();
 }
 
-struct Encoder {
-    uint8_t* p;
-    size_t cap;
-    size_t pos;
-
-    /**
-     * @brief Constructs a `Encoder` instance.
-     * @param data Value passed to the method.
-     *
-     * @details The instance is initialized and prepared for immediate use.
-     */
-    Encoder(uint8_t* data, size_t capacity) : p(data), cap(capacity), pos(0) {}
-
-    /**
-     * @brief Performs the `writeBytes` operation on the associated resource.
-     * @param data Value passed to the method.
-     * @param len Value passed to the method.
-     * @return `true` on success; otherwise `false`.
-     */
-    bool writeBytes(const void* data, size_t len) {
-        if (pos + len > cap) return false;
-        std::memcpy(p + pos, data, len);
-        pos += len;
-        return true;
-    }
-
-    template <class T>
-    /**
-     * @brief Performs the `writePOD` operation on the associated resource.
-     * @param v Value passed to the method.
-     * @return `true` on success; otherwise `false`.
-     */
-    bool writePOD(const T& v) {
-        if (pos + sizeof(T) > cap) return false;
-        std::memcpy(p + pos, &v, sizeof(T));
-        pos += sizeof(T);
-        return true;
-    }
-
-    /**
-     * @brief Returns the current size.
-     * @return The current size.
-     *
-     * @details The returned value reflects the state currently stored by the instance.
-     */
-    size_t size() const { return pos; }
-};
-
-struct Decoder {
-    const uint8_t* p;
-    size_t cap;
-    size_t pos;
-
-    /**
-     * @brief Constructs a `Decoder` instance.
-     * @param data Value passed to the method.
-     *
-     * @details The instance is initialized and prepared for immediate use.
-     */
-    Decoder(const uint8_t* data, size_t capacity) : p(data), cap(capacity), pos(0) {}
-
-    /**
-     * @brief Performs the `readBytes` operation on the associated resource.
-     * @param out Value passed to the method.
-     * @param len Value passed to the method.
-     * @return `true` on success; otherwise `false`.
-     */
-    bool readBytes(void* out, size_t len) {
-        if (pos + len > cap) return false;
-        std::memcpy(out, p + pos, len);
-        pos += len;
-        return true;
-    }
-
-    template <class T>
-    /**
-     * @brief Performs the `readPOD` operation on the associated resource.
-     * @param out Value passed to the method.
-     * @return `true` on success; otherwise `false`.
-     */
-    bool readPOD(T& out) {
-        if (pos + sizeof(T) > cap) return false;
-        std::memcpy(&out, p + pos, sizeof(T));
-        pos += sizeof(T);
-        return true;
-    }
-};
-
-template <typename T, typename Enable = void>
-struct Codec {
-    // Le Codec generique serialise T par memcpy brut (writePOD/readPOD). Cela n'est valide
-    // QUE si T est trivially-copyable : un type a heap (SwList/SwMap/SwAny, ou une struct
-    // contenant std::string/std::vector/pointeurs) verrait son pointeur copie tel quel dans
-    // la SHM puis relu dans un autre process => pointeur dangling / UB / corruption.
-    // On refuse donc a la COMPILATION tout type non trivialement copiable sans Codec dedie.
-    static_assert(std::is_trivially_copyable<T>::value,
-        "Codec<T> generique: T n'est pas trivially_copyable. Un memcpy brut vers la memoire "
-        "partagee serait de l'UB (pointeurs/heap copies entre process). Fournissez une "
-        "specialisation Codec<T> (cf. SwString/SwByteArray) ou n'envoyez pas ce type sur l'IPC.");
-
-    /**
-     * @brief Performs the `write` operation on the associated resource.
-     * @param enc Value passed to the method.
-     * @param v Value passed to the method.
-     * @return The requested write.
-     */
-    static bool write(Encoder& enc, const T& v) {
-        return enc.writePOD(v);
-    }
-    /**
-     * @brief Performs the `read` operation on the associated resource.
-     * @param dec Value passed to the method.
-     * @param out Value passed to the method.
-     * @return The resulting read.
-     */
-    static bool read(Decoder& dec, T& out) {
-        return dec.readPOD(out);
-    }
-};
-
-template <typename T>
-struct Codec<T, typename std::enable_if<std::is_same<T, SwString>::value>::type> {
-    /**
-     * @brief Performs the `write` operation on the associated resource.
-     * @param enc Value passed to the method.
-     * @param v Value passed to the method.
-     * @return The requested write.
-     */
-    static bool write(Encoder& enc, const SwString& v) {
-        std::string s = v.toStdString();
-        const uint32_t len = static_cast<uint32_t>(s.size());
-        if (!enc.writePOD(len)) return false;
-        return enc.writeBytes(s.data(), len);
-    }
-    /**
-     * @brief Performs the `read` operation on the associated resource.
-     * @param dec Value passed to the method.
-     * @param out Value passed to the method.
-     * @return The resulting read.
-     */
-    static bool read(Decoder& dec, SwString& out) {
-        uint32_t len = 0;
-        if (!dec.readPOD(len)) return false;
-        std::string s;
-        s.resize(len);
-        if (len != 0 && !dec.readBytes(&s[0], len)) return false;
-        out = SwString(s);
-        return true;
-    }
-};
-
-template <typename T>
-struct Codec<T, typename std::enable_if<std::is_same<T, SwByteArray>::value>::type> {
-    /**
-     * @brief Performs the `write` operation on the associated resource.
-     * @param enc Value passed to the method.
-     * @param v Value passed to the method.
-     * @return The requested write.
-     */
-    static bool write(Encoder& enc, const SwByteArray& v) {
-        const uint32_t len = static_cast<uint32_t>(v.size());
-        if (!enc.writePOD(len)) return false;
-        if (len == 0) return true;
-        return enc.writeBytes(v.constData(), len);
-    }
-    /**
-     * @brief Performs the `read` operation on the associated resource.
-     * @param dec Value passed to the method.
-     * @param out Value passed to the method.
-     * @return The resulting read.
-     */
-    static bool read(Decoder& dec, SwByteArray& out) {
-        uint32_t len = 0;
-        if (!dec.readPOD(len)) return false;
-        if (len == 0) {
-            out.clear();
-            return true;
-        }
-        SwByteArray tmp(static_cast<size_t>(len), '\0');
-        if (!dec.readBytes(tmp.data(), len)) return false;
-        out = std::move(tmp);
-        return true;
-    }
-};
+// Byte framing and all typed serialization belong to SwAny.
+using Encoder = SwAny::BinaryWriter;
+using Decoder = SwAny::BinaryReader;
 
 inline bool writeAll(Encoder&) { return true; }
 template <typename T, typename... Rest>
 inline bool writeAll(Encoder& enc, const T& v, const Rest&... rest) {
-    return Codec<T>::write(enc, v) && writeAll(enc, rest...);
+    return SwAny::serializeBinary(enc, v) && writeAll(enc, rest...);
 }
 
 inline bool readAll(Decoder&) { return true; }
 template <typename T, typename... Rest>
 inline bool readAll(Decoder& dec, T& out, Rest&... rest) {
-    return Codec<T>::read(dec, out) && readAll(dec, rest...);
+    return SwAny::deserializeBinary(dec, out) && readAll(dec, rest...);
 }
 
 #ifdef _WIN32
@@ -2618,23 +2439,32 @@ private:
 // Si SwLocalSocket est créé à l'avenir, cette section devra être refactorisée.
 #ifndef _WIN32
         static int senderSocket_() {
-            static int s = -1;
-            static std::mutex sm;
-            std::lock_guard<std::mutex> lk(sm);
-            if (s >= 0) return s;
-            s = ::socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
-            return s;
+            static std::atomic<int> socket{-1};
+            int descriptor = socket.load(std::memory_order_acquire);
+            if (descriptor >= 0) return descriptor;
+            static std::mutex creation;
+            std::lock_guard<std::mutex> lock(creation);
+            descriptor = socket.load(std::memory_order_relaxed);
+            if (descriptor < 0) {
+                descriptor = ::socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+                socket.store(descriptor, std::memory_order_release);
+            }
+            return descriptor;
         }
 
         static void fillAddr_(uint32_t pid, sockaddr_un& out, socklen_t& lenOut) {
             std::memset(&out, 0, sizeof(out));
             out.sun_family = AF_UNIX;
-            const std::string name = std::string("sw_ipc_notify_") + std::to_string(pid);
-            const size_t maxLen = sizeof(out.sun_path) - 2;
-            const size_t n = (name.size() > maxLen) ? maxLen : name.size();
-            out.sun_path[0] = '\0'; // abstract namespace
-            std::memcpy(out.sun_path + 1, name.data(), n);
-            lenOut = static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) + 1 + n);
+            // Format the existing abstract address directly in its fixed
+            // buffer, without allocating a temporary string for every wakeup.
+            static constexpr char prefix[] = "sw_ipc_notify_";
+            static constexpr size_t prefixLength = sizeof(prefix) - 1;
+            static_assert(sizeof(out.sun_path) >= prefixLength + 12, "IPC address buffer too small");
+            std::memcpy(out.sun_path + 1, prefix, prefixLength);
+            char* digits = out.sun_path + 1 + prefixLength;
+            const auto result = std::to_chars(digits, out.sun_path + sizeof(out.sun_path), pid);
+            lenOut = static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) +
+                                           (result.ptr - out.sun_path));
         }
 #endif
 
@@ -2774,7 +2604,7 @@ inline typename std::enable_if<I < std::tuple_size<Tuple>::value, bool>::type
 readTuple(Decoder& dec, Tuple& t) {
     typedef typename tuple_element_decay<Tuple, I>::type T;
     T& elem = std::get<I>(t);
-    if (!Codec<T>::read(dec, elem)) return false;
+    if (!SwAny::deserializeBinary(dec, elem)) return false;
     return readTuple<Tuple, I + 1>(dec, t);
 }
 
@@ -3752,16 +3582,19 @@ private:
 //    - choix de la semantique de livraison (DeliveryMode::Replay / LatestOnly) en un parametre ;
 //    - lifetime sur (la Subscription se desabonne dans son destructeur).
 //
-//  Contrainte : C++11 strict (pas de if constexpr / variable templates / fold expressions).
+//  Requires C++17, like SwAny and the native runtime.
 // =================================================================================================
 
 namespace size {
 
 // --- IpcIsBounded<T> : le type a-t-il une taille serialisee MAXIMALE connue a la compilation ? ---
-// Par defaut tout est borne (les POD le sont : ils s'ecrivent en sizeof(T) octets bruts).
+// Only native scalars have a fixed default wire size; records require an explicit bound.
 // On specialise a false pour les types a payload variable.
 template <typename T>
-struct IpcIsBounded { static const bool value = true; };
+struct IpcIsBounded {
+    // Registered record serializers may be variable-size, even for a POD record.
+    static const bool value = swAnyDetail::nativeScalar<typename std::decay<T>::type>;
+};
 
 template <> struct IpcIsBounded<SwString>    { static const bool value = false; };
 template <> struct IpcIsBounded<SwByteArray> { static const bool value = false; };
@@ -4003,7 +3836,7 @@ private:
 #define SW_IPC_STATIC_ASSERT_BOUNDED_(name, ...)                                                   \
     static_assert(::sw::ipc::size::IpcWireBound<__VA_ARGS__>::bounded,                             \
         "SW_IPC_SIGNAL(" #name "): un des types n'a pas de taille bornee "                         \
-        "(SwString/SwByteArray/SwList/SwMap). Utilisez "                                           \
+        "(texte/octets/conteneurs/types enregistres). Utilisez "                                           \
         "SW_IPC_SIGNAL_SIZED(" #name ", maxBytes, ...) pour reserver la place.")
 
 // Signal IPC dimensionne AUTOMATIQUEMENT depuis les types (POD uniquement).

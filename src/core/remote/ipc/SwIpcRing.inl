@@ -385,7 +385,10 @@ private:
         if (mode != DeliveryMode::Replay && mode != DeliveryMode::LatestOnly && mode != DeliveryMode::FollowPublisher)
             return false;
         if (size > map->header()->maxPayload || (size && !bytes)) return false;
-        std::vector<uint32_t> pids;
+        // Cursor count is bounded by the mapping layout; collecting wakeup
+        // destinations does not need a heap allocation on every publication.
+        std::array<uint32_t, kMaxSubscriberCursors> pids;
+        size_t pidCount = 0;
         {
             MappingLock lock(map);
             if (!lock) return false;
@@ -413,14 +416,15 @@ private:
             slot->size = static_cast<uint32_t>(size); slot->origin = origin; slot->seq = next;
             header->seq = next; sequence = next;
             for (const auto& cursor : header->cursors)
-                if (cursor.active) pids.push_back(cursor.subPid);
+                if (cursor.active) pids[pidCount++] = cursor.subPid;
 #ifndef _WIN32
             pthread_cond_broadcast(&header->cv);
 #endif
         }
-        std::sort(pids.begin(), pids.end());
-        pids.erase(std::unique(pids.begin(), pids.end()), pids.end());
-        for (auto pid : pids) detail::LoopPoller::notifyProcess(pid);
+        const auto end = pids.begin() + pidCount;
+        std::sort(pids.begin(), end);
+        const auto uniqueEnd = std::unique(pids.begin(), end);
+        for (auto it = pids.begin(); it != uniqueEnd; ++it) detail::LoopPoller::notifyProcess(*it);
         return true;
     }
     Registry& reg_;

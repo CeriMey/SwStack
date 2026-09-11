@@ -8,15 +8,15 @@
 
 struct ModulePacket { int value; };
 static int decodedPackets = 0;
-namespace sw { namespace ipc { namespace detail {
-template <> struct Codec<ModulePacket> {
-    static bool write(Encoder& encoder, const ModulePacket& value) { return encoder.writePOD(value.value); }
-    static bool read(Decoder& decoder, ModulePacket& value) {
+static const bool serializationRegistered = [] {
+    SwAny::registerBinarySerialization<ModulePacket>(
+    [](SwAny::BinaryWriter& encoder, const ModulePacket& value) { return encoder.writePOD(value.value); },
+    [](SwAny::BinaryReader& decoder, ModulePacket& value) {
         ++decodedPackets;
         return decoder.readPOD(value.value);
-    }
-};
-}}}
+    });
+    return true;
+}();
 
 #ifdef SW_SIGNAL_MODULE_PLUGIN
 static std::unique_ptr<sw::ipc::Registry> moduleRegistry;

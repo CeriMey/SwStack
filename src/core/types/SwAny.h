@@ -61,6 +61,7 @@
 #include <mutex>
 #include <sstream>
 #include "SwString.h"
+#include "SwAnySerialization.h"
 #include "SwJsonValue.h"
 #include "SwJsonObject.h"
 #include "SwJsonArray.h"
@@ -587,6 +588,15 @@ public:
         auto fromName = std::string(typeid(From).name());
         auto toName = std::string(typeid(To).name());
         std::lock_guard<std::mutex> lock(registryMutex());
+        // Retain the typed function as well as the erased SwAny converter.
+        // IPC uses this entry without copying/boxing the source object.
+        // Native binary values never consult text converters on the wire.
+        // Avoid allocating unused typed registrations for display conversions.
+        if constexpr (((std::is_same<To, SwString>::value || std::is_same<To, std::string>::value) &&
+                       !swAnyDetail::nativeBinary<From>) ||
+                      ((std::is_same<From, SwString>::value || std::is_same<From, std::string>::value) &&
+                       !swAnyDetail::nativeBinary<To>))
+            swAnyDetail::TypedConversion<From, To>::set(converterFunc);
 
         // Enregistrer dans la map qu'une conversion de fromName vers toName est possible
         auto& targets = getConversionRules()[fromName];
@@ -605,7 +615,7 @@ public:
         // Ici on encapsule converterFunc dans un lambda générique prenant un SwAny et retournant un SwAny
         getConverters()[std::make_pair(fromName, toName)] = [converterFunc](const SwAny& any) -> SwAny {
             // On sait que any stocke un From
-            From val = any.get<From>();
+            const From& val = any.get<From>();
             To convertedVal = converterFunc(val);
             return SwAny::from(convertedVal);
         };
@@ -828,6 +838,58 @@ public:
         registerConversion<std::string, T>([fromString](const std::string& s) {
             return fromString(SwString(s));
         });
+    }
+
+    using BinaryWriter = swAnyDetail::BinaryWriter;
+    using BinaryReader = swAnyDetail::BinaryReader;
+
+    // Shared serialization entry point for typed IPC and other bounded buffers.
+    // Native scalars/strings/bytes keep their binary wire format. Custom types
+    // reuse registerStringSerialization or the equivalent registerConversion pair.
+    // Missing registrations, invalid data and conversion exceptions return false.
+    template<class T>
+    static bool serializeBinary(BinaryWriter& writer, const T& value) {
+        if constexpr (swAnyDetail::nativeBinary<T>) {
+            return swAnyDetail::writeBinary(writer, value);
+        } else {
+            registerAllTypeOnce();
+            const auto start = writer.pos;
+            try {
+                if (swAnyDetail::writeBinary(writer, value)) return true;
+            } catch (...) {}
+            writer.pos = start;
+            return false;
+        }
+    }
+    template<class T>
+    static bool deserializeBinary(BinaryReader& reader, T& value) {
+        if constexpr (!swAnyDetail::nativeBinary<T>) registerAllTypeOnce();
+        const auto start = reader.pos;
+        try {
+            if (swAnyDetail::readBinary(reader, value)) return true;
+        } catch (...) {}
+        reader.pos = start;
+        return false;
+    }
+
+    // Optional allocation-free binary registration for existing hot paths.
+    // Register before creating publishers/readers, in each participating module.
+    // A custom reader must stage its result if it needs unchanged output on failure.
+    template<class T, class Write, class Read>
+    static void registerBinarySerialization(Write write, Read read) {
+        static_assert(!swAnyDetail::nativeScalar<T> &&
+            !std::is_same<T, SwString>::value && !std::is_same<T, SwByteArray>::value &&
+            !std::is_same<T, std::string>::value && !std::is_same<T, std::vector<uint8_t>>::value,
+            "Native wire formats are fixed; register a custom envelope instead");
+        using Registration = swAnyDetail::BinaryRegistration<T>;
+        swAnyDetail::BinaryFunctions<T> functions{write, read};
+        if (!functions.write || !functions.read)
+            throw std::invalid_argument("SwAny: both binary functions are required");
+        typename Registration::Write directWrite = nullptr;
+        typename Registration::Read directRead = nullptr;
+        if constexpr (std::is_convertible<Write, typename Registration::Write>::value) directWrite = write;
+        if constexpr (std::is_convertible<Read, typename Registration::Read>::value) directRead = read;
+        Registration::set(std::move(functions), directWrite, directRead);
     }
 
     //Verifier si le metaType est dans le registery
