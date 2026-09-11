@@ -18,7 +18,7 @@ class SwPingNode : public SwRemoteObject {
     }
 
  private:
-    SW_REGISTER_SHM_SIGNAL(ping, int, SwString);
+    SW_IPC_SIGNAL_SIZED(ping, 4096, int, SwString);
 
     void retime_() {
         if (!timer_) return;

@@ -1,0 +1,71 @@
+cmake_minimum_required(VERSION 3.22)
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  project(SwRealtimeDb LANGUAGES C CXX)
+endif()
+if(TARGET SwRealtimeDbStore)
+  return()
+endif()
+get_filename_component(SW_REALTIME_SOURCE "../../.." ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+find_package(Threads REQUIRED)
+find_package(OpenSSL REQUIRED)
+add_library(SwRealtimeDbMiniz STATIC
+  "${SW_REALTIME_SOURCE}/core/third_party/miniz/miniz.c"
+  "${SW_REALTIME_SOURCE}/core/third_party/miniz/miniz_tdef.c"
+  "${SW_REALTIME_SOURCE}/core/third_party/miniz/miniz_tinfl.c")
+target_compile_definitions(SwRealtimeDbMiniz PUBLIC MINIZ_NO_STDIO MINIZ_NO_ARCHIVE_APIS)
+add_library(SwRealtimeDbMlKem STATIC "${SW_REALTIME_SOURCE}/core/third_party/mlkem/mlkem/mlkem_native.c")
+target_compile_definitions(SwRealtimeDbMlKem PUBLIC MLK_CONFIG_PARAMETER_SET=768 MLK_CONFIG_NAMESPACE_PREFIX=sw_mlkem MLK_CONFIG_NO_RANDOMIZED_API=1)
+target_include_directories(SwRealtimeDbMlKem SYSTEM PRIVATE "${SW_REALTIME_SOURCE}/core/third_party/mlkem/mlkem")
+set_target_properties(SwRealtimeDbMiniz SwRealtimeDbMlKem PROPERTIES POSITION_INDEPENDENT_CODE ON)
+add_library(SwRealtimeDbRuntime INTERFACE)
+foreach(path . core core/types core/object core/runtime core/remote core/io core/fs core/platform core/storage core/hw core/third_party/miniz core/third_party/mlkem/mlkem)
+  target_include_directories(SwRealtimeDbRuntime SYSTEM INTERFACE "${SW_REALTIME_SOURCE}/${path}")
+endforeach()
+target_compile_features(SwRealtimeDbRuntime INTERFACE cxx_std_17)
+target_link_libraries(SwRealtimeDbRuntime INTERFACE SwRealtimeDbMiniz SwRealtimeDbMlKem Threads::Threads OpenSSL::SSL OpenSSL::Crypto ${CMAKE_DL_LIBS})
+if(WIN32)
+  target_link_libraries(SwRealtimeDbRuntime INTERFACE ws2_32 shell32 dbghelp bcrypt crypt32)
+endif()
+add_library(SwRealtimeDbStore STATIC
+  store/store.cpp store/store_introspection.cpp store/store_values.cpp store/store_schema.cpp store/store_storage.cpp store/store_writes.cpp store/store_view_writes.cpp store/store_mutations.cpp store/store_merge.cpp store/store_views.cpp)
+add_library(SwRealtimeDbEvaluation STATIC views/EvaluationScope.cpp)
+target_link_libraries(SwRealtimeDbEvaluation PUBLIC SwRealtimeDbRuntime)
+target_link_libraries(SwRealtimeDbStore PUBLIC SwRealtimeDbRuntime SwRealtimeDbEvaluation)
+add_library(SwRealtimeDbJs STATIC views/DuktapeRuntime.c views/JsViewEvaluator.cpp views/JsValueBridge.cpp)
+target_include_directories(SwRealtimeDbJs PRIVATE "${SW_REALTIME_SOURCE}/core/third_party/duktape")
+target_link_libraries(SwRealtimeDbJs PUBLIC SwRealtimeDbRuntime SwRealtimeDbEvaluation)
+# The bounded JS runtime is latency-sensitive even in a Debug application.
+# Optimize its interpreter and JSON bridge while preserving Debug symbols;
+# no fast-math: finite-number validation and exact JSON values are required.
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang" AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(SwRealtimeDbJs PRIVATE -O2)
+  target_compile_options(SwRealtimeDbEvaluation PRIVATE -O2)
+endif()
+if(UNIX)
+  target_link_libraries(SwRealtimeDbJs PRIVATE m)
+endif()
+add_library(SwRealtimeDbClient SHARED client/Client.cpp client/Component.cpp client/RemoteQuery.cpp)
+target_link_libraries(SwRealtimeDbClient PUBLIC SwRealtimeDbRuntime)
+add_library(SwRealtimeDbService STATIC service/Node.cpp)
+target_link_libraries(SwRealtimeDbService PUBLIC SwRealtimeDbStore SwRealtimeDbJs SwRealtimeDbClient)
+set_target_properties(SwRealtimeDbStore SwRealtimeDbJs SwRealtimeDbEvaluation SwRealtimeDbClient SwRealtimeDbService PROPERTIES POSITION_INDEPENDENT_CODE ON)
+if(WIN32)
+  set_target_properties(SwRealtimeDbClient PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+elseif(UNIX AND NOT APPLE)
+  # Share the inline SwStack runtime registry between a host and component DSOs.
+  target_link_options(SwRealtimeDbClient INTERFACE -rdynamic)
+  target_link_options(SwRealtimeDbService INTERFACE -rdynamic)
+endif()
+add_library(SwRealtimeDb::Store ALIAS SwRealtimeDbStore)
+add_library(SwRealtimeDb::Client ALIAS SwRealtimeDbClient)
+add_library(SwRealtimeDb::Service ALIAS SwRealtimeDbService)
+install(TARGETS SwRealtimeDbStore SwRealtimeDbJs SwRealtimeDbEvaluation SwRealtimeDbClient SwRealtimeDbService SwRealtimeDbMiniz SwRealtimeDbMlKem
+  RUNTIME DESTINATION bin LIBRARY DESTINATION lib ARCHIVE DESTINATION lib)
+# Public APIs include SwStack core headers. Install the matching headers together.
+install(DIRECTORY "${SW_REALTIME_SOURCE}/atomic/" DESTINATION include/SwStack/atomic FILES_MATCHING PATTERN "*.h")
+install(DIRECTORY "${SW_REALTIME_SOURCE}/core/" DESTINATION include/SwStack/core
+  FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp" PATTERN "*.inl")
+install(FILES "${SW_REALTIME_SOURCE}/core/storage/SwRealtimeDb.md"
+  DESTINATION share/SwStack/docs)
+install(FILES "${SW_REALTIME_SOURCE}/core/third_party/duktape/LICENSE"
+  DESTINATION share/SwStack/licenses/duktape)

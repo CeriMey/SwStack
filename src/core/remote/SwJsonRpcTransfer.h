@@ -33,6 +33,10 @@ public:
             SwJsonObject out; out["request_token"] = SwJsonValue(token); return out;
         }
         const auto found = pending_.find(request["request_token"].toString());
+        if (operation == "$request_abort") {
+            if (found != pending_.end()) pending_.erase(found);
+            return {};
+        }
         if (found == pending_.end()) throw std::invalid_argument("Unknown or expired JSON request transfer");
         auto& pending = found->second;
         if (operation == "$request_chunk") {
@@ -65,6 +69,11 @@ class JsonRequestUpload {
 public:
     explicit JsonRequestUpload(SwString encoded) : encoded_(std::move(encoded)) {
         if (encoded_.size() > JsonRequestAssembler::maxBytes) throw std::invalid_argument("JSON request exceeds 2 MiB");
+    }
+    SwString abortPacket() const {
+        if (token_.isEmpty()) return {};
+        SwJsonObject value; value["operation"] = SwJsonValue("$request_abort");
+        value["request_token"] = SwJsonValue(token_); return encode(value);
     }
     SwString first() {
         final_ = encoded_.size() <= 3000;

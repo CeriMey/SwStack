@@ -103,7 +103,7 @@ int main(int argc, char** argv) {
         RpcMethodClient<int> failing(domain, "test/service", "failure");
         require(!failing.callResult(500).ok && failing.lastError().contains("intentional failure"), "exception response");
         RpcMethodClient<SwString> large(domain, "test/service", "large");
-        require(!large.callResult(500).ok && large.lastError().contains("payload too large"), "oversized response error");
+        require(large.callResult(500).value.size() == 8192, "native response incorrectly used the fixed wire payload limit");
         RpcMethodClient<int> absent(domain, "test/missing", "missing");
         int callbacks = 0; bool destroyedCallback = false;
         auto id = absent.callAsyncResult([&](const RpcResult<int>& r) { require(!r.ok && r.error.contains("cancelled"), "cancel result"); ++callbacks; }, 500);

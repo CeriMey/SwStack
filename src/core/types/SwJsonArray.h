@@ -185,6 +185,10 @@ public:
         data_.push_back(value);
     }
 
+    void append(SwJsonValue&& value) {
+        data_.push_back(std::move(value));
+    }
+
     void prepend(const SwJsonValue& value) {
         data_.insert(data_.begin(), value);
     }

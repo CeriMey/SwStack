@@ -24,7 +24,7 @@ Documentation volontairement **très technique** basée sur l’implémentation 
 
 Le constructeur instancie :
 
-- `ipcRegistry_(nameSpace_, objectName)` : identité utilisée par `sw::ipc::Signal` et `sw::ipc::RingQueue`.
+- `ipcRegistry_(nameSpace_, objectName)` : identité utilisée par `sw::ipc::SwIpcSignal` et `sw::ipc::RingQueue`.
 - `publisherId_ = makePublisherId_(this)` : identifiant de publication pour filtrer ses propres messages.
 
 ### 0.1 FQN d’objet et “full name”
@@ -275,7 +275,7 @@ Point clé : le payload publié sur SHM n’est **pas** `userDoc_`, mais le **sn
 
 `SwRemoteObject` instancie :
 
-- `sw::ipc::Signal<uint64_t, SwString> shmConfig_(ipcRegistry_, "__config__|"+configId_)`
+- `sw::ipc::SwIpcSignal<uint64_t, SwString> shmConfig_(ipcRegistry_, "__config__|"+configId_, 1, 4096, sw::ipc::DeliveryMode::LatestOnly)`
 
 La signature est volontairement :
 
@@ -340,7 +340,7 @@ Effets :
   - `registeredConfigs_` est indexé par `fullName = "ns/obj#configName"`.
 
 - canal “update explicite” :
-  - crée `Signal<uint64_t, SwString>(ipcRegistry_, "__cfg__|"+configName)` via `ensureConfigSignal_`,
+  - crée `SwIpcSignal<uint64_t, SwString>(ipcRegistry_, "__cfg__|"+configName, 1, 4096, DeliveryMode::LatestOnly)` via `ensureConfigSignal_`,
   - se subscribe (`fireInitial=false`) : payload `SwString` → `T` via `stringToValue_`,
   - si update distante reçue :
     - applique localement via `ipcUpdateConfig<T>(configName, next, SaveToDisk)` (donc `publishToShm=false`),
@@ -358,7 +358,7 @@ Nota : à l’enregistrement, un snapshot `__config__|<configId>` est republié 
 
 Publie sur la cible :
 
-- `Signal<uint64_t, SwString>(Registry(ns,obj), "__cfg__|"+configName).publish(publisherId_, valueToString_(value))`
+- `SwIpcSignal<uint64_t, SwString>(registry, "__cfg__|"+configName, 1, 4096, DeliveryMode::LatestOnly).publish(publisherId_, valueToString_(value))`
 
 La cible n’appliquera l’update que si elle a enregistré la clé via `ipcRegisterConfig*` (c’est `ipcRegisterConfigT` qui installe le listener).
 
@@ -405,22 +405,22 @@ Le système combine deux axes :
 
 ---
 
-## 10) IPC signaux génériques : `SW_REGISTER_SHM_SIGNAL` + `ipcConnect*`
+## 10) IPC signaux génériques : `SW_IPC_SIGNAL_SIZED` + `ipcConnect*`
 
 `SwRemoteObject` ne “magicalise” pas les signaux : il fournit `ipcRegistry_` et des helpers.
 
 ### 10.1 Publier/écouter un signal SHM depuis une classe dérivée
 
-Déclarez vos signaux avec `SW_REGISTER_SHM_SIGNAL` (macro de `SwSharedMemorySignal.h`) :
+Déclarez vos signaux avec `SW_IPC_SIGNAL_SIZED` (macro de `SwSharedMemorySignal.h`) :
 
 ```cpp
 class MyObj : public SwRemoteObject {
-  SW_REGISTER_SHM_SIGNAL(ping, int, SwString);
-  SW_REGISTER_SHM_SIGNAL(pong, int, SwString);
+  SW_IPC_SIGNAL_SIZED(ping, 4096, int, SwString);
+  SW_IPC_SIGNAL_SIZED(pong, 4096, int, SwString);
 };
 ```
 
-Le membre est un `sw::ipc::SignalProxy<...>` :
+Le membre est un `sw::ipc::SwIpcSignal<...>` :
 
 - `ping.publish(args...)` ou `ping(args...)`
 - `ping.connect(cb, fireInitial=true, timeoutMs=0)`
@@ -430,7 +430,7 @@ Le membre est un `sw::ipc::SignalProxy<...>` :
 - `ipcConnectT(fullName, cb, fireInitial)`
   - `fullName` : `"ns/obj#signal"` (ou legacy `"ns/obj/signal"`),
   - déduit `A...` depuis la signature de `cb`,
-  - crée `sw::ipc::Signal<A...>(Registry(ns,obj), leaf)` et `connect`,
+  - crée `sw::ipc::SwIpcSignal<A...>(registry, leaf, 16, 4096)` et `connect`,
   - stocke la subscription, retourne un token.
 
 - `ipcConnectScopedT(targetObject, leaf, context, cb, fireInitial)`
@@ -441,11 +441,11 @@ Déconnexion :
 
 - `ipcDisconnect(token)`
 
-⚠️ Typage : le type réel du signal SHM doit correspondre exactement aux types attendus (sinon mismatch à l’exécution selon la politique de `sw::ipc::Signal`).
+⚠️ Typage : le type réel du signal SHM doit correspondre exactement aux types attendus (sinon mismatch à l’exécution selon la politique de `sw::ipc::SwIpcSignal`).
 
 ### 10.3 Gros payload (images/frames) : `sw::ipc::NoCopyRingBuffer<Meta>` (0-copy lecteur)
 
-Limite importante : les signaux SHM et les queues RPC utilisent un payload fixe (actuellement **4096 bytes**). Pour transporter des images (plusieurs Mo), utilisez un ring-buffer SHM dédié et ne passez sur IPC que des "petits" évènements (seq).
+Les queues RPC utilisent un payload fixe de **4096 bytes** ; les signaux `SwIpcSignal` ont une taille explicite. Pour transporter des images (plusieurs Mo), utilisez un ring-buffer SHM dédié et ne passez sur IPC que des "petits" évènements (seq).
 
 Header : `src/core/remote/SwIpcNoCopyRingBuffer.h`
 

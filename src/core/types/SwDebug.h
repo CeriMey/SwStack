@@ -509,6 +509,16 @@ private:
         rule.mask = mask;
         rule.enabled = enabled;
         std::lock_guard<SpinMutex_> lock(m_rulesMutex);
+        // An appended rule shadows every earlier identical pattern/mask.
+        // Replacing those entries preserves last-rule-wins ordering without
+        // growing the hot-path scan on each temporary debug enable/restore.
+        for (auto it = m_categoryRules.begin(); it != m_categoryRules.end();) {
+            if (it->pattern == rule.pattern && it->mask == rule.mask) {
+                it = m_categoryRules.erase(it);
+            } else {
+                ++it;
+            }
+        }
         m_categoryRules.push_back(std::move(rule));
     }
 

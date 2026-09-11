@@ -71,6 +71,9 @@ if(SW_ENABLE_QUIC)
 endif()
 
 find_package(Threads REQUIRED)
+# Native signal routing retains the code which owns cross-module callbacks.
+# Older libc versions require an explicit libdl dependency for these APIs.
+link_libraries(${CMAKE_DL_LIBS})
 
 if(UNIX AND NOT APPLE AND NOT ANDROID)
     find_package(CURL REQUIRED)

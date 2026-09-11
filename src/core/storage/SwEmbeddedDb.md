@@ -2,7 +2,7 @@
 
 ## But
 
-`SwEmbeddedDb` est une base embarquee locale orientee :
+`SwEmbeddedDb` est une base embarquee locale, persistante par defaut, orientee :
 
 - stockage cle -> valeur binaire,
 - blobs volumineux sur disque local,
@@ -10,7 +10,7 @@
 - un seul writer actif,
 - plusieurs readers possibles.
 
-Le module est pense pour un disque local SSD/NVMe. Il n'est pas prevu pour un filesystem reseau ni pour un usage SQL.
+Le mode persistant est pense pour un disque local SSD/NVMe. Il n'est pas prevu pour un filesystem reseau ni pour un usage SQL. Le mode `persistent = false` garde les donnees uniquement dans le processus.
 
 ## API publique
 
@@ -25,6 +25,7 @@ Types principaux :
 - `SwDbWriteBatch`
 - `SwDbEntry`
 - `SwDbIterator`
+- `SwDbJsonEntry` et `SwDbJsonIterator`
 - `SwDbSnapshot`
 - `SwDbMetrics`
 - `SwEmbeddedDb`
@@ -32,12 +33,15 @@ Types principaux :
 Operations exposees :
 
 - `open`
+- `isPersistent`
 - `close`
 - `get`
+- `getJson`
 - `write`
 - `sync`
 - `scanPrimary`
 - `scanIndex`
+- `scanPrimaryJson` et `scanIndexJson`
 - `refresh`
 - `createSnapshot`
 - `metricsSnapshot`
@@ -93,6 +97,34 @@ status = db.get(SwByteArray("user:42"), &value, nullptr);
 db.close();
 ```
 
+### Base uniquement en memoire
+
+```cpp
+SwEmbeddedDbOptions options;
+options.persistent = false;
+SwEmbeddedDb db;
+SwDbStatus status = db.open(options);
+// Utiliser les memes write(batch), get, scan et createSnapshot.
+```
+
+- `persistent` vaut `true` par defaut. En mode memoire, `dbPath` peut etre vide et est ignore : aucun dossier, WAL, verrou fichier, blob disque, flush ou compaction n'est cree.
+- Chaque instance et chaque `open()` creent une base vide independante. Deux instances avec le meme `dbPath` ne partagent pas leur contenu.
+- Les batches publient leurs changements sous un meme verrou. `put` remplace la valeur et ses index ; `erase` retire les entrees, sans conserver de tombstones ou d'historique interne.
+- Les snapshots et iterateurs gardent leur etat coherent apres les ecritures suivantes et apres `close()`. Tant qu'un snapshot ou iterateur retient l'etat courant, l'ecriture suivante le copie avant modification. Une fois ces lecteurs liberes, les anciennes versions sont liberees.
+- `sync()` et `refresh()` reussissent sans I/O sur une base ouverte. `lastDurableSequence` reste a zero ; aucune durabilite n'est annoncee. `lazyWrite`, `commitWindowMs`, les seuils de flush/blob, le cache disque et les notifications SHM n'ont aucun effet dans ce mode.
+- `readOnly = true` et les operations `putBlobRef` sont refuses avec `InvalidArgument`. Les valeurs binaires ordinaires, y compris volumineuses, restent utilisables avec `put`.
+- `memoryRecordCount` et `memoryIndexEntryCount` comptent les entrees vivantes de l'etat courant, hors etats retenus par les snapshots.
+
+Ce mode ne fournit pas de garantie de temps reel dur : les ecritures prennent un mutex, allouent de la memoire et peuvent copier l'etat si un snapshot reste vivant. Les notifications de lignes, tables et vues relevent de la couche applicative.
+
+### Valeurs JSON natives
+
+`SwDbWriteBatch::putJson(key, object, secondaryKeys)` copie profondement l'objet a l'admission. En mode memoire, le record conserve seulement ce payload JSON opaque, partage avec les snapshots ; aucune representation texte ni cache de lignes supplementaire n'est maintenu. `getJson`, `scanPrimaryJson` et `scanIndexJson` rendent des copies profondes, y compris des enfants accessibles via les pointeurs de `SwJsonValue`. Une lecture ponctuelle ne retient pas l'etat complet de la base.
+
+Les APIs binaires existantes serialisent ce payload a la demande dans le meme format JSON compact. Inversement, les lectures JSON analysent les records crees par `put` ; un contenu binaire qui n'est pas un objet JSON produit `Corruption` pour `getJson`, ou `validJson = false` pour l'entree d'un iterateur JSON. L'iterateur peut continuer apres cette entree. Les index, bornes et sequences sont communs aux deux interfaces.
+
+En mode persistant, les batches JSON sont materialises en octets avant le coordinateur d'ecriture : WAL, comptage des octets, blobs et format disque restent identiques. `estimatedWalBytes()` materialise temporairement les objets pour mesurer leur taille lorsqu'il est demande sur un batch type ; les commits memoire ne font pas appel a cette estimation. `SwTableDb` utilise ces APIs pour les ecritures Exact et pour toutes ses lectures. Les ecritures Managed conservent leur encodage en octets et leur comportement historique de coercition.
+
 ## Ecriture
 
 Les ecritures passent par `SwDbWriteBatch`.
@@ -101,6 +133,8 @@ Deux modes existent :
 
 - `lazyWrite = false` : `write()` ne reussit qu'une fois la durabilite WAL atteinte.
 - `lazyWrite = true` : `write()` publie d'abord en memoire dans le process, puis la durabilite est faite en fond. Utiliser `sync()` pour attendre que l'etat visible soit durable.
+
+Ces deux modes de durabilite concernent `persistent = true`. Avec `persistent = false`, `write()` ne fait que publier le batch en memoire.
 
 `sync()` force un drain immediat de la file d'ecritures en attente, sans attendre la fin du `commitWindowMs`.
 
@@ -193,6 +227,8 @@ while (it.isValid()) {
 ```
 
 ## Readers read-only
+
+Cette section concerne le mode persistant.
 
 Pour un reader :
 

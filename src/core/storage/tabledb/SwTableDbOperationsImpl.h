@@ -20,10 +20,16 @@ inline SwDbStatus SwTableDb::insertRow(const SwTableSchema& schema,
     if (!normalizeStatus.ok()) {
         return normalizeStatus;
     }
+    if (schema.rowMode == SwTableRowMode::Exact) {
+        const SwDbStatus exists = db_.get(rowPrimaryKey_(schema.tableId, row.value(schema.primaryKey).toString()), nullptr, nullptr);
+        if (exists.ok()) return SwDbStatus(SwDbStatus::InvalidArgument, "Primary key already exists");
+        if (exists.code() != SwDbStatus::NotFound) return exists;
+    }
     SwDbWriteBatch batch;
-    batch.put(rowPrimaryKey_(schema.tableId, row.value("rowId").toString()),
-              jsonBytes_(row),
-              secondaryKeysForRow_(schema, row));
+    const auto key = rowPrimaryKey_(schema.tableId, row.value(schema.primaryKey).toString());
+    const auto secondary = secondaryKeysForRow_(schema, row);
+    if (schema.rowMode == SwTableRowMode::Exact) batch.putJson(key, row, secondary);
+    else batch.put(key, jsonBytes_(row), secondary);
     const SwDbStatus writeStatus = db_.write(batch);
     if (writeStatus.ok() && createdOut) {
         *createdOut = row;
@@ -34,6 +40,11 @@ inline SwDbStatus SwTableDb::insertRow(const SwTableSchema& schema,
 inline SwDbStatus SwTableDb::getRow(const SwTableSchema& schema,
                                     const SwString& rowId,
                                     SwJsonObject* rowOut) const {
+    return getRow_(schema, rowId, rowOut, nullptr);
+}
+
+inline SwDbStatus SwTableDb::getRow_(const SwTableSchema& schema, const SwString& rowId,
+                                     SwJsonObject* rowOut, const PreparedSchema_* prepared) const {
     SwMutexLocker locker(&mutex_);
     if (!opened_) {
         return SwDbStatus(SwDbStatus::NotOpen, "Table database not open");
@@ -41,40 +52,52 @@ inline SwDbStatus SwTableDb::getRow(const SwTableSchema& schema,
     if (!rowOut) {
         return SwDbStatus(SwDbStatus::InvalidArgument, "Missing output row");
     }
-    const SwDbStatus schemaStatus = validateSchema_(schema);
+    const SwDbStatus schemaStatus = prepared ? SwDbStatus::success() : validateSchema_(schema);
     if (!schemaStatus.ok()) {
         return schemaStatus;
     }
-    SwByteArray bytes;
-    const SwDbStatus getStatus = db_.get(rowPrimaryKey_(schema.tableId, rowId.trimmed()), &bytes, nullptr);
-    if (!getStatus.ok()) {
-        return getStatus;
-    }
-    if (!parseJsonObject_(bytes, *rowOut)) {
-        return SwDbStatus(SwDbStatus::Corruption, "Corrupted table row");
-    }
-    return SwDbStatus::success();
+    const SwString key = schema.rowMode == SwTableRowMode::Exact ? rowId : rowId.trimmed();
+    return db_.getJson(prepared ? prepared->rowPrefix + SwByteArray(key.toUtf8()) : rowPrimaryKey_(schema.tableId, key), rowOut);
+}
+
+inline SwDbStatus SwTableDb::getRowRecord(const SwTableSchema& schema, const SwString& rowId,
+                                          SwDbJsonRecord* out) const {
+    return getRowRecord_(schema, rowId, out, nullptr);
+}
+inline SwDbStatus SwTableDb::getRowRecord_(const SwTableSchema& schema, const SwString& rowId,
+                                           SwDbJsonRecord* out, const PreparedSchema_* prepared) const {
+    SwMutexLocker locker(&mutex_);
+    if (!opened_) return SwDbStatus(SwDbStatus::NotOpen, "Table database not open");
+    if (!out) return SwDbStatus(SwDbStatus::InvalidArgument, "Missing output row");
+    const auto status = prepared ? SwDbStatus::success() : validateSchema_(schema);
+    if (!status.ok()) return status;
+    const auto key = schema.rowMode == SwTableRowMode::Exact ? rowId : rowId.trimmed();
+    return db_.getJsonRecord(prepared ? prepared->rowPrefix + SwByteArray(key.toUtf8()) :
+                             rowPrimaryKey_(schema.tableId, key), out);
 }
 
 inline SwDbStatus SwTableDb::updateRow(const SwTableSchema& schema,
                                        const SwString& rowId,
                                        const SwJsonObject& patch,
                                        SwJsonObject* updatedOut) {
-    SwJsonObject currentRow;
-    const SwDbStatus getStatus = getRow(schema, rowId, &currentRow);
-    if (!getStatus.ok()) {
-        return getStatus;
-    }
     SwMutexLocker locker(&mutex_);
+    if (!opened_) return SwDbStatus(SwDbStatus::NotOpen, "Table database not open");
+    const SwDbStatus schemaStatus = validateSchema_(schema);
+    if (!schemaStatus.ok()) return schemaStatus;
+    const SwString key = schema.rowMode == SwTableRowMode::Exact ? rowId : rowId.trimmed();
+    SwJsonObject currentRow;
+    const SwDbStatus getStatus = db_.getJson(rowPrimaryKey_(schema.tableId, key), &currentRow);
+    if (!getStatus.ok()) return getStatus;
     SwJsonObject nextRow;
     const SwDbStatus normalizeStatus = normalizeRowForUpdate_(schema, currentRow, patch, nextRow);
     if (!normalizeStatus.ok()) {
         return normalizeStatus;
     }
     SwDbWriteBatch batch;
-    batch.put(rowPrimaryKey_(schema.tableId, rowId.trimmed()),
-              jsonBytes_(nextRow),
-              secondaryKeysForRow_(schema, nextRow));
+    const auto primary = rowPrimaryKey_(schema.tableId, key);
+    const auto secondary = secondaryKeysForRow_(schema, nextRow);
+    if (schema.rowMode == SwTableRowMode::Exact) batch.putJson(primary, nextRow, secondary);
+    else batch.put(primary, jsonBytes_(nextRow), secondary);
     const SwDbStatus writeStatus = db_.write(batch);
     if (writeStatus.ok() && updatedOut) {
         *updatedOut = nextRow;
@@ -87,14 +110,22 @@ inline SwDbStatus SwTableDb::deleteRow(const SwTableSchema& schema, const SwStri
     if (!opened_) {
         return SwDbStatus(SwDbStatus::NotOpen, "Table database not open");
     }
+    const SwDbStatus schemaStatus = validateSchema_(schema);
+    if (!schemaStatus.ok()) return schemaStatus;
+    const SwString key = schema.rowMode == SwTableRowMode::Exact ? rowId : rowId.trimmed();
     SwDbWriteBatch batch;
-    batch.erase(rowPrimaryKey_(schema.tableId, rowId.trimmed()));
+    batch.erase(rowPrimaryKey_(schema.tableId, key));
     return db_.write(batch);
 }
 
 inline SwDbStatus SwTableDb::queryRows(const SwTableSchema& schema,
                                        const SwTableQuery& query,
                                        SwTableQueryResult* outResult) const {
+    return queryRows_(schema, query, outResult, nullptr);
+}
+
+inline SwDbStatus SwTableDb::queryRows_(const SwTableSchema& schema, const SwTableQuery& query,
+                                        SwTableQueryResult* outResult, const PreparedSchema_* prepared) const {
     SwDbSnapshot snapshot;
     {
         SwMutexLocker locker(&mutex_);
@@ -104,7 +135,7 @@ inline SwDbStatus SwTableDb::queryRows(const SwTableSchema& schema,
         if (!outResult) {
             return SwDbStatus(SwDbStatus::InvalidArgument, "Missing query result");
         }
-        const SwDbStatus schemaStatus = validateSchema_(schema);
+        const SwDbStatus schemaStatus = prepared ? SwDbStatus::success() : validateSchema_(schema);
         if (!schemaStatus.ok()) {
             return schemaStatus;
         }
@@ -118,23 +149,25 @@ inline SwDbStatus SwTableDb::queryRows(const SwTableSchema& schema,
         return SwDbStatus(SwDbStatus::NotOpen, "Table database not open");
     }
 
-    const SwString sortBy = query.sortBy.trimmed().isEmpty() ? SwString("updatedAt") : query.sortBy.trimmed();
+    const SwString sortBy = querySortField_(schema, query);
     const SwString sortDirection = query.sortDirection.trimmed().isEmpty() ? SwString("desc")
                                                                            : query.sortDirection.trimmed().toLower();
     const bool descending = sortDirection == "desc";
 
-    SwString scanField = "rowId";
+    SwString scanField = schema.primaryKey;
     SwString scanOp;
     SwJsonValue scanValue;
     for (std::size_t i = 0; i < query.filters.size(); ++i) {
-        if (isBuiltInField_(query.filters[i].columnId) || findIndexByColumn_(schema, query.filters[i].columnId)) {
+        if (query.filters[i].columnId == schema.primaryKey ||
+            (schema.rowMode == SwTableRowMode::Managed && isBuiltInField_(query.filters[i].columnId)) ||
+            findIndexByColumn_(schema, query.filters[i].columnId)) {
             scanField = query.filters[i].columnId;
             scanOp = query.filters[i].op.trimmed().isEmpty() ? SwString("eq") : query.filters[i].op.trimmed().toLower();
             scanValue = query.filters[i].value;
             break;
         }
     }
-    if (scanField == "rowId" && scanOp.isEmpty() && sortBy != "rowId") {
+    if (scanField == schema.primaryKey && scanOp.isEmpty() && sortBy != schema.primaryKey) {
         scanField = sortBy;
     }
 
@@ -143,7 +176,7 @@ inline SwDbStatus SwTableDb::queryRows(const SwTableSchema& schema,
     SwString indexName;
     SwByteArray indexStart;
     SwByteArray indexEnd;
-    if (scanField == "rowId") {
+    if (scanField == schema.primaryKey) {
         primaryStart = rowPrefix_(schema.tableId);
         primaryEnd = primaryStart;
         primaryEnd.append('\xff');
@@ -194,9 +227,9 @@ inline SwDbStatus SwTableDb::queryRows(const SwTableSchema& schema,
 
     auto compareRows = [&](const SwJsonObject& lhs, const SwJsonObject& rhs) -> int {
         return compareOrderedValues(sortValueForRow_(lhs, sortBy),
-                                    lhs.value("rowId").toString(),
+                                    lhs.value(schema.primaryKey).toString(),
                                     sortValueForRow_(rhs, sortBy),
-                                    rhs.value("rowId").toString());
+                                    rhs.value(schema.primaryKey).toString());
     };
 
     auto matchesAllFilters = [&](const SwJsonObject& row) -> bool {
@@ -213,25 +246,23 @@ inline SwDbStatus SwTableDb::queryRows(const SwTableSchema& schema,
             return true;
         }
         return compareOrderedValues(sortValueForRow_(row, sortBy),
-                                    row.value("rowId").toString(),
+                                    row.value(schema.primaryKey).toString(),
                                     cursorSortValue,
                                     cursorRowId) > 0;
     };
 
     auto scanRows = [&](const std::function<bool(const SwJsonObject&)>& visitor) {
-        if (scanField == "rowId") {
-            for (SwDbIterator it = snapshot.scanPrimary(primaryStart, primaryEnd); it.isValid(); it.next()) {
-                SwJsonObject row;
-                if (parseJsonObject_(it.current().value, row) && !visitor(row)) {
+        if (scanField == schema.primaryKey) {
+            for (SwDbJsonIterator it = snapshot.scanPrimaryJson(primaryStart, primaryEnd); it.isValid(); it.next()) {
+                if (it.current().validJson && !visitor(it.current().value)) {
                     break;
                 }
             }
             return;
         }
 
-        for (SwDbIterator it = snapshot.scanIndex(indexName, indexStart, indexEnd); it.isValid(); it.next()) {
-            SwJsonObject row;
-            if (parseJsonObject_(it.current().value, row) && !visitor(row)) {
+        for (SwDbJsonIterator it = snapshot.scanIndexJson(indexName, indexStart, indexEnd); it.isValid(); it.next()) {
+            if (it.current().validJson && !visitor(it.current().value)) {
                 break;
             }
         }
@@ -280,7 +311,7 @@ inline SwDbStatus SwTableDb::queryRows(const SwTableSchema& schema,
                 return true;
             });
             for (std::vector<SwJsonObject>::reverse_iterator it = tail.rbegin(); it != tail.rend(); ++it) {
-                selected.push_back(*it);
+                selected.push_back(std::move(*it));
             }
         }
     } else {
@@ -310,13 +341,13 @@ inline SwDbStatus SwTableDb::queryRows(const SwTableSchema& schema,
     }
 
     for (std::size_t i = 0; i < selected.size() && i < static_cast<std::size_t>(limit); ++i) {
-        outResult->rows.append(selected[i]);
+        outResult->rows.append(std::move(selected[i]));
     }
     outResult->hasMore = selected.size() > static_cast<std::size_t>(limit);
     if (outResult->hasMore && !outResult->rows.isEmpty()) {
         const SwJsonObject& tail = outResult->rows[outResult->rows.size() - 1];
         outResult->nextCursor =
-            makeCursor_(sortValueForRow_(tail, sortBy), tail.value("rowId").toString());
+            makeCursor_(sortValueForRow_(tail, sortBy), tail.value(schema.primaryKey).toString());
     }
     return SwDbStatus::success();
 }
@@ -326,11 +357,13 @@ inline SwDbStatus SwTableDb::clearTable(const SwTableSchema& schema) {
     if (!opened_) {
         return SwDbStatus(SwDbStatus::NotOpen, "Table database not open");
     }
+    const SwDbStatus schemaStatus = validateSchema_(schema);
+    if (!schemaStatus.ok()) return schemaStatus;
     SwDbWriteBatch batch;
     SwByteArray start = rowPrefix_(schema.tableId);
     SwByteArray end = start;
     end.append('\xff');
-    for (SwDbIterator it = db_.scanPrimary(start, end); it.isValid(); it.next()) {
+    for (SwDbJsonIterator it = db_.scanPrimaryJson(start, end); it.isValid(); it.next()) {
         batch.erase(it.current().primaryKey);
     }
     if (batch.isEmpty()) {
@@ -354,13 +387,16 @@ inline SwDbStatus SwTableDb::migrateTable(const SwTableSchema& currentSchema,
     if (!nextStatus.ok()) {
         return nextStatus;
     }
+    if (currentSchema.rowMode != SwTableRowMode::Managed || nextSchema.rowMode != SwTableRowMode::Managed) {
+        return SwDbStatus(SwDbStatus::InvalidArgument, "Exact schemas require explicit atomic row replacement for migration");
+    }
     SwDbWriteBatch batch;
     SwByteArray start = rowPrefix_(currentSchema.tableId);
     SwByteArray end = start;
     end.append('\xff');
-    for (SwDbIterator it = db_.scanPrimary(start, end); it.isValid(); it.next()) {
-        SwJsonObject currentRow;
-        if (!parseJsonObject_(it.current().value, currentRow)) {
+    for (SwDbJsonIterator it = db_.scanPrimaryJson(start, end); it.isValid(); it.next()) {
+        const auto& currentRow = it.current().value;
+        if (!it.current().validJson) {
             return SwDbStatus(SwDbStatus::Corruption, "Corrupted row during migration");
         }
         SwJsonObject nextRow;

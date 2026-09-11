@@ -52,6 +52,11 @@
 #include <memory>
 #include <cmath>
 #include <cstdint>
+#include <iomanip>
+#include <limits>
+#include <locale>
+#include <sstream>
+#include <utility>
 
 #include "SwString.h"
 
@@ -70,6 +75,9 @@ public:
      * @brief Enumeration of possible JSON value types.
      */
     enum class Type { Null, Boolean, Integer, Double, String, Object, Array };
+
+    // Stored representation; unlike isInt(), this does not classify integral doubles as integers.
+    Type type() const { return type_; }
 
     /**
      * @brief Default constructor, initializes the value as Null.
@@ -131,12 +139,19 @@ public:
     SwJsonValue(const SwJsonObject& object)
         : type_(Type::Object), objectValue_(std::make_shared<SwJsonObject>(object)) {}
 
+    // Transfer a temporary container; lvalue construction remains a deep copy.
+    SwJsonValue(SwJsonObject&& object)
+        : type_(Type::Object), objectValue_(std::make_shared<SwJsonObject>(std::move(object))) {}
+
     /**
      * @brief Constructs a SwJsonValue from a SwJsonArray.
      * @param array The JSON array.
      */
     SwJsonValue(const SwJsonArray& array)
         : type_(Type::Array), arrayValue_(std::make_shared<SwJsonArray>(array)) {}
+
+    SwJsonValue(SwJsonArray&& array)
+        : type_(Type::Array), arrayValue_(std::make_shared<SwJsonArray>(std::move(array))) {}
 
 
     /**
@@ -192,14 +207,16 @@ public:
      */
     SwJsonValue& operator=(SwJsonValue&& other) noexcept {
         if (this != &other) {
-            type_ = std::move(other.type_);
-            boolValue_ = std::move(other.boolValue_);
-            intValue_ = std::move(other.intValue_);
-            doubleValue_ = std::move(other.doubleValue_);
-            stringValue_ = std::move(other.stringValue_);
-            objectValue_ = std::move(other.objectValue_);
-            arrayValue_ = std::move(other.arrayValue_);
-            other.type_ = Type::Null;
+            // The source can be a child of the payload being replaced. Detach
+            // every source member before destroying that parent container.
+            SwJsonValue incoming(std::move(other));
+            type_ = incoming.type_;
+            boolValue_ = incoming.boolValue_;
+            intValue_ = incoming.intValue_;
+            doubleValue_ = incoming.doubleValue_;
+            stringValue_ = std::move(incoming.stringValue_);
+            objectValue_ = std::move(incoming.objectValue_);
+            arrayValue_ = std::move(incoming.arrayValue_);
         }
         return *this;
     }
@@ -210,7 +227,9 @@ public:
      */
     void setObject(std::shared_ptr<SwJsonObject> object) {
         type_ = Type::Object;
-        objectValue_ = object;
+        objectValue_ = std::move(object);
+        arrayValue_.reset();
+        stringValue_.clear();
     }
 
     /**
@@ -219,7 +238,9 @@ public:
      */
     void setArray(std::shared_ptr<SwJsonArray> array) {
         type_ = Type::Array;
-        arrayValue_ = array;
+        arrayValue_ = std::move(array);
+        objectValue_.reset();
+        stringValue_.clear();
     }
 
 
@@ -460,8 +481,14 @@ public:
      * @return A reference to this SwJsonValue.
      */
     SwJsonValue& operator=(const SwJsonObject& object) {
-        type_ = Type::Object;
-        objectValue_ = std::make_shared<SwJsonObject>(object);
+        // Copy first: object may be borrowed from the container being replaced.
+        setObject(std::make_shared<SwJsonObject>(object));
+        return *this;
+    }
+
+    SwJsonValue& operator=(SwJsonObject&& object) {
+        // Finish moving a borrowed child before releasing its previous owner.
+        setObject(std::make_shared<SwJsonObject>(std::move(object)));
         return *this;
     }
 
@@ -510,6 +537,22 @@ private:
     std::shared_ptr<SwJsonObject> objectValue_; ///< The JSON object value.
     std::shared_ptr<SwJsonArray> arrayValue_; ///< The JSON array value.
 };
+
+namespace swJsonDetail {
+
+// Both JSON writers use the same locale-independent, round-trip number format.
+inline SwString numberLiteral(const SwJsonValue& value) {
+    if (value.type() == SwJsonValue::Type::Integer) return SwString::number(value.toLongLong());
+    const double number = value.toDouble();
+    std::ostringstream stream;
+    stream.imbue(std::locale::classic());
+    stream << std::setprecision(std::numeric_limits<double>::max_digits10) << number;
+    std::string text = stream.str();
+    if (std::isfinite(number) && text.find_first_of(".eE") == std::string::npos) text += ".0";
+    return SwString(text);
+}
+
+} // namespace swJsonDetail
 
 #ifndef SW_JSON_VALUE_NO_AUTO_INLINE
 #include "SwJsonObject.h"

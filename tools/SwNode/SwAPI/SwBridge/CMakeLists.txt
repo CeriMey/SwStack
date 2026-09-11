@@ -8,6 +8,14 @@ add_executable(SwBridge
     SwBridge.cpp
     SwBridgeApp.cpp
     SwBridgeHttpServer.cpp
+    SwBridgeRpcClient.cpp
+    rosbridge/SwRosBridgeCatalog.cpp
+    rosbridge/SwRosBridgeSignal.cpp
+    rosbridge/SwRosBridgeSession.cpp
+    rosbridge/SwRosBridgeGraph.cpp
+    rosbridge/SwRosBridgeParameters.cpp
+    rosbridge/SwRosBridgeServer.cpp
+    ../SwApi/SwApiJson.cpp
 )
 
 target_link_libraries(SwBridge PRIVATE SwQuicCore)

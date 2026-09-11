@@ -130,6 +130,9 @@ public:
           observer_(nullptr),
           watchdogFlag_(nullptr),
           warmInitialized_(false),
+          warmCount_(0),
+          spilloverCount_(0),
+          runningCount_(0),
           currentSlot_(nullptr),
           rejectedCount_(0),
           tasksExecuted_(0),
@@ -285,7 +288,7 @@ public:
                 readyFibers_[laneIndex].pop_front();
                 if (slot) {
                     slot->queuedReady = false;
-                    slot->running = true;
+                    setRunningLocked_(slot, true);
                     slot->readyLane = lane;
                     slot->resumedDispatch = true;
                 }
@@ -301,7 +304,7 @@ public:
                         ++tasksReused_;
                     }
                     slot->taskAssigned = true;
-                    slot->running = true;
+                    setRunningLocked_(slot, true);
                     slot->yielded = false;
                     slot->queuedReady = false;
                     slot->idle = false;
@@ -353,7 +356,7 @@ public:
             yieldedFibers_[id] = slot;
             slot->yieldId = id;
             slot->yielded = true;
-            slot->running = false;
+            setRunningLocked_(slot, false);
             slot->idle = false;
         }
 
@@ -404,7 +407,7 @@ public:
                 slot->queuedReady = true;
                 updateHighWaterMarkLocked_(slot->readyLane);
             }
-            slot->running = false;
+            setRunningLocked_(slot, false);
             slot->idle = false;
         }
 
@@ -450,6 +453,7 @@ public:
         slots_.clear();
         idleWarmFibers_.clear();
         idleSpillFibers_.clear();
+        warmCount_ = spilloverCount_ = runningCount_ = 0;
         warmInitialized_ = false;
 #else
         std::vector<LPVOID> handlesToDelete;
@@ -474,6 +478,7 @@ public:
             idleWarmFibers_.clear();
             idleSpillFibers_.clear();
             slots_.clear();
+            warmCount_ = spilloverCount_ = runningCount_ = 0;
             warmInitialized_ = false;
             currentSlot_ = nullptr;
         }
@@ -581,48 +586,23 @@ private:
         return std::max(0, (std::min)(config_.warmFiberCount, config_.maxFiberCount));
     }
 
-    int warmCountLocked_() const {
-        int count = 0;
-        for (size_t i = 0; i < slots_.size(); ++i) {
-            const FiberSlot* slot = slots_[i].get();
-            if (slot && slot->warm && slot->handle) {
-                ++count;
-            }
-        }
-        return count;
-    }
+    int warmCountLocked_() const { return warmCount_; }
 
-    int spilloverCountLocked_() const {
-        int count = 0;
-        for (size_t i = 0; i < slots_.size(); ++i) {
-            const FiberSlot* slot = slots_[i].get();
-            if (slot && slot->spillover && slot->handle) {
-                ++count;
-            }
-        }
-        return count;
-    }
+    int spilloverCountLocked_() const { return spilloverCount_; }
 
-    int runningCountLocked_() const {
-        int count = 0;
-        for (size_t i = 0; i < slots_.size(); ++i) {
-            const FiberSlot* slot = slots_[i].get();
-            if (slot && slot->handle && slot->running) {
-                ++count;
-            }
-        }
-        return count;
-    }
+    int runningCountLocked_() const { return runningCount_; }
 
     int occupiedSlotCountLocked_() const {
-        int count = 0;
-        for (size_t i = 0; i < slots_.size(); ++i) {
-            const FiberSlot* slot = slots_[i].get();
-            if (slot && slot->handle && !slot->idle) {
-                ++count;
-            }
-        }
-        return count;
+        // Yielded and ready-to-resume fibers still occupy a live slot. Idle
+        // queues contain every reusable handle, including emergency spillover.
+        return warmCount_ + spilloverCount_ -
+            static_cast<int>(idleWarmFibers_.size() + idleSpillFibers_.size());
+    }
+
+    void setRunningLocked_(FiberSlot* slot, bool running) {
+        if (slot->running == running) return;
+        if (slot->handle) runningCount_ += running ? 1 : -1;
+        slot->running = running;
     }
 
     int pendingTaskCountLocked_() const {
@@ -807,12 +787,20 @@ private:
         }
 
         FiberSlot* rawSlot = slot.get();
-        slots_.push_back(std::move(slot));
-        if (spillover) {
-            idleSpillFibers_.push_back(rawSlot);
-        } else {
-            idleWarmFibers_.push_back(rawSlot);
+        const LPVOID handle = rawSlot->handle;
+        try {
+            slots_.push_back(std::move(slot));
+            if (spillover) idleSpillFibers_.push_back(rawSlot);
+            else idleWarmFibers_.push_back(rawSlot);
+        } catch (...) {
+            // Publish the handle and its idle entry together. Failed queue
+            // allocation must not leave an uncounted/non-dispatchable fiber.
+            if (!slots_.empty() && slots_.back().get() == rawSlot) slots_.pop_back();
+            DeleteFiber(handle);
+            throw;
         }
+        if (spillover) ++spilloverCount_;
+        else ++warmCount_;
         return rawSlot;
     }
 
@@ -856,7 +844,7 @@ private:
         SwMutexLocker locker(&mutex_);
         slot->callback = std::function<void()>();
         slot->taskAssigned = false;
-        slot->running = false;
+        setRunningLocked_(slot, false);
         slot->yielded = false;
         slot->queuedReady = false;
         slot->yieldId = 0;
@@ -880,6 +868,12 @@ private:
         if (!watchdogFlag_->exchange(false, std::memory_order_acq_rel)) {
             return;
         }
+        {
+            SwMutexLocker locker(&mutex_);
+            // The watchdog flag may arrive just as the callback completes.
+            // An idle handle has no interrupted task to retire or requeue.
+            if (!slot->handle || !slot->taskAssigned) return;
+        }
 
 #if defined(_WIN32)
         swCWarning(kSwLogCategory_SwFiberPool)
@@ -889,10 +883,14 @@ private:
         {
             SwMutexLocker locker(&mutex_);
             oldHandle = slot->handle;
+            setRunningLocked_(slot, false);
+            if (oldHandle) {
+                if (slot->warm) --warmCount_;
+                if (slot->spillover) --spilloverCount_;
+            }
             slot->handle = nullptr;
             slot->callback = std::function<void()>();
             slot->taskAssigned = false;
-            slot->running = false;
             slot->yielded = false;
             slot->queuedReady = false;
             slot->yieldId = 0;
@@ -913,7 +911,7 @@ private:
         if (!slot->queuedReady) {
             readyFibers_[laneIndex_(slot->readyLane)].push_back(slot);
             slot->queuedReady = true;
-            slot->running = false;
+            setRunningLocked_(slot, false);
             slot->idle = false;
             updateHighWaterMarkLocked_(slot->readyLane);
         }
@@ -1017,6 +1015,11 @@ private:
     std::atomic<bool>* watchdogFlag_;
     SwFiberPoolConfig config_;
     bool warmInitialized_;
+    // Protected by mutex_; handle creation/retirement and running transitions
+    // update these counts instead of scanning every configured slot per event.
+    int warmCount_;
+    int spilloverCount_;
+    int runningCount_;
     std::vector<std::unique_ptr<FiberSlot> > slots_;
     std::deque<FiberSlot*> idleWarmFibers_;
     std::deque<FiberSlot*> idleSpillFibers_;

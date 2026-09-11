@@ -36,7 +36,7 @@ private:
     std::unique_ptr<sw::ipc::Registry> reg_;
     RB rb_;
     RB::Consumer consumer_;
-    sw::ipc::Signal<uint64_t>::Subscription sub_;
+    sw::ipc::SwIpcSignal<uint64_t>::Subscription sub_;
 
     std::unique_ptr<SwMainWindow> window_;
     SwLabel* infoLabel_{nullptr};

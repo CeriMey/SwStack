@@ -30,7 +30,7 @@ private:
     static SwByteArray makeSyntheticRgb_(int seq, int width, int height);
     void publishFrame_();
 
-    SW_REGISTER_SHM_SIGNAL(frame, int, int, int, SwByteArray);
+    SW_IPC_LATCH_SIZED(frame, 4096, int, int, int, SwByteArray);
 
     int periodMs_{100};
     int width_{32};

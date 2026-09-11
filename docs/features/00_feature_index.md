@@ -14,7 +14,7 @@ Chaque fiche suit une structure fixe:
 - `docs/features/25_utilities_and_serialization.md`  
   Types utilitaires (SwString/ByteArray/containers), JSON, regex, helpers
 - `docs/features/30_ipc_shared_memory_pubsub.md`  
-  IPC pub/sub en mémoire partagée (Signal<T...>, registries, LoopPoller, wakeups)
+  IPC pub/sub en mémoire partagée (SwIpcSignal<T...>, registries, LoopPoller, wakeups)
 - `docs/features/40_ipc_rpc_remote_components.md`  
   RPC + discovery/remotes + container/plugins
 - `docs/features/50_config_and_nodes.md`  

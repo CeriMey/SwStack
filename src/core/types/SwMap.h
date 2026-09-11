@@ -378,6 +378,9 @@ public:
     }
 
 
+    T& at(const Key& key) { return m_map.at(key); }
+    const T& at(const Key& key) const { return m_map.at(key); }
+
     T value(const Key& key, const T& defaultValue = T()) const {
         auto it = m_map.find(key);
         return (it != m_map.end()) ? it->second : defaultValue;

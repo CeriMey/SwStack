@@ -832,14 +832,27 @@ inline SwDbStatus SwEmbeddedDb::syncInternal_(bool allowClosed) {
 }
 
 inline SwDbStatus SwEmbeddedDb::write(const SwDbWriteBatch& batch) {
+    if (!options_.persistent) return swEmbeddedDbDetail::MemoryManager_(*this).write(batch);
+    if (batch.hasJson()) {
+        SwDbWriteBatch bytes = batch;
+        bytes.materializeJson();
+        return swEmbeddedDbDetail::WriteCoordinator_(*this).writeMutable(bytes);
+    }
     return swEmbeddedDbDetail::WriteCoordinator_(*this).write(batch);
 }
 
 inline SwDbStatus SwEmbeddedDb::write(SwDbWriteBatch&& batch) {
+    if (!options_.persistent) return swEmbeddedDbDetail::MemoryManager_(*this).write(batch);
+    if (batch.hasJson()) batch.materializeJson();
     return swEmbeddedDbDetail::WriteCoordinator_(*this).writeMutable(batch);
 }
 
 inline SwDbStatus SwEmbeddedDb::sync() {
+    if (!options_.persistent) {
+        SwEmbeddedDbLock_ lock(mutex_);
+        return opened_.load(std::memory_order_acquire)
+            ? SwDbStatus::success() : SwDbStatus(SwDbStatus::NotOpen, "database is not open");
+    }
     return syncInternal_(false);
 }
 

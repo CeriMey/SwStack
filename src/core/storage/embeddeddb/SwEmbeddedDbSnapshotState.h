@@ -5,6 +5,7 @@ public:
     unsigned long long visibleSequence{0};
     SwString blobDir;
     SwEmbeddedDbOptions options;
+    std::shared_ptr<const MemoryState_> memory;
     std::shared_ptr<ReadModel_> readModel;
     std::shared_ptr<const WriterOverlay_> overlay;
     std::shared_ptr<const MemTable_> mutableMem;
@@ -40,6 +41,12 @@ public:
                                PrimaryRecord_& outRecord,
                                bool resolveBlob,
                                int* tableHint) const {
+        if (memory) {
+            const auto found = memory->primary.find(primaryKey);
+            if (found == memory->primary.end()) return false;
+            outRecord = found->second;
+            return true;
+        }
         if (overlay) {
             const std::map<SwByteArray, PrimaryRecord_>::const_iterator overlayIt =
                 overlay->primary.find(primaryKey);
@@ -147,4 +154,3 @@ private:
 };
 
 } // namespace swEmbeddedDbDetail
-

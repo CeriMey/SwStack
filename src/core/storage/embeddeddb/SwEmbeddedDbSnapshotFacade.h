@@ -48,7 +48,7 @@ inline SwDbStatus SwDbSnapshot::get(const SwByteArray& primaryKey,
         return SwDbStatus(SwDbStatus::NotFound, "primary key not found");
     }
     if (valueOut) {
-        *valueOut = record.value;
+        *valueOut = swEmbeddedDbDetail::recordBytes_(record);
     }
     if (secondaryKeysOut) {
         *secondaryKeysOut = record.secondaryKeys;

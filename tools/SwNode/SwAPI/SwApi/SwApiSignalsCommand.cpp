@@ -227,31 +227,31 @@ void SwApiSignalsCommand::cmdEcho_() {
     sw::ipc::Registry reg(target.domain, target.object);
 
     if (types.size() == 1 && isBoolType(types[0])) {
-        sw::ipc::Signal<bool> sig(reg, sigName);
+        sw::ipc::SwIpcSignal<bool> sig(reg, sigName);
         auto sub = sig.connect([sigName](bool a0) { std::cout << sigName.toStdString() << " " << (a0 ? "true" : "false") << "\n"; }, fireInitial, 0);
         subscription_.emplace(std::move(sub));
     } else if (types.size() == 1 && isIntType(types[0])) {
-        sw::ipc::Signal<int> sig(reg, sigName);
+        sw::ipc::SwIpcSignal<int> sig(reg, sigName);
         auto sub = sig.connect([sigName](int a0) { std::cout << sigName.toStdString() << " " << a0 << "\n"; }, fireInitial, 0);
         subscription_.emplace(std::move(sub));
     } else if (types.size() == 1 && isDoubleType(types[0])) {
-        sw::ipc::Signal<double> sig(reg, sigName);
+        sw::ipc::SwIpcSignal<double> sig(reg, sigName);
         auto sub = sig.connect([sigName](double a0) { std::cout << sigName.toStdString() << " " << a0 << "\n"; }, fireInitial, 0);
         subscription_.emplace(std::move(sub));
     } else if (types.size() == 1 && isStringType(types[0])) {
-        sw::ipc::Signal<SwString> sig(reg, sigName);
+        sw::ipc::SwIpcSignal<SwString> sig(reg, sigName, 16u, 4096u);
         auto sub = sig.connect([sigName](SwString a0) { std::cout << sigName.toStdString() << " " << a0.toStdString() << "\n"; }, fireInitial, 0);
         subscription_.emplace(std::move(sub));
     } else if (types.size() == 1 && isU64Type(types[0])) {
-        sw::ipc::Signal<uint64_t> sig(reg, sigName);
+        sw::ipc::SwIpcSignal<uint64_t> sig(reg, sigName);
         auto sub = sig.connect([sigName](uint64_t a0) { std::cout << sigName.toStdString() << " " << a0 << "\n"; }, fireInitial, 0);
         subscription_.emplace(std::move(sub));
     } else if (types.size() == 2 && isU64Type(types[0]) && isStringType(types[1])) {
-        sw::ipc::Signal<uint64_t, SwString> sig(reg, sigName);
+        sw::ipc::SwIpcSignal<uint64_t, SwString> sig(reg, sigName, 16u, 4096u);
         auto sub = sig.connect([sigName](uint64_t a0, SwString a1) { std::cout << sigName.toStdString() << " " << a0 << " " << a1.toStdString() << "\n"; }, fireInitial, 0);
         subscription_.emplace(std::move(sub));
     } else if (types.size() == 2 && isIntType(types[0]) && isStringType(types[1])) {
-        sw::ipc::Signal<int, SwString> sig(reg, sigName);
+        sw::ipc::SwIpcSignal<int, SwString> sig(reg, sigName, 16u, 4096u);
         auto sub = sig.connect([sigName](int a0, SwString a1) { std::cout << sigName.toStdString() << " " << a0 << " " << a1.toStdString() << "\n"; }, fireInitial, 0);
         subscription_.emplace(std::move(sub));
     } else {
@@ -330,69 +330,69 @@ int SwApiSignalsCommand::cmdPublish_() {
         if (types.size() == 1 && isBoolType(types[0])) {
             bool a0 = false;
             if (!asBool(argsArr[0], a0)) { std::cerr << "swapi signal publish: arg0 bool parse failed\n"; return 2; }
-            sw::ipc::Signal<bool> sig(reg, sigName);
+            sw::ipc::SwIpcSignal<bool> sig(reg, sigName);
             ok = sig.publish(a0);
         } else if (types.size() == 1 && isIntType(types[0])) {
             int a0 = 0;
             if (!asInt(argsArr[0], a0)) { std::cerr << "swapi signal publish: arg0 int parse failed\n"; return 2; }
-            sw::ipc::Signal<int> sig(reg, sigName);
+            sw::ipc::SwIpcSignal<int> sig(reg, sigName);
             ok = sig.publish(a0);
         } else if (types.size() == 1 && isDoubleType(types[0])) {
             double a0 = 0.0;
             if (!asDouble(argsArr[0], a0)) { std::cerr << "swapi signal publish: arg0 double parse failed\n"; return 2; }
-            sw::ipc::Signal<double> sig(reg, sigName);
+            sw::ipc::SwIpcSignal<double> sig(reg, sigName);
             ok = sig.publish(a0);
         } else if (types.size() == 1 && isStringType(types[0])) {
             SwString a0;
             if (!asString(argsArr[0], a0)) { std::cerr << "swapi signal publish: arg0 SwString parse failed\n"; return 2; }
-            sw::ipc::Signal<SwString> sig(reg, sigName);
+            sw::ipc::SwIpcSignal<SwString> sig(reg, sigName, 16u, 4096u);
             ok = sig.publish(a0);
         } else if (types.size() == 1 && isBytesType(types[0])) {
             SwByteArray a0;
             if (!asBytes(argsArr[0], a0)) { std::cerr << "swapi signal publish: arg0 SwByteArray parse failed (use string)\n"; return 2; }
-            sw::ipc::Signal<SwByteArray> sig(reg, sigName);
+            sw::ipc::SwIpcSignal<SwByteArray> sig(reg, sigName, 16u, 4096u);
             ok = sig.publish(a0);
         } else if (types.size() == 1 && isU64Type(types[0])) {
             uint64_t a0 = 0;
             if (!asU64(argsArr[0], a0)) { std::cerr << "swapi signal publish: arg0 u64 parse failed\n"; return 2; }
-            sw::ipc::Signal<uint64_t> sig(reg, sigName);
+            sw::ipc::SwIpcSignal<uint64_t> sig(reg, sigName);
             ok = sig.publish(a0);
         } else if (types.size() == 2 && isU64Type(types[0]) && isStringType(types[1])) {
             uint64_t a0 = 0;
             SwString a1;
             if (!asU64(argsArr[0], a0) || !asString(argsArr[1], a1)) { std::cerr << "swapi signal publish: args parse failed\n"; return 2; }
-            sw::ipc::Signal<uint64_t, SwString> sig(reg, sigName);
+            sw::ipc::SwIpcSignal<uint64_t, SwString> sig(reg, sigName, 16u, 4096u);
             ok = sig.publish(a0, a1);
         } else if (types.size() == 2 && isIntType(types[0]) && isStringType(types[1])) {
             int a0 = 0;
             SwString a1;
             if (!asInt(argsArr[0], a0) || !asString(argsArr[1], a1)) { std::cerr << "swapi signal publish: args parse failed\n"; return 2; }
-            sw::ipc::Signal<int, SwString> sig(reg, sigName);
+            sw::ipc::SwIpcSignal<int, SwString> sig(reg, sigName, 16u, 4096u);
             ok = sig.publish(a0, a1);
         } else if (types.size() == 3 && isIntType(types[0]) && isIntType(types[1]) && isIntType(types[2])) {
             int a0 = 0, a1 = 0, a2 = 0;
             if (!asInt(argsArr[0], a0) || !asInt(argsArr[1], a1) || !asInt(argsArr[2], a2)) { std::cerr << "swapi signal publish: args parse failed\n"; return 2; }
-            sw::ipc::Signal<int, int, int> sig(reg, sigName);
+            sw::ipc::SwIpcSignal<int, int, int> sig(reg, sigName);
             ok = sig.publish(a0, a1, a2);
         } else if (types.size() == 3 && isU64Type(types[0]) && isStringType(types[1]) && isStringType(types[2])) {
             uint64_t a0 = 0;
             SwString a1, a2;
             if (!asU64(argsArr[0], a0) || !asString(argsArr[1], a1) || !asString(argsArr[2], a2)) { std::cerr << "swapi signal publish: args parse failed\n"; return 2; }
-            sw::ipc::Signal<uint64_t, SwString, SwString> sig(reg, sigName);
+            sw::ipc::SwIpcSignal<uint64_t, SwString, SwString> sig(reg, sigName, 16u, 4096u);
             ok = sig.publish(a0, a1, a2);
         } else if (types.size() == 3 && isBoolType(types[0]) && isIntType(types[1]) && isStringType(types[2])) {
             bool a0 = false;
             int a1 = 0;
             SwString a2;
             if (!asBool(argsArr[0], a0) || !asInt(argsArr[1], a1) || !asString(argsArr[2], a2)) { std::cerr << "swapi signal publish: args parse failed\n"; return 2; }
-            sw::ipc::Signal<bool, int, SwString> sig(reg, sigName);
+            sw::ipc::SwIpcSignal<bool, int, SwString> sig(reg, sigName, 16u, 4096u);
             ok = sig.publish(a0, a1, a2);
         } else if (types.size() == 3 && isIntType(types[0]) && isDoubleType(types[1]) && isStringType(types[2])) {
             int a0 = 0;
             double a1 = 0.0;
             SwString a2;
             if (!asInt(argsArr[0], a0) || !asDouble(argsArr[1], a1) || !asString(argsArr[2], a2)) { std::cerr << "swapi signal publish: args parse failed\n"; return 2; }
-            sw::ipc::Signal<int, double, SwString> sig(reg, sigName);
+            sw::ipc::SwIpcSignal<int, double, SwString> sig(reg, sigName, 16u, 4096u);
             ok = sig.publish(a0, a1, a2);
         } else {
             std::cerr << "swapi signal publish: unsupported signature (extend dispatcher)\n";

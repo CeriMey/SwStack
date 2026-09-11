@@ -46,7 +46,7 @@ inline SwByteArray hexWidth64_(std::uint64_t value) {
 }
 
 inline SwString indexNameForField_(const SwTableSchema& schema, const SwString& columnId) {
-    if (columnId == "createdAt" || columnId == "updatedAt") {
+    if (schema.rowMode == SwTableRowMode::Managed && (columnId == "createdAt" || columnId == "updatedAt")) {
         return "swtable." + schema.tableId + ".builtin." + columnId;
     }
     for (std::size_t i = 0; i < schema.indexes.size(); ++i) {
@@ -201,9 +201,8 @@ inline bool SwTableDb::isBuiltInField_(const SwString& columnId) {
     return columnId == "rowId" || columnId == "createdAt" || columnId == "updatedAt";
 }
 
-inline bool SwTableDb::requiresStringPrefixSupport_(const SwString& columnId, const SwString& type) {
-    return columnId == "rowId" || columnId == "createdAt" || columnId == "updatedAt" ||
-           swTableDbDetail::normalizedType_(type) == "string" ||
+inline bool SwTableDb::requiresStringPrefixSupport_(const SwString&, const SwString& type) {
+    return swTableDbDetail::normalizedType_(type) == "string" ||
            swTableDbDetail::normalizedType_(type) == "datetime";
 }
 
@@ -258,6 +257,19 @@ inline SwDbStatus SwTableDb::validateSchema_(const SwTableSchema& schema) {
     }
     if (hasDuplicateIndexes_(schema)) {
         return SwDbStatus(SwDbStatus::InvalidArgument, "Duplicate index ids are not allowed");
+    }
+    if (schema.rowMode == SwTableRowMode::Managed && schema.primaryKey != "rowId") {
+        return SwDbStatus(SwDbStatus::InvalidArgument, "Managed rows require the rowId primary key");
+    }
+    if (schema.rowMode == SwTableRowMode::Exact) {
+        const std::string tableId = schema.tableId.toStdString();
+        if (tableId.find('/') != std::string::npos || tableId.find('\0') != std::string::npos) {
+            return SwDbStatus(SwDbStatus::InvalidArgument, "Exact tableId cannot contain slash or NUL");
+        }
+        const SwTableColumn* keyColumn = findColumn_(schema, schema.primaryKey);
+        if (!keyColumn || swTableDbDetail::normalizedType_(keyColumn->type) != "string") {
+            return SwDbStatus(SwDbStatus::InvalidArgument, "Exact primaryKey must name a string column");
+        }
     }
     for (std::size_t i = 0; i < schema.columns.size(); ++i) {
         if (!isSupportedType_(schema.columns[i].type)) {

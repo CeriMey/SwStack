@@ -142,8 +142,8 @@ int main(int argc, char** argv) {
         sw::ipc::Registry selfReg(selfDomain, selfObject);
         sw::ipc::Registry peerReg(peerDomain, peerObject);
 
-        sw::ipc::Signal<uint64_t, uint64_t, SwByteArray> ping(selfReg, "perfPing");
-        sw::ipc::Signal<uint64_t, uint64_t, uint64_t> pong(peerReg, "perfPong");
+        sw::ipc::SwIpcSignal<uint64_t, uint64_t, SwByteArray> ping(selfReg, "perfPing", 16u, 4096u);
+        sw::ipc::SwIpcSignal<uint64_t, uint64_t, uint64_t> pong(peerReg, "perfPong");
 
         std::cout << "[IpcPerfMonitor] server online: self=" << selfFqn.toStdString()
                   << " peer=" << peerFqn.toStdString()
@@ -246,8 +246,8 @@ int main(int argc, char** argv) {
         sw::ipc::Registry selfReg(selfDomain, selfObject);
         sw::ipc::Registry peerReg(peerDomain, peerObject);
 
-        sw::ipc::Signal<uint64_t, uint64_t, SwByteArray> ping(peerReg, "perfPing");
-        sw::ipc::Signal<uint64_t, uint64_t, uint64_t> pong(selfReg, "perfPong");
+        sw::ipc::SwIpcSignal<uint64_t, uint64_t, SwByteArray> ping(peerReg, "perfPing", 16u, 4096u);
+        sw::ipc::SwIpcSignal<uint64_t, uint64_t, uint64_t> pong(selfReg, "perfPong");
 
         struct State {
             std::atomic<uint64_t> expectedSeq{0};

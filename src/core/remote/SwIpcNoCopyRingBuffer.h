@@ -569,8 +569,8 @@ public:
      * @param timeoutMs Timeout expressed in milliseconds.
      * @return The requested connect.
      */
-    sw::ipc::Signal<uint64_t>::Subscription connect(Consumer& c, Fn cb, bool fireInitial = true, int timeoutMs = 0) {
-        if (!notify_ || !c.isValid()) return sw::ipc::Signal<uint64_t>::Subscription();
+    sw::ipc::SwIpcSignal<uint64_t>::Subscription connect(Consumer& c, Fn cb, bool fireInitial = true, int timeoutMs = 0) {
+        if (!notify_ || !c.isValid()) return sw::ipc::SwIpcSignal<uint64_t>::Subscription();
         return notify_->connect([&c, cb](uint64_t seq) mutable {
             ReadLease v = c.acquire(seq);
             if (!v.isValid()) return;
@@ -582,12 +582,12 @@ public:
      * @brief Performs the `notifier` operation.
      * @return The requested notifier.
      */
-    sw::ipc::Signal<uint64_t>* notifier() { return notify_.get(); }
+    sw::ipc::SwIpcSignal<uint64_t>* notifier() { return notify_.get(); }
     /**
      * @brief Performs the `notifier` operation.
      * @return The requested notifier.
      */
-    const sw::ipc::Signal<uint64_t>* notifier() const { return notify_.get(); }
+    const sw::ipc::SwIpcSignal<uint64_t>* notifier() const { return notify_.get(); }
 
 private:
     static const uint32_t kMagic = 0x4E434231u;   // 'NCB1'
@@ -645,7 +645,7 @@ private:
     SwString shmName_;
 
     std::shared_ptr<detail::ShmMappingDyn> map_;
-    std::unique_ptr<sw::ipc::Signal<uint64_t>> notify_;
+    std::unique_ptr<sw::ipc::SwIpcSignal<uint64_t>> notify_;
 };
 
 template <typename MetaT, uint32_t MaxConsumers>
@@ -1365,10 +1365,9 @@ bool NoCopyRingBuffer<MetaT, MaxConsumers>::commitWrite_(WriteLease& w, uint32_t
 
     detail::atomic_store_u64(&w.slot_->seq, w.seq_);
     detail::atomic_store_u64(&H->lastSeq, w.seq_);
-    if (notify_) notify_->publish(w.seq_);
-
     w.committed_ = true;
     w.owner_ = nullptr;
+    if (notify_) notify_->publish(w.seq_);
     return true;
 }
 
@@ -1443,7 +1442,7 @@ void NoCopyRingBuffer<MetaT, MaxConsumers>::initCreate_(Registry& reg,
                                            typeId_(),
                                            registryTypeName_(capacity, maxBytes, notifySignalName_));
 
-    notify_.reset(new sw::ipc::Signal<uint64_t>(reg, notifySignalName_));
+    notify_.reset(new sw::ipc::SwIpcSignal<uint64_t>(reg, notifySignalName_, 16u, 0u, sw::ipc::DeliveryMode::LatestOnly));
 }
 
 template <typename MetaT, uint32_t MaxConsumers>
@@ -1462,7 +1461,7 @@ void NoCopyRingBuffer<MetaT, MaxConsumers>::initOpen_(Registry& reg, const SwStr
     if (!H) throw std::runtime_error("NoCopyRingBuffer: null header");
     validateHeaderOrThrow_(*H);
 
-    notify_.reset(new sw::ipc::Signal<uint64_t>(reg, notifySignalName_));
+    notify_.reset(new sw::ipc::SwIpcSignal<uint64_t>(reg, notifySignalName_, 16u, 0u, sw::ipc::DeliveryMode::LatestOnly));
 }
 
 template <typename MetaT, uint32_t MaxConsumers>

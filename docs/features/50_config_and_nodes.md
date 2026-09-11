@@ -90,7 +90,7 @@ Dans `src/core/remote/SwRemoteObject.h` (à utiliser dans les classes dérivées
 
 Dans `src/core/remote/SwSharedMemorySignal.h`:
 
-- `SW_REGISTER_SHM_SIGNAL(signalName, Arg1, Arg2, ...)`
+- `SW_IPC_SIGNAL_SIZED(signalName, 4096, Arg1, Arg2, ...)`
 
 ### RPC système exposés par défaut (factory)
 
@@ -182,7 +182,7 @@ flowchart TD
 Core:
 - `src/core/remote/SwRemoteObject.h`: config multi-couches + IPC config + macros (register/bind/connect/expose).
 - `src/core/remote/SwRemoteObjectNode.h`: macro main node + parsing JSON/args.
-- `src/core/remote/SwSharedMemorySignal.h`: SHM pub/sub + `SW_REGISTER_SHM_SIGNAL`.
+- `src/core/remote/SwSharedMemorySignal.h`: SHM pub/sub + `SW_IPC_SIGNAL_SIZED`.
 
 Données:
 - `systemConfig/global/`: configuration globale (par `objectName`).
@@ -191,7 +191,7 @@ Données:
 
 Exemples:
 - `exemples/23-ConfigurableObjectDemo/DemoSubscriber.cpp`: `ipcRegisterConfig`, `ipcExposeRpc`, naming (`buildObjectFqn`, `ipcFullName`).
-- `exemples/24-ComponentPlugin/PingPongPlugin.cpp`: `ipcRegisterConfig`, `ipcConnect`, `SW_REGISTER_SHM_SIGNAL`, `SW_REGISTER_COMPONENT_NODE`.
+- `exemples/24-ComponentPlugin/PingPongPlugin.cpp`: `ipcRegisterConfig`, `ipcConnect`, `SW_IPC_SIGNAL_SIZED`, `SW_REGISTER_COMPONENT_NODE`.
 - `exemples/29-IpcPingPongNodes/SwPingNode.cpp`, `exemples/29-IpcPingPongNodes/SwPongNode.cpp`: nodes (`SW_REMOTE_OBJECT_NODE`).
 - `SwNode/SwLaunch/SwLaunch.cpp`: launcher JSON + monitoring de présence (`__config__|*`).
 
@@ -216,7 +216,7 @@ class MyNode : public SwRemoteObject {
 };
 ```
 
-### 8.2 Publier un signal SHM (macro `SW_REGISTER_SHM_SIGNAL`)
+### 8.2 Publier un signal SHM (macro `SW_IPC_SIGNAL_SIZED`)
 
 ```cpp
 #include "SwRemoteObject.h"
@@ -227,7 +227,7 @@ class Ping : public SwRemoteObject {
   using SwRemoteObject::SwRemoteObject;
 
  private:
-  SW_REGISTER_SHM_SIGNAL(ping, int, SwString);
+  SW_IPC_SIGNAL_SIZED(ping, 4096, int, SwString);
 
   void tick_() {
     (void)emit ping(++seq_, SwString("ping"));
@@ -399,7 +399,7 @@ Références (toutes dans `src/core/remote/SwRemoteObject.h`):
 
 **1) Snapshot complet: `__config__|<objectName>`**
 
-- Type: `sw::ipc::Signal<uint64_t, SwString>` (publisherId + JSON texte).
+- Type: `sw::ipc::SwIpcSignal<uint64_t, SwString>` (publisherId + JSON texte).
 - Nom du signal: `__config__|<objectName>`.
 - Payload JSON: `effectiveConfigJson_locked_(Compact)` = `mergedDoc_` + injection des defaults des `ipcRegisterConfig` + méta `__swconfig__`.
 - La présence d’un signal `__config__|*` dans la registry est utilisée comme “presence marker” pour détecter un `SwRemoteObject`.
@@ -424,7 +424,7 @@ Référence: `startShmConfigSubscription_locked()` et `applyRemoteConfig()` dans
 
 **2) Update par clé (si et seulement si la clé est enregistrée): `__cfg__|<configPath>`**
 
-- Type: `sw::ipc::Signal<uint64_t, SwString>` (publisherId + valeur texte).
+- Type: `sw::ipc::SwIpcSignal<uint64_t, SwString>` (publisherId + valeur texte).
 - Nom du signal: `__cfg__|<configPath>` (ex: `__cfg__|period_ms`, ou `__cfg__|image/gain`).
 - Émission:
   - `ipcUpdateConfig(targetObject, configName, value)` publie sur l’objet distant (pas d’écriture disque côté émetteur).

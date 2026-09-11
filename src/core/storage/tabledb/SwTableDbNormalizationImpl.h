@@ -95,6 +95,7 @@ inline SwDbStatus SwTableDb::coerceValue_(const SwString& columnType,
 inline SwDbStatus SwTableDb::normalizeRowForCreate_(const SwTableSchema& schema,
                                                     const SwJsonObject& input,
                                                     SwJsonObject& outRow) {
+    if (schema.rowMode == SwTableRowMode::Exact) return normalizeExactRow_(schema, input, outRow);
     outRow = SwJsonObject();
     for (SwJsonObject::ConstIterator it = input.begin(); it != input.end(); ++it) {
         if (isBuiltInField_(it.key()) || !findColumn_(schema, it.key())) {
@@ -132,6 +133,16 @@ inline SwDbStatus SwTableDb::normalizeRowForUpdate_(const SwTableSchema& schema,
                                                     const SwJsonObject& currentRow,
                                                     const SwJsonObject& patch,
                                                     SwJsonObject& outRow) {
+    if (schema.rowMode == SwTableRowMode::Exact) {
+        SwJsonObject merged = currentRow;
+        for (SwJsonObject::ConstIterator it = patch.begin(); it != patch.end(); ++it) {
+            if (it.key() == schema.primaryKey && it.value() != currentRow.value(schema.primaryKey)) {
+                return SwDbStatus(SwDbStatus::InvalidArgument, "A row update cannot change its primary key");
+            }
+            merged[it.key()] = it.value();
+        }
+        return normalizeExactRow_(schema, merged, outRow);
+    }
     outRow = currentRow;
     for (SwJsonObject::ConstIterator it = patch.begin(); it != patch.end(); ++it) {
         if (isBuiltInField_(it.key()) || !findColumn_(schema, it.key())) {
@@ -157,11 +168,16 @@ inline SwDbStatus SwTableDb::normalizeRowForUpdate_(const SwTableSchema& schema,
 }
 
 inline SwString SwTableDb::columnTypeForField_(const SwTableSchema& schema, const SwString& columnId) {
-    if (columnId == "rowId" || columnId == "createdAt" || columnId == "updatedAt") {
+    if (schema.rowMode == SwTableRowMode::Managed && isBuiltInField_(columnId)) {
         return "string";
     }
     const SwTableColumn* column = findColumn_(schema, columnId);
     return column ? column->type : SwString();
+}
+
+inline SwString SwTableDb::querySortField_(const SwTableSchema& schema, const SwTableQuery& query) {
+    if (!query.sortBy.trimmed().isEmpty()) return query.sortBy.trimmed();
+    return schema.rowMode == SwTableRowMode::Managed ? SwString("updatedAt") : schema.primaryKey;
 }
 
 inline SwDbStatus SwTableDb::validateQuery_(const SwTableSchema& schema, const SwTableQuery& query) {
@@ -174,8 +190,9 @@ inline SwDbStatus SwTableDb::validateQuery_(const SwTableSchema& schema, const S
     if (direction != "asc" && direction != "desc") {
         return SwDbStatus(SwDbStatus::InvalidArgument, "Invalid sort direction");
     }
-    const SwString sortBy = query.sortBy.trimmed().isEmpty() ? SwString("updatedAt") : query.sortBy.trimmed();
-    if (!isBuiltInField_(sortBy) && !findIndexByColumn_(schema, sortBy)) {
+    const SwString sortBy = querySortField_(schema, query);
+    const bool builtInSort = schema.rowMode == SwTableRowMode::Managed && isBuiltInField_(sortBy);
+    if (sortBy != schema.primaryKey && !builtInSort && !findIndexByColumn_(schema, sortBy)) {
         return SwDbStatus(SwDbStatus::InvalidArgument, "Sort column is not indexed");
     }
     for (std::size_t i = 0; i < query.filters.size(); ++i) {
@@ -184,7 +201,8 @@ inline SwDbStatus SwTableDb::validateQuery_(const SwTableSchema& schema, const S
         if (type.trimmed().isEmpty()) {
             return SwDbStatus(SwDbStatus::InvalidArgument, "Filter targets unknown column");
         }
-        if (!isBuiltInField_(filter.columnId) && !findIndexByColumn_(schema, filter.columnId)) {
+        const bool builtInFilter = schema.rowMode == SwTableRowMode::Managed && isBuiltInField_(filter.columnId);
+        if (filter.columnId != schema.primaryKey && !builtInFilter && !findIndexByColumn_(schema, filter.columnId)) {
             return SwDbStatus(SwDbStatus::InvalidArgument, "Filter column is not indexed");
         }
         const SwString op = filter.op.trimmed().isEmpty() ? SwString("eq") : filter.op.trimmed().toLower();
@@ -307,16 +325,18 @@ inline SwByteArray SwTableDb::encodeIndexValue_(const SwString& columnType,
 inline SwMap<SwString, SwList<SwByteArray>> SwTableDb::secondaryKeysForRow_(const SwTableSchema& schema,
                                                                             const SwJsonObject& row) {
     SwMap<SwString, SwList<SwByteArray>> secondary;
-    const SwString rowId = row.value("rowId").toString();
+    const SwString rowId = row.value(schema.primaryKey).toString();
     const SwByteArray rowSuffix = swTableDbDetail::rowSuffix_(rowId);
 
-    SwList<SwByteArray> createdKeys;
-    createdKeys.append(encodeIndexValue_("string", row.value("createdAt")) + SwByteArray("\x1f") + rowSuffix);
-    secondary.insert(swTableDbDetail::indexNameForField_(schema, "createdAt"), createdKeys);
+    if (schema.rowMode == SwTableRowMode::Managed) {
+        SwList<SwByteArray> createdKeys;
+        createdKeys.append(encodeIndexValue_("string", row.value("createdAt")) + SwByteArray("\x1f") + rowSuffix);
+        secondary.insert(swTableDbDetail::indexNameForField_(schema, "createdAt"), createdKeys);
 
-    SwList<SwByteArray> updatedKeys;
-    updatedKeys.append(encodeIndexValue_("string", row.value("updatedAt")) + SwByteArray("\x1f") + rowSuffix);
-    secondary.insert(swTableDbDetail::indexNameForField_(schema, "updatedAt"), updatedKeys);
+        SwList<SwByteArray> updatedKeys;
+        updatedKeys.append(encodeIndexValue_("string", row.value("updatedAt")) + SwByteArray("\x1f") + rowSuffix);
+        secondary.insert(swTableDbDetail::indexNameForField_(schema, "updatedAt"), updatedKeys);
+    }
 
     for (std::size_t i = 0; i < schema.indexes.size(); ++i) {
         const SwTableIndex& index = schema.indexes[i];

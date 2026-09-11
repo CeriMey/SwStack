@@ -46,7 +46,7 @@ void PnCaptureManagerNode::retime_() {
 }
 
 void PnCaptureManagerNode::sanitizeGeometry_() {
-    // SW_REGISTER_SHM_SIGNAL payload is bounded (~4KB), keep RGB frames compact.
+    // The frame signal payload is bounded (4096 bytes), keep RGB frames compact.
     width_ = clampInt_(width_, 8, 32);
     height_ = clampInt_(height_, 8, 32);
 }

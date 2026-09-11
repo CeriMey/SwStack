@@ -441,8 +441,9 @@ private:
         const SwPointer<SwProxyObjectBrowser> self(this);
 
         ::sw::ipc::Registry reg(domain_, ::sw::ipc::detail::registryEventsObjectName_());
-        ::sw::ipc::Signal<uint64_t> sig(reg, ::sw::ipc::detail::registryEventsSignalName_());
-        registrySub_ = sig.connect([self](uint64_t) {
+        ::sw::ipc::SwIpcSignal<uint64_t> sig(reg, ::sw::ipc::detail::registryEventsSignalName_(),
+            16u, 0u, ::sw::ipc::DeliveryMode::LatestOnly);
+        registrySub_ = sig.connect(this, [self](uint64_t) {
             if (!self) return;
             self->refreshNow();
         }, /*fireInitial=*/false);
@@ -517,7 +518,7 @@ private:
     bool requireAlive_{true};
     bool active_{true};
 
-    typename ::sw::ipc::Signal<uint64_t>::Subscription registrySub_{};
+    typename ::sw::ipc::SwIpcSignal<uint64_t>::Subscription registrySub_{};
     std::atomic_bool refreshing_{false};
     SwMap<SwString, Instance*> instances_;
 };

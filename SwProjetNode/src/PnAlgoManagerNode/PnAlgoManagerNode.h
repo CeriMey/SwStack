@@ -18,7 +18,7 @@ private:
     void sanitizeConfig_();
     void processFrame_(int seq, int width, int height, const SwByteArray& rgb);
 
-    SW_REGISTER_SHM_SIGNAL(frame, int, int, int, SwByteArray);
+    SW_IPC_LATCH_SIZED(frame, 4096, int, int, int, SwByteArray);
 
     SwString capturePeer_{SwString("pn/pn/capture")};
     SwString mode_{SwString("threshold")};

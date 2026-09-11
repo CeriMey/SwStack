@@ -76,6 +76,8 @@ struct SwEmbeddedDbOptions {
     unsigned long long readCacheBytes{512ull * 1024ull * 1024ull};
     int maxBackgroundJobs{2};
     bool enableShmNotifications{false};
+    // False creates an independent, process-local database with no filesystem I/O.
+    bool persistent{true};
 };
 
 struct SwDbMetrics {
@@ -106,6 +108,8 @@ struct SwDbMetrics {
     unsigned long long readCacheEntryCount{0};
     unsigned long long readCacheHitCount{0};
     unsigned long long readCacheMissCount{0};
+    unsigned long long memoryRecordCount{0};
+    unsigned long long memoryIndexEntryCount{0};
 };
 
 class SwEmbeddedDbMutex_ {
@@ -280,6 +284,10 @@ private:
 #endif
 };
 
+#include "embeddeddb/SwEmbeddedDbJsonPayload.h"
+
+class SwTableDb;
+
 class SwDbWriteBatch {
 public:
     struct Operation {
@@ -288,6 +296,8 @@ public:
         SwByteArray primaryKey;
         bool valueInline{true};
         SwByteArray value;
+        // Mutually exclusive with value; only the memory backend retains it.
+        std::shared_ptr<const swEmbeddedDbDetail::JsonPayload_> jsonPayload;
         unsigned long long blobFileId{0};
         unsigned long long blobOffset{0};
         unsigned int blobLength{0};
@@ -307,6 +317,34 @@ public:
         op.secondaryKeys = secondaryKeys;
         operations_.append(op);
         walEstimateBytes_ += estimateOperationWalBytes_(op);
+    }
+
+    void putJson(const SwByteArray& primaryKey,
+                 const SwJsonObject& value,
+                 const SwMap<SwString, SwList<SwByteArray>>& secondaryKeys = {}) {
+        Operation op;
+        op.primaryKey = primaryKey;
+        op.jsonPayload = std::make_shared<const swEmbeddedDbDetail::JsonPayload_>(value);
+        op.secondaryKeys = secondaryKeys;
+        operations_.append(std::move(op));
+    }
+
+    // Persistence consumes the original JSON byte format. Memory writes never
+    // call this method and never retain a second, serialized representation.
+    void materializeJson() {
+        for (auto& op : operations_) {
+            if (op.jsonPayload) {
+                op.value = op.jsonPayload->bytes();
+                op.jsonPayload.reset();
+            }
+        }
+        walEstimateBytes_ = 12u;
+        for (const auto& op : operations_) walEstimateBytes_ += estimateOperationWalBytes_(op);
+    }
+
+    bool hasJson() const {
+        for (const auto& op : operations_) if (op.jsonPayload) return true;
+        return false;
     }
 
     void putBlobRef(const SwByteArray& primaryKey,
@@ -341,7 +379,12 @@ public:
 
     const SwList<Operation>& operations() const { return operations_; }
     SwList<Operation>& mutableOperations() { return operations_; }
-    unsigned long long estimatedWalBytes() const { return walEstimateBytes_; }
+    unsigned long long estimatedWalBytes() const {
+        if (!hasJson()) return walEstimateBytes_;
+        unsigned long long bytes = 12u;
+        for (const auto& op : operations_) bytes += estimateOperationWalBytes_(op);
+        return bytes;
+    }
     bool isEmpty() const { return operations_.isEmpty(); }
     void clear() {
         operations_.clear();
@@ -349,6 +392,16 @@ public:
     }
 
 private:
+    friend class SwTableDb;
+    // Only SwTableDb's internal owned pipeline may transfer mutable JSON.
+    void putJsonOwned_(const SwByteArray& primaryKey, SwJsonObject&& value,
+                       const SwMap<SwString, SwList<SwByteArray>>& secondaryKeys) {
+        Operation op;
+        op.primaryKey = primaryKey;
+        op.jsonPayload.reset(new swEmbeddedDbDetail::JsonPayload_(std::move(value)));
+        op.secondaryKeys = secondaryKeys;
+        operations_.append(std::move(op));
+    }
     static unsigned long long estimateSecondaryKeysWalBytes_(
         const SwMap<SwString, SwList<SwByteArray>>& secondaryKeys) {
         unsigned long long bytes = 4u;
@@ -368,7 +421,7 @@ private:
         unsigned long long bytes = 1u + 4u + static_cast<unsigned long long>(op.primaryKey.size());
         if (op.type == Operation::Put) {
             bytes += static_cast<unsigned long long>(op.valueInline
-                         ? (4u + static_cast<unsigned long long>(op.value.size()))
+                         ? (4u + static_cast<unsigned long long>(op.jsonPayload ? op.jsonPayload->bytes().size() : op.value.size()))
                          : (8u + 8u + 4u + 4u + 4u));
             bytes += estimateSecondaryKeysWalBytes_(op.secondaryKeys);
         }
@@ -387,6 +440,17 @@ struct SwDbEntry {
     unsigned long long sequence{0};
 };
 
+struct SwDbJsonEntry {
+    SwByteArray primaryKey;
+    SwByteArray secondaryKey;
+    SwJsonObject value;
+    SwMap<SwString, SwList<SwByteArray>> secondaryKeys;
+    unsigned long long sequence{0};
+    // A raw byte record may contain malformed JSON. Keep it in the iterator so
+    // callers can report corruption instead of silently ending their scan.
+    bool validJson{false};
+};
+
 namespace swEmbeddedDbDetail {
 inline std::size_t memTableBucketReserveHint_(const SwEmbeddedDbOptions& options) {
     const unsigned long long hint = options.memTableBytes / 256ull;
@@ -400,6 +464,7 @@ class LifecycleManager_;
 class ManifestStore_;
 class WalManager_;
 class WriteCoordinator_;
+class MemoryManager_;
 class Materializer_;
 class ReadModel_;
 class TableWriter_;
@@ -410,6 +475,17 @@ class IteratorState_ {
 public:
     virtual ~IteratorState_() {}
     virtual bool next(SwDbEntry& outEntry) = 0;
+    virtual bool nextJson(SwDbJsonEntry& outEntry) {
+        SwDbEntry raw;
+        if (!next(raw)) return false;
+        outEntry.primaryKey = std::move(raw.primaryKey);
+        outEntry.secondaryKey = std::move(raw.secondaryKey);
+        outEntry.secondaryKeys = std::move(raw.secondaryKeys);
+        outEntry.sequence = raw.sequence;
+        outEntry.value = SwJsonObject();
+        outEntry.validJson = parseJsonObject_(raw.value, outEntry.value);
+        return true;
+    }
 };
 bool snapshotLookupPrimary_(const std::shared_ptr<SnapshotState_>& snapshot,
                             const SwByteArray& primaryKey,
@@ -444,6 +520,24 @@ private:
     mutable std::size_t sizeCache_{0};
 };
 
+class SwDbJsonIterator {
+public:
+    bool isValid() const { return valid_; }
+    void next() { if (valid_) valid_ = state_ && state_->nextJson(current_); }
+    void rewind() {
+        state_ = factory_ ? factory_() : nullptr;
+        valid_ = state_ && state_->nextJson(current_);
+    }
+    const SwDbJsonEntry& current() const { return current_; }
+
+private:
+    friend class SwDbSnapshot;
+    std::shared_ptr<swEmbeddedDbDetail::IteratorState_> state_;
+    std::function<std::shared_ptr<swEmbeddedDbDetail::IteratorState_>()> factory_;
+    SwDbJsonEntry current_;
+    bool valid_{false};
+};
+
 namespace swEmbeddedDbDetail {
 struct BlobRef_ {
     bool valid{false};
@@ -459,8 +553,22 @@ struct PrimaryRecord_ {
     unsigned long long sequence{0};
     bool inlineValue{true};
     SwByteArray value;
+    std::shared_ptr<const JsonPayload_> jsonPayload;
     BlobRef_ blobRef;
     SwMap<SwString, SwList<SwByteArray>> secondaryKeys;
+};
+
+struct MemoryIndexEntry_ {
+    SwByteArray secondaryKey;
+    SwByteArray primaryKey;
+};
+
+// Only live records and indexes. Snapshots share this state; a later write
+// detaches it only while a snapshot/iterator still owns the previous state.
+struct MemoryState_ {
+    std::map<SwByteArray, PrimaryRecord_> primary;
+    std::map<SwString, std::map<SwByteArray, MemoryIndexEntry_>> indexes;
+    unsigned long long indexEntryCount{0};
 };
 
 struct SecondaryEntry_ {
@@ -568,6 +676,12 @@ class IteratorState_;
 
 class SwDbSnapshot {
 public:
+    SwDbStatus getJson(const SwByteArray& primaryKey, SwJsonObject* valueOut,
+                      SwMap<SwString, SwList<SwByteArray>>* secondaryKeysOut = nullptr) const;
+    SwDbJsonIterator scanPrimaryJson(const SwByteArray& startKey = {}, const SwByteArray& endKey = {}) const;
+    SwDbJsonIterator scanIndexJson(const SwString& indexName,
+                                 const SwByteArray& startSecondaryKey = {},
+                                 const SwByteArray& endSecondaryKey = {}) const;
     SwDbStatus get(const SwByteArray& primaryKey,
                    SwByteArray* valueOut,
                    SwMap<SwString, SwList<SwByteArray>>* secondaryKeysOut = nullptr) const;
@@ -593,7 +707,15 @@ public:
     ~SwEmbeddedDb();
 
     SwDbStatus open(const SwEmbeddedDbOptions& options);
+    bool isPersistent() const;
     void close();
+    SwDbStatus getJsonRecord(const SwByteArray& primaryKey, SwDbJsonRecord* recordOut);
+    SwDbStatus getJson(const SwByteArray& primaryKey, SwJsonObject* valueOut,
+                      SwMap<SwString, SwList<SwByteArray>>* secondaryKeysOut = nullptr);
+    SwDbJsonIterator scanPrimaryJson(const SwByteArray& startKey = {}, const SwByteArray& endKey = {});
+    SwDbJsonIterator scanIndexJson(const SwString& indexName,
+                                 const SwByteArray& startSecondaryKey = {},
+                                 const SwByteArray& endSecondaryKey = {});
     SwDbStatus get(const SwByteArray& primaryKey,
                    SwByteArray* valueOut,
                    SwMap<SwString, SwList<SwByteArray>>* secondaryKeysOut = nullptr);
@@ -614,6 +736,7 @@ private:
     friend class swEmbeddedDbDetail::ManifestStore_;
     friend class swEmbeddedDbDetail::WalManager_;
     friend class swEmbeddedDbDetail::WriteCoordinator_;
+    friend class swEmbeddedDbDetail::MemoryManager_;
     friend class swEmbeddedDbDetail::Materializer_;
     friend class swEmbeddedDbDetail::TableWriter_;
     friend class swEmbeddedDbDetail::BlobGcManager_;
@@ -702,6 +825,7 @@ private:
     SwEmbeddedDbCondition_ commitCv_;
     std::atomic<bool> opened_{false};
     SwEmbeddedDbOptions options_;
+    std::shared_ptr<swEmbeddedDbDetail::MemoryState_> memoryState_;
     SwString dbPath_;
     SwString walDir_;
     SwString tableDir_;
@@ -748,14 +872,15 @@ private:
     SwThreadPool backgroundPool_;
     std::shared_ptr<swEmbeddedDbDetail::ReadCacheManager_> readCacheManager_;
     std::unique_ptr<sw::ipc::Registry> shmRegistry_;
-    std::unique_ptr<sw::ipc::Signal<unsigned long long, unsigned long long> > shmNotification_;
-    sw::ipc::Signal<unsigned long long, unsigned long long>::Subscription shmNotificationSub_;
+    std::unique_ptr<sw::ipc::SwIpcSignal<unsigned long long, unsigned long long> > shmNotification_;
+    sw::ipc::SwIpcSignal<unsigned long long, unsigned long long>::Subscription shmNotificationSub_;
     std::atomic<bool> shmRefreshHint_{false};
 };
 
 #include "embeddeddb/SwEmbeddedDbCodec.h"
 #include "embeddeddb/SwEmbeddedDbMemTable.h"
 #include "embeddeddb/SwEmbeddedDbBloomFilter.h"
+#include "embeddeddb/SwEmbeddedDbMemory.h"
 #include "embeddeddb/SwEmbeddedDbReadCache.h"
 #include "embeddeddb/SwEmbeddedDbTable.h"
 #include "embeddeddb/SwEmbeddedDbSnapshotState.h"
@@ -766,6 +891,7 @@ private:
 #include "embeddeddb/SwEmbeddedDbWal.h"
 #include "embeddeddb/SwEmbeddedDbWriteCoordinator.h"
 #include "embeddeddb/SwEmbeddedDbLifecycle.h"
+#include "embeddeddb/SwEmbeddedDbJsonFacade.h"
 #include "embeddeddb/SwEmbeddedDbLookup.h"
 #include "embeddeddb/SwEmbeddedDbMaterializer.h"
 #include "embeddeddb/SwEmbeddedDbBlobGcWorker.h"

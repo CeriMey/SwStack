@@ -117,6 +117,7 @@ static constexpr const char* kSwLogCategory_SwCoreApplication = "sw.core.runtime
 #include "SwEvent.h"
 #include "SwEventDispatchSupport.h"
 #include "SwFiberPool.h"
+#include "SwRuntimeLoadWindow.h"
 #include "SwIoDispatcher.h"
 #include "SwRuntimeTelemetry.h"
 #include "SwRuntimeProfiler.h"
@@ -937,23 +938,7 @@ public:
      */
     double getLastSecondLoadPercentage() {
         RegistryLock_ lock(measurementsMutex_);
-        auto now = std::chrono::steady_clock::now();
-        auto oneSecondAgo = now - std::chrono::seconds(1);
-
-        // On supprime les mesures plus vieilles que 1 seconde
-        while (!measurements.empty() && measurements.front().timestamp < oneSecondAgo) {
-            measurements.pop_front();
-        }
-
-        uint64_t sumBusy = 0;
-        uint64_t sumTotal = 0;
-        for (auto &m : measurements) {
-            sumBusy += m.busyMicroseconds;
-            sumTotal += m.totalMicroseconds;
-        }
-
-        if (sumTotal == 0) return 0.0;
-        return 100.0 * (double)sumBusy / (double)sumTotal;
+        return measurements.loadPercentage(std::chrono::steady_clock::now());
     }
 
     /**
@@ -1586,38 +1571,6 @@ public:
             if (!running) {
                 sleepDuration = 0;
             }
-#if 0
-
-            {
-                std::lock_guard<std::mutex> lock(measurementsMutex_);
-                // On met à jour le temps total
-                totalTimeMicroseconds += (uint64_t)elapsed;
-                // On ajoute à totalBusyTimeMicroseconds le temps occupé de cette itération
-                totalBusyTimeMicroseconds += (uint64_t)busyElapsedIteration;
-
-                // On enregistre la mesure de cette itération
-                measurements.push_back({
-                    currentTime,
-                    (uint64_t)busyElapsedIteration,
-                    (uint64_t)elapsed
-                });
-
-                // Nettoyage des mesures plus vieilles que 1 seconde
-                auto oneSecondAgo = currentTime - std::chrono::seconds(1);
-                while (!measurements.empty() && measurements.front().timestamp < oneSecondAgo) {
-                    measurements.pop_front();
-                }
-            }
-
-            profilerUpdateIterationSnapshot_();
-
-            auto totalElapsed = std::chrono::duration_cast<std::chrono::microseconds>(currentTime - startTime).count();
-            if (maxDurationMicroseconds != 0 && totalElapsed >= maxDurationMicroseconds) {
-                break;
-            }
-
-            if (!running) break;
-#endif
             if (sleepDuration != 0) {
                 waitForWork_(sleepDuration);
             }
@@ -1859,25 +1812,8 @@ protected:
     }
 
     double runtimeLastSecondLoadPercentage_() const {
-        const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
-        const std::chrono::steady_clock::time_point oneSecondAgo = now - std::chrono::seconds(1);
-
-        uint64_t sumBusy = 0;
-        uint64_t sumTotal = 0;
         RegistryLock_ lock(measurementsMutex_);
-        for (std::deque<IterationMeasurement>::const_iterator it = measurements.begin();
-             it != measurements.end();
-             ++it) {
-            if (it->timestamp < oneSecondAgo) {
-                continue;
-            }
-            sumBusy += it->busyMicroseconds;
-            sumTotal += it->totalMicroseconds;
-        }
-        if (sumTotal == 0) {
-            return 0.0;
-        }
-        return 100.0 * static_cast<double>(sumBusy) / static_cast<double>(sumTotal);
+        return measurements.loadPercentage(std::chrono::steady_clock::now());
     }
 
     void recordRuntimeIterationMeasurement_(const std::chrono::steady_clock::time_point& iterationEnd,
@@ -1886,16 +1822,7 @@ protected:
         RegistryLock_ lock(measurementsMutex_);
         totalBusyTimeMicroseconds += busyMicroseconds;
         totalTimeMicroseconds += totalMicroseconds;
-        measurements.push_back({
-            iterationEnd,
-            busyMicroseconds,
-            totalMicroseconds
-        });
-
-        const std::chrono::steady_clock::time_point oneSecondAgo = iterationEnd - std::chrono::seconds(1);
-        while (!measurements.empty() && measurements.front().timestamp < oneSecondAgo) {
-            measurements.pop_front();
-        }
+        measurements.record(iterationEnd, busyMicroseconds, totalMicroseconds);
     }
 
     SwRuntimeIterationSnapshot buildRuntimeIterationSnapshot_() {
@@ -1903,9 +1830,7 @@ protected:
         snapshot.busyMicroseconds = busyElapsedIteration;
         {
             RegistryLock_ lock(measurementsMutex_);
-            if (!measurements.empty()) {
-                snapshot.totalMicroseconds = measurements.back().totalMicroseconds;
-            }
+            snapshot.totalMicroseconds = measurements.lastTotalMicroseconds();
             if (totalTimeMicroseconds != 0) {
                 snapshot.loadPercentage =
                     100.0 * static_cast<double>(totalBusyTimeMicroseconds) / static_cast<double>(totalTimeMicroseconds);
@@ -2111,6 +2036,8 @@ protected:
      */
     void waitForWorkGui(std::int64_t timeoutUs) {
         if (!running) return;
+        WakeWaitGuard_ wakeWait(*this);
+        if (wakeWait.consume()) return;
 
         std::vector<HANDLE> handles;
         handles.reserve(1);
@@ -2968,13 +2895,8 @@ protected:
     RegistryMutex_ eventQueueMutex; ///< Mutex protecting access to the event queue.
     RuntimeCondition_ cv; ///< Condition variable for event waiting.
 
-    struct IterationMeasurement {
-        std::chrono::steady_clock::time_point timestamp;
-        uint64_t busyMicroseconds;
-        uint64_t totalMicroseconds;
-    };
-    // Queue des mesures sur la dernière seconde environ
-    std::deque<IterationMeasurement> measurements;
+    // Both read paths expire the same rolling aggregate under measurementsMutex_.
+    mutable SwRuntimeLoadWindow measurements;
     mutable RegistryMutex_ measurementsMutex_; ///< Protects measurements, totalBusyTimeMicroseconds, totalTimeMicroseconds.
 
     uint64_t totalBusyTimeMicroseconds = 0;
@@ -3009,6 +2931,24 @@ protected:
     LPVOID mainFiber = nullptr; ///< Pointer to the main fiber.
 
 private:
+    // Owner posts normally need no kernel wake. An armed wait still needs one:
+    // a watchdog-preempted fiber can resume between its final check and poll.
+    // Counts, rather than saved booleans, handle overlapping waits from fibers.
+    std::atomic<bool> ownerWakePending_{false};
+    std::atomic<unsigned> armedWakeWaits_{0};
+    class WakeWaitGuard_ {
+    public:
+        explicit WakeWaitGuard_(SwCoreApplication& app) : app_(app) {
+            app_.armedWakeWaits_.fetch_add(1, std::memory_order_seq_cst);
+        }
+        ~WakeWaitGuard_() { app_.armedWakeWaits_.fetch_sub(1, std::memory_order_seq_cst); }
+        bool consume() { return app_.ownerWakePending_.exchange(false, std::memory_order_seq_cst); }
+    private:
+        WakeWaitGuard_(const WakeWaitGuard_&) = delete;
+        WakeWaitGuard_& operator=(const WakeWaitGuard_&) = delete;
+        SwCoreApplication& app_;
+    };
+
     void initWakeup_() {
 #if defined(_WIN32)
         wakeEvent_ = ::CreateEventA(NULL, FALSE, FALSE, NULL);
@@ -3048,6 +2988,11 @@ private:
     }
 
     void signalWakeup_() {
+        if (getThreadLocalInstance_() == this) {
+            ownerWakePending_.store(true, std::memory_order_seq_cst);
+            if (!armedWakeWaits_.load(std::memory_order_seq_cst)) return;
+        }
+        // Foreign threads retain the OS wake, including the check-to-wait race.
 #if defined(_WIN32)
         if (wakeEvent_) ::SetEvent(wakeEvent_);
 #else
@@ -3061,6 +3006,8 @@ private:
 
     void waitForWork_(std::int64_t timeoutUs) {
         if (!running) return;
+        WakeWaitGuard_ wakeWait(*this);
+        if (wakeWait.consume()) return;
 
 #if defined(_WIN32)
         std::vector<HANDLE> handles;

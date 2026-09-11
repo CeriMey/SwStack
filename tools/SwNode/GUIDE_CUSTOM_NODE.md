@@ -12,7 +12,7 @@ through IPC (shared memory). Each node is a subclass of `SwRemoteObject` and
 exposes:
 
 - **Configs** that can be changed at runtime through IPC (`ipcRegisterConfig`)
-- **SHM signals** to publish data to other nodes (`SW_REGISTER_SHM_SIGNAL`)
+- **SHM signals** to publish data to other nodes (`SW_IPC_SIGNAL_SIZED`)
 - **Subscriptions** to receive signals from other nodes
 
 The `main()` entry point is generated automatically by the
@@ -55,7 +55,7 @@ private:
     void onTick_();
 
     // IPC signal: publishes (int seq, SwString message)
-    SW_REGISTER_SHM_SIGNAL(heartbeat, int, SwString);
+    SW_IPC_SIGNAL_SIZED(heartbeat, 4096, int, SwString);
 
     int periodMs_{1000};
     int seq_{0};
@@ -68,7 +68,7 @@ private:
 | Element | Role |
 |---------|------|
 | `SwRemoteObject` | Required base class for a node |
-| `SW_REGISTER_SHM_SIGNAL(name, types...)` | Declares a publishable IPC signal used with `emit name(...)` |
+| `SW_IPC_SIGNAL_SIZED(name, maxBytes, types...)` | Declares a bounded IPC event ring used with `emit name(...)`; use `SW_IPC_LATCH_SIZED` for state |
 | `ipcRegisterConfig(...)` | Registers a config that can be changed at runtime |
 
 ### 2.2 Implementation (`MyNode.cpp`)
@@ -189,7 +189,7 @@ endif()
 ```
 
 **MSVC note:** `/Zc:preprocessor` is required for variadic macros
-(`SW_REGISTER_SHM_SIGNAL`, `SW_REMOTE_OBJECT_NODE`).
+(`SW_IPC_SIGNAL_SIZED`, `SW_REMOTE_OBJECT_NODE`).
 
 ---
 
@@ -494,7 +494,7 @@ Process A (server node)            Process B (client)
 |                          | IPC   |   |                              |
 |  ipcExposeRpc(add, ...)  |<----->|   +-> MyNodeProxy::candidates()  |
 |  ipcExposeRpc(greet,...) | SHM   |   +-> remoteAppeared signal      |
-|  SW_REGISTER_SHM_SIGNAL  |       |   +-> remoteDisappeared signal   |
+|  SW_IPC_SIGNAL_SIZED  |       |   +-> remoteDisappeared signal   |
 +--------------------------+       |                                  |
                                    | SwProxyObjectInstance<MyNodeProxy>|
                                    |   +-> remote().add(3, 4)         |

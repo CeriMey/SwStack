@@ -371,6 +371,18 @@ enum ConnectionType {
     BlockingQueuedConnection
 };
 
+namespace swObjectDetail {
+// Slot arguments already have their own value here. Preserve reference
+// signatures and payloads that intentionally provide copy construction only.
+template<class T>
+using SlotForward = typename std::conditional<std::is_reference<T>::value ||
+    std::is_move_constructible<T>::value, T&&, const T&>::type;
+template<class T>
+SlotForward<T> forwardSlotArgument(typename std::remove_reference<T>::type& value) {
+    return static_cast<SlotForward<T>>(value);
+}
+}
+
 class ISlotBase {
 public:
     virtual ~ISlotBase() {}
@@ -410,7 +422,7 @@ public:
         return static_cast<void*>(receiveur());
     }
     void invokeRaw(Args... args) override {
-        invoke(receiveur(), args...);
+        invoke(receiveur(), swObjectDetail::forwardSlotArgument<Args>(args)...);
     }
 };
 
@@ -433,7 +445,7 @@ public:
      * @param args Value passed to the method.
      */
     void invoke(T* instance, Args... args) override {
-        (instance->*method)(args...);
+        (instance->*method)(swObjectDetail::forwardSlotArgument<Args>(args)...);
     }
     /**
      * @brief Returns the current receiveur.
@@ -474,7 +486,7 @@ public:
      * @param args Value passed to the method.
      */
     void invoke(T*, Args... args) override {
-        func_(args...);
+        func_(swObjectDetail::forwardSlotArgument<Args>(args)...);
     }
 
     /**
@@ -508,7 +520,7 @@ public:
      * @param args Value passed to the method.
      */
     void invoke(void*, Args... args) override {
-        func(args...);
+        func(swObjectDetail::forwardSlotArgument<Args>(args)...);
     }
 
     /**
@@ -1016,6 +1028,19 @@ public:
             return nullptr;
         }
         return m_threadAffinity;
+    }
+
+    // Guards deferred work without retaining the object itself.
+    std::weak_ptr<void> lifetimeToken() const { return m_lifetimeToken; }
+
+    // Execute runtime lookups in the module which owns this object's vtable.
+    // Header-only runtime registries may be separate in hidden-symbol plugins.
+    virtual std::thread::id affinityThreadId() const {
+        ThreadHandle* target = threadHandle();
+        return target ? target->threadId() : std::thread::id{};
+    }
+    virtual bool postToAffinity(std::function<void()> task) const {
+        return ThreadHandle::postTaskOnLaneReliableIfLive(threadHandle(), std::move(task), SwFiberLane::Normal);
     }
 
     /**
@@ -2102,7 +2127,7 @@ protected:
      * @param signalName Value passed to the method.
      * @param args Value passed to the method.
      */
-    void emitSignal(const SwString& signalName, Args... args) {
+    void emitSignal(const SwString& signalName, const Args&... args) {
         SwVector<std::pair<std::shared_ptr<ISlotBase>, ConnectionType>> slotListCopy;
         {
             SwReadLocker lock(connectionsMutex_);
@@ -2122,7 +2147,7 @@ protected:
      * @param key Value passed to the method.
      * @param args Value passed to the method.
      */
-    void emitSignal(const SignalKey& key, Args... args) {
+    void emitSignal(const SignalKey& key, const Args&... args) {
         SwVector<std::pair<std::shared_ptr<ISlotBase>, ConnectionType>> slotListCopy;
         {
             SwReadLocker lock(connectionsMutex_);
@@ -2161,6 +2186,20 @@ protected:
             }
             SwObject* receiverObject = receiverRaw ? static_cast<SwObject*>(receiverRaw) : nullptr;
             ThreadHandle* receiverThread = receiverObject ? receiverObject->threadHandle() : nullptr;
+
+            // A direct slot owns its argument copy through invokeRaw. Building
+            // a queued closure here used to copy that same payload once more.
+            const bool blocking = type == BlockingQueuedConnection;
+            const bool queued = type == QueuedConnection ||
+                (type != DirectConnection && !blocking && receiverThread &&
+                 !isSameThreadHandle_(receiverThread, senderThread));
+            if (!queued && !blocking) {
+                if (receiverRaw && !SwObject::isLive(receiverRaw)) continue;
+                SwObject* liveSender = senderObject && SwObject::isLive(senderObject) ? senderObject : nullptr;
+                if (receiverObject) receiverObject->setSender(liveSender);
+                if (slot) slot->invokeRaw(args...);
+                continue;
+            }
 
             std::function<void()> task = [slotPtr, receiverRaw, receiverObject, senderObject, args...]() mutable {
                 if (receiverRaw && !SwObject::isLive(receiverRaw)) {

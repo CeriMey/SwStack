@@ -372,7 +372,7 @@ bool SwApiIpcInspector::readConfigDocJson(const Target& target, SwString& outJso
     }
 
     sw::ipc::Registry reg(target.domain, target.object);
-    sw::ipc::Signal<uint64_t, SwString> sig(reg, cfgSig);
+    sw::ipc::SwIpcSignal<uint64_t, SwString> sig(reg, cfgSig, 1u, 4096u, sw::ipc::DeliveryMode::LatestOnly);
 
     uint64_t pubId = 0;
     SwString json;
@@ -401,7 +401,7 @@ bool SwApiIpcInspector::publishConfigValue(const Target& target,
     }
 
     sw::ipc::Registry reg(target.domain, target.object);
-    sw::ipc::Signal<uint64_t, SwString> sig(reg, SwString("__cfg__|") + configPath);
+    sw::ipc::SwIpcSignal<uint64_t, SwString> sig(reg, SwString("__cfg__|") + configPath, 1u, 4096u, sw::ipc::DeliveryMode::LatestOnly);
     const bool ok = sig.publish(0, value);
     if (!ok) err = "publish failed (queue full or mapping error)";
     return ok;

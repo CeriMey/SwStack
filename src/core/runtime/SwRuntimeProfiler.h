@@ -35,6 +35,9 @@
 #include <pthread.h>
 #include <signal.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include "SwLinuxStackCapture.h"
+#endif
 #endif
 
 enum class SwRuntimeTimingKind {
@@ -277,7 +280,7 @@ private:
     void captureLinuxStack_(SwList<unsigned long long>& framesOut,
                             SwList<SwRuntimeResolvedFrame>& resolvedFramesOut,
                             SwList<SwString>& symbolsOut);
-    static const int kLinuxMaxSampleFrames_ = 128;
+    static constexpr int kLinuxMaxSampleFrames_ = 128;
 #endif
 
     static SwRuntimeProfilerSession*& currentSessionTls_();
@@ -302,6 +305,8 @@ private:
 
 #if defined(_WIN32)
     DWORD nativeThreadId_;
+#elif defined(__linux__) && !defined(__ANDROID__)
+    std::shared_ptr<swRuntimeStackCapture::Collector> linuxCollector_;
 #elif !defined(__ANDROID__)
     pthread_t nativePthread_;
     std::atomic<unsigned long long> sampleRequestSeq_;
@@ -678,6 +683,8 @@ inline SwRuntimeProfilerSession::SwRuntimeProfilerSession(SwRuntimeProfilerSink*
     frames_.reserve(32);
 #if defined(_WIN32)
     nativeThreadId_ = 0;
+#elif defined(__linux__) && !defined(__ANDROID__)
+    installLinuxSignalHandlerOnce_();
 #elif !defined(__ANDROID__)
     nativePthread_ = pthread_t();
     sampleRequestSeq_.store(0, std::memory_order_relaxed);
@@ -755,6 +762,8 @@ inline void SwRuntimeProfilerSession::bindToCurrentThread() {
     currentThreadIdKey_ = currentThreadKey_();
 #if defined(_WIN32)
     nativeThreadId_ = ::GetCurrentThreadId();
+#elif defined(__linux__) && !defined(__ANDROID__)
+    linuxCollector_ = swRuntimeStackCapture::bindCurrentThread();
 #elif !defined(__ANDROID__)
     nativePthread_ = pthread_self();
 #endif
@@ -1066,6 +1075,8 @@ inline bool SwRuntimeProfilerSession::maybeEmitStall() {
 #if defined(_WIN32)
     report.symbolBackend = "dbghelp/stackwalk64/pdb";
     report.symbolSearchPath = swRuntimeProfilerDetail::WindowsSymbolEngine::instance().searchPath();
+#elif defined(__linux__) && !defined(__ANDROID__)
+    report.symbolBackend = "ucontext/frame-pointer/dladdr";
 #elif !defined(__ANDROID__)
     report.symbolBackend = "backtrace/dladdr";
 #endif
@@ -1243,7 +1254,11 @@ inline void SwRuntimeProfilerSession::installLinuxSignalHandlerOnce_() {
 
 inline void SwRuntimeProfilerSession::linuxSignalHandler_(int /*signalNumber*/,
                                                           siginfo_t* /*info*/,
-                                                          void* /*uctx*/) {
+                                                          void* uctx) {
+#if defined(__linux__)
+    swRuntimeStackCapture::handleSignal(uctx);
+#else
+    (void)uctx;
     std::vector<SwRuntimeProfilerSession*>& sessions = currentSessionsTls_();
     for (std::size_t i = 0; i < sessions.size(); ++i) {
         SwRuntimeProfilerSession* session = sessions[i];
@@ -1262,6 +1277,7 @@ inline void SwRuntimeProfilerSession::linuxSignalHandler_(int /*signalNumber*/,
         session->sampleFrameCount_.store(captured, std::memory_order_release);
         session->sampleResponseSeq_.store(request, std::memory_order_release);
     }
+#endif
 }
 
 inline void SwRuntimeProfilerSession::captureLinuxStack_(SwList<unsigned long long>& framesOut,
@@ -1271,6 +1287,11 @@ inline void SwRuntimeProfilerSession::captureLinuxStack_(SwList<unsigned long lo
         return;
     }
 
+#if defined(__linux__)
+    std::uintptr_t captured[swRuntimeStackCapture::Collector::capacity];
+    const auto frameLimit = static_cast<std::size_t>(std::max(1, std::min(config_.maxStackFrames, kLinuxMaxSampleFrames_)));
+    const int frameCount = static_cast<int>(linuxCollector_->capture(linuxSignalNumber_(), captured, frameLimit));
+#else
     const unsigned long long request = sampleRequestSeq_.fetch_add(1, std::memory_order_acq_rel) + 1;
     sampleFrameCount_.store(0, std::memory_order_release);
     (void)::pthread_kill(nativePthread_, linuxSignalNumber_());
@@ -1284,6 +1305,7 @@ inline void SwRuntimeProfilerSession::captureLinuxStack_(SwList<unsigned long lo
     }
 
     const int frameCount = sampleFrameCount_.load(std::memory_order_acquire);
+#endif
     if (frameCount <= 0) {
         return;
     }
@@ -1291,8 +1313,13 @@ inline void SwRuntimeProfilerSession::captureLinuxStack_(SwList<unsigned long lo
     std::vector<void*> localFrames;
     localFrames.reserve(static_cast<std::size_t>(frameCount));
     for (int i = 0; i < frameCount; ++i) {
+#if defined(__linux__)
+        localFrames.push_back(reinterpret_cast<void*>(captured[i]));
+        framesOut.append(static_cast<unsigned long long>(captured[i]));
+#else
         localFrames.push_back(sampleFrames_[i]);
         framesOut.append(static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(sampleFrames_[i])));
+#endif
     }
 
     char** symbols = ::backtrace_symbols(localFrames.data(), frameCount);

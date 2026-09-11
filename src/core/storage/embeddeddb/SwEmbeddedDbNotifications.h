@@ -4,14 +4,14 @@ inline SwString SwEmbeddedDb::notificationObjectName_() const {
 
 inline void SwEmbeddedDb::setupShmNotifications_() {
     teardownShmNotifications_();
-    if (!options_.enableShmNotifications || dbPath_.isEmpty()) {
+    if (!options_.persistent || !options_.enableShmNotifications || dbPath_.isEmpty()) {
         return;
     }
 
     try {
         shmRegistry_.reset(new sw::ipc::Registry("sw_embedded_db", notificationObjectName_()));
         shmNotification_.reset(
-            new sw::ipc::Signal<unsigned long long, unsigned long long>(*shmRegistry_, "__changes__"));
+            new sw::ipc::SwIpcSignal<unsigned long long, unsigned long long>(*shmRegistry_, "__changes__", 16u, 0u, sw::ipc::DeliveryMode::LatestOnly));
         if (options_.readOnly) {
             shmNotificationSub_ = shmNotification_->connect(
                 [this](unsigned long long, unsigned long long) {
@@ -41,6 +41,7 @@ inline void SwEmbeddedDb::publishShmNotificationLocked_() {
 
 inline void SwEmbeddedDb::maybeRefreshFromNotifications_() {
     if (!opened_.load(std::memory_order_acquire) ||
+        !options_.persistent ||
         !options_.readOnly ||
         !options_.enableShmNotifications ||
         !shmNotification_) {
@@ -70,4 +71,3 @@ inline void SwEmbeddedDb::maybeRefreshFromNotifications_() {
         shmRefreshHint_.store(true, std::memory_order_release);
     }
 }
-

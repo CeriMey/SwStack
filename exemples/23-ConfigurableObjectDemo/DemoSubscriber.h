@@ -17,9 +17,9 @@ class DemoSubscriber : public SwRemoteObject {
     const SwString& modeProfile() const { return modeProfile_; }
 
  private:
-    SW_REGISTER_SHM_SIGNAL(ping, int, SwString);
-    SW_REGISTER_SHM_SIGNAL(pong, int, SwString);
-    SW_REGISTER_SHM_SIGNAL(configAck, uint64_t, SwString);
+    SW_IPC_SIGNAL_SIZED(ping, 4096, int, SwString);
+    SW_IPC_SIGNAL_SIZED(pong, 4096, int, SwString);
+    SW_IPC_SIGNAL_SIZED(configAck, 4096, uint64_t, SwString);
 
     int add(int a, int b) const;
     SwString who(const sw::ipc::RpcContext& ctx) const;
@@ -27,14 +27,14 @@ class DemoSubscriber : public SwRemoteObject {
     void notify(const sw::ipc::RpcContext& ctx, const SwString& msg) const;
 
     // Extra signals to demonstrate introspection + different argument types.
-    SW_REGISTER_SHM_SIGNAL(alarm, bool);
-    SW_REGISTER_SHM_SIGNAL(note, SwString);
-    SW_REGISTER_SHM_SIGNAL(setPoint, double);
-    SW_REGISTER_SHM_SIGNAL(vec3, int, int, int);
-    SW_REGISTER_SHM_SIGNAL(telemetry, int, double, SwString);
-    SW_REGISTER_SHM_SIGNAL(blob, SwByteArray);
-    SW_REGISTER_SHM_SIGNAL(identity, uint64_t, SwString, SwString);
-    SW_REGISTER_SHM_SIGNAL(triple, bool, int, SwString);
+    SW_IPC_SIGNAL(alarm, bool);
+    SW_IPC_SIGNAL_SIZED(note, 4096, SwString);
+    SW_IPC_LATCH(setPoint, double);
+    SW_IPC_LATCH(vec3, int, int, int);
+    SW_IPC_LATCH_SIZED(telemetry, 4096, int, double, SwString);
+    SW_IPC_SIGNAL_SIZED(blob, 4096, SwByteArray);
+    SW_IPC_LATCH_SIZED(identity, 4096, uint64_t, SwString, SwString);
+    SW_IPC_SIGNAL_SIZED(triple, 4096, bool, int, SwString);
 
     int exposure_{0};
     int brightness_{10};

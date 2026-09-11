@@ -53,6 +53,7 @@
 #include "SwMap.h"
 #include "SwObject.h"
 #include "SwSharedMemorySignal.h"
+#include "ipc/SwIpcConnection.h"
 #include "SwIpcRpc.h"
 #include "SwTimer.h"
 
@@ -92,7 +93,8 @@ class SwRemoteObject : public SwObject {
             void stop() {}
         };
 
-        AndroidNoopSignal(sw::ipc::Registry&, const SwString&) {}
+        AndroidNoopSignal(sw::ipc::Registry&, const SwString&, uint32_t = 16u, uint32_t = 4096u,
+                          sw::ipc::DeliveryMode = sw::ipc::DeliveryMode::LatestOnly) {}
 
         bool publish(const Args&...) { return false; }
 
@@ -105,11 +107,13 @@ class SwRemoteObject : public SwObject {
         Subscription connect(Fn, bool, int) {
             return Subscription();
         }
+        template <typename Fn>
+        Subscription connect(SwObject*, Fn, bool = true, int = 0) { return Subscription(); }
     };
 
     using ConfigIpcSignal = AndroidNoopSignal<uint64_t, SwString>;
 #else
-    using ConfigIpcSignal = sw::ipc::Signal<uint64_t, SwString>;
+    using ConfigIpcSignal = sw::ipc::SwIpcSignal<uint64_t, SwString>;
 #endif
 
  public:
@@ -164,7 +168,7 @@ class SwRemoteObject : public SwObject {
           nameSpace_(nameSpace),
           configRoot_(constructionRoot_()),
           ipcRegistry_(sysName_, buildObjectFqn(nameSpace_, objectName)),
-          shmConfig_(ipcRegistry_, SwString("__config__|") + objectName),
+          shmConfig_(ipcRegistry_, SwString("__config__|") + objectName, 16u, 4096u, sw::ipc::DeliveryMode::LatestOnly),
           alive_(new std::atomic_bool(true)) {
         setObjectName(objectName);
         publisherId_ = makePublisherId_(this);
@@ -625,7 +629,7 @@ class SwRemoteObject : public SwObject {
          if (configSignal) {
               std::shared_ptr<std::atomic_bool> alive = alive_;
               sw::ipc::detail::ScopedSubscriberObject subScope(ipcRegistry_.object());
-              auto sub = configSignal->connect(
+              auto sub = configSignal->connect(this,
                  [this, alive, configName, &storage](uint64_t pubId, SwString payload) {
                       if (!alive || !alive->load(std::memory_order_relaxed)) return;
                        if (pubId == publisherId_) return;
@@ -687,7 +691,7 @@ class SwRemoteObject : public SwObject {
         if (!splitObjectFqn_(targetObject, ns, obj)) return false;
         const SwString sigName = SwString("__cfg__|") + configName;
         sw::ipc::Registry reg(ns, obj);
-        sw::ipc::Signal<uint64_t, SwString> sig(reg, sigName);
+        sw::ipc::SwIpcSignal<uint64_t, SwString> sig(reg, sigName, 16u, 4096u, sw::ipc::DeliveryMode::LatestOnly);
         return sig.publish(publisherId_, valueToString_(value));
     }
 
@@ -722,10 +726,10 @@ class SwRemoteObject : public SwObject {
         std::function<void(const T&)> cb(onChange);
 
         sw::ipc::Registry reg(ns, obj);
-        sw::ipc::Signal<uint64_t, SwString> sig(reg, sigName);
+        sw::ipc::SwIpcSignal<uint64_t, SwString> sig(reg, sigName, 16u, 4096u, sw::ipc::DeliveryMode::LatestOnly);
         sw::ipc::detail::ScopedSubscriberObject subScope(ipcRegistry_.object());
         std::shared_ptr<std::atomic_bool> alive = alive_;
-        auto sub = sig.connect([this, alive, &storage, cb](uint64_t pubId, SwString payload) {
+        auto sub = sig.connect(this, [this, alive, &storage, cb](uint64_t pubId, SwString payload) {
             if (!alive || !alive->load(std::memory_order_relaxed)) return;
              if (pubId == publisherId_) return;
              T next{};
@@ -1686,7 +1690,7 @@ class SwRemoteObject : public SwObject {
         stopShmConfigSubscription_locked();
         std::shared_ptr<std::atomic_bool> alive = alive_;
         sw::ipc::detail::ScopedSubscriberObject subScope(ipcRegistry_.object());
-        shmConfigSub_ = shmConfig_.connect([this, alive](uint64_t pubId, SwString json) {
+        shmConfigSub_ = shmConfig_.connect(this, [this, alive](uint64_t pubId, SwString json) {
             if (!alive || !alive->load(std::memory_order_relaxed)) return;
             if (pubId == publisherId_) return;
 
@@ -1908,22 +1912,12 @@ protected:
             if (!self || !self->splitFullName_(fullName, ns, obj, leaf)) {
                 return 0;
             }
-            sw::ipc::Registry reg(ns, obj);
-            sw::ipc::Signal<A...> sig(reg, leaf);
             sw::ipc::detail::ScopedSubscriberObject subScope(self->ipcRegistry_.object());
             std::shared_ptr<std::atomic_bool> alive = self ? self->alive_ : std::shared_ptr<std::atomic_bool>();
-            auto wrapped = [self, alive, cb](A... args) mutable {
-                if (!alive || !alive->load(std::memory_order_relaxed)) return;
-                ThreadHandle* targetThread = self->threadHandle();
-                ThreadHandle* currentThread = ThreadHandle::currentThread();
-                auto task = [cb, args...]() mutable { cb(args...); };
-                if (!targetThread || targetThread == currentThread) {
-                    task();
-                } else {
-                    targetThread->postTask(std::move(task));
-                }
+            auto wrapped = [alive, cb](A... args) mutable {
+                if (alive && alive->load(std::memory_order_relaxed)) cb(args...);
             };
-            auto sub = sig.connect(wrapped, fireInitial);
+            sw::ipc::NamedSignalConnection<A...> sub(ns, obj, leaf, self, wrapped, fireInitial);
             return self->storeIpcSubscription_(std::move(sub));
         }
     };
@@ -1987,21 +1981,8 @@ protected:
             if (!self || !self->splitObjectFqn_(targetObject, ns, obj)) {
                 return nullptr;
             }
-            sw::ipc::Registry reg(ns, obj);
-            sw::ipc::Signal<A...> sig(reg, leaf);
             sw::ipc::detail::ScopedSubscriberObject subScope(self->ipcRegistry_.object());
-            auto wrapped = [context, cb](A... args) mutable {
-                if (!context) return;
-                ThreadHandle* targetThread = context->threadHandle();
-                ThreadHandle* currentThread = ThreadHandle::currentThread();
-                auto task = [cb, args...]() mutable { cb(args...); };
-                if (!targetThread || targetThread == currentThread) {
-                    task();
-                } else {
-                    targetThread->postTask(std::move(task));
-                }
-            };
-            auto sub = sig.connect(wrapped, fireInitial);
+            sw::ipc::NamedSignalConnection<A...> sub(ns, obj, leaf, context, cb, fireInitial);
             return self->createIpcConnection_(context, std::move(sub));
         }
     };
@@ -2143,118 +2124,24 @@ protected:
         }
     }
 
-    template <typename Ret, typename Handler, typename... A>
+    template <typename Ret>
     typename std::enable_if<!std::is_void<Ret>::value, void>::type
-    rpcInvokeNoCtx_(const Handler& handlerFn,
-                    const SwString& methodName,
-                    uint64_t callId,
-                    uint32_t clientPid,
-                    const SwString& /*clientInfo*/,
-                    const A&... args) {
-        try {
-        const Ret out = handlerFn(args...);
-        rpcRespondValue_<Ret>(methodName, callId, clientPid, /*ok=*/true, SwString(), out);
-        } catch (const std::exception& e) {
-            const SwString error = SwString("rpc: handler exception: ") + SwString(e.what()).left(512);
-            rpcRespondValue_<Ret>(methodName, callId, clientPid, false, error, Ret{});
-        } catch (...) {
-            const SwString error("rpc: unknown handler exception");
-            rpcRespondValue_<Ret>(methodName, callId, clientPid, false, error, Ret{});
-        }
+    rpcRespondResult_(const SwString& method, uint64_t id, uint32_t pid,
+                      const sw::ipc::RpcResult<Ret>& result) {
+        rpcRespondValue_<Ret>(method, id, pid, result.ok, result.error, result.value);
     }
-
-    template <typename Ret, typename Handler, typename... A>
+    template <typename Ret>
     typename std::enable_if<std::is_void<Ret>::value, void>::type
-    rpcInvokeNoCtx_(const Handler& handlerFn,
-                    const SwString& methodName,
-                    uint64_t callId,
-                    uint32_t clientPid,
-                    const SwString& /*clientInfo*/,
-                    const A&... args) {
-        try {
-        handlerFn(args...);
-        rpcRespondVoid_<Ret>(methodName, callId, clientPid, /*ok=*/true, SwString());
-        } catch (const std::exception& e) {
-            const SwString error = SwString("rpc: handler exception: ") + SwString(e.what()).left(512);
-            rpcRespondVoid_<Ret>(methodName, callId, clientPid, false, error);
-        } catch (...) {
-            const SwString error("rpc: unknown handler exception");
-            rpcRespondVoid_<Ret>(methodName, callId, clientPid, false, error);
-        }
-    }
-
-    template <typename Ret, typename Handler, typename... A>
-    typename std::enable_if<!std::is_void<Ret>::value, void>::type
-    rpcInvokeWithCtx_(const Handler& handlerFn,
-                      const SwString& methodName,
-                      uint64_t callId,
-                      uint32_t clientPid,
-                      const SwString& clientInfo,
-                      const A&... args) {
-        sw::ipc::RpcContext ctx;
-        ctx.clientPid = clientPid;
-        ctx.clientInfo = clientInfo;
-        try {
-        const Ret out = handlerFn(ctx, args...);
-        rpcRespondValue_<Ret>(methodName, callId, clientPid, /*ok=*/true, SwString(), out);
-        } catch (const std::exception& e) {
-            const SwString error = SwString("rpc: handler exception: ") + SwString(e.what()).left(512);
-            rpcRespondValue_<Ret>(methodName, callId, clientPid, false, error, Ret{});
-        } catch (...) {
-            const SwString error("rpc: unknown handler exception");
-            rpcRespondValue_<Ret>(methodName, callId, clientPid, false, error, Ret{});
-        }
-    }
-
-    template <typename Ret, typename Handler, typename... A>
-    typename std::enable_if<std::is_void<Ret>::value, void>::type
-    rpcInvokeWithCtx_(const Handler& handlerFn,
-                      const SwString& methodName,
-                      uint64_t callId,
-                      uint32_t clientPid,
-                      const SwString& clientInfo,
-                      const A&... args) {
-        sw::ipc::RpcContext ctx;
-        ctx.clientPid = clientPid;
-        ctx.clientInfo = clientInfo;
-        try {
-        handlerFn(ctx, args...);
-        rpcRespondVoid_<Ret>(methodName, callId, clientPid, /*ok=*/true, SwString());
-        } catch (const std::exception& e) {
-            const SwString error = SwString("rpc: handler exception: ") + SwString(e.what()).left(512);
-            rpcRespondVoid_<Ret>(methodName, callId, clientPid, false, error);
-        } catch (...) {
-            const SwString error("rpc: unknown handler exception");
-            rpcRespondVoid_<Ret>(methodName, callId, clientPid, false, error);
-        }
+    rpcRespondResult_(const SwString& method, uint64_t id, uint32_t pid,
+                      const sw::ipc::RpcResult<Ret>& result) {
+        rpcRespondVoid_<Ret>(method, id, pid, result.ok, result.error);
     }
 
     template <size_t Capacity, typename Ret, typename... A, typename Fn>
     size_t ipcExposeRpcNoCtxCap_(const SwString& methodName, Fn handler, bool fireInitial) {
         std::function<Ret(A...)> fn(handler);
-        sw::ipc::RingQueue<Capacity, uint64_t, uint32_t, SwString, A...> req(
-            ipcRegistry_, sw::ipc::rpcRequestQueueName(methodName));
-        std::shared_ptr<std::atomic_bool> alive = alive_;
-        const SwString methodCopy = methodName;
-
-        auto sub = req.connect([this, alive, fn, methodCopy](uint64_t callId,
-                                                            uint32_t clientPid,
-                                                            SwString clientInfo,
-                                                            A... args) {
-            if (!alive || !alive->load(std::memory_order_relaxed)) return;
-            ThreadHandle* targetThread = this->threadHandle();
-            ThreadHandle* currentThread = ThreadHandle::currentThread();
-            auto task = [this, alive, fn, methodCopy, callId, clientPid, clientInfo, args...]() mutable {
-                if (!alive || !alive->load(std::memory_order_relaxed)) return;
-                this->template rpcInvokeNoCtx_<Ret>(fn, methodCopy, callId, clientPid, clientInfo, args...);
-            };
-            if (!targetThread || targetThread == currentThread) {
-                task();
-            } else {
-                targetThread->postTask(std::move(task));
-            }
-        }, fireInitial);
-        return storeIpcSubscription_(std::move(sub));
+        auto withContext = [fn](sw::ipc::RpcContext, A... args) -> Ret { return fn(args...); };
+        return ipcExposeRpcWithCtxCap_<Capacity, Ret, A...>(methodName, withContext, fireInitial);
     }
 
     template <typename Ret, typename... A, typename Fn>
@@ -2273,30 +2160,26 @@ protected:
 
     template <size_t Capacity, typename Ret, typename... A, typename Fn>
     size_t ipcExposeRpcWithCtxCap_(const SwString& methodName, Fn handler, bool fireInitial) {
-        std::function<Ret(sw::ipc::RpcContext, A...)> fn(handler);
-        sw::ipc::RingQueue<Capacity, uint64_t, uint32_t, SwString, A...> req(
-            ipcRegistry_, sw::ipc::rpcRequestQueueName(methodName));
-        std::shared_ptr<std::atomic_bool> alive = alive_;
+        using Native = sw::ipc::NativeRpcEndpoint<Ret, A...>;
+        using Queue = sw::ipc::RingQueue<Capacity, uint64_t, uint32_t, SwString, A...>;
+        auto native = Native::expose(ipcRegistry_.domain(), ipcRegistry_.object(), methodName, this,
+                                    typename Native::Handler(handler));
+        const auto endpoint = Native::select(Native::channel(ipcRegistry_.domain(), ipcRegistry_.object(), methodName));
+        Queue req(ipcRegistry_, sw::ipc::rpcRequestQueueName(methodName));
+        const auto alive = alive_;
         const SwString methodCopy = methodName;
-
-        auto sub = req.connect([this, alive, fn, methodCopy](uint64_t callId,
-                                                            uint32_t clientPid,
-                                                            SwString clientInfo,
-                                                            A... args) {
-            if (!alive || !alive->load(std::memory_order_relaxed)) return;
-            ThreadHandle* targetThread = this->threadHandle();
-            ThreadHandle* currentThread = ThreadHandle::currentThread();
-            auto task = [this, alive, fn, methodCopy, callId, clientPid, clientInfo, args...]() mutable {
-                if (!alive || !alive->load(std::memory_order_relaxed)) return;
-                this->template rpcInvokeWithCtx_<Ret>(fn, methodCopy, callId, clientPid, clientInfo, args...);
-            };
-            if (!targetThread || targetThread == currentThread) {
-                task();
-            } else {
-                targetThread->postTask(std::move(task));
-            }
+        auto sub = req.connect([this, alive, endpoint, methodCopy](uint64_t callId, uint32_t clientPid,
+                                                                 SwString clientInfo, A... args) {
+            if (!alive || !alive->load(std::memory_order_acquire)) return;
+            sw::ipc::RpcContext context; context.clientPid = clientPid; context.clientInfo = std::move(clientInfo);
+            Native::dispatch(endpoint, std::move(context), std::make_shared<typename Native::Tuple>(args...),
+                [this, alive, methodCopy, callId, clientPid](const sw::ipc::RpcResult<Ret>& result) {
+                    if (alive && alive->load(std::memory_order_acquire))
+                        rpcRespondResult_<Ret>(methodCopy, callId, clientPid, result);
+                }, [alive] { return alive && alive->load(std::memory_order_acquire); });
         }, fireInitial);
-        return storeIpcSubscription_(std::move(sub));
+        return storeIpcSubscription_(sw::ipc::RpcExposure<typename Native::Registration, typename Queue::Subscription>(
+            std::move(native), std::move(sub)));
     }
 
     template <typename Ret, typename... A, typename Fn>
@@ -2342,7 +2225,7 @@ protected:
     std::shared_ptr<ConfigIpcSignal> ensureConfigSignal_(const SwString& signalName) {
         auto it = configSignals_.find(signalName);
         if (it != configSignals_.end() && it->second) return it->second;
-        std::shared_ptr<ConfigIpcSignal> sig(new ConfigIpcSignal(ipcRegistry_, signalName));
+        std::shared_ptr<ConfigIpcSignal> sig(new ConfigIpcSignal(ipcRegistry_, signalName, 16u, 4096u, sw::ipc::DeliveryMode::LatestOnly));
         configSignals_[signalName] = sig;
         return sig;
     }

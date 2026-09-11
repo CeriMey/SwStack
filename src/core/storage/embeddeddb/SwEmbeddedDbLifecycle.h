@@ -8,6 +8,16 @@ public:
 
     SwDbStatus open(const SwEmbeddedDbOptions& options) {
         db_.close();
+        if (!options.persistent) {
+            if (options.readOnly) {
+                return SwDbStatus(SwDbStatus::InvalidArgument,
+                                  "readOnly requires a persistent database");
+            }
+            db_.options_ = options;
+            db_.memoryState_.reset(new MemoryState_());
+            db_.opened_.store(true, std::memory_order_release);
+            return SwDbStatus::success();
+        }
         if (options.dbPath.isEmpty()) {
             return SwDbStatus(SwDbStatus::InvalidArgument, "dbPath is required");
         }
@@ -91,6 +101,13 @@ public:
             return;
         }
 
+        if (!db_.options_.persistent) {
+            // Snapshots retain their own shared state after close. No worker,
+            // file, notification registry, or disk cleanup exists in this mode.
+            resetState();
+            return;
+        }
+
         if (!db_.options_.readOnly && db_.writerLockHeld_) {
             {
                 SwEmbeddedDbLock_ lock(db_.mutex_);
@@ -121,6 +138,9 @@ public:
     SwDbStatus get(const SwByteArray& primaryKey,
                    SwByteArray* valueOut,
                    SwMap<SwString, SwList<SwByteArray>>* secondaryKeysOut) {
+        if (!db_.options_.persistent) {
+            return MemoryManager_(db_).get(primaryKey, valueOut, secondaryKeysOut);
+        }
         if (!db_.opened_.load(std::memory_order_acquire)) {
             return SwDbStatus(SwDbStatus::NotOpen, "database is not open");
         }
@@ -191,8 +211,14 @@ public:
         }
         db_.maybeRefreshFromNotifications_();
         SwEmbeddedDbLock_ lock(db_.mutex_);
+        if (!db_.opened_.load(std::memory_order_acquire)) return snapshot;
         db_.metrics_.snapshotCount += 1;
-        if (db_.options_.readOnly && db_.readOnlySnapshotState_) {
+        if (!db_.options_.persistent) {
+            snapshot.state_.reset(new SnapshotState_());
+            snapshot.state_->visibleSequence = db_.lastVisibleSequence_;
+            snapshot.state_->options = db_.options_;
+            snapshot.state_->memory = db_.memoryState_;
+        } else if (db_.options_.readOnly && db_.readOnlySnapshotState_) {
             snapshot.state_ = db_.readOnlySnapshotState_;
         } else if (!db_.options_.readOnly && db_.writerSnapshotState_ &&
                    db_.writerSnapshotGeneration_ == db_.applyGeneration_) {
@@ -257,6 +283,7 @@ public:
 
     void resetState() {
         SwEmbeddedDbLock_ lock(db_.mutex_);
+        db_.memoryState_.reset();
         db_.manifest_ = swEmbeddedDbDetail::Manifest_();
         db_.mutable_ = swEmbeddedDbDetail::MemTable_();
         db_.immutables_.clear();
@@ -319,6 +346,10 @@ public:
         metrics.tableCount = static_cast<unsigned long long>(db.manifest_.tables.size());
         metrics.lastVisibleSequence = db.lastVisibleSequence_;
         metrics.lastDurableSequence = db.lastDurableSequence_;
+        if (db.memoryState_) {
+            metrics.memoryRecordCount = static_cast<unsigned long long>(db.memoryState_->primary.size());
+            metrics.memoryIndexEntryCount = db.memoryState_->indexEntryCount;
+        }
         if (db.readCacheManager_) {
             metrics.readCacheResidentBytes = db.readCacheManager_->residentBytes();
             metrics.readCacheEntryCount = db.readCacheManager_->entryCount();
@@ -357,6 +388,11 @@ inline SwEmbeddedDb::~SwEmbeddedDb() {
 
 inline SwDbStatus SwEmbeddedDb::open(const SwEmbeddedDbOptions& options) {
     return swEmbeddedDbDetail::LifecycleManager_(*this).open(options);
+}
+
+inline bool SwEmbeddedDb::isPersistent() const {
+    SwEmbeddedDbLock_ lock(mutex_);
+    return options_.persistent;
 }
 
 inline void SwEmbeddedDb::close() {

@@ -60,6 +60,9 @@ static constexpr const char* kSwLogCategory_linux_fiber = "sw.core.runtime.linux
 #include <new>
 
 #include "SwDebug.h"
+#if defined(__linux__)
+#include "SwLinuxStackCapture.h"
+#endif
 
 #ifndef WINAPI
 #define WINAPI
@@ -93,6 +96,9 @@ struct Fiber
     std::unique_ptr<char[]> stack;
     std::size_t stackSize{kDefaultStackSize};
     bool isMain{false};
+#if defined(__linux__)
+    swRuntimeStackCapture::StackBounds profilingBounds;
+#endif
 };
 
 inline Fiber *&currentFiberRef()
@@ -132,6 +138,9 @@ inline LPVOID ConvertThreadToFiber(LPVOID)
 
     fiber->stack.reset();
     currentFiberRef() = fiber;
+#if defined(__linux__)
+    swRuntimeStackCapture::setCurrentFiberStack(nullptr);
+#endif
     return fiber;
 }
 
@@ -156,6 +165,10 @@ inline LPVOID CreateFiber(SIZE_T stackSize, LPFIBER_START_ROUTINE routine, LPVOI
 
     fiber->startRoutine = routine;
     fiber->parameter = parameter;
+#if defined(__linux__)
+    const auto stackLow = reinterpret_cast<std::uintptr_t>(fiber->stack.get());
+    fiber->profilingBounds = {stackLow, stackLow + fiber->stackSize};
+#endif
 
     if (getcontext(&fiber->context) == -1)
     {
@@ -198,10 +211,16 @@ inline void SwitchToFiber(LPVOID fiberPtr)
     }
 
     currentFiberRef() = target;
+#if defined(__linux__)
+    swRuntimeStackCapture::setCurrentFiberStack(target->isMain ? nullptr : &target->profilingBounds);
+#endif
     if (swapcontext(&previous->context, &target->context) == -1)
     {
         swCError(kSwLogCategory_linux_fiber) << "[linux_fiber] swapcontext failed while switching fibers";
         currentFiberRef() = previous;
+#if defined(__linux__)
+        swRuntimeStackCapture::setCurrentFiberStack(previous->isMain ? nullptr : &previous->profilingBounds);
+#endif
     }
 }
 
@@ -217,6 +236,9 @@ inline void DeleteFiber(LPVOID fiberPtr)
     if (fiber == currentFiberRef())
     {
         currentFiberRef() = nullptr;
+#if defined(__linux__)
+        swRuntimeStackCapture::setCurrentFiberStack(nullptr);
+#endif
     }
 
     delete fiber;

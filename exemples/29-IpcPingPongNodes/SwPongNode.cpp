@@ -13,7 +13,7 @@ class SwPongNode : public SwRemoteObject {
     }
 
  private:
-    SW_REGISTER_SHM_SIGNAL(pong, int, SwString);
+    SW_IPC_SIGNAL_SIZED(pong, 4096, int, SwString);
 
     void reconnect_() {
         if (pingConn_) {

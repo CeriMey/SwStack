@@ -840,7 +840,7 @@ public:
 private:
     void tick_();
 
-    SW_REGISTER_SHM_SIGNAL(tick, int, SwString);
+    SW_IPC_SIGNAL_SIZED(tick, 4096, int, SwString);
 
     int seq_{0};
     SwTimer* timer_{nullptr};

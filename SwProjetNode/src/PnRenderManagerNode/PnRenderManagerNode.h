@@ -21,7 +21,7 @@ private:
     void onAlgoFrame_(int seq, int width, int height, const SwByteArray& rgb);
     void publishRender_(int seq, int width, int height, const SwByteArray& captureRgb);
 
-    SW_REGISTER_SHM_SIGNAL(frame, int, int, int, SwByteArray);
+    SW_IPC_LATCH_SIZED(frame, 4096, int, int, int, SwByteArray);
 
     SwString capturePeer_{SwString("pn/pn/capture")};
     SwString algoPeer_{SwString("pn/pn/algoManager")};

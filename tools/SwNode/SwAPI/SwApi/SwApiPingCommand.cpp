@@ -51,7 +51,7 @@ void SwApiPingCommand::start() {
     bool ok = false;
     try {
         sw::ipc::Registry reg(target.domain, target.object);
-        sw::ipc::Signal<int, SwString> sig(reg, "ping");
+        sw::ipc::SwIpcSignal<int, SwString> sig(reg, "ping", 16u, 4096u);
         ok = sig.publish(n, s);
     } catch (...) {
         ok = false;

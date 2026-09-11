@@ -385,6 +385,10 @@ private:
 inline std::shared_ptr<IteratorState_> createPrimaryIteratorState_(const std::shared_ptr<SnapshotState_>& snapshot,
                                                                    const SwByteArray& startKey,
                                                                    const SwByteArray& endKey) {
+    if (snapshot && snapshot->memory) {
+        return std::shared_ptr<IteratorState_>(
+            new MemoryPrimaryIteratorState_(snapshot->memory, startKey, endKey));
+    }
     if (!snapshot || !snapshot->readModel) {
         return std::shared_ptr<IteratorState_>();
     }
@@ -400,6 +404,10 @@ inline std::shared_ptr<IteratorState_> createIndexIteratorState_(const std::shar
                                                                  const SwString& indexName,
                                                                  const SwByteArray& startSecondaryKey,
                                                                  const SwByteArray& endSecondaryKey) {
+    if (snapshot && snapshot->memory) {
+        return std::shared_ptr<IteratorState_>(
+            new MemoryIndexIteratorState_(snapshot->memory, indexName, startSecondaryKey, endSecondaryKey));
+    }
     if (!snapshot || !snapshot->readModel) {
         return std::shared_ptr<IteratorState_>();
     }

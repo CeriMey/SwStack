@@ -70,6 +70,7 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <system_error>
 #include <string>
 #include <thread>
 #include <tuple>
@@ -93,7 +94,16 @@
 #  include <errno.h>
 #  include <fcntl.h>
 #  include <sys/socket.h>
+#  include <sys/file.h>
+#  include <dlfcn.h>
+#  ifdef __linux__
+#    include <link.h>
+#  endif
+#  ifdef __APPLE__
+#    include <libproc.h>
+#  endif
 #  include <sys/types.h>
+#  include <sys/file.h>
 #  include <sys/un.h>
 #  include <pthread.h>
 #  include <signal.h>
@@ -200,14 +210,14 @@ inline bool isRegistryEventsSignal_(const SwString& object, const SwString& sign
     return object == registryEventsObjectName_() && signal == registryEventsSignalName_();
 }
 
-// Forward-declared here because it uses Signal<> (defined later in the file).
+// Forward-declared here because it uses SwIpcSignal<> (defined later in the file).
 inline void notifyRegistryChangedBestEffort_(const SwString& domain);
 
 // -------------------------------------------------------------------------
 // Shared registries (best-effort) to allow IPC introspection:
-// - Apps registry (global): "sw_ipc_registry"
+// - Apps registry (global): "sw_ipc_apps_r3"
 //     - lists which "soft" (domain) is alive, with pid list + lastSeen
-// - Signals registry (per-domain): "sw_ipc_registry_<domain>"
+// - Signals registry (per-domain): "sw_ipc_registry_r3_<domain>"
 //     - maps shm hashes back to readable info (domain/object/signal/typeId/typeName)
 // - Not required for normal operation
 // -------------------------------------------------------------------------
@@ -236,7 +246,7 @@ struct RegistryLayout {
     RegistryEntry entries[MaxEntries];
 
     static const uint32_t kMagic = 0x52454731u;   // 'REG1'
-    static const uint32_t kVersion = 2;
+    static const uint32_t kVersion = 3;
     static const uint32_t kTimeBaseTag = 0x544D5331u; // 'TMS1'
 };
 
@@ -263,7 +273,7 @@ struct AppLayout {
     AppEntry apps[MaxApps];
 
     static const uint32_t kMagic = 0x41505031u;   // 'APP1'
-    static const uint32_t kVersion = 2;
+    static const uint32_t kVersion = 3;
     static const uint32_t kTimeBaseTag = 0x544D5331u; // 'TMS1'
 };
 
@@ -289,7 +299,7 @@ struct SubscribersLayout {
     SubscriberEntry entries[MaxEntries];
 
     static const uint32_t kMagic = 0x53554231u;   // 'SUB1'
-    static const uint32_t kVersion = 1;
+    static const uint32_t kVersion = 3;
     static const uint32_t kTimeBaseTag = 0x544D5331u; // 'TMS1'
 };
 
@@ -339,6 +349,36 @@ inline PidState pidStateBestEffort_(uint32_t pid) {
     return PidState::Alive;
 #endif
 }
+
+// Observe each peer once during cleanup. Nothing survives this pass: a PID
+// may exit or be reused before the next publication.
+template <size_t Capacity>
+class PidProbePass_ {
+public:
+    explicit PidProbePass_(uint32_t self) : self_(self) {}
+    template <class Probe>
+    bool stale(uint32_t pid, uint64_t lastSeen, uint64_t now,
+               uint64_t ttl, bool allowTtl, const Probe& probe) {
+        if (pid == 0 || lastSeen == 0) return true;
+        if (allowTtl && now >= lastSeen && now - lastSeen > ttl) return true;
+        if (pid == self_) return false;
+        for (size_t i = 0; i < size_; ++i)
+            if (states_[i].pid == pid) return states_[i].state == PidState::Dead;
+        const auto state = probe(pid);
+        if (size_ < Capacity) {
+            states_[size_].pid = pid;
+            states_[size_++].state = state;
+        }
+        return state == PidState::Dead; // Unknown keeps the existing entry.
+    }
+private:
+    struct Entry { uint32_t pid; PidState state; };
+    const uint32_t self_;
+    // No allocation while the process-shared registry mutex is held. At most
+    // Capacity rows can supply distinct PIDs; unused entries remain unread.
+    std::array<Entry, Capacity> states_;
+    size_t size_{0};
+};
 
 inline void copyTrunc(char* dst, size_t cap, const SwString& s) {
     if (!dst || cap == 0) return;
@@ -450,8 +490,9 @@ inline SwString sanitizeRegistrySuffix_(const SwString& domain) {
     while (!s.empty() && s.back() == '_') s.pop_back();
     if (s.empty()) s = "root";
 
-    // Keep the name reasonably short for platform limits.
-    const size_t kMax = 32;
+    // Leave room for the prefix, hash and terminator in AppEntry's 64-byte
+    // signalsRegistryName (20 + 26 + 1 + 16 + 1).
+    const size_t kMax = 26;
     if (s.size() > kMax) {
         const SwString h = hex64(fnv1a64(domain.toStdString()));
         s.resize(kMax);
@@ -464,15 +505,15 @@ inline SwString sanitizeRegistrySuffix_(const SwString& domain) {
 inline SwString signalsRegistryNameForDomain_(const SwString& domain) {
     const SwString suffix = sanitizeRegistrySuffix_(domain);
 #ifdef _WIN32
-    return SwString("sw_ipc_registry_") + suffix;
+    return SwString("sw_ipc_registry_r3_") + suffix;
 #else
-    return SwString("/sw_ipc_registry_") + suffix;
+    return SwString("/sw_ipc_registry_r3_") + suffix;
 #endif
 }
 
 inline SwString signalsRegistryMutexNameForDomain_(const SwString& domain) {
 #ifdef _WIN32
-    return SwString("sw_ipc_registry_") + sanitizeRegistrySuffix_(domain) + "_mtx";
+    return SwString("sw_ipc_registry_r3_") + sanitizeRegistrySuffix_(domain) + "_mtx";
 #else
     return SwString();
 #endif
@@ -481,19 +522,21 @@ inline SwString signalsRegistryMutexNameForDomain_(const SwString& domain) {
 inline SwString subscribersRegistryNameForDomain_(const SwString& domain) {
     const SwString suffix = sanitizeRegistrySuffix_(domain);
 #ifdef _WIN32
-    return SwString("sw_ipc_subs_") + suffix;
+    return SwString("sw_ipc_subs_r3_") + suffix;
 #else
-    return SwString("/sw_ipc_subs_") + suffix;
+    return SwString("/sw_ipc_subs_r3_") + suffix;
 #endif
 }
 
 inline SwString subscribersRegistryMutexNameForDomain_(const SwString& domain) {
 #ifdef _WIN32
-    return SwString("sw_ipc_subs_") + sanitizeRegistrySuffix_(domain) + "_mtx";
+    return SwString("sw_ipc_subs_r3_") + sanitizeRegistrySuffix_(domain) + "_mtx";
 #else
     return SwString();
 #endif
 }
+
+#include "ipc/RegistryMapping.inl"
 
 template <size_t MaxApps = 64>
 class AppsRegistryTable {
@@ -646,16 +689,12 @@ public:
 
 private:
     static SwString appsRegistryName_() {
-#ifdef _WIN32
-        return SwString("sw_ipc_registry");
-#else
-        return SwString("/sw_ipc_registry");
-#endif
+        return appsRegistrySegmentName_();
     }
 
     static SwString appsRegistryMutexName_() {
 #ifdef _WIN32
-        return SwString("sw_ipc_registry_mtx");
+        return SwString("sw_ipc_apps_r3_mtx");
 #else
         return SwString();
 #endif
@@ -776,34 +815,8 @@ private:
         return map;
 #else
         const std::string nameA = appsRegistryName_().toStdString();
-        int fd = ::shm_open(nameA.c_str(), O_RDWR | O_CREAT, 0666);
-        if (fd < 0) return std::shared_ptr<Mapping>();
-        ensureSharedMemoryPermissions_(fd);
-        if (sw::ipc::detail::reserveSharedMemory_(fd, sizeof(Layout)) != 0) {
-            ::close(fd);
-            return std::shared_ptr<Mapping>();
-        }
-        void* mem = ::mmap(NULL, sizeof(Layout), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-        ::close(fd);
-        if (mem == MAP_FAILED) return std::shared_ptr<Mapping>();
+        void* mem = openRegistryMemory_<Layout>(SwString(nameA));
         Layout* L = static_cast<Layout*>(mem);
-
-        if (L->magic != Layout::kMagic || L->version != Layout::kVersion) {
-            std::memset(L, 0, sizeof(Layout));
-            L->magic = Layout::kMagic;
-            L->version = Layout::kVersion;
-            L->count = 0;
-            pthread_mutexattr_t ma;
-            pthread_mutexattr_init(&ma);
-            pthread_mutexattr_setpshared(&ma, PTHREAD_PROCESS_SHARED);
-            pthread_mutex_init(&L->mtx, &ma);
-            pthread_mutexattr_destroy(&ma);
-        }
-        if (L->reserved != Layout::kTimeBaseTag) {
-            L->count = 0;
-            std::memset(L->apps, 0, sizeof(L->apps));
-            L->reserved = Layout::kTimeBaseTag;
-        }
 
         std::shared_ptr<Mapping> map(new Mapping(L));
         map->mem_ = mem;
@@ -820,7 +833,9 @@ private:
 #ifdef _WIN32
         if (map->hMtx_) ::WaitForSingleObject(map->hMtx_, INFINITE);
 #else
-        pthread_mutex_lock(&map->layout()->mtx);
+        (void)lockRegistryMemory_(map->layout(), false, [](Layout* L) {
+            cleanupStale_locked_(L, nowMs());
+        });
 #endif
     }
 
@@ -831,7 +846,9 @@ private:
         const DWORD wr = ::WaitForSingleObject(map->hMtx_, 0);
         return (wr == WAIT_OBJECT_0 || wr == WAIT_ABANDONED);
 #else
-        return pthread_mutex_trylock(&map->layout()->mtx) == 0;
+        return lockRegistryMemory_(map->layout(), true, [](Layout* L) {
+            cleanupStale_locked_(L, nowMs());
+        });
 #endif
     }
 
@@ -1124,6 +1141,7 @@ public:
             const uint64_t h = fnv1a64(domain.toStdString() + "|" + object.toStdString() + "|" + signal.toStdString());
             const uint64_t t = nowMs();
             const uint32_t pid = currentPid();
+            cleanupStale_locked_(L, t);
             bool changed = false;
 
             for (uint32_t i = 0; i < L->count && i < MaxEntries; ++i) {
@@ -1131,10 +1149,10 @@ public:
                 if (e.hash == h) {
                     e.typeId = typeId;
                     // Don't steal ownership when another process merely opens the signal.
-                    // Ownership is only refreshed by the owning PID's heartbeat, or taken over if stale/dead.
+                    // A delayed heartbeat does not transfer a live publisher's
+                    // ownership to a reader opening the same signal.
                     if (e.pid == 0 || e.pid == pid ||
-                        pidStateBestEffort_(e.pid) == PidState::Dead ||
-                        (e.lastSeenMs != 0 && t >= e.lastSeenMs && (t - e.lastSeenMs) > kEntryTtlMs)) {
+                        pidStateBestEffort_(e.pid) == PidState::Dead) {
                         e.lastSeenMs = t;
                         e.pid = pid;
                     }
@@ -1183,12 +1201,20 @@ public:
             std::shared_ptr<Mapping> map = openOrCreate_(domain);
             if (!map) return arr;
 
+            // Allocate before locking and serialize after unlocking: registry
+            // readers must not hold up IPC publishers while building JSON.
+            std::vector<RegistryEntry> rows(MaxEntries);
             lock_(map);
             Layout* L = map->layout();
-            cleanupStale_locked_(L, nowMs());
+            const uint64_t t = nowMs();
+            cleanupStale_locked_(L, t);
+            const bool allowTtl = L->reserved == Layout::kTimeBaseTag;
             const uint32_t n = (L->count < MaxEntries) ? L->count : static_cast<uint32_t>(MaxEntries);
+            std::memcpy(rows.data(), L->entries, n * sizeof(RegistryEntry));
+            unlock_(map);
             for (uint32_t i = 0; i < n; ++i) {
-                const RegistryEntry& e = L->entries[i];
+                const RegistryEntry& e = rows[i];
+                if (allowTtl && t >= e.lastSeenMs && t - e.lastSeenMs > kEntryTtlMs) continue;
                 SwJsonObject o;
                 o["hash"] = hex64(e.hash);
                 o["typeId"] = hex64(e.typeId);
@@ -1201,7 +1227,6 @@ public:
                 o["typeName"] = SwString(e.typeName);
                 arr.append(o);
             }
-            unlock_(map);
         } catch (...) {
         }
         return arr;
@@ -1337,34 +1362,8 @@ private:
         return map;
 #else
         const std::string nameA = registryName_(domain).toStdString();
-        int fd = ::shm_open(nameA.c_str(), O_RDWR | O_CREAT, 0666);
-        if (fd < 0) return std::shared_ptr<Mapping>();
-        ensureSharedMemoryPermissions_(fd);
-        if (sw::ipc::detail::reserveSharedMemory_(fd, sizeof(Layout)) != 0) {
-            ::close(fd);
-            return std::shared_ptr<Mapping>();
-        }
-        void* mem = ::mmap(NULL, sizeof(Layout), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-        ::close(fd);
-        if (mem == MAP_FAILED) return std::shared_ptr<Mapping>();
+        void* mem = openRegistryMemory_<Layout>(SwString(nameA));
         Layout* L = static_cast<Layout*>(mem);
-
-        if (L->magic != Layout::kMagic || L->version != Layout::kVersion) {
-            std::memset(L, 0, sizeof(Layout));
-            L->magic = Layout::kMagic;
-            L->version = Layout::kVersion;
-            L->count = 0;
-            pthread_mutexattr_t ma;
-            pthread_mutexattr_init(&ma);
-            pthread_mutexattr_setpshared(&ma, PTHREAD_PROCESS_SHARED);
-            pthread_mutex_init(&L->mtx, &ma);
-            pthread_mutexattr_destroy(&ma);
-        }
-        if (L->reserved != Layout::kTimeBaseTag) {
-            L->count = 0;
-            std::memset(L->entries, 0, sizeof(L->entries));
-            L->reserved = Layout::kTimeBaseTag;
-        }
 
         std::shared_ptr<Mapping> map(new Mapping(L));
         map->mem_ = mem;
@@ -1381,7 +1380,9 @@ private:
 #ifdef _WIN32
         ::WaitForSingleObject(map->hMtx_, INFINITE);
 #else
-        pthread_mutex_lock(&map->layout()->mtx);
+        (void)lockRegistryMemory_(map->layout(), false, [](Layout* L) {
+            cleanupStale_locked_(L, nowMs());
+        });
 #endif
     }
 
@@ -1405,7 +1406,7 @@ private:
 
     static void cleanupStale_locked_(Layout* L, uint64_t nowMs) {
         if (!L) return;
-        const bool allowTtl = (L->reserved == Layout::kTimeBaseTag);
+        PidProbePass_<MaxEntries> probes(currentPid());
 
         uint32_t i = 0;
         while (i < L->count && i < MaxEntries) {
@@ -1413,11 +1414,11 @@ private:
             const uint32_t pid = e.pid;
             const uint64_t ls = e.lastSeenMs;
 
-            bool stale = false;
-            if (pid == 0) stale = true;
-            else if (ls == 0) stale = true;
-            else if (allowTtl && nowMs >= ls && (nowMs - ls) > kEntryTtlMs) stale = true;
-            else if (pidStateBestEffort_(pid) == PidState::Dead) stale = true;
+            // Expiry affects visibility, not registration lifetime. Otherwise
+            // one missed heartbeat deletes the rows that a resumed heartbeat
+            // needs to refresh. Reclaim rows when their owning process exits.
+            const bool stale = probes.stale(pid, ls, nowMs, kEntryTtlMs,
+                                            false, pidStateBestEffort_);
 
             if (stale) {
                 removeAt_locked_(*L, i);
@@ -1434,7 +1435,9 @@ private:
         const DWORD wr = ::WaitForSingleObject(map->hMtx_, 0);
         return (wr == WAIT_OBJECT_0 || wr == WAIT_ABANDONED);
 #else
-        return pthread_mutex_trylock(&map->layout()->mtx) == 0;
+        return lockRegistryMemory_(map->layout(), true, [](Layout* L) {
+            cleanupStale_locked_(L, nowMs());
+        });
 #endif
     }
 
@@ -1644,12 +1647,18 @@ public:
             std::shared_ptr<Mapping> map = openOrCreate_(domain);
             if (!map) return arr;
 
+            std::vector<SubscriberEntry> rows(MaxEntries);
             lock_(map);
             Layout* L = map->layout();
-            cleanupStale_locked_(L, nowMs());
+            const uint64_t t = nowMs();
+            cleanupStale_locked_(L, t);
+            const bool allowTtl = L->reserved == Layout::kTimeBaseTag;
             const uint32_t n = (L->count < MaxEntries) ? L->count : static_cast<uint32_t>(MaxEntries);
+            std::memcpy(rows.data(), L->entries, n * sizeof(SubscriberEntry));
+            unlock_(map);
             for (uint32_t i = 0; i < n; ++i) {
-                const SubscriberEntry& e = L->entries[i];
+                const SubscriberEntry& e = rows[i];
+                if (allowTtl && t >= e.lastSeenMs && t - e.lastSeenMs > kEntryTtlMs) continue;
                 SwJsonObject o;
                 o["hash"] = hex64(e.hash);
                 o["subPid"] = static_cast<int>(e.subPid);
@@ -1668,7 +1677,6 @@ public:
                 }
                 arr.append(o);
             }
-            unlock_(map);
         } catch (...) {
         }
         return arr;
@@ -1865,34 +1873,8 @@ private:
         return map;
 #else
         const std::string nameA = registryName_(domain).toStdString();
-        int fd = ::shm_open(nameA.c_str(), O_RDWR | O_CREAT, 0666);
-        if (fd < 0) return std::shared_ptr<Mapping>();
-        ensureSharedMemoryPermissions_(fd);
-        if (sw::ipc::detail::reserveSharedMemory_(fd, sizeof(Layout)) != 0) {
-            ::close(fd);
-            return std::shared_ptr<Mapping>();
-        }
-        void* mem = ::mmap(NULL, sizeof(Layout), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-        ::close(fd);
-        if (mem == MAP_FAILED) return std::shared_ptr<Mapping>();
+        void* mem = openRegistryMemory_<Layout>(SwString(nameA));
         Layout* L = static_cast<Layout*>(mem);
-
-        if (L->magic != Layout::kMagic || L->version != Layout::kVersion) {
-            std::memset(L, 0, sizeof(Layout));
-            L->magic = Layout::kMagic;
-            L->version = Layout::kVersion;
-            L->count = 0;
-            pthread_mutexattr_t ma;
-            pthread_mutexattr_init(&ma);
-            pthread_mutexattr_setpshared(&ma, PTHREAD_PROCESS_SHARED);
-            pthread_mutex_init(&L->mtx, &ma);
-            pthread_mutexattr_destroy(&ma);
-        }
-        if (L->reserved != Layout::kTimeBaseTag) {
-            L->count = 0;
-            std::memset(L->entries, 0, sizeof(L->entries));
-            L->reserved = Layout::kTimeBaseTag;
-        }
 
         std::shared_ptr<Mapping> map(new Mapping(L));
         map->mem_ = mem;
@@ -1909,7 +1891,9 @@ private:
 #ifdef _WIN32
         if (map->hMtx_) ::WaitForSingleObject(map->hMtx_, INFINITE);
 #else
-        pthread_mutex_lock(&map->layout()->mtx);
+        (void)lockRegistryMemory_(map->layout(), false, [](Layout* L) {
+            cleanupStale_locked_(L, nowMs());
+        });
 #endif
     }
 
@@ -1920,7 +1904,9 @@ private:
         const DWORD wr = ::WaitForSingleObject(map->hMtx_, 0);
         return (wr == WAIT_OBJECT_0 || wr == WAIT_ABANDONED);
 #else
-        return pthread_mutex_trylock(&map->layout()->mtx) == 0;
+        return lockRegistryMemory_(map->layout(), true, [](Layout* L) {
+            cleanupStale_locked_(L, nowMs());
+        });
 #endif
     }
 
@@ -1944,7 +1930,7 @@ private:
 
     static void cleanupStale_locked_(Layout* L, uint64_t nowMs) {
         if (!L) return;
-        const bool allowTtl = (L->reserved == Layout::kTimeBaseTag);
+        PidProbePass_<MaxEntries> probes(currentPid());
 
         uint32_t i = 0;
         while (i < L->count && i < MaxEntries) {
@@ -1952,12 +1938,10 @@ private:
             const uint32_t pid = e.subPid;
             const uint64_t ls = e.lastSeenMs;
 
-            bool stale = false;
-            if (pid == 0) stale = true;
-            else if (ls == 0) stale = true;
-            else if (e.refCount == 0) stale = true;
-            else if (allowTtl && nowMs >= ls && (nowMs - ls) > kEntryTtlMs) stale = true;
-            else if (pidStateBestEffort_(pid) == PidState::Dead) stale = true;
+            // Keep a live receiver's subscriptions (and reference counts)
+            // across pauses. Publishers must still be able to wake it up.
+            const bool stale = e.refCount == 0 ||
+                probes.stale(pid, ls, nowMs, kEntryTtlMs, false, pidStateBestEffort_);
 
             if (stale) {
                 removeAt_locked_(*L, i);
@@ -2845,7 +2829,7 @@ inline SwJsonArray shmAppsSnapshot() {
 }
 
 // Best-effort snapshot of a domain signals registry (signals/config channels created so far).
-// Segment name: "sw_ipc_registry_<domain>".
+// Segment name: "sw_ipc_registry_r3_<domain>".
 inline SwJsonArray shmRegistrySnapshot(const SwString& domain) {
     return detail::RegistryTable<>::snapshot(domain);
 }
@@ -2859,213 +2843,10 @@ inline SwString shmRegistrySegmentName(const SwString& domain) {
 }
 
 // Best-effort snapshot of a domain subscribers registry (who is connected to what).
-// Segment name: "sw_ipc_subs_<domain>".
+// Segment name: "sw_ipc_subs_r3_<domain>".
 inline SwJsonArray shmSubscribersSnapshot(const SwString& domain) {
     return detail::SubscribersRegistryTable<>::snapshot(domain);
 }
-
-template <size_t MaxPayload>
-struct ShmLayout {
-    uint32_t magic;
-    uint32_t version;
-    uint64_t typeId;
-
-#ifndef _WIN32
-    pthread_mutex_t mtx;
-    pthread_cond_t cv;
-#endif
-
-    uint64_t seq;
-    uint32_t size;
-    uint8_t data[MaxPayload];
-
-    // Windows fallback when WaitOnAddress is not available:
-    // number of subscribers currently waiting on the semaphore.
-    uint32_t winWaiters;
-
-    uint8_t reserved[64];
-
-    static const uint32_t kMagic = 0x53494731u; // 'SIG1'
-    static const uint32_t kVersion = 2;
-};
-
-template <size_t MaxPayload>
-class ShmMapping {
-public:
-    typedef ShmLayout<MaxPayload> Layout;
-
-    /**
-     * @brief Opens the or Create handled by the object.
-     * @param shmName Value passed to the method.
-     * @param expectedTypeId Value passed to the method.
-     * @return The requested or Create.
-     *
-     * @details The call affects the runtime state associated with the underlying resource or service.
-     */
-    static std::shared_ptr<ShmMapping> openOrCreate(const SwString& shmName, uint64_t expectedTypeId) {
-        bool created = false;
-
-#ifdef _WIN32
-        const std::string nameA = shmName.toStdString();
-        HANDLE hMap = ::CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0,
-                                           static_cast<DWORD>(sizeof(Layout)), nameA.c_str());
-        const DWORD lastErr = ::GetLastError();
-        if (!hMap) {
-            throw std::runtime_error("CreateFileMapping failed");
-        }
-        created = (lastErr != ERROR_ALREADY_EXISTS);
-
-        void* mem = ::MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(Layout));
-        if (!mem) {
-            ::CloseHandle(hMap);
-            throw std::runtime_error("MapViewOfFile failed");
-        }
-
-        std::shared_ptr<ShmMapping> mapping(new ShmMapping(shmName, mem, hMap));
-#else
-        const std::string nameA = shmName.toStdString();
-        int fd = ::shm_open(nameA.c_str(), O_RDWR | O_CREAT | O_EXCL, 0666);
-        if (fd >= 0) {
-            created = true;
-            detail::ensureSharedMemoryPermissions_(fd);
-            if (sw::ipc::detail::reserveSharedMemory_(fd, sizeof(Layout)) != 0) {
-                ::close(fd);
-                ::shm_unlink(nameA.c_str());
-                throw std::runtime_error("Cannot reserve shared memory (check /dev/shm capacity)");
-            }
-        } else if (errno == EEXIST) {
-            fd = ::shm_open(nameA.c_str(), O_RDWR, 0666);
-            if (fd < 0) throw std::runtime_error("shm_open(existing) failed");
-            detail::ensureSharedMemoryPermissions_(fd);
-        } else {
-            throw std::runtime_error("shm_open failed");
-        }
-
-        void* mem = ::mmap(NULL, sizeof(Layout), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-        ::close(fd);
-        if (mem == MAP_FAILED) throw std::runtime_error("mmap failed");
-
-        std::shared_ptr<ShmMapping> mapping(new ShmMapping(shmName, mem));
-#endif
-
-        Layout* L = mapping->layout();
-
-#ifdef _WIN32
-        // Serialize initialization/validation to avoid races between concurrent creators/openers.
-        const std::string initName = shmName.toStdString() + "_init";
-        HANDLE initMtx = ::CreateMutexA(NULL, FALSE, initName.c_str());
-        if (!initMtx) {
-            throw std::runtime_error("CreateMutex(init) failed");
-        }
-        ::WaitForSingleObject(initMtx, INFINITE);
-#endif
-
-        if (created || (L->magic == 0 && L->version == 0)) {
-            std::memset(L, 0, sizeof(Layout));
-            L->magic = Layout::kMagic;
-            L->version = Layout::kVersion;
-            L->typeId = expectedTypeId;
-
-#ifndef _WIN32
-            pthread_mutexattr_t ma;
-            pthread_condattr_t ca;
-            pthread_mutexattr_init(&ma);
-            pthread_condattr_init(&ca);
-            pthread_mutexattr_setpshared(&ma, PTHREAD_PROCESS_SHARED);
-            pthread_condattr_setpshared(&ca, PTHREAD_PROCESS_SHARED);
-            pthread_mutex_init(&L->mtx, &ma);
-            pthread_cond_init(&L->cv, &ca);
-            pthread_mutexattr_destroy(&ma);
-            pthread_condattr_destroy(&ca);
-#endif
-
-            L->seq = 1;
-            L->size = 0;
-        } else {
-            if (L->magic != Layout::kMagic || L->version != Layout::kVersion) {
-#ifdef _WIN32
-                ::ReleaseMutex(initMtx);
-                ::CloseHandle(initMtx);
-#endif
-                throw std::runtime_error("SHM layout mismatch (magic/version)");
-            }
-            if (L->typeId != expectedTypeId) {
-#ifdef _WIN32
-                ::ReleaseMutex(initMtx);
-                ::CloseHandle(initMtx);
-#endif
-                throw std::runtime_error("SHM type mismatch (subscriber/publisher types differ)");
-            }
-        }
-
-#ifdef _WIN32
-        ::ReleaseMutex(initMtx);
-        ::CloseHandle(initMtx);
-#endif
-
-        return mapping;
-    }
-
-#ifndef _WIN32
-    /**
-     * @brief Destroys the specified destroy.
-     * @param shmName Value passed to the method.
-     * @return The requested destroy.
-     */
-    static void destroy(const SwString& shmName) {
-        ::shm_unlink(shmName.toStdString().c_str());
-    }
-#endif
-
-    /**
-     * @brief Destroys the `ShmMapping` instance.
-     *
-     * @details Use this hook to release any resources that remain associated with the instance.
-     */
-    ~ShmMapping() {
-#ifdef _WIN32
-        if (mem_) {
-            ::UnmapViewOfFile(mem_);
-        }
-        if (hMap_) {
-            ::CloseHandle(hMap_);
-        }
-#else
-        if (mem_ && mem_ != MAP_FAILED) {
-            ::munmap(mem_, sizeof(Layout));
-        }
-#endif
-    }
-
-    /**
-     * @brief Performs the `layout` operation.
-     * @param mem_ Value passed to the method.
-     * @return The requested layout.
-     */
-    Layout* layout() const { return static_cast<Layout*>(mem_); }
-    /**
-     * @brief Returns the current name.
-     * @return The current name.
-     *
-     * @details The returned value reflects the state currently stored by the instance.
-     */
-    const SwString& name() const { return name_; }
-
-private:
-#ifdef _WIN32
-    ShmMapping(const SwString& name, void* mem, HANDLE hMap)
-        : name_(name), mem_(mem), hMap_(hMap) {}
-#else
-    ShmMapping(const SwString& name, void* mem)
-        : name_(name), mem_(mem) {}
-#endif
-
-    SwString name_;
-    void* mem_{nullptr};
-#ifdef _WIN32
-    HANDLE hMap_{NULL};
-#endif
-};
 
 // -------------------------------------------------------------------------
 // Ring queue: multi-producer / single-consumer (shared-memory)
@@ -3958,1495 +3739,7 @@ private:
 #endif
 };
 
-// Delivery semantics for a late-joining subscriber (one that connects after messages
-// have already been published).
-//   Replay     : on connect with fireInitial, replay the backlog still present in the ring
-//                (up to `capacity` messages). This is the queue/stream semantics used by RPC.
-//   LatestOnly : on connect with fireInitial, deliver ONLY the single most recent message
-//                (the last known value), never the older backlog. This is the "latch" /
-//                last-value-on-connect semantics wanted for state/config-like channels.
-//
-// NOTE (anti-pattern a eviter) : ne PAS mélanger un abonné LatestOnly/latch (typiquement une
-// queue de capacite 1, cf. SW_IPC_LATCH) et un abonné Replay sur LA MEME queue. Le producteur
-// est borne par le curseur le plus en retard (minReadSeqLocked_) : un Replay lent sur une queue
-// de capacite 1 bloquerait toute nouvelle publication (famine producteur). Un LatestOnly ne peut
-// PAS, lui, faire droper les messages d'un Replay concurrent (avancer un curseur ne fait que
-// liberer des slots) — l'invariant de livraison du Replay reste donc correct. Chaque canal
-// SwIpcSignal possede sa propre queue dediee, donc ce cas ne se produit pas via les macros.
-enum class DeliveryMode {
-    Replay = 0,
-    LatestOnly = 1,
-};
-
-template <class... Args>
-class RingQueueDynamic {
-public:
-    static const uint32_t kDefaultMaxPayload = 4096u;
-    static const uint32_t kMaxSubscriberCursors = 64u;
-private:
-    class DynamicMapping;
-public:
-
-    class Subscription {
-    public:
-        /**
-         * @brief Constructs a `Subscription` instance.
-         *
-         * @details The instance is initialized and prepared for immediate use.
-         */
-        Subscription() {}
-        /**
-         * @brief Constructs a `Subscription` instance.
-         * @param pollerId Value passed to the method.
-         * @param domain Value passed to the method.
-         * @param object Value passed to the method.
-         * @param signal Value passed to the method.
-         * @param subPid Value passed to the method.
-         * @param subscriberObject Value passed to the method.
-         * @param map Value passed to the method.
-         * @param true Value passed to the method.
-         *
-         * @details The instance is initialized and prepared for immediate use.
-         */
-        Subscription(size_t pollerId,
-                     const SwString& domain,
-                     const SwString& object,
-                     const SwString& signal,
-                     uint32_t subPid,
-                     const SwString& subscriberObject,
-                     const std::shared_ptr<DynamicMapping>& map,
-                     const SwString& shmName)
-            : pollerId_(pollerId),
-              domain_(domain),
-              object_(object),
-              signal_(signal),
-              subPid_(subPid),
-              subscriberObject_(subscriberObject),
-              map_(map),
-              shmName_(shmName),
-              registered_(true) {}
-
-        /**
-         * @brief Constructs a `Subscription` instance.
-         *
-         * @details The instance is initialized and prepared for immediate use.
-         */
-        Subscription(const Subscription&) = delete;
-        /**
-         * @brief Performs the `operator=` operation.
-         * @return The requested operator =.
-         */
-        Subscription& operator=(const Subscription&) = delete;
-
-        /**
-         * @brief Constructs a `Subscription` instance.
-         * @param this Value passed to the method.
-         *
-         * @details The instance is initialized and prepared for immediate use.
-         */
-        Subscription(Subscription&& o) noexcept { *this = std::move(o); }
-        /**
-         * @brief Performs the `operator=` operation.
-         * @param o Value passed to the method.
-         * @return The requested operator =.
-         */
-        Subscription& operator=(Subscription&& o) noexcept {
-            if (this == &o) return *this;
-            stop();
-            pollerId_ = o.pollerId_;
-            o.pollerId_ = 0;
-            domain_ = std::move(o.domain_);
-            object_ = std::move(o.object_);
-            signal_ = std::move(o.signal_);
-            subPid_ = o.subPid_;
-            o.subPid_ = 0;
-            subscriberObject_ = std::move(o.subscriberObject_);
-            map_ = std::move(o.map_);
-            shmName_ = std::move(o.shmName_);
-            registered_ = o.registered_;
-            o.registered_ = false;
-            return *this;
-        }
-
-        /**
-         * @brief Destroys the `Subscription` instance.
-         *
-         * @details Use this hook to release any resources that remain associated with the instance.
-         */
-        ~Subscription() { stop(); }
-
-        /**
-         * @brief Stops the underlying activity managed by the object.
-         *
-         * @details The call affects the runtime state associated with the underlying resource or service.
-         */
-        void stop() {
-            if (!pollerId_ && !registered_) return;
-
-            if (registered_) {
-                detail::SubscribersRegistryTable<>::unregisterSubscription(domain_, object_, signal_, subPid_, subscriberObject_);
-                registered_ = false;
-            }
-
-            if (map_) {
-                clearSubscriberCursor_(map_, shmName_, subPid_, subscriberObject_);
-            }
-
-            detail::LoopPoller::instance().remove(pollerId_);
-            pollerId_ = 0;
-        }
-
-    private:
-        size_t pollerId_{0};
-        SwString domain_;
-        SwString object_;
-        SwString signal_;
-        uint32_t subPid_{0};
-        SwString subscriberObject_;
-        std::shared_ptr<DynamicMapping> map_;
-        SwString shmName_;
-        bool registered_{false};
-    };
-
-    /**
-     * @brief Constructs a `RingQueueDynamic` instance.
-     * @param reg Value passed to the method.
-     * @param signalName Value passed to the method.
-     * @param capacity Value passed to the method.
-     * @param maxPayload Value passed to the method.
-     * @param signalName Value passed to the method.
-     *
-     * @details The instance is initialized and prepared for immediate use.
-     */
-    RingQueueDynamic(Registry& reg,
-                     const SwString& signalName,
-                     uint32_t capacity,
-                     uint32_t maxPayload = kDefaultMaxPayload)
-        : reg_(reg), signalName_(signalName) {
-        if (capacity == 0u) throw std::runtime_error("RingQueueDynamic: capacity must be > 0");
-        if (maxPayload == 0u) throw std::runtime_error("RingQueueDynamic: maxPayload must be > 0");
-
-        shmName_ = detail::make_shm_name(reg_.domain(), reg_.object(), signalName_);
-        map_ = openOrCreateMapping_(shmName_, detail::type_id<Args...>(), capacity, maxPayload);
-        detail::RegistryTable<>::registerSignal(reg_.domain(), reg_.object(), signalName_, shmName_,
-                                               detail::type_id<Args...>(), detail::type_name<Args...>());
-
-#ifdef _WIN32
-        const std::string mtxName = (shmName_ + "_mtx").toStdString();
-        mutex_ = ::CreateMutexA(NULL, FALSE, mtxName.c_str());
-        if (!mutex_) {
-            throw std::runtime_error("CreateMutex failed");
-        }
-#endif
-    }
-
-    /**
-     * @brief Destroys the `RingQueueDynamic` instance.
-     *
-     * @details Use this hook to release any resources that remain associated with the instance.
-     */
-    ~RingQueueDynamic() {
-#ifdef _WIN32
-        if (mutex_) {
-            ::CloseHandle(mutex_);
-            mutex_ = NULL;
-        }
-#endif
-    }
-
-    /**
-     * @brief Returns the current shm Name.
-     * @return The current shm Name.
-     *
-     * @details The returned value reflects the state currently stored by the instance.
-     */
-    const SwString& shmName() const { return shmName_; }
-    /**
-     * @brief Performs the `capacity` operation.
-     * @return The requested capacity.
-     */
-    uint32_t capacity() const { return map_ ? map_->header()->capacity : 0u; }
-    /**
-     * @brief Performs the `maxPayload` operation.
-     * @return The requested max Payload.
-     */
-    uint32_t maxPayload() const { return map_ ? map_->header()->maxPayload : 0u; }
-
-    /**
-     * @brief Performs the `push` operation.
-     * @param args Value passed to the method.
-     * @return `true` on success; otherwise `false`.
-     */
-    bool push(const Args&... args) {
-        Header* L = map_ ? map_->header() : nullptr;
-        if (!L) return false;
-
-        const uint32_t cap = L->capacity;
-        const uint32_t maxPayloadBytes = L->maxPayload;
-        if (cap == 0u || maxPayloadBytes == 0u) return false;
-
-        detail::ScratchBuffer tmp(static_cast<size_t>(maxPayloadBytes));
-        detail::Encoder enc(tmp.data(), tmp.size());
-        if (!detail::writeAll(enc, args...)) return false;
-
-        bool ok = false;
-
-#ifdef _WIN32
-        ::WaitForSingleObject(mutex_, INFINITE);
-        const uint64_t minRead = minReadSeqLocked_(L);
-        L->readSeq = minRead;
-        const uint64_t inFlight = (L->seq >= minRead) ? (L->seq - minRead) : 0ull;
-        if (inFlight < static_cast<uint64_t>(cap)) {
-            const uint64_t next = L->seq + 1;
-            DynamicSlot* slot = map_->slotAt(static_cast<size_t>(next % cap));
-            slot->seq = next;
-            slot->size = static_cast<uint32_t>(enc.size());
-            slot->reserved = 0;
-            if (slot->size <= maxPayloadBytes) {
-                if (slot->size != 0) std::memcpy(map_->slotData(slot), tmp.data(), slot->size);
-                L->seq = next;
-                ok = true;
-            }
-        }
-        ::ReleaseMutex(mutex_);
-#else
-        pthread_mutex_lock(&L->mtx);
-        const uint64_t minRead = minReadSeqLocked_(L);
-        L->readSeq = minRead;
-        const uint64_t inFlight = (L->seq >= minRead) ? (L->seq - minRead) : 0ull;
-        if (inFlight < static_cast<uint64_t>(cap)) {
-            const uint64_t next = L->seq + 1;
-            DynamicSlot* slot = map_->slotAt(static_cast<size_t>(next % cap));
-            slot->seq = next;
-            slot->size = static_cast<uint32_t>(enc.size());
-            slot->reserved = 0;
-            if (slot->size <= maxPayloadBytes) {
-                if (slot->size != 0) std::memcpy(map_->slotData(slot), tmp.data(), slot->size);
-                L->seq = next;
-                ok = true;
-            }
-        }
-        if (ok) pthread_cond_broadcast(&L->cv);
-        pthread_mutex_unlock(&L->mtx);
-#endif
-
-        if (!ok) return false;
-
-        // Notify all subscribers so LoopPoller dispatches callbacks promptly.
-        std::vector<uint32_t> pids;
-        detail::SubscribersRegistryTable<>::listSubscriberPids(reg_.domain(), reg_.object(), signalName_, pids);
-        if (!pids.empty()) {
-            std::sort(pids.begin(), pids.end());
-            pids.erase(std::unique(pids.begin(), pids.end()), pids.end());
-            for (size_t i = 0; i < pids.size(); ++i) {
-                detail::LoopPoller::notifyProcess(pids[i]);
-            }
-        }
-
-        return true;
-    }
-
-    /**
-     * @brief Performs the `operator` operation.
-     * @return `true` on success; otherwise `false`.
-     */
-    bool operator()(const Args&... args) { return push(args...); }
-
-    template <typename Fn>
-    /**
-     * @brief Performs the `connect` operation.
-     * @param cb Value passed to the method.
-     * @param fireInitial Value passed to the method.
-     * @param timeoutMs Timeout expressed in milliseconds.
-     * @return The requested connect.
-     */
-    Subscription connect(Fn cb, bool fireInitial = true, int timeoutMs = 0,
-                         DeliveryMode mode = DeliveryMode::Replay) {
-        typedef typename std::decay<Fn>::type Callback;
-        Callback cbCopy(std::move(cb));
-
-        if (timeoutMs < 0) timeoutMs = 0;
-
-        struct State {
-            std::shared_ptr<DynamicMapping> map;
-            Callback cb;
-            bool fireInitial;
-            DeliveryMode mode;
-            std::atomic_bool inCallback;
-            uint32_t subPid;
-            SwString subscriberObject;
-
-#ifdef _WIN32
-            HANDLE mtx;
-#endif
-
-            /**
-             * @brief Constructs a `State` instance.
-             * @param m Value passed to the method.
-             * @param c Value passed to the method.
-             * @param fi Value passed to the method.
-             * @param dm Value passed to the method.
-             * @param pid Value passed to the method.
-             * @param _WIN32 Value passed to the method.
-             * @param NULL Value passed to the method.
-             *
-             * @details The instance is initialized and prepared for immediate use.
-             */
-            State(const std::shared_ptr<DynamicMapping>& m,
-                  Callback c,
-                  bool fi,
-                  DeliveryMode dm,
-                  uint32_t pid,
-                  const SwString& subObj)
-                : map(m),
-                  cb(std::move(c)),
-                  fireInitial(fi),
-                  mode(dm),
-                  inCallback(false),
-                  subPid(pid),
-                  subscriberObject(subObj)
-#ifdef _WIN32
-                  ,
-                  mtx(NULL)
-#endif
-            {
-            }
-
-#ifdef _WIN32
-            /**
-             * @brief Destroys the `State` instance.
-             *
-             * @details Use this hook to release any resources that remain associated with the instance.
-             */
-            ~State() {
-                if (mtx) ::CloseHandle(mtx);
-            }
-#endif
-        };
-
-        const SwString domCopy = reg_.domain();
-        const SwString objCopy = reg_.object();
-        const SwString sigCopy = signalName_;
-        const uint32_t subPid = detail::currentPid();
-        const SwString subObjCopy = detail::currentSubscriberObject_();
-
-        std::shared_ptr<State> st(new State(map_, cbCopy, fireInitial, mode, subPid, subObjCopy));
-
-#ifdef _WIN32
-        const std::string mtxName = (shmName_ + "_mtx").toStdString();
-        st->mtx = ::CreateMutexA(NULL, FALSE, mtxName.c_str());
-        if (!st->mtx) {
-            throw std::runtime_error("CreateMutex (loop sub) failed");
-        }
-#endif
-
-        const size_t id = detail::LoopPoller::instance().add([st]() {
-            if (!st) return;
-            if (st->inCallback.exchange(true, std::memory_order_acq_rel)) return;
-
-            Header* L = st->map ? st->map->header() : nullptr;
-            if (!L) {
-                st->inCallback.store(false, std::memory_order_release);
-                return;
-            }
-
-            struct Msg {
-                uint32_t sz;
-                std::vector<uint8_t> data;
-            };
-            std::vector<Msg> msgs;
-
-#ifdef _WIN32
-            if (!st->mtx) {
-                st->inCallback.store(false, std::memory_order_release);
-                return;
-            }
-            DWORD wr = ::WaitForSingleObject(st->mtx, INFINITE);
-            if (wr != WAIT_OBJECT_0 && wr != WAIT_ABANDONED) {
-                st->inCallback.store(false, std::memory_order_release);
-                return;
-            }
-#else
-            pthread_mutex_lock(&L->mtx);
-#endif
-
-            const uint32_t cap = L->capacity;
-            const uint32_t maxPayloadBytes = L->maxPayload;
-            SubscriberCursor* cursor =
-                findOrCreateCursorLocked_(L, st->subPid, st->subscriberObject, st->fireInitial, st->mode);
-            if (!cursor) {
-#ifdef _WIN32
-                    ::ReleaseMutex(st->mtx);
-#else
-                    pthread_mutex_unlock(&L->mtx);
-#endif
-                st->inCallback.store(false, std::memory_order_release);
-                return;
-            }
-
-            const uint64_t seqNow = L->seq;
-
-            if (cursor->readSeq < seqNow) {
-                // In LatestOnly mode, collapse any backlog: only the most recent message
-                // (seqNow) is ever delivered, regardless of how far behind the cursor is.
-                const uint64_t start = (st->mode == DeliveryMode::LatestOnly)
-                                           ? seqNow
-                                           : (cursor->readSeq + 1ull);
-                for (uint64_t seq = start; seq <= seqNow; ++seq) {
-                    DynamicSlot* slot = st->map->slotAt(static_cast<size_t>(seq % cap));
-                    const uint32_t sz = slot->size;
-                    if (slot->seq == seq && sz <= maxPayloadBytes) {
-                        Msg m;
-                        m.sz = sz;
-                        m.data.resize(static_cast<size_t>(sz));
-                        if (sz != 0) std::memcpy(m.data.data(), st->map->slotData(slot), sz);
-                        msgs.push_back(std::move(m));
-                    }
-                }
-                cursor->readSeq = seqNow;
-            }
-            cursor->lastSeenMs = detail::nowMs();
-            L->readSeq = minReadSeqLocked_(L);
-
-#ifdef _WIN32
-            ::ReleaseMutex(st->mtx);
-#else
-            pthread_mutex_unlock(&L->mtx);
-#endif
-
-            for (size_t i = 0; i < msgs.size(); ++i) {
-                Msg& m = msgs[i];
-                typedef std::tuple<typename std::decay<Args>::type...> Tuple;
-                Tuple out;
-                detail::Decoder dec(m.data.data(), m.sz);
-                if (detail::readTuple(dec, out)) {
-                    detail::invokeWithTuple(st->cb, out);
-                }
-            }
-
-            st->inCallback.store(false, std::memory_order_release);
-        });
-
-        detail::SubscribersRegistryTable<>::registerSubscription(domCopy, objCopy, sigCopy, subPid, subObjCopy);
-
-        if (timeoutMs > 0) {
-            std::shared_ptr<DynamicMapping> mapCopy = map_;
-            const SwString shmCopy = shmName_;
-            SwTimer::singleShot(timeoutMs, [id, domCopy, objCopy, sigCopy, subPid, subObjCopy, mapCopy, shmCopy]() {
-                detail::SubscribersRegistryTable<>::unregisterSubscription(domCopy, objCopy, sigCopy, subPid, subObjCopy);
-                clearSubscriberCursor_(mapCopy, shmCopy, subPid, subObjCopy);
-                detail::LoopPoller::instance().remove(id);
-            });
-        }
-
-        return Subscription(id, domCopy, objCopy, sigCopy, subPid, subObjCopy, map_, shmName_);
-    }
-
-private:
-    struct SubscriberCursor {
-        uint32_t subPid;
-        uint32_t active;
-        uint64_t readSeq;
-        uint64_t lastSeenMs;
-        char subscriberObject[64];
-    };
-
-    struct Header {
-        uint32_t magic;
-        uint32_t version;
-        uint64_t typeId;
-        uint32_t capacity;
-        uint32_t maxPayload;
-        uint32_t cursorCount;
-        uint32_t cursorCapacity;
-
-#ifndef _WIN32
-        pthread_mutex_t mtx;
-        pthread_cond_t cv;
-#endif
-
-        uint64_t seq;
-        uint64_t readSeq;
-        uint32_t winWaiters;
-        uint32_t reserved0;
-        SubscriberCursor cursors[kMaxSubscriberCursors];
-        uint8_t reserved[64];
-
-        static const uint32_t kMagic = 0x51554431u; // 'QUD1'
-        static const uint32_t kVersion = 2;
-    };
-
-    struct DynamicSlot {
-        uint64_t seq;
-        uint32_t size;
-        uint32_t reserved;
-    };
-
-    class DynamicMapping {
-    public:
-#ifdef _WIN32
-        /**
-         * @brief Constructs a `DynamicMapping` instance.
-         * @param name Value passed to the method.
-         * @param mem Value passed to the method.
-         * @param hMap Value passed to the method.
-         * @param mappedSize Value passed to the method.
-         *
-         * @details The instance is initialized and prepared for immediate use.
-         */
-        DynamicMapping(const SwString& name, void* mem, HANDLE hMap, size_t mappedSize)
-            : name_(name), mem_(mem), hMap_(hMap), mappedSize_(mappedSize) {}
-#else
-        /**
-         * @brief Constructs a `DynamicMapping` instance.
-         * @param name Value passed to the method.
-         * @param mem Value passed to the method.
-         * @param mappedSize Value passed to the method.
-         *
-         * @details The instance is initialized and prepared for immediate use.
-         */
-        DynamicMapping(const SwString& name, void* mem, size_t mappedSize)
-            : name_(name), mem_(mem), mappedSize_(mappedSize) {}
-#endif
-
-        /**
-         * @brief Destroys the `DynamicMapping` instance.
-         *
-         * @details Use this hook to release any resources that remain associated with the instance.
-         */
-        ~DynamicMapping() {
-#ifdef _WIN32
-            if (mem_) ::UnmapViewOfFile(mem_);
-            if (hMap_) ::CloseHandle(hMap_);
-#else
-            if (mem_ && mem_ != MAP_FAILED) ::munmap(mem_, mappedSize_);
-#endif
-        }
-
-        /**
-         * @brief Performs the `header` operation.
-         * @param mem_ Value passed to the method.
-         * @return The requested header.
-         */
-        Header* header() const { return static_cast<Header*>(mem_); }
-        /**
-         * @brief Returns the current mapped Size.
-         * @return The current mapped Size.
-         *
-         * @details The returned value reflects the state currently stored by the instance.
-         */
-        size_t mappedSize() const { return mappedSize_; }
-
-        /**
-         * @brief Performs the `configure` operation.
-         * @param entriesOffset Value passed to the method.
-         * @param slotStride Value passed to the method.
-         * @param requiredSize Value passed to the method.
-         */
-        void configure(size_t entriesOffset, size_t slotStride, size_t requiredSize) {
-            entriesOffset_ = entriesOffset;
-            slotStride_ = slotStride;
-            requiredSize_ = requiredSize;
-        }
-
-        /**
-         * @brief Performs the `slotAt` operation.
-         * @param slotIndex Value passed to the method.
-         * @return The requested slot At.
-         */
-        DynamicSlot* slotAt(size_t slotIndex) const {
-            uint8_t* base = static_cast<uint8_t*>(mem_) + entriesOffset_ + slotIndex * slotStride_;
-            return reinterpret_cast<DynamicSlot*>(base);
-        }
-
-        /**
-         * @brief Performs the `slotData` operation.
-         * @param slot Value passed to the method.
-         * @return The requested slot Data.
-         */
-        uint8_t* slotData(DynamicSlot* slot) const {
-            return reinterpret_cast<uint8_t*>(slot) + sizeof(DynamicSlot);
-        }
-
-    private:
-        SwString name_;
-        void* mem_{nullptr};
-        size_t mappedSize_{0};
-        size_t entriesOffset_{0};
-        size_t slotStride_{0};
-        size_t requiredSize_{0};
-#ifdef _WIN32
-        HANDLE hMap_{NULL};
-#endif
-    };
-
-    static std::string normalizedSubscriberObjectKey_(const SwString& subscriberObject) {
-        std::string key = subscriberObject.toStdString();
-        const size_t cap = sizeof(SubscriberCursor::subscriberObject);
-        if (cap > 0 && key.size() >= cap) key.resize(cap - 1);
-        return key;
-    }
-
-    static bool cursorMatches_(const SubscriberCursor& c, uint32_t subPid, const std::string& key) {
-        if (c.active == 0u) return false;
-        if (c.subPid != subPid) return false;
-        return std::string(c.subscriberObject) == key;
-    }
-
-    static uint32_t recomputeCursorCountLocked_(Header* L) {
-        if (!L) return 0u;
-        uint32_t n = 0u;
-        for (uint32_t i = 0; i < kMaxSubscriberCursors; ++i) {
-            if (L->cursors[i].active != 0u) ++n;
-        }
-        L->cursorCount = n;
-        return n;
-    }
-
-    static SubscriberCursor* findCursorLocked_(Header* L, uint32_t subPid, const std::string& key) {
-        if (!L) return nullptr;
-        for (uint32_t i = 0; i < kMaxSubscriberCursors; ++i) {
-            if (cursorMatches_(L->cursors[i], subPid, key)) {
-                return &L->cursors[i];
-            }
-        }
-        return nullptr;
-    }
-
-    static SubscriberCursor* findOrCreateCursorLocked_(Header* L,
-                                                       uint32_t subPid,
-                                                       const SwString& subscriberObject,
-                                                       bool fireInitial,
-                                                       DeliveryMode mode) {
-        if (!L) return nullptr;
-        const std::string key = normalizedSubscriberObjectKey_(subscriberObject);
-
-        SubscriberCursor* c = findCursorLocked_(L, subPid, key);
-        if (c) {
-            c->lastSeenMs = detail::nowMs();
-            return c;
-        }
-
-        SubscriberCursor* freeSlot = nullptr;
-        for (uint32_t i = 0; i < kMaxSubscriberCursors; ++i) {
-            if (L->cursors[i].active == 0u) {
-                freeSlot = &L->cursors[i];
-                break;
-            }
-        }
-
-        if (!freeSlot) {
-            for (uint32_t i = 0; i < kMaxSubscriberCursors; ++i) {
-                SubscriberCursor& c0 = L->cursors[i];
-                if (c0.active == 0u) continue;
-                if (detail::pidStateBestEffort_(c0.subPid) == detail::PidState::Dead) {
-                    std::memset(&c0, 0, sizeof(SubscriberCursor));
-                    freeSlot = &c0;
-                    break;
-                }
-            }
-        }
-        if (!freeSlot) return nullptr;
-
-        std::memset(freeSlot, 0, sizeof(SubscriberCursor));
-        freeSlot->subPid = subPid;
-        freeSlot->active = 1u;
-        freeSlot->lastSeenMs = detail::nowMs();
-        detail::copyTrunc(freeSlot->subscriberObject, sizeof(freeSlot->subscriberObject), SwString(key));
-
-        const uint64_t seqNow = L->seq;
-        if (fireInitial) {
-            if (mode == DeliveryMode::LatestOnly) {
-                // Deliver only the single most recent message (last known value).
-                // seqNow == 0 means nothing was ever published -> deliver nothing.
-                freeSlot->readSeq = (seqNow > 0ull) ? (seqNow - 1ull) : 0ull;
-            } else {
-                // Replay the backlog still present in the ring (bounded by capacity).
-                const uint64_t cap = static_cast<uint64_t>(L->capacity);
-                freeSlot->readSeq = (seqNow > cap) ? (seqNow - cap) : 0ull;
-            }
-        } else {
-            freeSlot->readSeq = seqNow;
-        }
-
-        recomputeCursorCountLocked_(L);
-        return freeSlot;
-    }
-
-    static uint64_t minReadSeqLocked_(Header* L) {
-        if (!L) return 0ull;
-        uint64_t minRead = L->seq;
-        bool found = false;
-        for (uint32_t i = 0; i < kMaxSubscriberCursors; ++i) {
-            const SubscriberCursor& c = L->cursors[i];
-            if (c.active == 0u) continue;
-            if (!found || c.readSeq < minRead) {
-                minRead = c.readSeq;
-                found = true;
-            }
-        }
-        if (!found) minRead = L->seq;
-        return minRead;
-    }
-
-    static void clearSubscriberCursor_(const std::shared_ptr<DynamicMapping>& map,
-                                       const SwString& shmName,
-                                       uint32_t subPid,
-                                       const SwString& subscriberObject) {
-        if (!map) return;
-        Header* L = map->header();
-        if (!L) return;
-        const std::string key = normalizedSubscriberObjectKey_(subscriberObject);
-
-#ifdef _WIN32
-        const std::string mtxName = (shmName + "_mtx").toStdString();
-        HANDLE mtx = ::CreateMutexA(NULL, FALSE, mtxName.c_str());
-        if (!mtx) return;
-        DWORD wr = ::WaitForSingleObject(mtx, 1000);
-        if (wr != WAIT_OBJECT_0 && wr != WAIT_ABANDONED) {
-            ::CloseHandle(mtx);
-            return;
-        }
-#else
-        pthread_mutex_lock(&L->mtx);
-#endif
-
-        for (uint32_t i = 0; i < kMaxSubscriberCursors; ++i) {
-            SubscriberCursor& c = L->cursors[i];
-            if (!cursorMatches_(c, subPid, key)) continue;
-            std::memset(&c, 0, sizeof(SubscriberCursor));
-            break;
-        }
-        recomputeCursorCountLocked_(L);
-        L->readSeq = minReadSeqLocked_(L);
-
-#ifdef _WIN32
-        ::ReleaseMutex(mtx);
-        ::CloseHandle(mtx);
-#else
-        pthread_mutex_unlock(&L->mtx);
-#endif
-    }
-
-    static size_t alignUp_(size_t v, size_t a) {
-        if (a == 0u) return v;
-        const size_t rem = v % a;
-        return (rem == 0u) ? v : (v + (a - rem));
-    }
-
-    static bool computeLayout_(uint32_t capacity,
-                               uint32_t maxPayload,
-                               size_t& entriesOffsetOut,
-                               size_t& slotStrideOut,
-                               size_t& totalSizeOut) {
-        if (capacity == 0u || maxPayload == 0u) return false;
-
-        const size_t align = alignof(DynamicSlot);
-        const size_t entriesOffset = alignUp_(sizeof(Header), align);
-        const size_t rawStride = sizeof(DynamicSlot) + static_cast<size_t>(maxPayload);
-        const size_t slotStride = alignUp_(rawStride, align);
-
-        if (slotStride == 0u) return false;
-        if (static_cast<size_t>(capacity) > (std::numeric_limits<size_t>::max() - entriesOffset) / slotStride) {
-            return false;
-        }
-
-        const size_t total = entriesOffset + static_cast<size_t>(capacity) * slotStride;
-        entriesOffsetOut = entriesOffset;
-        slotStrideOut = slotStride;
-        totalSizeOut = total;
-        return true;
-    }
-
-    static std::shared_ptr<DynamicMapping> openOrCreateMapping_(const SwString& shmName,
-                                                                uint64_t expectedTypeId,
-                                                                uint32_t expectedCapacity,
-                                                                uint32_t expectedMaxPayload) {
-        size_t expectedEntriesOffset = 0;
-        size_t expectedSlotStride = 0;
-        size_t expectedTotalSize = 0;
-        if (!computeLayout_(expectedCapacity, expectedMaxPayload,
-                            expectedEntriesOffset, expectedSlotStride, expectedTotalSize)) {
-            throw std::runtime_error("RingQueueDynamic: invalid queue layout");
-        }
-
-        bool created = false;
-
-#ifdef _WIN32
-        const std::string nameA = shmName.toStdString();
-        HANDLE hMap = ::CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0,
-                                           static_cast<DWORD>(expectedTotalSize), nameA.c_str());
-        const DWORD lastErr = ::GetLastError();
-        if (!hMap) {
-            throw std::runtime_error("CreateFileMapping failed");
-        }
-        created = (lastErr != ERROR_ALREADY_EXISTS);
-
-        void* mem = ::MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, 0, 0, 0);
-        if (!mem) {
-            ::CloseHandle(hMap);
-            throw std::runtime_error("MapViewOfFile failed");
-        }
-
-        std::shared_ptr<DynamicMapping> mapping(new DynamicMapping(shmName, mem, hMap, expectedTotalSize));
-#else
-        const std::string nameA = shmName.toStdString();
-        int fd = ::shm_open(nameA.c_str(), O_RDWR | O_CREAT | O_EXCL, 0666);
-        if (fd >= 0) {
-            created = true;
-            detail::ensureSharedMemoryPermissions_(fd);
-            if (sw::ipc::detail::reserveSharedMemory_(fd, static_cast<off_t>(expectedTotalSize)) != 0) {
-                ::close(fd);
-                ::shm_unlink(nameA.c_str());
-                throw std::runtime_error("Cannot reserve shared memory (check /dev/shm capacity)");
-            }
-        } else if (errno == EEXIST) {
-            fd = ::shm_open(nameA.c_str(), O_RDWR, 0666);
-            if (fd < 0) throw std::runtime_error("shm_open(existing) failed");
-            detail::ensureSharedMemoryPermissions_(fd);
-        } else {
-            throw std::runtime_error("shm_open failed");
-        }
-
-        struct stat st;
-        if (::fstat(fd, &st) != 0) {
-            ::close(fd);
-            throw std::runtime_error("fstat(shm) failed");
-        }
-        const size_t mappedSize = static_cast<size_t>(st.st_size);
-        if (mappedSize < sizeof(Header)) {
-            ::close(fd);
-            throw std::runtime_error("shm too small");
-        }
-
-        void* mem = ::mmap(NULL, mappedSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-        ::close(fd);
-        if (mem == MAP_FAILED) throw std::runtime_error("mmap failed");
-
-        std::shared_ptr<DynamicMapping> mapping(new DynamicMapping(shmName, mem, mappedSize));
-#endif
-
-        Header* L = mapping->header();
-
-#ifdef _WIN32
-        const std::string initName = shmName.toStdString() + "_init";
-        HANDLE initMtx = ::CreateMutexA(NULL, FALSE, initName.c_str());
-        if (!initMtx) {
-            throw std::runtime_error("CreateMutex(init) failed");
-        }
-        ::WaitForSingleObject(initMtx, INFINITE);
-        try {
-#endif
-            if (created || (L->magic == 0 && L->version == 0)) {
-                if (mapping->mappedSize() < expectedTotalSize) {
-                    throw std::runtime_error("SHM queue mapping too small for requested capacity");
-                }
-
-                std::memset(L, 0, expectedTotalSize);
-                L->magic = Header::kMagic;
-                L->version = Header::kVersion;
-                L->typeId = expectedTypeId;
-                L->capacity = expectedCapacity;
-                L->maxPayload = expectedMaxPayload;
-                L->cursorCount = 0;
-                L->cursorCapacity = kMaxSubscriberCursors;
-                L->seq = 0;
-                L->readSeq = 0;
-                L->winWaiters = 0;
-                L->reserved0 = 0;
-
-#ifndef _WIN32
-                pthread_mutexattr_t ma;
-                pthread_condattr_t ca;
-                pthread_mutexattr_init(&ma);
-                pthread_condattr_init(&ca);
-                pthread_mutexattr_setpshared(&ma, PTHREAD_PROCESS_SHARED);
-                pthread_condattr_setpshared(&ca, PTHREAD_PROCESS_SHARED);
-                pthread_mutex_init(&L->mtx, &ma);
-                pthread_cond_init(&L->cv, &ca);
-                pthread_mutexattr_destroy(&ma);
-                pthread_condattr_destroy(&ca);
-#endif
-
-                uint8_t* entriesBase = reinterpret_cast<uint8_t*>(L) + expectedEntriesOffset;
-                for (size_t i = 0; i < static_cast<size_t>(expectedCapacity); ++i) {
-                    DynamicSlot* slot =
-                        reinterpret_cast<DynamicSlot*>(entriesBase + i * expectedSlotStride);
-                    slot->seq = 0;
-                    slot->size = 0;
-                    slot->reserved = 0;
-                }
-            } else {
-                if (L->magic != Header::kMagic || L->version != Header::kVersion) {
-                    throw std::runtime_error("SHM queue layout mismatch (magic/version)");
-                }
-                if (L->typeId != expectedTypeId) {
-                    throw std::runtime_error("SHM queue type mismatch");
-                }
-                if (L->capacity != expectedCapacity || L->maxPayload != expectedMaxPayload) {
-                    throw std::runtime_error("SHM queue config mismatch (capacity/maxPayload)");
-                }
-                if (L->cursorCapacity != kMaxSubscriberCursors) {
-                    throw std::runtime_error("SHM queue cursor config mismatch");
-                }
-            }
-
-            size_t actualEntriesOffset = 0;
-            size_t actualSlotStride = 0;
-            size_t actualTotalSize = 0;
-            if (!computeLayout_(L->capacity, L->maxPayload,
-                                actualEntriesOffset, actualSlotStride, actualTotalSize)) {
-                throw std::runtime_error("SHM queue layout invalid");
-            }
-            if (mapping->mappedSize() < actualTotalSize) {
-                throw std::runtime_error("SHM queue mapping smaller than layout");
-            }
-
-            mapping->configure(actualEntriesOffset, actualSlotStride, actualTotalSize);
-
-#ifdef _WIN32
-            ::ReleaseMutex(initMtx);
-            ::CloseHandle(initMtx);
-        } catch (...) {
-            ::ReleaseMutex(initMtx);
-            ::CloseHandle(initMtx);
-            throw;
-        }
-#endif
-
-        return mapping;
-    }
-
-    Registry& reg_;
-    SwString signalName_;
-    SwString shmName_;
-    std::shared_ptr<DynamicMapping> map_;
-#ifdef _WIN32
-    HANDLE mutex_{NULL};
-#endif
-};
-
-template <class... Args>
-class Signal {
-public:
-    static const size_t kMaxPayload = 4096;
-    typedef ShmMapping<kMaxPayload> Mapping;
-    typedef ShmLayout<kMaxPayload> Layout;
-
-    /**
-     * @brief Constructs a `Signal` instance.
-     * @param reg Value passed to the method.
-     * @param signalName Value passed to the method.
-     *
-     * @details The instance is initialized and prepared for immediate use.
-     */
-    Signal(Registry& reg, const SwString& signalName)
-        : reg_(reg), signalName_(signalName) {
-        shmName_ = detail::make_shm_name(reg_.domain(), reg_.object(), signalName_);
-        map_ = Mapping::openOrCreate(shmName_, detail::type_id<Args...>());
-        detail::RegistryTable<>::registerSignal(reg_.domain(), reg_.object(), signalName_, shmName_, detail::type_id<Args...>(), detail::type_name<Args...>());
-#ifdef _WIN32
-        const std::string mtxName = (shmName_ + "_mtx").toStdString();
-        mutex_ = ::CreateMutexA(NULL, FALSE, mtxName.c_str());
-        if (!mutex_) {
-            throw std::runtime_error("CreateMutex failed");
-        }
-
-        const std::string semName = (shmName_ + "_sem").toStdString();
-        semaphore_ = ::CreateSemaphoreA(NULL, 0, 0x7fffffff, semName.c_str());
-        if (!semaphore_) {
-            ::CloseHandle(mutex_);
-            mutex_ = NULL;
-            throw std::runtime_error("CreateSemaphore failed");
-        }
-#endif
-    }
-
-    /**
-     * @brief Destroys the `Signal` instance.
-     *
-     * @details Use this hook to release any resources that remain associated with the instance.
-     */
-    ~Signal() {
-#ifdef _WIN32
-        if (mutex_) {
-            ::CloseHandle(mutex_);
-            mutex_ = NULL;
-        }
-        if (semaphore_) {
-            ::CloseHandle(semaphore_);
-            semaphore_ = NULL;
-        }
-#endif
-    }
-
-    /**
-     * @brief Returns the current shm Name.
-     * @return The current shm Name.
-     *
-     * @details The returned value reflects the state currently stored by the instance.
-     */
-    const SwString& shmName() const { return shmName_; }
-
-    /**
-     * @brief Performs the `publish` operation.
-     * @param args Value passed to the method.
-     * @return `true` on success; otherwise `false`.
-     */
-    bool publish(const Args&... args) {
-        std::array<uint8_t, kMaxPayload> tmp;
-        detail::Encoder enc(tmp.data(), tmp.size());
-        if (!detail::writeAll(enc, args...)) return false;
-
-        Layout* L = map_->layout();
-
-#ifdef _WIN32
-        ::WaitForSingleObject(mutex_, INFINITE);
-        std::memcpy(L->data, tmp.data(), enc.size());
-        L->size = static_cast<uint32_t>(enc.size());
-        ::InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&L->seq));
-        ::ReleaseMutex(mutex_);
-        if (detail::win_wake_by_address_all_fn()) {
-            detail::win_wake_by_address_all(&L->seq);
-        } else {
-            const LONG w = static_cast<LONG>(L->winWaiters);
-            if (w > 0) {
-                ::ReleaseSemaphore(semaphore_, w, NULL);
-            }
-        }
-#else
-        pthread_mutex_lock(&L->mtx);
-        std::memcpy(L->data, tmp.data(), enc.size());
-        L->size = static_cast<uint32_t>(enc.size());
-        L->seq++;
-        pthread_cond_broadcast(&L->cv);
-        pthread_mutex_unlock(&L->mtx);
-#endif
-
-        // Event-driven wakeup for loop-based subscriptions (no polling).
-        // We notify subscriber processes best-effort; they will dispatch in their main loop thread.
-        std::vector<uint32_t> pids;
-        detail::SubscribersRegistryTable<>::listSubscriberPids(reg_.domain(), reg_.object(), signalName_, pids);
-        if (!pids.empty()) {
-            std::sort(pids.begin(), pids.end());
-            pids.erase(std::unique(pids.begin(), pids.end()), pids.end());
-            for (size_t i = 0; i < pids.size(); ++i) {
-                detail::LoopPoller::notifyProcess(pids[i]);
-            }
-        }
-        return true;
-    }
-
-    /**
-     * @brief Performs the `operator` operation.
-     * @return `true` on success; otherwise `false`.
-     */
-    bool operator()(const Args&... args) { return publish(args...); }
-
-    /**
-     * @brief Performs the `readLatest` operation on the associated resource.
-     * @param out Value passed to the method.
-     * @return `true` on success; otherwise `false`.
-     */
-    bool readLatest(Args&... out) const {
-        Layout* L = map_->layout();
-        std::array<uint8_t, kMaxPayload> tmp;
-        uint32_t sz = 0;
-
-#ifdef _WIN32
-        ::WaitForSingleObject(mutex_, INFINITE);
-        sz = L->size;
-        if (sz != 0 && sz <= kMaxPayload) {
-            std::memcpy(tmp.data(), L->data, sz);
-        }
-        ::ReleaseMutex(mutex_);
-#else
-        pthread_mutex_lock(&L->mtx);
-        sz = L->size;
-        if (sz != 0 && sz <= kMaxPayload) {
-            std::memcpy(tmp.data(), L->data, sz);
-        }
-        pthread_mutex_unlock(&L->mtx);
-#endif
-
-        if (sz == 0 || sz > kMaxPayload) return false;
-
-        detail::Decoder dec(tmp.data(), sz);
-        return detail::readAll(dec, out...);
-    }
-
-
-    class Subscription {
-    public:
-        /**
-         * @brief Constructs a `Subscription` instance.
-         *
-         * @details The instance is initialized and prepared for immediate use.
-         */
-        Subscription() {}
-        /**
-         * @brief Constructs a `Subscription` instance.
-         * @param id Value passed to the method.
-         * @param domain Value passed to the method.
-         * @param object Value passed to the method.
-         * @param signal Value passed to the method.
-         * @param subPid Value passed to the method.
-         * @param true Value passed to the method.
-         *
-         * @details The instance is initialized and prepared for immediate use.
-         */
-        explicit Subscription(size_t id,
-                                   const SwString& domain,
-                                   const SwString& object,
-                                   const SwString& signal,
-                                   uint32_t subPid,
-                                   const SwString& subscriberObject)
-            : id_(id),
-              domain_(domain),
-              object_(object),
-              signal_(signal),
-              subPid_(subPid),
-              subscriberObject_(subscriberObject),
-              registered_(true) {}
-        /**
-         * @brief Destroys the `Subscription` instance.
-         *
-         * @details Use this hook to release any resources that remain associated with the instance.
-         */
-        ~Subscription() { stop(); }
-
-        /**
-         * @brief Constructs a `Subscription` instance.
-         *
-         * @details The instance is initialized and prepared for immediate use.
-         */
-        Subscription(const Subscription&) = delete;
-        /**
-         * @brief Performs the `operator=` operation.
-         * @return The requested operator =.
-         */
-        Subscription& operator=(const Subscription&) = delete;
-
-        /**
-         * @brief Constructs a `Subscription` instance.
-         * @param this Value passed to the method.
-         *
-         * @details The instance is initialized and prepared for immediate use.
-         */
-        Subscription(Subscription&& o) noexcept { *this = std::move(o); }
-        /**
-         * @brief Performs the `operator=` operation.
-         * @param o Value passed to the method.
-         * @return The requested operator =.
-         */
-        Subscription& operator=(Subscription&& o) noexcept {
-            if (this == &o) return *this;
-            stop();
-            id_ = o.id_;
-            o.id_ = 0;
-            domain_ = std::move(o.domain_);
-            object_ = std::move(o.object_);
-            signal_ = std::move(o.signal_);
-            subPid_ = o.subPid_;
-            subscriberObject_ = std::move(o.subscriberObject_);
-            registered_ = o.registered_;
-            o.registered_ = false;
-            return *this;
-        }
-
-        /**
-         * @brief Stops the underlying activity managed by the object.
-         *
-         * @details The call affects the runtime state associated with the underlying resource or service.
-         */
-        void stop() {
-            if (!id_) return;
-            if (registered_) {
-                detail::SubscribersRegistryTable<>::unregisterSubscription(domain_, object_, signal_, subPid_, subscriberObject_);
-                registered_ = false;
-            }
-            detail::LoopPoller::instance().remove(id_);
-            id_ = 0;
-        }
-
-    private:
-        size_t id_{0};
-        SwString domain_;
-        SwString object_;
-        SwString signal_;
-        uint32_t subPid_{0};
-        SwString subscriberObject_;
-        bool registered_{false};
-    };
-
-    // Subscribe without creating a dedicated OS thread:
-    // - Uses a per-process OS wakeup (eventfd / named event) to become event-driven (no polling)
-    // - Uses try-lock to avoid blocking the event loop thread
-    // - Good for "state signals" (latest value wins)
-    // - Optional timeoutMs to auto-stop the runtime
-    template <typename Fn>
-    /**
-     * @brief Performs the `connect` operation.
-     * @param cb Value passed to the method.
-     * @param fireInitial Value passed to the method.
-     * @param timeoutMs Timeout expressed in milliseconds.
-     * @return The requested connect.
-     */
-    Subscription connect(Fn cb, bool fireInitial = true, int timeoutMs = 0) {
-        typedef typename std::decay<Fn>::type Callback;
-        Callback cbCopy(std::move(cb));
-
-        if (timeoutMs < 0) timeoutMs = 0;
-
-        std::shared_ptr<Mapping> map = map_;
-
-        struct State {
-            uint64_t lastSeq;
-            bool fireInitial;
-            bool firedInitial;
-            std::atomic_bool inCallback;
-#ifdef _WIN32
-            HANDLE mtx;
-            /**
-             * @brief Constructs a `State` instance.
-             * @param NULL Value passed to the method.
-             *
-             * @details The instance is initialized and prepared for immediate use.
-             */
-            explicit State() : lastSeq(0), fireInitial(true), firedInitial(false), inCallback(false), mtx(NULL) {}
-            /**
-             * @brief Destroys the `State` instance.
-             * @param mtx Value passed to the method.
-             *
-             * @details Use this hook to release any resources that remain associated with the instance.
-             */
-            ~State() { if (mtx) ::CloseHandle(mtx); }
-#else
-            /**
-             * @brief Constructs a `State` instance.
-             * @param false Value passed to the method.
-             *
-             * @details The instance is initialized and prepared for immediate use.
-             */
-            explicit State() : lastSeq(0), fireInitial(true), firedInitial(false), inCallback(false) {}
-#endif
-        };
-        std::shared_ptr<State> st(new State());
-
-#ifdef _WIN32
-        const std::string mtxName = (shmName_ + "_mtx").toStdString();
-        st->mtx = ::CreateMutexA(NULL, FALSE, mtxName.c_str());
-#endif
-
-        // Seed lastSeq at connect-time so we don't miss publishes that happen before the runtime starts.
-        st->fireInitial = fireInitial;
-        st->firedInitial = false;
-        st->lastSeq = detail::atomic_load_u64(&map->layout()->seq);
-
-        const size_t id = detail::LoopPoller::instance().add([map, st, cbCopy]() mutable {
-            if (!map || !st) return;
-            if (st->inCallback.exchange(true, std::memory_order_acq_rel)) return;
-
-            Layout* L = map->layout();
-
-            // Fast path: avoid locking/copying when nothing changed (except when we still owe fireInitial).
-            if (!(st->fireInitial && !st->firedInitial)) {
-                const uint64_t seqFast = detail::atomic_load_u64(&L->seq);
-                if (seqFast == st->lastSeq) {
-                    st->inCallback.store(false, std::memory_order_release);
-                    return;
-                }
-            }
-
-            uint32_t sz = 0;
-            uint64_t seq = 0;
-            std::array<uint8_t, kMaxPayload> tmp;
-            bool hasPayload = false;
-
-#ifdef _WIN32
-            if (!st->mtx) { st->inCallback.store(false, std::memory_order_release); return; }
-            DWORD wr = ::WaitForSingleObject(st->mtx, 0);
-            if (wr != WAIT_OBJECT_0 && wr != WAIT_ABANDONED) { st->inCallback.store(false, std::memory_order_release); return; }
-            seq = L->seq;
-            if (!(st->fireInitial && !st->firedInitial) && seq == st->lastSeq) {
-                ::ReleaseMutex(st->mtx);
-                st->inCallback.store(false, std::memory_order_release);
-                return;
-            }
-            sz = L->size;
-            if (sz != 0 && sz <= kMaxPayload) {
-                std::memcpy(tmp.data(), L->data, sz);
-                hasPayload = true;
-            }
-            ::ReleaseMutex(st->mtx);
-#else
-            if (pthread_mutex_trylock(&L->mtx) != 0) { st->inCallback.store(false, std::memory_order_release); return; }
-            seq = L->seq;
-            if (!(st->fireInitial && !st->firedInitial) && seq == st->lastSeq) {
-                pthread_mutex_unlock(&L->mtx);
-                st->inCallback.store(false, std::memory_order_release);
-                return;
-            }
-            sz = L->size;
-            if (sz != 0 && sz <= kMaxPayload) {
-                std::memcpy(tmp.data(), L->data, sz);
-                hasPayload = true;
-            }
-            pthread_mutex_unlock(&L->mtx);
-#endif
-
-            if (st->fireInitial && !st->firedInitial) {
-                st->firedInitial = true;
-                st->lastSeq = seq;
-                if (!hasPayload) { st->inCallback.store(false, std::memory_order_release); return; }
-            } else {
-                st->lastSeq = seq;
-                if (!hasPayload) { st->inCallback.store(false, std::memory_order_release); return; }
-            }
-
-            typedef std::tuple<typename std::decay<Args>::type...> Tuple;
-            Tuple out;
-            detail::Decoder dec(tmp.data(), sz);
-            if (detail::readTuple(dec, out)) {
-                detail::invokeWithTuple(cbCopy, out);
-            }
-
-            st->inCallback.store(false, std::memory_order_release);
-        });
-
-        const uint32_t subPid = detail::currentPid();
-        const SwString subObjCopy = detail::currentSubscriberObject_();
-        detail::SubscribersRegistryTable<>::registerSubscription(reg_.domain(), reg_.object(), signalName_, subPid, subObjCopy);
-
-        if (timeoutMs > 0) {
-            const SwString domCopy = reg_.domain();
-            const SwString objCopy = reg_.object();
-            const SwString sigCopy = signalName_;
-            SwTimer::singleShot(timeoutMs, [id, domCopy, objCopy, sigCopy, subPid, subObjCopy]() {
-                detail::SubscribersRegistryTable<>::unregisterSubscription(domCopy, objCopy, sigCopy, subPid, subObjCopy);
-                detail::LoopPoller::instance().remove(id);
-            });
-        }
-
-        return Subscription(id, reg_.domain(), reg_.object(), signalName_, subPid, subObjCopy);
-    }
-
-private:
-    Registry& reg_;
-    SwString signalName_;
-    SwString shmName_;
-    std::shared_ptr<Mapping> map_;
-#ifdef _WIN32
-    HANDLE mutex_{NULL};
-    HANDLE semaphore_{NULL};
-#endif
-};
-
-/**
- * @brief Small proxy that makes IPC signals feel like SwObject signals:
- *        - call: `emit ping(1, "x")` (because `emit` macro expands to nothing)
- *        - subscribe: `ping.connect(...)`
- *        - still available: `ping.publish(...)`
- */
-template <class... Args>
-class SignalProxy {
-public:
-    /**
-     * @brief Constructs a `SignalProxy` instance.
-     * @param reg Value passed to the method.
-     * @param signalName Value passed to the method.
-     *
-     * @details The instance is initialized and prepared for immediate use.
-     */
-    SignalProxy(Registry& reg, const SwString& signalName)
-        : sig_(reg, signalName) {}
-
-    /**
-     * @brief Performs the `publish` operation.
-     * @return `true` on success; otherwise `false`.
-     */
-    bool publish(const Args&... args) { return sig_.publish(args...); }
-    /**
-     * @brief Performs the `operator` operation.
-     * @return `true` on success; otherwise `false`.
-     */
-    bool operator()(const Args&... args) { return publish(args...); }
-
-    /**
-     * @brief Performs the `readLatest` operation on the associated resource.
-     * @return `true` on success; otherwise `false`.
-     */
-    bool readLatest(Args&... out) const { return sig_.readLatest(out...); }
-
-    template <typename Fn>
-    /**
-     * @brief Performs the `connect` operation.
-     * @param cb Value passed to the method.
-     * @param fireInitial Value passed to the method.
-     * @param timeoutMs Timeout expressed in milliseconds.
-     * @return The requested connect.
-     */
-    typename Signal<Args...>::Subscription connect(Fn cb, bool fireInitial = true, int timeoutMs = 0) {
-        return sig_.connect(cb, fireInitial, timeoutMs);
-    }
-
-    /**
-     * @brief Performs the `shmName` operation.
-     * @return The requested shm Name.
-     */
-    const SwString& shmName() const { return sig_.shmName(); }
-
-private:
-    Signal<Args...> sig_;
-};
-
-namespace detail {
-
-inline void notifyRegistryChangedBestEffort_(const SwString& domain) {
-    if (domain.isEmpty()) return;
-
-    try {
-        struct Notifier {
-            Registry reg;
-            Signal<uint64_t> sig;
-            /**
-             * @brief Constructs a `Notifier` instance.
-             *
-             * @details The instance is initialized and prepared for immediate use.
-             */
-            explicit Notifier(const SwString& dom)
-                : reg(dom, registryEventsObjectName_()),
-                  sig(reg, registryEventsSignalName_()) {}
-        };
-
-        static std::atomic_flag lock = ATOMIC_FLAG_INIT;
-        static std::map<std::string, std::shared_ptr<Notifier>>* byDomain =
-            new std::map<std::string, std::shared_ptr<Notifier>>();
-
-        const std::string key = domain.toStdString();
-        std::shared_ptr<Notifier> n;
-        {
-            ProcessHooksSpinGuard_ lk(lock);
-            auto it = byDomain->find(key);
-            if (it == byDomain->end()) {
-                n = std::make_shared<Notifier>(domain);
-                (*byDomain)[key] = n;
-            } else {
-                n = it->second;
-            }
-        }
-
-        if (n) {
-            n->sig.publish(nowMs());
-        }
-    } catch (...) {
-    }
-}
-
-} // namespace detail
-
-// Convenience macro (requires a member named `ipcRegistry_` in the class).
-#define SW_REGISTER_SHM_SIGNAL(name, ...) ::sw::ipc::SignalProxy<__VA_ARGS__> name{ipcRegistry_, SwString(#name)}
+#include "ipc/SwIpcRing.inl"
 
 // =================================================================================================
 //  SwIpcSignal — couche "signal/slot a la Qt" par-dessus l'IPC partage.
@@ -5528,65 +3821,54 @@ struct IpcAutoMaxBytes_ {
     }
 };
 
-// SwIpcSignal : facade typee au-dessus de RingQueueDynamic (le seul transport a maxPayload
-// dynamique, donc dimensionnable). Le mode latch (etat) = capacity 1 + LatestOnly.
-template <class... Args>
-class SwIpcSignal {
-public:
-    typedef typename RingQueueDynamic<Args...>::Subscription Subscription;
+#include "ipc/NativeRegistry.inl"
+#include "ipc/SwIpcSignal.inl"
 
-    SwIpcSignal(Registry& reg,
-                const SwString& signalName,
-                uint32_t capacity         = 16u,
-                uint32_t maxBytesOverride = 0u,
-                DeliveryMode defaultMode  = DeliveryMode::Replay)
-        : ring_(reg, signalName, capacity, IpcAutoMaxBytes_<Args...>::resolve(maxBytesOverride)),
-          defaultMode_(defaultMode) {
-        // Garde-fou : un type a taille variable (SwString/SwByteArray/...) instancie SANS
-        // maxBytesOverride donne un sizing auto reduit au seul coussin (kOverhead) -> tout
-        // message non trivial serait droppe SILENCIEUSEMENT a l'emission. Les macros
-        // SW_IPC_SIGNAL/SW_IPC_LATCH attrapent ce cas a la compilation (static_assert) ; ce
-        // throw protege l'instanciation directe de la classe qui contourne les macros.
-        if (maxBytesOverride == 0u && !size::IpcWireBound<Args...>::bounded) {
-            throw std::runtime_error(
-                std::string("SwIpcSignal('") + signalName.toStdString() +
-                "'): un type a taille variable (SwString/SwByteArray/SwList/SwMap) exige "
-                "maxBytesOverride > 0 (utilisez SW_IPC_SIGNAL_SIZED / SW_IPC_LATCH_SIZED).");
+namespace detail {
+
+inline void notifyRegistryChangedBestEffort_(const SwString& domain) {
+    if (domain.isEmpty()) return;
+
+    try {
+        struct Notifier {
+            Registry reg;
+            SwIpcSignal<uint64_t> sig;
+            /**
+             * @brief Constructs a `Notifier` instance.
+             *
+             * @details The instance is initialized and prepared for immediate use.
+             */
+            explicit Notifier(const SwString& dom)
+                : reg(dom, registryEventsObjectName_()),
+                  sig(reg, registryEventsSignalName_(), 16u, 0u, DeliveryMode::LatestOnly) {}
+        };
+
+        static std::atomic_flag lock = ATOMIC_FLAG_INIT;
+        static std::map<std::string, std::shared_ptr<Notifier>>* byDomain =
+            new std::map<std::string, std::shared_ptr<Notifier>>();
+
+        const std::string key = domain.toStdString();
+        std::shared_ptr<Notifier> n;
+        {
+            ProcessHooksSpinGuard_ lk(lock);
+            auto it = byDomain->find(key);
+            if (it == byDomain->end()) {
+                n = std::make_shared<Notifier>(domain);
+                (*byDomain)[key] = n;
+            } else {
+                n = it->second;
+            }
         }
+
+        if (n) {
+            n->sig.publish(nowMs());
+        }
+    } catch (...) {
     }
+}
 
-    SwIpcSignal(const SwIpcSignal&) = delete;
-    SwIpcSignal& operator=(const SwIpcSignal&) = delete;
+} // namespace detail
 
-    // Emission "a la Qt". NOTE: `emit` est une macro vide du framework (SwObject.h),
-    // donc on n'expose PAS de methode nommee `emit`. On ecrit `emit sig(a, b);` (la macro
-    // disparait et appelle operator()), ou `sig.publish(a, b);` explicitement.
-    // Zero copie au-dela du memcpy wire. Retourne false si le message depasse maxBytes
-    // ou si le ring est plein.
-    bool publish(const Args&... args) { return ring_.push(args...); }
-    bool operator()(const Args&... args) { return ring_.push(args...); }
-
-    // Abonnement type : Fn doit etre appelable avec (decay<Args>...).
-    // mode defaut = celui fixe a la declaration (Replay pour un signal, LatestOnly pour un latch).
-    template <typename Fn>
-    Subscription connect(Fn cb) {
-        return ring_.connect(std::move(cb), /*fireInitial=*/true, /*timeoutMs=*/0, defaultMode_);
-    }
-    template <typename Fn>
-    Subscription connect(Fn cb, DeliveryMode mode, bool fireInitial = true, int timeoutMs = 0) {
-        return ring_.connect(std::move(cb), fireInitial, timeoutMs, mode);
-    }
-
-    uint32_t maxBytes() const { return ring_.maxPayload(); }
-    uint32_t capacity() const { return ring_.capacity(); }
-    DeliveryMode defaultMode() const { return defaultMode_; }
-
-    RingQueueDynamic<Args...>& raw() { return ring_; }
-
-private:
-    RingQueueDynamic<Args...> ring_;
-    DeliveryMode defaultMode_;
-};
 
 // =================================================================================================
 //  SwIpcProperty — property distante "a la Qt" (equivalent Q_PROPERTY partage entre process).
@@ -5625,10 +3907,7 @@ public:
                   NotifyFn notify,
                   uint32_t maxBytes = 0u)
         : name_(name),
-          // capacity > 1 : un latch peut avoir plusieurs lecteurs (owner + proxies) ET
-          // plusieurs ecrivains (bidirectionnel). Avec un seul slot, un slot fraichement
-          // ecrit peut etre invalide pour un second lecteur avant qu'il l'ait vu. Une petite
-          // profondeur evite ces courses ; LatestOnly garantit qu'on ne livre que le dernier.
+          // Owner and proxies share a retained, bidirectional state channel.
           latch_(reg, name, /*capacity*/ 16u, maxBytes, DeliveryMode::LatestOnly),
           cached_(defaultValue),
           self_(ownerPublisherId),
@@ -5636,10 +3915,8 @@ public:
           notify_(std::move(notify)) {
         std::shared_ptr<std::atomic_bool> alive = alive_;
         SwIpcProperty<T>* selfPtr = this;
-        // IMPORTANT : chaque property a son PROPRE curseur d'abonnement. Deux instances dans
-        // le meme process avec le meme objectName (owner + proxy local) partageraient sinon le
-        // meme curseur (identifie par (pid, subscriberObject)) : quand l'une draine, l'autre ne
-        // recevrait plus rien. On rend le subscriberObject unique via le publisherId d'instance.
+        // Keep owner and proxy subscriptions identifiable in registry diagnostics.
+        // The ring itself allocates an independent cursor for every connection.
         const SwString uniqueSub = reg.object() + SwString("#prop#") + detail::hex64(self_);
         detail::ScopedSubscriberObject subScope(uniqueSub);
         // fireInitial=true + LatestOnly : si la SHM porte deja une valeur (set d'un autre
@@ -5665,16 +3942,29 @@ public:
 
     // Ecriture : met a jour le cache, publie (self_, v) sur le latch, notifie localement.
     bool set(const T& v) {
+        const T next = v;
         {
             SwMutexLocker lk(mutex_);
-            if (published_ && cached_ == v) return true;
-            if (!latch_.publish(self_, v)) return false;
-            cached_ = v;
-            published_ = true;
+            if (published_ && cached_ == next) return true;
         }
-        // Publication succeeded; observers may now use the new cache.  // last-writer-wins ; les autres convergent via LatestOnly
-        if (notify_) notify_(v);   // emit local immediat (la NotifyFn gere le thread d'affinite)
-        return true;
+        uint64_t committedVersion = 0;
+        // Commit in transport order, before direct mirrors run. The property
+        // mutex never spans delivery: a mirror may synchronously read or set us.
+        const bool accepted = latch_.publishWithCommit([this, &next, &committedVersion]() {
+            SwMutexLocker lk(mutex_);
+            cached_ = next;
+            published_ = true;
+            committedVersion = ++version_;
+        }, self_, next);
+        if (!committedVersion) return false;
+        {
+            SwMutexLocker lk(mutex_);
+            if (version_ != committedVersion) return accepted;
+        }
+        // A nested newer update already notified observers; do not follow it
+        // with an obsolete notification for this outer set().
+        if (notify_) notify_(next);
+        return accepted;
     }
 
     const SwString& name() const { return name_; }
@@ -5688,6 +3978,7 @@ private:
             SwMutexLocker lk(mutex_);
             if (cached_ == value) return; // deja a jour -> pas de double notify
             cached_ = value;
+            ++version_;
         }
         if (notify_) notify_(value);
     }
@@ -5697,6 +3988,7 @@ private:
     mutable SwMutex mutex_;
     T cached_;
     bool published_{false};
+    uint64_t version_{0};
     uint64_t self_;
     std::shared_ptr<std::atomic_bool> alive_;
     NotifyFn notify_;

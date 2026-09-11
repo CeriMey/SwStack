@@ -30,12 +30,8 @@ inline void appendJsonValue(const SwJsonValue& value, SwString& out, bool compac
         out += value.toBool() ? "true" : "false";
         return;
     }
-    if (value.isInt()) {
-        out += SwString::number(value.toLongLong());
-        return;
-    }
     if (value.isDouble()) {
-        out += SwString::number(value.toDouble());
+        out += numberLiteral(value);
         return;
     }
     if (value.isObject()) {

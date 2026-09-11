@@ -2,16 +2,21 @@
 
 #include "SwObject.h"
 #include "SwString.h"
+#include <memory>
 
 class SwBridgeHttpServer;
+class SwBridgeRpcClient;
+namespace swros { class Server; }
 
 class SwBridgeApp : public SwObject {
 public:
     SwBridgeApp(int argc, char** argv, SwObject* parent = nullptr);
     ~SwBridgeApp() override;
+    bool started() const { return started_; }
 
 private:
-    static uint16_t parsePort_(int argc, char** argv);
-
-    SwBridgeHttpServer* server_{nullptr};
+    bool started_{false};
+    std::unique_ptr<SwBridgeRpcClient> rpc_;
+    std::unique_ptr<SwBridgeHttpServer> server_;
+    std::unique_ptr<swros::Server> rosbridge_;
 };

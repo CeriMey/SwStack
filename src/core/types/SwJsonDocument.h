@@ -452,12 +452,12 @@ private:
             SwString boolStr = value.toBool() ? "true" : "false";
             if (encryptionKey.isEmpty()) output += boolStr;
             else appendEncryptedScalar("bool", boolStr);
-        } else if (value.isInt()) {
-            SwString intStr = SwString::number(value.toLongLong());
+        } else if (value.type() == SwJsonValue::Type::Integer) {
+            SwString intStr = swJsonDetail::numberLiteral(value);
             if (encryptionKey.isEmpty()) output += intStr;
             else appendEncryptedScalar("int", intStr);
         } else if (value.isDouble()) {
-            SwString doubleStr = SwString::number(value.toDouble());
+            SwString doubleStr = swJsonDetail::numberLiteral(value);
             if (encryptionKey.isEmpty()) output += doubleStr;
             else appendEncryptedScalar("double", doubleStr);
         } else if (value.isNull()) {

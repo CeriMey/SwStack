@@ -48,7 +48,7 @@
 
 #include "SwEventLoop.h"
 #include "SwSharedMemorySignal.h"
-#include "SwIpcRpcRouter.h"
+#include "SwIpcRpcNative.h"
 #include "SwString.h"
 #include "SwTimer.h"
 
@@ -78,11 +78,6 @@ public:
 
 private:
     std::atomic_flag flag_ = ATOMIC_FLAG_INIT;
-};
-
-struct RpcContext {
-    uint32_t clientPid{0};
-    SwString clientInfo;
 };
 
 inline uint32_t normalizeRpcQueueCapacity(uint32_t requested) {
@@ -129,11 +124,35 @@ public:
     using Completion = std::function<void(const Result&)>;
     using Traits = RpcResultTraits<Ret>;
     using Router = typename Traits::Router;
+    using Native = NativeRpcEndpoint<Ret, Args...>;
+    using RemoteCancel = std::function<void()>;
+    using RemoteInvoker = std::function<RemoteCancel(const Args&..., Completion, int)>;
+
+    class PreparedCall {
+    public:
+        PreparedCall(PreparedCall&&) = default;
+        PreparedCall& operator=(PreparedCall&&) = default;
+        PreparedCall(const PreparedCall&) = delete;
+        PreparedCall& operator=(const PreparedCall&) = delete;
+    private:
+        friend class RpcMethodClient;
+        PreparedCall(std::shared_ptr<typename Native::Channel> channel, typename Native::Selection endpoint,
+                     std::shared_ptr<typename Native::Tuple> values)
+            : channel_(std::move(channel)), endpoint_(std::move(endpoint)), values_(std::move(values)) {}
+        std::shared_ptr<typename Native::Channel> channel_;
+        typename Native::Selection endpoint_;
+        std::shared_ptr<typename Native::Tuple> values_;
+    };
+    // Admission may precede execution in a bounded application queue. Capture
+    // the selected service now, so a queued mutation cannot cross a restart.
+    PreparedCall prepare(Args... args) const {
+        return PreparedCall(native_, Native::select(native_),
+                            std::make_shared<typename Native::Tuple>(std::move(args)...));
+    }
 
     RpcMethodClient(const SwString& domain, const SwString& object, const SwString& method,
                     const SwString& clientInfo = SwString())
-        : registry_(domain, object), method_(method), clientInfo_(clientInfo),
-          state_(std::make_shared<State>()), pid_(detail::currentPid()) {
+        : RpcMethodClient(domain, object, method, clientInfo, RemoteInvoker()) {
         router_ = Router::get(domain, object, rpcResponseQueueName(method, pid_), rpcQueueCapacity());
         switch (rpcQueueCapacity()) {
 #define SW_RPC_REQUEST_CAP(N) case N: initRequest<N>(); break
@@ -144,15 +163,29 @@ public:
             default: throw std::invalid_argument("unsupported RPC capacity");
         }
     }
+    // This overload does not instantiate fixed-packet codecs. The supplied
+    // adapter runs only when no native endpoint existed at submission time.
+    RpcMethodClient(const SwString& domain, const SwString& object, const SwString& method,
+                    const SwString& clientInfo, RemoteInvoker remote)
+        : registry_(domain, object), method_(method), clientInfo_(clientInfo),
+          state_(std::make_shared<State>()), pid_(detail::currentPid()),
+          native_(Native::channel(domain, object, method)), remote_(std::move(remote)) {
+        detail::registerNativeSignalThread();
+    }
     ~RpcMethodClient() {
-        // Destruction suppresses callbacks. Explicit cancelAll() completes them.
-        SwMutexLocker lock(state_->mutex);
-        state_->closed = true;
-        for (const auto& entry : state_->pending) {
-            router_->remove(entry.first);
-            stopTimer(entry.second);
+        std::vector<RemoteCancel> cancels;
+        {
+            SwMutexLocker lock(state_->mutex);
+            state_->closed.store(true, std::memory_order_release);
+            for (const auto& entry : state_->pending) {
+                if (router_) router_->remove(entry.first);
+                stopTimer(entry.second);
+                entry.second->cancelRequested = true;
+                if (entry.second->remoteCancel) cancels.push_back(std::move(entry.second->remoteCancel));
+            }
+            state_->pending.clear();
         }
-        state_->pending.clear();
+        for (const auto& cancel : cancels) cancel();
     }
     RpcMethodClient(const RpcMethodClient&) = delete;
     RpcMethodClient& operator=(const RpcMethodClient&) = delete;
@@ -165,15 +198,28 @@ public:
         SwMutexLocker lock(state_->mutex);
         return state_->pending.size();
     }
+    bool canCallDirect() const { return Native::isDirect(Native::select(native_)); }
+    bool tryCallDirect(Result& out, const Args&... args) {
+        const auto endpoint = Native::select(native_);
+        if (!Native::isDirect(endpoint)) return false;
+        const auto state = state_;
+        RpcContext context; context.clientPid = pid_; context.clientInfo = clientInfo_;
+        out = Native::invoke(endpoint, context, typename Native::Tuple(args...));
+        { SwMutexLocker lock(state->mutex); state->lastError = out.error; }
+        return true;
+    }
     Result callResult(const Args&... args, int timeoutMs = 2000) {
-        auto pending = begin(Completion(), args...);
-        SwEventLoop::waitUntil([pending]() {
-            detail::LoopPoller::instance().dispatch();
-            return pending->done.load(std::memory_order_acquire);
-        }, timeoutMs);
+        auto state = state_; auto response = router_;
+        auto pending = begin(Completion(), timeoutMs, false, prepare(args...));
+        if (!pending->done.load(std::memory_order_acquire)) {
+            SwEventLoop::waitUntil([pending]() {
+                detail::LoopPoller::instance().dispatch();
+                return pending->done.load(std::memory_order_acquire);
+            }, timeoutMs);
+        }
         if (!pending->done.load(std::memory_order_acquire)) {
             Result result; result.error = "rpc: timeout";
-            finish(state_, router_, pending, result);
+            finish(state, response, pending, result, true);
         }
         return pending->result;
     }
@@ -181,34 +227,31 @@ public:
         return Traits::value(callResult(args..., timeoutMs));
     }
 
-    // Always completes once while the client is alive; pending calls can be
-    // explicitly cancelled. An event loop is required for asynchronous calls.
+    // Execution and completion are deferred, including on the same thread.
+    // This gives the caller a cancellable ID before a handler can execute.
     uint64_t callAsyncResult(const Args&... args, Completion complete, int timeoutMs = 2000) {
-        SwCoreApplication* app = SwCoreApplication::instance(false);
-        if (!app) {
-            Result result; result.error = "rpc: asynchronous call requires an event loop";
-            { SwMutexLocker lock(state_->mutex); state_->lastError = result.error; }
-            if (complete) complete(result);
-            return 0;
-        }
+        return callAsyncResult(prepare(args...), std::move(complete), timeoutMs);
+    }
+    uint64_t callAsyncResult(PreparedCall prepared, Completion complete, int timeoutMs = 2000) {
         auto state = state_;
         auto response = router_;
-        auto pending = begin(std::move(complete), args...);
+        auto pending = begin(std::move(complete), timeoutMs, true, std::move(prepared));
         if (timeoutMs > 0 && !pending->done.load(std::memory_order_acquire)) {
             std::weak_ptr<State> weak = state;
-            std::weak_ptr<Router> router = response;
-            std::weak_ptr<Pending> weakPending = pending;
-            const int timer = app->addTimer([weak, router, weakPending]() {
-                auto pending = weakPending.lock();
-                if (!pending) return;
-                auto state = weak.lock(); auto response = router.lock();
-                if (!state || !response) return;
-                Result result; result.error = "rpc: timeout";
-                finish(state, response, pending, result);
-            }, static_cast<int64_t>(timeoutMs) * 1000, true);
-            SwMutexLocker lock(state->mutex);
-            if (state->closed || pending->done.load()) app->removeTimer(timer);
-            else pending->timer = timer;
+            auto timer = detail::startNativeSignalTimer(pending->caller, [weak, response, pending]() {
+                if (auto state = weak.lock()) {
+                    Result result; result.error = "rpc: timeout";
+                    deliver(state, response, pending, result, true);
+                }
+            }, static_cast<int64_t>(timeoutMs) * 1000);
+            if (!timer) {
+                Result result; result.error = "rpc: caller timer runtime unavailable";
+                finish(state, response, pending, result, true);
+            } else {
+                SwMutexLocker lock(state->mutex);
+                if (state->closed.load() || pending->done.load()) timer();
+                else pending->timerCancel = std::move(timer);
+            }
         }
         return pending->id;
     }
@@ -227,75 +270,184 @@ public:
         {
             SwMutexLocker lock(state_->mutex);
             auto it = state_->pending.find(id);
-            if (it == state_->pending.end()) return false;
+            if (it == state_->pending.end() || it->second->cancelRequested.load()) return false;
             pending = it->second;
+            pending->cancelRequested.store(true, std::memory_order_release);
         }
         Result result; result.error = "rpc: cancelled";
-        return finish(state_, router_, pending, result);
+        deliver(state_, router_, pending, result, true);
+        return true;
     }
     void cancelAll() {
-        auto state = state_; auto router = router_;
+        auto state = state_; auto response = router_;
         std::vector<std::shared_ptr<Pending>> pending;
         { SwMutexLocker lock(state->mutex);
-          for (const auto& entry : state->pending) pending.push_back(entry.second); }
+          for (const auto& entry : state->pending) {
+              entry.second->cancelRequested.store(true, std::memory_order_release);
+              pending.push_back(entry.second);
+          } }
         Result result; result.error = "rpc: cancelled";
-        for (const auto& call : pending) finish(state, router, call, result);
+        for (const auto& call : pending) deliver(state, response, call, result, true);
     }
 private:
+    using Clock = std::chrono::steady_clock;
     struct Pending {
         uint64_t id{0};
         std::atomic_bool done{false};
         Result result;
         Completion complete;
-        int timer{0};
+        RemoteCancel timerCancel;
+        bool asynchronous{false};
+        std::atomic_bool cancelRequested{false};
+        std::thread::id caller;
+        Clock::time_point deadline{Clock::time_point::max()};
+        RemoteCancel remoteCancel;
     };
     struct State {
         SwMutex mutex;
-        bool closed{false};
+        std::atomic_bool closed{false};
         SwString lastError;
         std::map<uint64_t, std::shared_ptr<Pending>> pending;
     };
     static void stopTimer(const std::shared_ptr<Pending>& pending) {
-        if (pending->timer) {
-            if (auto app = SwCoreApplication::instance(false)) app->removeTimer(pending->timer);
-            pending->timer = 0;
-        }
+        auto cancel = std::move(pending->timerCancel);
+        if (cancel) cancel();
     }
-    static bool finish(const std::shared_ptr<State>& state, const std::shared_ptr<Router>& router,
-                       const std::shared_ptr<Pending>& pending, const Result& result) {
+    static bool finish(const std::shared_ptr<State>& state, const std::shared_ptr<Router>& response,
+                       const std::shared_ptr<Pending>& pending, const Result& result,
+                       bool cancelRemote = false, bool suppressCallback = false) {
         Completion complete;
+        RemoteCancel cancel;
+        Result expired;
+        const Result* admitted = &result;
         {
             SwMutexLocker lock(state->mutex);
-            if (state->closed || pending->done.load(std::memory_order_acquire)) return false;
-            router->remove(pending->id);
+            if (state->closed.load() || pending->done.load(std::memory_order_acquire) ||
+                (pending->cancelRequested.load(std::memory_order_acquire) && !cancelRemote)) return false;
+            // A handler can block the caller's timer, or a response can wait in
+            // its queue past the deadline. Admission on the caller thread must
+            // enforce the deadline independently of timer callback dispatch.
+            if (!cancelRemote && Clock::now() >= pending->deadline) {
+                expired.error = "rpc: timeout";
+                admitted = &expired;
+                cancelRemote = true;
+            }
+            if (response) response->remove(pending->id);
             stopTimer(pending);
             state->pending.erase(pending->id);
-            pending->result = result;
-            state->lastError = result.error;
+            pending->result = *admitted;
+            state->lastError = admitted->error;
             complete = std::move(pending->complete);
+            pending->cancelRequested = cancelRemote;
+            if (cancelRemote) cancel = std::move(pending->remoteCancel);
+            else pending->remoteCancel = {};
             pending->done.store(true, std::memory_order_release);
         }
-        if (complete) complete(result);
+        if (cancel) cancel();
+        if (complete && !suppressCallback) complete(*admitted);
         return true;
     }
-    std::shared_ptr<Pending> begin(Completion complete, const Args&... args) {
+    static void deliver(const std::shared_ptr<State>& state, const std::shared_ptr<Router>& response,
+                        const std::shared_ptr<Pending>& pending, Result result, bool cancelRemote = false) {
+        if (state->closed.load() || pending->done.load()) return;
+        if (!pending->asynchronous || pending->caller == std::this_thread::get_id()) {
+            finish(state, response, pending, result, cancelRemote); return;
+        }
+        if (!detail::postNativeSignalThread(pending->caller, [state, response, pending, result, cancelRemote] {
+            finish(state, response, pending, result, cancelRemote);
+        })) {
+            // The caller runtime has stopped. Release the call without running
+            // arbitrary application code on the server's thread.
+            result.ok = false; result.error = "rpc: caller thread unavailable";
+            finish(state, response, pending, result, true, true);
+        }
+    }
+    static bool current(const std::shared_ptr<State>& state, const std::shared_ptr<Router>& response,
+                        const std::shared_ptr<Pending>& pending) {
+        if (state->closed.load() || pending->done.load()) return false;
+        if (pending->cancelRequested.load(std::memory_order_acquire)) {
+            Result result; result.error = "rpc: cancelled";
+            deliver(state, response, pending, result, true);
+            return false;
+        }
+        if (Clock::now() < pending->deadline) return true;
+        Result result; result.error = "rpc: timeout";
+        deliver(state, response, pending, result, true);
+        return false;
+    }
+    template<size_t... I>
+    static RemoteCancel invokeRemote(const RemoteInvoker& remote, const typename Native::Tuple& args,
+                                     Completion complete, int timeoutMs, detail::index_sequence<I...>) {
+        return remote(std::get<I>(args)..., std::move(complete), timeoutMs);
+    }
+    template<size_t... I>
+    static bool invokeRequest(const std::function<bool(uint64_t, uint32_t, const SwString&, const Args&...)>& request,
+                              const typename Native::Tuple& args, uint64_t id, uint32_t pid,
+                              const SwString& info, detail::index_sequence<I...>) {
+        return request(id, pid, info, std::get<I>(args)...);
+    }
+    std::shared_ptr<Pending> begin(Completion complete, int timeoutMs, bool asynchronous, PreparedCall prepared) {
+        detail::registerNativeSignalThread();
+        const auto state = state_;
+        const auto response = router_;
+        const auto remote = remote_;
+        const auto request = request_;
+        const bool validPrepared = prepared.channel_ == native_ && static_cast<bool>(prepared.values_);
+        const auto endpoint = std::move(prepared.endpoint_);
+        RpcContext context; context.clientPid = pid_; context.clientInfo = clientInfo_;
+        auto values = std::move(prepared.values_);
         auto pending = std::make_shared<Pending>();
         pending->id = nextRpcCallId();
         pending->complete = std::move(complete);
+        pending->asynchronous = asynchronous;
+        pending->caller = std::this_thread::get_id();
+        if (timeoutMs > 0) pending->deadline = Clock::now() + std::chrono::milliseconds(timeoutMs);
         {
-            SwMutexLocker lock(state_->mutex);
-            state_->lastError.clear();
-            state_->pending[pending->id] = pending;
+            SwMutexLocker lock(state->mutex);
+            state->lastError.clear();
+            state->pending[pending->id] = pending;
         }
-        std::weak_ptr<State> weak = state_;
-        std::weak_ptr<Router> router = router_;
-        Traits::listen(*router_, pending->id, [weak, router, pending](const Result& result) {
-            auto state = weak.lock(); auto response = router.lock();
-            if (state && response) finish(state, response, pending, result);
-        });
-        if (!request_(pending->id, pid_, clientInfo_, args...)) {
-            Result result; result.error = "rpc: request queue full (or payload too large)";
-            finish(state_, router_, pending, result);
+        Completion done = [state, response, pending](const Result& result) {
+            deliver(state, response, pending, result);
+        };
+        const auto live = [state, response, pending] { return current(state, response, pending); };
+        auto start = [state, response, remote, request, endpoint, context, values, pending, done, live, validPrepared]() {
+            if (!live()) return;
+            if (!validPrepared) { Result result; result.error = "rpc: invalid prepared call"; done(result); return; }
+            if (endpoint) { Native::dispatch(endpoint, context, values, done, live); return; }
+            try {
+                if (remote) {
+                    const int remaining = pending->deadline == Clock::time_point::max() ? 0 :
+                        static_cast<int>(std::max<int64_t>(1, std::chrono::duration_cast<std::chrono::milliseconds>(
+                            pending->deadline - Clock::now()).count()));
+                    auto cancel = invokeRemote(remote, *values, done, remaining, typename detail::make_index_sequence<sizeof...(Args)>::type{});
+                    bool cancelNow = false;
+                    {
+                        SwMutexLocker lock(state->mutex);
+                        cancelNow = state->closed.load() || pending->cancelRequested;
+                        if (!cancelNow && !pending->done.load()) pending->remoteCancel = std::move(cancel);
+                    }
+                    if (cancelNow && cancel) cancel();
+                    return;
+                }
+                if (!request || !response) {
+                    Result result; result.error = "rpc: no remote adapter"; done(result); return;
+                }
+                Traits::listen(*response, pending->id, done);
+                if (!invokeRequest(request, *values, pending->id, context.clientPid, context.clientInfo,
+                                   typename detail::make_index_sequence<sizeof...(Args)>::type{})) {
+                    Result result; result.error = "rpc: request queue full (or payload too large)";
+                    done(result);
+                }
+            } catch (const std::exception& error) {
+                Result result; result.error = SwString("rpc: transport exception: ") + SwString(error.what()).left(512);
+                done(result);
+            } catch (...) { Result result; result.error = "rpc: unknown transport exception"; done(result); }
+        };
+        if (!asynchronous) start();
+        else if (!detail::postNativeSignalThread(pending->caller, std::move(start))) {
+            Result result; result.error = "rpc: caller event queue unavailable";
+            finish(state, response, pending, result);
         }
         return pending;
     }
@@ -312,6 +464,8 @@ private:
     std::shared_ptr<State> state_;
     uint32_t pid_;
     std::shared_ptr<Router> router_;
+    std::shared_ptr<typename Native::Channel> native_;
+    RemoteInvoker remote_;
     std::function<bool(uint64_t, uint32_t, const SwString&, const Args&...)> request_;
 };
 

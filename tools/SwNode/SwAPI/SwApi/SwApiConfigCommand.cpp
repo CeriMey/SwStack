@@ -291,7 +291,7 @@ int SwApiConfigCommand::cmdSendAll_() {
     bool ok = false;
     try {
         sw::ipc::Registry reg(target.domain, target.object);
-        sw::ipc::Signal<uint64_t, SwString> sig(reg, cfgSig);
+        sw::ipc::SwIpcSignal<uint64_t, SwString> sig(reg, cfgSig, 1u, 4096u, sw::ipc::DeliveryMode::LatestOnly);
         ok = sig.publish(0, compact);
     } catch (...) {
         ok = false;
@@ -378,7 +378,7 @@ void SwApiConfigCommand::cmdWatch_() {
     const SwString path = (args().size() >= 3) ? args()[2] : SwString();
 
     sw::ipc::Registry reg(target.domain, target.object);
-    sw::ipc::Signal<uint64_t, SwString> sig(reg, cfgSig);
+    sw::ipc::SwIpcSignal<uint64_t, SwString> sig(reg, cfgSig, 1u, 4096u, sw::ipc::DeliveryMode::LatestOnly);
 
     auto sub = sig.connect([path, pretty](uint64_t pubId, SwString json) {
         (void)pubId;

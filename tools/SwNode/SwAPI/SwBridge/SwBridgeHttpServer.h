@@ -14,10 +14,11 @@
 class SwTcpServer;
 class SwTcpSocket;
 class SwTimer;
+class SwBridgeRpcClient;
 
 class SwBridgeHttpServer : public SwObject {
 public:
-    SwBridgeHttpServer(uint16_t httpPort, SwObject* parent = nullptr);
+    SwBridgeHttpServer(uint16_t httpPort, SwBridgeRpcClient& rpc, SwObject* parent = nullptr);
     ~SwBridgeHttpServer() override;
 
     bool start();
@@ -59,15 +60,16 @@ private:
     SwMap<SwTcpSocket*, WsConnState> wsConns_;
     SwMap<SwTcpSocket*, SwTimer*> wsPollTimers_;
 
+    SwBridgeRpcClient& rpc_;
     SwString apiKey_;
     uint64_t stateSeq_{0};
 
     SwString subscribedTarget_;
     std::shared_ptr<sw::ipc::Registry> reg_;
-    std::shared_ptr<sw::ipc::Signal<int, SwString>> pongSig_;
-    std::shared_ptr<sw::ipc::Signal<uint64_t, SwString>> cfgAckSig_;
-    sw::ipc::Signal<int, SwString>::Subscription pongSub_;
-    sw::ipc::Signal<uint64_t, SwString>::Subscription cfgAckSub_;
+    std::shared_ptr<sw::ipc::SwIpcSignal<int, SwString>> pongSig_;
+    std::shared_ptr<sw::ipc::SwIpcSignal<uint64_t, SwString>> cfgAckSig_;
+    sw::ipc::SwIpcSignal<int, SwString>::Subscription pongSub_;
+    sw::ipc::SwIpcSignal<uint64_t, SwString>::Subscription cfgAckSub_;
 
     SwString lastPong_;
     SwString lastConfigAck_;

@@ -363,8 +363,6 @@
 - `make_index_sequence` - make_index_sequence; methodes: none
 - `tuple_element_decay` - tuple_element_decay; methodes: none
 - `Registry` - Registry; methodes: `Registry(...)`, `domain(...)`, `object(...)`
-- `ShmLayout` - Shm Layout; methodes: none
-- `ShmMapping` - Shm Mapping; methodes: `openOrCreate(...)`, `destroy(...)`, `~ShmMapping(...)`, `layout(...)`, `name(...)`
 - `ShmQueueLayout` - Shm Queue Layout; methodes: `initLayout(...)`
 - `Slot` - Slot; methodes: none
 - `ShmMappingT` - Shm Mapping T; methodes: `openOrCreate(...)`, `destroy(...)`, `~ShmMappingT(...)`, `layout(...)`, `name(...)`
@@ -374,10 +372,9 @@
 - `Msg` - Msg; methodes: none
 - `State` - State; methodes: `State(...)`, `~State(...)`
 - `Msg` - Msg; methodes: none
-- `Signal` - Signal; methodes: `Signal(...)`, `~Signal(...)`, `shmName(...)`, `publish(...)`, `operator(...)`, `readLatest(...)`
+- `SwIpcSignal` - Ring partagé typé ; méthodes : `publish(...)`, `connect(...)`, `readLatest(...)`, `maxBytes(...)`, `capacity(...)`, `raw(...)`
 - `Subscription` - Subscription; methodes: `Subscription(...)`, `~Subscription(...)`, `stop(...)`
 - `State` - State; methodes: `State(...)`, `~State(...)`
-- `SignalProxy` - Signal Proxy; methodes: `SignalProxy(...)`, `publish(...)`, `operator(...)`, `readLatest(...)`, `shmName(...)`
 - `Notifier` - Notifier; methodes: `Notifier(...)`
 
 ### `src/core/SwSlider.h` - Slider
