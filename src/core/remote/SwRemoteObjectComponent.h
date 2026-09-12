@@ -70,12 +70,20 @@ struct ComponentNode {
     ComponentNode* next;
 };
 
-inline ComponentNode*& head() {
+#if defined(__GNUC__) && !defined(_WIN32)
+#  define SW_COMPONENT_LOCAL_ __attribute__((visibility("hidden")))
+#else
+#  define SW_COMPONENT_LOCAL_
+#endif
+
+// Registration lists belong to one shared library, including its translation units.
+// ELF symbol interposition must not merge lists from different plugins.
+SW_COMPONENT_LOCAL_ inline ComponentNode*& head() {
     static ComponentNode* h = nullptr;
     return h;
 }
 
-struct AutoRegister {
+struct SW_COMPONENT_LOCAL_ AutoRegister {
     /**
      * @brief Constructs a `AutoRegister` instance.
      * @param n Value passed to the method.
@@ -186,12 +194,14 @@ inline SwString normalizeComponentTypeName(SwString raw) {
 // Exported entry point for plugins (explicit construction config root).
 // Compiled only when SW_COMPONENT_PLUGIN is defined (set by the plugin CMake target).
 #ifdef SW_COMPONENT_PLUGIN
+SW_COMPONENT_PLUGIN_EXPORT unsigned swRemoteObjectComponentAbiVersion() { return 1; }
+
 SW_COMPONENT_PLUGIN_EXPORT bool swRegisterRemoteObjectComponents(SwRemoteObjectComponentRegistry* registry) {
     if (!registry) return false;
     ::sw::component::plugin::detail::ComponentNode* n = ::sw::component::plugin::detail::head();
     while (n) {
         if (!n->typeName.isEmpty() && n->create) {
-            (void)registry->registerComponent(n->typeName, n->create, n->destroy);
+            if (!registry->registerComponent(n->typeName, n->create, n->destroy)) return false;
         }
         n = n->next;
     }
