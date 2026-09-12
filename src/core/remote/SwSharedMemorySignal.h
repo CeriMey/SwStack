@@ -60,7 +60,6 @@
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -2461,10 +2460,18 @@ private:
             static constexpr size_t prefixLength = sizeof(prefix) - 1;
             static_assert(sizeof(out.sun_path) >= prefixLength + 12, "IPC address buffer too small");
             std::memcpy(out.sun_path + 1, prefix, prefixLength);
-            char* digits = out.sun_path + 1 + prefixLength;
-            const auto result = std::to_chars(digits, out.sun_path + sizeof(out.sun_path), pid);
+            // uint32_t needs at most 10 decimal digits. Keep this path
+            // allocation-free without requiring C++17's std::to_chars.
+            char digits[10];
+            char* first = digits + sizeof(digits);
+            do {
+                *--first = static_cast<char>('0' + pid % 10);
+                pid /= 10;
+            } while (pid != 0);
+            const size_t digitCount = static_cast<size_t>(digits + sizeof(digits) - first);
+            std::memcpy(out.sun_path + 1 + prefixLength, first, digitCount);
             lenOut = static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) +
-                                           (result.ptr - out.sun_path));
+                                           1 + prefixLength + digitCount);
         }
 #endif
 
