@@ -37,7 +37,7 @@ SwString SwRealtimeDb::State::viewInputs(const Table& target, SwJsonObject& inpu
             failure = SwString("missing dependency: ") + dependency;
             break;
         }
-        if (!found->second.valid) {
+        if (!found->second.valid && (!target.allowInvalidSources || found->second.view || found->second.writeOrder.empty())) {
             failure = SwString("invalid dependency: ") + dependency;
             break;
         }
@@ -57,7 +57,8 @@ bool SwRealtimeDb::State::reuseView(Table& target) {
     std::map<SwString, std::uint64_t> versions;
     for (const auto& name : target.dependencies) {
         const auto source = tables.find(name);
-        if (source == tables.end() || !source->second.valid || source->second.dirty) return false;
+        if (source == tables.end() || source->second.dirty ||
+            (!source->second.valid && (!target.allowInvalidSources || source->second.view || source->second.writeOrder.empty()))) return false;
         versions.emplace(name, source->second.valueRevision);
     }
     if (target.valid && target.inputVersions == versions) {
@@ -165,7 +166,8 @@ SwString SwRealtimeDb::State::pendingViewError(const Table& target) const {
             const auto found = tables.find(dependency);
             if (found == tables.end()) { failure = "missing dependency: " + dependency; break; }
             const auto& parent = found->second;
-            if (parent.dirty ? !inspect(parent).isEmpty() : !parent.valid) {
+            if ((parent.dirty ? !inspect(parent).isEmpty() : !parent.valid) &&
+                (!current.allowInvalidSources || parent.view || parent.writeOrder.empty())) {
                 failure = "invalid dependency: " + dependency;
                 break;
             }

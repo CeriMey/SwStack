@@ -66,6 +66,7 @@ struct SwRealtimeDb::State {
         SwString overflowPolicy{"reject"};
         std::set<SwString> writers;
         std::vector<SwString> dependencies;
+        bool allowInvalidSources{false};
         SwString script;
         ViewProgram program;
         SwString encodeScript, writeTarget;

@@ -176,6 +176,11 @@ SwRealtimeDb::State::Table SwRealtimeDb::State::parseTable(const SwJsonObject& r
         if (result.overflowPolicy != "reject" && result.overflowPolicy != "evict_oldest_write")
             throw std::runtime_error("overflow_policy must be reject or evict_oldest_write");
     }
+    if (request.contains("allow_invalid_sources")) {
+        if (!view || !request["allow_invalid_sources"].isBool())
+            throw std::runtime_error("allow_invalid_sources must be a boolean on a view");
+        result.allowInvalidSources = request["allow_invalid_sources"].toBool();
+    }
     if (view) {
         result.script = swRealtimeDbDetail::requiredString(request,
             request.contains("decode") ? "decode" : "script", 64 * 1024);

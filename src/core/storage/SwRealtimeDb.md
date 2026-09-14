@@ -220,6 +220,14 @@ or tombstones in the memory backend.
 
 ## Views before their sources
 
+A view may explicitly declare `allow_invalid_sources: true` to evaluate the
+retained rows of an invalid **base table**, for example after its producer's
+lease expires. The default is `false`. This does not change source validity,
+rows or timestamps; the transform must decide how to label or use retained data.
+Missing dependencies, invalid upstream views, and expiration of the view owner
+still prevent evaluation. Unchanged retained inputs reuse the ordinary view
+cache. This option is persisted and included in introspection.
+
 A view descriptor adds `dependencies` and `script`. Its ES5 function body receives
 `tables`, mapping each dependency name to its current rows, and returns rows
 conforming to the view's schema.
@@ -238,8 +246,8 @@ conforming to the view's schema.
 The view can be created while `sensor.samples` does not exist. It appears in the
 catalog with `valid=false` and a diagnostic naming the missing dependency. Merely
 creating an uninitialized source does not validate the view. A successful source
-publication marks dependent views dirty; all dependencies and the view owner must be
-valid/online. Reading a dirty view materializes it and its dependencies once.
+publication marks dependent views dirty; by default all dependencies and the view owner must be
+valid/online (see `allow_invalid_sources` for retained base-table inputs). Reading a dirty view materializes it and its dependencies once.
 An active `write` or `change` subscription instead materializes the subscribed
 view and its ancestors on every source write, preserving notification semantics.
 Without readers or subscribers, source writes do not execute those scripts.

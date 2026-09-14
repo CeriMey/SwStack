@@ -160,6 +160,7 @@ SwJsonObject SwRealtimeDb::State::registerTable(const SwJsonObject& request, boo
             current.writers != candidate.writers)
             throw std::runtime_error("registered table descriptor mismatch");
         if (current.dependencies != candidate.dependencies || current.script != candidate.script || current.metadata != candidate.metadata ||
+            current.allowInvalidSources != candidate.allowInvalidSources ||
             current.encodeScript != candidate.encodeScript || current.writeTarget != candidate.writeTarget || current.encodeMerge != candidate.encodeMerge) {
             if (!view || !request["replace"].isBool() || !request["replace"].toBool())
                 throw std::runtime_error("registered table descriptor mismatch");
@@ -172,6 +173,7 @@ SwJsonObject SwRealtimeDb::State::registerTable(const SwJsonObject& request, boo
             current.program = std::move(candidate.program);
             current.encodeScript = candidate.encodeScript; current.writeTarget = candidate.writeTarget;
             current.encodeMerge = candidate.encodeMerge;
+            current.allowInvalidSources = candidate.allowInvalidSources;
             current.encodeProgram = std::move(candidate.encodeProgram);
             current.descriptorBytes = candidate.descriptorBytes;
             graphTableCount=static_cast<std::size_t>(-1);

@@ -931,7 +931,9 @@ private:
         if (isFloating) {
             char* endPtr = nullptr;
             double value = std::strtod(numberStd.c_str(), &endPtr);
-            if (endPtr != numberStd.c_str() + numberStd.size() || errno == ERANGE) {
+            // strtod also sets ERANGE for finite subnormals and underflow to zero.
+            // Both are valid JSON numbers; only overflow/non-finite values are rejected.
+            if (endPtr != numberStd.c_str() + numberStd.size() || !std::isfinite(value)) {
                 reportError(errorMessage, jsonString, startNumber, "Invalid floating-point number");
                 return SwJsonValue();
             }

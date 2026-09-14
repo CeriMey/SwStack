@@ -68,6 +68,7 @@ SwJsonObject SwRealtimeDb::State::introspect(const SwJsonObject& request) const 
         for (const auto& actor : item.writers) writers.append(actor);
         descriptor["writers"] = writers;
         if (item.view) {
+            descriptor["allow_invalid_sources"] = item.allowInvalidSources;
             descriptor["writable"] = !item.encodeScript.isEmpty();
             if (!item.writeTarget.isEmpty()) {
                 descriptor["write_target"] = item.writeTarget;

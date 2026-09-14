@@ -188,6 +188,7 @@ void SwRealtimeDb::State::persistDescriptor(const Table& table) {
         SwJsonArray deps;
         for (const auto& name : table.dependencies) deps.append(name);
         definition["dependencies"] = deps;
+        definition["allow_invalid_sources"] = table.allowInvalidSources;
     }
     if (!table.view || !table.encodeScript.isEmpty()) {
         SwJsonArray writers;

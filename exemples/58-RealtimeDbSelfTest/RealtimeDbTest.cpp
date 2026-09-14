@@ -703,7 +703,9 @@ void storageModes() {
         const auto owner = hello(store, "devices/owner");
         const auto consumer = hello(store, "interfaces/consumer");
         store.execute(descriptor(owner, "source"));
-        store.execute(view(consumer, "derived", "source"));
+        auto retainedDefinition = view(consumer, "derived", "source");
+        retainedDefinition["allow_invalid_sources"] = true;
+        store.execute(retainedDefinition);
         write(store, owner, "source", retained);
         require(read(store, "derived")["rows"] == SwJsonValue(retained), "materialized view did not persist its source snapshot");
         store.execute(writeDefinitionRequest(owner, "automatic_persisted", retained));
@@ -713,6 +715,9 @@ void storageModes() {
         Store reopened(transform, options);
         const auto catalog = reopened.execute(object({{"op", "introspect"}}));
         require(catalog["tables"].toArray().size() == 3, "persistent reopen lost table/view descriptors");
+        for (const auto& table : catalog["tables"].toArray())
+            if (table.toObject()["table"].toString() == "derived")
+                require(table.toObject()["allow_invalid_sources"].toBool(), "persistent view lost its retention policy");
         require(catalog["actors"].toArray().isEmpty(), "persistent reopen restored live actor sessions");
         require(catalog["epoch"].toString() != oldEpoch, "persistent reopen reused the service epoch");
         require(read(reopened, "source")["rows"] == SwJsonValue(retained) &&
@@ -723,7 +728,9 @@ void storageModes() {
         const auto owner = hello(reopened, "devices/owner");
         const auto consumer = hello(reopened, "interfaces/consumer");
         reopened.execute(descriptor(owner, "source"));
-        reopened.execute(view(consumer, "derived", "source"));
+        auto retainedDefinition = view(consumer, "derived", "source");
+        retainedDefinition["allow_invalid_sources"] = true;
+        reopened.execute(retainedDefinition);
         require(!read(reopened, "source")["valid"].toBool(), "re-registering persisted schema freshened measurements");
         write(reopened, owner, "source", oneRow(11));
         require(read(reopened, "source")["rows"] == SwJsonValue(oneRow(11)) &&
@@ -773,6 +780,15 @@ void leases() {
     store.execute(object({{"op", "subscribe"}, {"session", consumer}, {"table", "derived"}, {"mode", "change"}}));
     store.execute(descriptor(producer, "source"));
     store.execute(view(consumer, "derived", "source"));
+    auto retainedView = view(consumer, "retained_view", "source");
+    retainedView["allow_invalid_sources"] = true;
+    store.execute(retainedView);
+    auto missingView = view(consumer, "retained_missing", "missing");
+    missingView["allow_invalid_sources"] = true;
+    store.execute(missingView);
+    auto badPolicy = view(consumer, "bad_policy", "source");
+    badPolicy["allow_invalid_sources"] = "true";
+    rejects([&] { store.execute(badPolicy); }, "non-boolean retention policy accepted");
     const auto retained = array({oneRow(9)[0], object({{"id", "old_only"}, {"value", 12}})});
     write(store, producer, "source", retained);
     store.execute(writeDefinitionRequest(producer, "automatic_lease", retained));
@@ -800,6 +816,28 @@ void leases() {
             "view with an expired observer failed to materialize on demand");
     require(!read(store, "source")["valid"].toBool(), "expired producer remains fresh");
     require(!read(store, "derived")["valid"].toBool(), "stale source did not invalidate view");
+    const auto last = read(store, "retained_view");
+    require(last["valid"].toBool(), "retained view invalid after producer expiration");
+    require(last["rows"] == read(store, "source")["rows"],
+            "retained view differs from its ordered source snapshot");
+    require(read(store, "retained_view")["revision"] == last["revision"],
+            "unchanged retained view was recomputed on repeated reads");
+    retainedView["replace"] = true;
+    retainedView["allow_invalid_sources"] = false;
+    store.execute(retainedView);
+    require(!read(store, "retained_view")["valid"].toBool(), "replacing retention policy had no effect");
+    retainedView["allow_invalid_sources"] = true;
+    store.execute(retainedView);
+    require(read(store, "retained_view")["valid"].toBool(), "restored retention policy stayed invalid");
+
+    require(!read(store, "retained_missing")["valid"].toBool(),
+            "retained policy hid a missing dependency");
+    auto failedParent = view(consumer, "retained_bad_parent", "derived");
+    failedParent["allow_invalid_sources"] = true;
+    store.execute(failedParent);
+    require(!read(store, "retained_bad_parent")["valid"].toBool(),
+            "retained policy hid an invalid upstream view");
+
     require(read(store, "source")["rows"].toArray().size() == 2, "expiration destroyed retained data");
     rejects([&] { write(store, producer, "source", oneRow()); }, "expired session accepted");
     producer = hello(store, "producer");
