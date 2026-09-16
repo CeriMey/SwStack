@@ -4,6 +4,7 @@
 #include <core/storage/realtimedb/SwRealtimeDbJson.h>
 #include <core/storage/realtimedb/ChangeNotice.hpp>
 #include <core/storage/realtimedb/JsonSize.hpp>
+#include "NotificationWire.hpp"
 using swRealtimeDbDetail::json;
 using swRealtimeDbDetail::parseObject;
 using swRealtimeDbDetail::operation;
@@ -191,22 +192,22 @@ private:
             // Large catalog changes use the same safe unfiltered wakeup.
             if (swRealtimeDbDetail::JsonSize(2 * 1024 * 1024).object(notification)>3000) notification.remove("tables");
         }
-        auto wire = json(notification);
+        const bool withValues = state.contains("snapshots");
+        SwString wire;
+        // Metadata-only notices are already complete here. Encode them before
+        // attaching the native journal, without copying a second metadata map.
+        if (!withValues) wire = json(notification);
         notification["resync_required"] = state["resync_required"];
         notification["events"] = std::move(state["events"]);
-        if(state.contains("snapshots")) {
+        if(withValues) {
             notification["snapshots"]=std::move(state["snapshots"]);
             notification["value_tables"]=std::move(state["value_tables"]);
-            // Push the bounded complete value batch over native SHM too. Large
-            // payloads retain the compact wakeup and recover by subscription,
-            // through the existing paged RPC transport (no truncated rows).
-            try {
-                swRealtimeDbDetail::JsonSize(swRealtimeDbDetail::changeNoticeCapacity-64).object(notification);
-                wire=json(notification);
-            } catch(const std::runtime_error&) {}
+            // Large values keep compact wakeup and paged subscription recovery.
+            // Select and encode one representation for the value notification.
+            wire = swRealtimeDbDetail::notificationWire(notification);
         }
         auto typed = std::make_shared<const swRealtimeDbDetail::ChangeBatch>(std::move(notification));
-        return swRealtimeDbDetail::ChangeNotice(std::move(typed), wire);
+        return swRealtimeDbDetail::ChangeNotice(std::move(typed), std::move(wire));
     }
     void notifyNow() {
         const auto notice = collectNotice();

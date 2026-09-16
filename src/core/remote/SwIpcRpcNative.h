@@ -15,19 +15,19 @@ struct RpcContext {
 namespace detail {
 template<class Ret> struct NativeRpcInvoke {
     template<class Fn, class Tuple, size_t... I>
-    static RpcResult<Ret> call(const Fn& fn, const RpcContext& context, const Tuple& args,
+    static RpcResult<Ret> call(const Fn& fn, const RpcContext& context, Tuple&& args,
                                detail::index_sequence<I...>) {
         RpcResult<Ret> result;
-        result.value = fn(context, std::get<I>(args)...);
+        result.value = fn(context, std::get<I>(std::forward<Tuple>(args))...);
         result.ok = true;
         return result;
     }
 };
 template<> struct NativeRpcInvoke<void> {
     template<class Fn, class Tuple, size_t... I>
-    static RpcResult<void> call(const Fn& fn, const RpcContext& context, const Tuple& args,
+    static RpcResult<void> call(const Fn& fn, const RpcContext& context, Tuple&& args,
                                 detail::index_sequence<I...>) {
-        fn(context, std::get<I>(args)...);
+        fn(context, std::get<I>(std::forward<Tuple>(args))...);
         RpcResult<void> result; result.ok = true;
         return result;
     }
@@ -118,10 +118,11 @@ public:
     static bool isDirect(const Selection& entry) {
         return valid(entry) && targetThread(entry) == std::this_thread::get_id();
     }
-    static Result invoke(const Selection& entry, const RpcContext& context, const Tuple& args) {
+    template<class Arguments>
+    static Result invoke(const Selection& entry, const RpcContext& context, Arguments&& args) {
         Result result;
         if (!valid(entry)) { result.error = "rpc: native endpoint stopped"; return result; }
-        try { return detail::NativeRpcInvoke<Ret>::call(entry->handler, context, args,
+        try { return detail::NativeRpcInvoke<Ret>::call(entry->handler, context, std::forward<Arguments>(args),
                                                        typename detail::make_index_sequence<sizeof...(Args)>::type{}); }
         catch (const std::exception& error) { result.error = SwString("rpc: handler exception: ") + SwString(error.what()).left(512); }
         catch (...) { result.error = "rpc: unknown handler exception"; }
@@ -136,7 +137,9 @@ public:
             Result result; result.error = "rpc: native endpoint stopped";
             complete(result); return;
         }
-        if (isDirect(entry)) { complete(invoke(entry, context, *args)); return; }
+        // A selected invocation executes once. Its queued arguments already own
+        // the caller snapshot and can be consumed by the by-value handler.
+        if (isDirect(entry)) { complete(invoke(entry, context, std::move(*args))); return; }
         auto task = [entry, context, args, complete, current] {
             dispatch(entry, context, args, complete, current);
         };

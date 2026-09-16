@@ -22,6 +22,9 @@ public:
         if (memory_ && memory_ != MAP_FAILED) ::munmap(memory_, size_);
 #endif
     }
+#if defined(__linux__) && !defined(__ANDROID__)
+    void retainLease(const std::shared_ptr<detail::SharedMemoryLease>& lease) { lease_ = lease; }
+#endif
     Header* header() const { return static_cast<Header*>(memory_); }
     size_t mappedSize() const { return size_; }
     void configure(size_t offset, size_t stride) { offset_ = offset; stride_ = stride; }
@@ -49,6 +52,9 @@ public:
 #endif
     }
 private:
+#if defined(__linux__) && !defined(__ANDROID__)
+    std::shared_ptr<detail::SharedMemoryLease> lease_;
+#endif
     void* memory_{nullptr};
     size_t size_{0}, offset_{0}, stride_{0};
 #ifdef _WIN32
@@ -90,6 +96,12 @@ static std::shared_ptr<DynamicMapping> openMapping_(const SwString& name, uint64
     if (allowCreate && !computeLayout_(capacity, payload, expectedOffset, expectedStride, expectedSize))
         throw std::runtime_error("RingQueueDynamic: invalid capacity/maxPayload");
     const std::string nameBytes = name.toStdString();
+#if defined(__linux__) && !defined(__ANDROID__)
+    std::shared_ptr<detail::SharedMemoryLease> lease;
+    detail::SharedMemoryLease::recoverAtProcessStart();
+    detail::SharedMemoryNamespaceLock namespaceLock;
+    lease = std::make_shared<detail::SharedMemoryLease>(nameBytes);
+#endif
     bool initialize = false;
 #ifdef _WIN32
     // Serialize both mapping initialization and validation with a named mutex.
@@ -171,6 +183,9 @@ static std::shared_ptr<DynamicMapping> openMapping_(const SwString& name, uint64
     void* memory = ::mmap(NULL, mappedSize, PROT_READ | PROT_WRITE, MAP_SHARED, file.fd, 0);
     if (memory == MAP_FAILED) throw std::runtime_error("RingQueueDynamic: mmap failed");
     auto result = std::make_shared<DynamicMapping>(memory, mappedSize);
+#if defined(__linux__) && !defined(__ANDROID__)
+    result->retainLease(lease);
+#endif
 #endif
     Header* header = result->header();
     if (!allowCreate && header->magic == 0 && header->version == 0) throw MappingPending();
@@ -220,5 +235,8 @@ static std::shared_ptr<DynamicMapping> openMapping_(const SwString& name, uint64
     if (!computeLayout_(header->capacity, header->maxPayload, offset, stride, total) || total > result->mappedSize())
         throw std::runtime_error("RingQueueDynamic: truncated or invalid SHM layout");
     result->configure(offset, stride);
+#if defined(__linux__) && !defined(__ANDROID__)
+    lease->commit();
+#endif
     return result;
 }

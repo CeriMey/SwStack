@@ -85,6 +85,7 @@ struct SwRealtimeDbClient::State : std::enable_shared_from_this<State> {
     }
     void pump();
     void cancel();
+    std::optional<SwRealtimeDbReply> immediate(const SwJsonObject& request, SwJsonObject* owned = nullptr);
 };
 
 struct SwRealtimeDbClient::Operation : std::enable_shared_from_this<Operation> {
@@ -196,7 +197,7 @@ void SwRealtimeDbClient::requestPreferredImpl(const SwJsonObject& request, SwRea
     if(timeoutMs>0 && state->directDepth<16 && !state->pumping && state->calls.empty() &&
        !state->directExecuting && state->transport->canCallDirect()) {
         ++state->directDepth;
-        auto reply=requestImmediate(request);
+        auto reply=state->immediate(request, owned);
         if(reply) {
             try {if(!state->closed && complete)complete(std::move(*reply));}
             catch(const std::exception& error){swCWarning("sw.core.storage.realtimedb.client")<<"Request completion callback: "<<error.what();}
@@ -252,15 +253,39 @@ void SwRealtimeDbClient::setNativeChangedHandler(std::function<void(const swReal
 bool SwRealtimeDbClient::canRequestDirect() const { return state_->transport->canCallDirect(); }
 std::optional<SwRealtimeDbReply> SwRealtimeDbClient::requestImmediate(const SwJsonObject& request) {
     const auto state = state_;
-    if (state->closed || state->cancelling) return SwRealtimeDbReply{false, {}, "RtDb request cancelled"};
-    if (state->directExecuting) return std::nullopt;
-    struct Guard {bool& busy;Guard(bool& value):busy(value){busy=true;}~Guard(){busy=false;}} guard(state->directExecuting);
+    return state->immediate(request);
+}
+std::optional<SwRealtimeDbReply> SwRealtimeDbClient::State::immediate(const SwJsonObject& request, SwJsonObject* owned) {
+    if (closed || cancelling) return SwRealtimeDbReply{false, {}, "RtDb request cancelled"};
+    if (directExecuting) return std::nullopt;
+    struct Guard {bool& busy;Guard(bool& value):busy(value){busy=true;}~Guard(){busy=false;}} guard(directExecuting);
     try {
         swRealtimeDbDetail::JsonSize(1024 * 1024, 32).object(request);
-        auto payload = request;
-        removePriority(payload);
+        const bool prioritized = request.contains("priority");
+        const auto priority = prioritized ? request["priority"] : SwJsonValue();
+        std::optional<SwJsonObject> payload;
+        // Component requests already own detached inputs. Transfer them; only
+        // public requests needing priority removal require an additional copy.
+        // Public borrowed requests still detach at the RPC boundary; a mutable
+        // child obtained by a handler must not alias the original caller.
+        if (owned) payload.emplace(std::move(*owned));
+        else if (prioritized) payload.emplace(request);
+        if (payload) removePriority(*payload);
+        const auto& argument = payload ? *payload : request;
         Transport::Result result;
-        if (!state->transport->tryCallDirect(result, payload)) return std::nullopt;
-        return result.ok ? result.value : SwRealtimeDbReply{false, {}, result.error};
+        const bool invoked = payload
+            ? transport->tryCallDirectOwned(result, std::move(*payload))
+            : transport->tryCallDirect(result, argument);
+        if (!invoked) {
+            // A withdrawal or affinity change may invalidate the earlier
+            // capability check. Preserve the complete request for queued IO.
+            if (owned) {
+                if (prioritized) (*payload)["priority"] = priority;
+                *owned = std::move(*payload);
+            }
+            return std::nullopt;
+        }
+        if (result.ok) return std::move(result.value);
+        return SwRealtimeDbReply{false, {}, std::move(result.error)};
     } catch (const std::exception& error) { return SwRealtimeDbReply{false, {}, error.what()}; }
 }

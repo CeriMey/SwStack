@@ -5,12 +5,12 @@
 #include <cstdlib>
 
 namespace sw { namespace ipc { namespace detail {
-// Response queues are addressed to one PID; their names must not survive that
-// process indefinitely. Request queues remain stable for application restarts.
+// Linux mapping leases unlink queues only after their last live mapping.
+// Other POSIX targets retain the process-exit response cleanup.
 class RpcResponseResources {
 public:
     static void own(const SwString& name) {
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__linux__)
         auto& state = instance();
         SwMutexLocker lock(state.mutex);
         if (state.pid != currentPid()) {
@@ -30,7 +30,7 @@ public:
     template<class Map> static void prune(Map& queues, const Registry& registry) {
         for (auto it = queues.begin(); it != queues.end();) {
             if (!deadClient(it.key())) { ++it; continue; }
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__linux__)
             ::shm_unlink(make_shm_name(registry.domain(), registry.object(), it.key()).c_str());
 #endif
             it = queues.erase(it);
@@ -49,7 +49,7 @@ private:
         return *state;
     }
     static void cleanup() {
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__linux__)
         auto& state = instance();
         SwMutexLocker lock(state.mutex);
         if (state.pid != currentPid()) return;

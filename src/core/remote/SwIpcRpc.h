@@ -91,7 +91,7 @@ inline uint32_t normalizeRpcQueueCapacity(uint32_t requested) {
 }
 
 inline std::atomic<uint32_t>& rpcQueueCapacityStorage_() {
-    static std::atomic<uint32_t> cap(1000u);
+    static std::atomic<uint32_t> cap(100u);
     return cap;
 }
 
@@ -153,15 +153,18 @@ public:
     RpcMethodClient(const SwString& domain, const SwString& object, const SwString& method,
                     const SwString& clientInfo = SwString())
         : RpcMethodClient(domain, object, method, clientInfo, RemoteInvoker()) {
-        router_ = Router::get(domain, object, rpcResponseQueueName(method, pid_), rpcQueueCapacity());
-        switch (rpcQueueCapacity()) {
+        initializeWire_ = [this, domain, object, method] {
+            const auto capacity = rpcQueueCapacity();
+            router_ = Router::get(domain, object, rpcResponseQueueName(method, pid_), capacity);
+            switch (capacity) {
 #define SW_RPC_REQUEST_CAP(N) case N: initRequest<N>(); break
-            SW_RPC_REQUEST_CAP(10); SW_RPC_REQUEST_CAP(25); SW_RPC_REQUEST_CAP(50);
-            SW_RPC_REQUEST_CAP(100); SW_RPC_REQUEST_CAP(200); SW_RPC_REQUEST_CAP(500);
-            SW_RPC_REQUEST_CAP(1000);
+                SW_RPC_REQUEST_CAP(10); SW_RPC_REQUEST_CAP(25); SW_RPC_REQUEST_CAP(50);
+                SW_RPC_REQUEST_CAP(100); SW_RPC_REQUEST_CAP(200); SW_RPC_REQUEST_CAP(500);
+                SW_RPC_REQUEST_CAP(1000);
 #undef SW_RPC_REQUEST_CAP
-            default: throw std::invalid_argument("unsupported RPC capacity");
-        }
+                default: throw std::invalid_argument("unsupported RPC capacity");
+            }
+        };
     }
     // This overload does not instantiate fixed-packet codecs. The supplied
     // adapter runs only when no native endpoint existed at submission time.
@@ -178,7 +181,7 @@ public:
             SwMutexLocker lock(state_->mutex);
             state_->closed.store(true, std::memory_order_release);
             for (const auto& entry : state_->pending) {
-                if (router_) router_->remove(entry.first);
+                if (entry.second->response) entry.second->response->remove(entry.first);
                 stopTimer(entry.second);
                 entry.second->cancelRequested = true;
                 if (entry.second->remoteCancel) cancels.push_back(std::move(entry.second->remoteCancel));
@@ -208,9 +211,21 @@ public:
         { SwMutexLocker lock(state->mutex); state->lastError = out.error; }
         return true;
     }
+    // Consume owned inputs only after the endpoint/affinity check succeeds.
+    // On false the caller can still submit the same arguments to queued IO.
+    bool tryCallDirectOwned(Result& out, typename std::decay<Args>::type&&... args) {
+        const auto endpoint = Native::select(native_);
+        if (!Native::isDirect(endpoint)) return false;
+        const auto state = state_;
+        RpcContext context; context.clientPid = pid_; context.clientInfo = clientInfo_;
+        out = Native::invoke(endpoint, context, typename Native::Tuple(std::move(args)...));
+        { SwMutexLocker lock(state->mutex); state->lastError = out.error; }
+        return true;
+    }
     Result callResult(const Args&... args, int timeoutMs = 2000) {
-        auto state = state_; auto response = router_;
+        auto state = state_;
         auto pending = begin(Completion(), timeoutMs, false, prepare(args...));
+        auto response = pending->response;
         if (!pending->done.load(std::memory_order_acquire)) {
             SwEventLoop::waitUntil([pending]() {
                 detail::LoopPoller::instance().dispatch();
@@ -234,8 +249,8 @@ public:
     }
     uint64_t callAsyncResult(PreparedCall prepared, Completion complete, int timeoutMs = 2000) {
         auto state = state_;
-        auto response = router_;
         auto pending = begin(std::move(complete), timeoutMs, true, std::move(prepared));
+        auto response = pending->response;
         if (timeoutMs > 0 && !pending->done.load(std::memory_order_acquire)) {
             std::weak_ptr<State> weak = state;
             auto timer = detail::startNativeSignalTimer(pending->caller, [weak, response, pending]() {
@@ -275,11 +290,11 @@ public:
             pending->cancelRequested.store(true, std::memory_order_release);
         }
         Result result; result.error = "rpc: cancelled";
-        deliver(state_, router_, pending, result, true);
+        deliver(state_, pending->response, pending, result, true);
         return true;
     }
     void cancelAll() {
-        auto state = state_; auto response = router_;
+        auto state = state_;
         std::vector<std::shared_ptr<Pending>> pending;
         { SwMutexLocker lock(state->mutex);
           for (const auto& entry : state->pending) {
@@ -287,7 +302,7 @@ public:
               pending.push_back(entry.second);
           } }
         Result result; result.error = "rpc: cancelled";
-        for (const auto& call : pending) deliver(state, response, call, result, true);
+        for (const auto& call : pending) deliver(state, call->response, call, result, true);
     }
 private:
     using Clock = std::chrono::steady_clock;
@@ -296,6 +311,7 @@ private:
         std::atomic_bool done{false};
         Result result;
         Completion complete;
+        std::shared_ptr<Router> response;
         RemoteCancel timerCancel;
         bool asynchronous{false};
         std::atomic_bool cancelRequested{false};
@@ -389,14 +405,27 @@ private:
     std::shared_ptr<Pending> begin(Completion complete, int timeoutMs, bool asynchronous, PreparedCall prepared) {
         detail::registerNativeSignalThread();
         const auto state = state_;
-        const auto response = router_;
         const auto remote = remote_;
-        const auto request = request_;
         const bool validPrepared = prepared.channel_ == native_ && static_cast<bool>(prepared.values_);
         const auto endpoint = std::move(prepared.endpoint_);
+        // A native selection never needs fixed-packet shared memory. Initialize
+        // it only for a call that was admitted to the remote transport.
+        SwString transportError;
+        std::shared_ptr<Router> response;
+        decltype(request_) request;
+        if (validPrepared && !endpoint && initializeWire_) {
+            try {
+                // A fiber may yield during registry/router initialization.
+                // Use its cooperative mutex rather than blocking its OS thread.
+                SwMutexLocker lock(wireMutex_);
+                if (!wireReady_) { initializeWire_(); wireReady_ = true; }
+                response = router_; request = request_;
+            } catch (const std::exception& error) { transportError = error.what(); }
+        }
         RpcContext context; context.clientPid = pid_; context.clientInfo = clientInfo_;
         auto values = std::move(prepared.values_);
         auto pending = std::make_shared<Pending>();
+        pending->response = response;
         pending->id = nextRpcCallId();
         pending->complete = std::move(complete);
         pending->asynchronous = asynchronous;
@@ -411,10 +440,11 @@ private:
             deliver(state, response, pending, result);
         };
         const auto live = [state, response, pending] { return current(state, response, pending); };
-        auto start = [state, response, remote, request, endpoint, context, values, pending, done, live, validPrepared]() {
+        auto start = [state, response, remote, request, endpoint, context, values, pending, done, live, validPrepared, transportError]() {
             if (!live()) return;
             if (!validPrepared) { Result result; result.error = "rpc: invalid prepared call"; done(result); return; }
             if (endpoint) { Native::dispatch(endpoint, context, values, done, live); return; }
+            if (!transportError.isEmpty()) { Result result; result.error = transportError; done(result); return; }
             try {
                 if (remote) {
                     const int remaining = pending->deadline == Clock::time_point::max() ? 0 :
@@ -463,6 +493,9 @@ private:
     SwString clientInfo_;
     std::shared_ptr<State> state_;
     uint32_t pid_;
+    SwMutex wireMutex_;
+    bool wireReady_{false};
+    std::function<void()> initializeWire_;
     std::shared_ptr<Router> router_;
     std::shared_ptr<typename Native::Channel> native_;
     RemoteInvoker remote_;

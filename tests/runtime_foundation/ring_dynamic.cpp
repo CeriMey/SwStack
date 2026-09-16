@@ -160,11 +160,16 @@ void crossChannelCallbacks(Registry& registry) {
     require(succeeded && firstCount == 2 && secondCount == 2, "cross-channel delivery failed");
 }
 void concurrentCreation(Registry& registry) {
+    // Retain participants until the observation: last-close now releases SHM.
+    std::vector<std::shared_ptr<Ring>> participants(8);
     std::vector<std::thread> threads;
     std::atomic_bool succeeded{true};
     for (int i = 0; i < 8; ++i) {
         threads.emplace_back([&, i] {
-            try { Ring queue(registry, "concurrent", 2); if (!queue.push(i)) succeeded = false; }
+            try {
+                participants[i] = std::make_shared<Ring>(registry, "concurrent", 2);
+                if (!participants[i]->push(i)) succeeded = false;
+            }
             catch (...) { succeeded = false; }
         });
     }

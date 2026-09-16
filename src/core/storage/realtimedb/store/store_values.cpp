@@ -36,26 +36,37 @@ SwJsonObject SwRealtimeDb::State::subscriptionSnapshot(const SwJsonObject& reque
 SwJsonObject SwRealtimeDb::State::changesWithValues(const SwJsonObject& request) {
     auto result=changes(request);
     if(!request["include_values"].toBool())return result;
+    const auto journalRevision = revision;
     std::set<SwString> selected;
     if(request.contains("value_subscriptions")) {
-        if(!request["value_subscriptions"].isArray() || request["value_subscriptions"].toArray().size()>1024)
+        const auto subscriptions = request["value_subscriptions"].toArrayPtr();
+        if(!subscriptions || subscriptions->size()>1024)
             throw std::runtime_error("value_subscriptions requires at most 1024 subscription ids");
-        for(const auto& value:request["value_subscriptions"].toArray()) {
+        for(const auto& value:subscriptions->dataRef()) {
             if(!value.isString())throw std::runtime_error("value subscription must be an id");
             selected.insert(value.toString());
         }
     }
     std::map<SwString,bool> changed;
-    for(const auto& value:result["events"].toArray()) {
-        const auto event=value.toObject();const auto name=event["table"].toString();
-        changed[name]=changed[name] || event["changed"].toBool();
+    {
+        // Borrow the journal only while indexing it; a lazy dependency below
+        // can replace the result with a newer journal boundary.
+        const auto events=result["events"].toArrayPtr();
+        if(events)for(const auto& value:events->dataRef()) {
+            const auto object=value.toObjectPtr();
+            if(!object)continue;
+            const auto& event=*object;
+            auto& hasChange=changed[event["table"].toString()];
+            hasChange=hasChange || event["changed"].toBool();
+        }
     }
+    const bool resync=result["resync_required"].toBool();
     std::set<SwString> targets,names;
     for(const auto& entry:subscriptions) {
         const auto& watch=entry.second;
         if(!watch.includeRows || (request.contains("value_subscriptions") && !selected.count(entry.first)))continue;
         const auto event=changed.find(watch.table);
-        if(!result["resync_required"].toBool() &&
+        if(!resync &&
            (event==changed.end() || (watch.mode=="change" && !event->second)))continue;
         targets.insert(watch.table);names.insert(watch.table);
         names.insert(watch.dependencies.begin(),watch.dependencies.end());
@@ -80,9 +91,9 @@ SwJsonObject SwRealtimeDb::State::changesWithValues(const SwJsonObject& request)
             values[name] = std::move(value);
         } catch (const std::runtime_error&) {}
     }
-    // Materializing requested dependencies can commit lazy views. Use the
-    // resulting journal boundary for both the events and their snapshots.
-    result=changes(request);
+    // A lazy dependency can commit new events while producing the snapshots.
+    // Rebuild only in that case; ordinary table snapshots reuse the journal.
+    if(revision != journalRevision)result=changes(request);
     result["snapshots"]=std::move(values);
     SwJsonArray included;for(const auto& table:targets)included.append(table);
     result["value_tables"]=std::move(included);

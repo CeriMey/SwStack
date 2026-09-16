@@ -128,9 +128,13 @@ public:
         std::map<SwString, SwJsonObject> pending;
         std::vector<std::pair<std::size_t, SwJsonObject>> remember;
         for (std::size_t index = 0; index < operations.size(); ++index) {
-            if (!operations[index].isObject()) continue; // Ordered server validation.
-            auto operation = operations[index].toObject();
-            if (operation["op"].toString() != "write" || !operation["definition"].isObject()) continue;
+            const auto source = operations[index].toObjectPtr();
+            if (!source) continue; // Ordered server validation.
+            const auto& supplied = *source;
+            // Ordinary writes already have a registered schema. Inspect that
+            // fact without cloning every row and timestamp in the operation.
+            if (supplied["op"].toString() != "write" || !supplied["definition"].isObject()) continue;
+            auto operation = supplied;
             auto definition = operation["definition"].toObject();
             if (!definition.contains("table")) definition["table"] = operation["table"];
             if (definition["table"] != operation["table"]) continue; // Server reports mismatch.

@@ -16,6 +16,7 @@ static void require(bool value, const char* text) { if (!value) throw std::runti
 template<class Fn> static void waitFor(Fn fn, const char* text, int timeout = 3000) {
     require(SwEventLoop::waitUntil([&] { detail::LoopPoller::instance().dispatch(); return fn(); }, timeout), text);
 }
+#include "rpc_owned_checks.hpp"
 struct Owned {
     std::shared_ptr<std::vector<int>> values;
 }; // Intentionally no wire Codec specialization.
@@ -156,6 +157,9 @@ static void queued(const SwString& domain) {
     Owned input{std::make_shared<std::vector<int>>(1, 42)};
     RpcResult<Owned> untouched;
     require(!client.tryCallDirect(untouched, input) && executions == 0, "direct-only read queued work");
+    const auto retained = input.values;
+    require(!client.tryCallDirectOwned(untouched, std::move(input)) && input.values == retained && executions == 0,
+            "foreign-affinity direct attempt consumed its fallback input");
     auto result = client.callResult(input, 1000);
     require(result.ok && result.value.values == input.values && executions == 1, "queued synchronous native result failed");
     bool completed = false;
@@ -304,6 +308,7 @@ int main(int argc, char** argv) {
         SwRemoteObject::ConfigRootScope config(SwString((work / "config").string()));
         Service service(domain);
         direct(domain, service); typed(domain); queued(domain); adapter(domain); completionDeadline(domain);
+        ownedRpcTest::run(domain);
 #ifndef _WIN32
         external(domain, std::filesystem::absolute(argv[0]).c_str(), service);
 #endif
