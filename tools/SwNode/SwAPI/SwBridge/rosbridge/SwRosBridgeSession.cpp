@@ -1,6 +1,7 @@
 #include "SwRosBridgeSession.h"
 #include "SwWebSocket.h"
 #include "SwTimer.h"
+#include "../SwBridgeJsonRpcCall.h"
 #include <cmath>
 
 namespace swros {
@@ -41,6 +42,8 @@ Session::Session(SwWebSocket* socket, Catalog& catalog, SwBridgeRpcClient& rpc, 
         timer_->stop();
         for (auto id : calls_) rpc_.cancel(id);
         calls_.clear();
+        for (auto* transfer : jsonCalls_) delete transfer;
+        jsonCalls_.clear();
         socket_ = nullptr;
         deleteLater();
     });
@@ -50,6 +53,7 @@ Session::Session(SwWebSocket* socket, Catalog& catalog, SwBridgeRpcClient& rpc, 
 Session::~Session() {
     timer_->stop();
     for (auto id : calls_) rpc_.cancel(id);
+    for (auto* transfer : jsonCalls_) delete transfer;
 }
 
 void Session::send(const SwJsonObject& message) {
@@ -168,7 +172,7 @@ void Session::callService(const SwJsonObject& request) {
     if (service.startsWith("/rosapi/") && !args.isObject()) throw std::runtime_error("rosapi args must be named fields");
     if (graphService(service, args.toObject(), result)) { respond(request, true, SwJsonValue(result)); return; }
     if (parameterService(service, request)) return;
-    if (calls_.size() >= 64) throw std::runtime_error("too many pending service calls");
+    if (calls_.size() + jsonCalls_.size() >= 64) throw std::runtime_error("too many pending service calls");
     const auto binding = catalog_.service(service);
     checkType(binding, request, "srv");
     auto values = Catalog::arguments(binding, args);
@@ -180,6 +184,23 @@ void Session::callService(const SwJsonObject& request) {
         timeoutMs = std::max(1, static_cast<int>(seconds * 1000));
     }
     SwPointer<Session> weak(this);
+    if (binding.jsonTransfer) {
+        if (values.size() != 1 || !values[0].isString()) throw std::runtime_error("JSON transfer requires one string request");
+        // The pointer holder lets an immediate transport failure remove the
+        // transfer from the session before start() has returned.
+        auto identity = std::make_shared<SwBridgeJsonRpcCall*>(nullptr);
+        auto* transfer = new SwBridgeJsonRpcCall(rpc_, binding.target, binding.channel,
+            values[0].toString(), timeoutMs,
+            [weak, request, identity](bool ok, const SwJsonValue& response) {
+                if (!weak) return;
+                weak->jsonCalls_.erase(*identity);
+                weak->respond(request, ok, response);
+            }, this);
+        *identity = transfer;
+        jsonCalls_.insert(transfer);
+        transfer->start();
+        return;
+    }
     const uint64_t id = rpc_.call(binding.target, binding.channel, values, timeoutMs, "SwBridge/rosbridge",
         [weak, request, binding](const SwBridgeRpcClient::Result& response) {
             if (!weak) return;

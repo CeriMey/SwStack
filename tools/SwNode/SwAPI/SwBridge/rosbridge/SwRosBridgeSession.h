@@ -8,6 +8,7 @@
 #include <set>
 
 class SwTimer;
+class SwBridgeJsonRpcCall;
 
 namespace swros {
 class Session : public SwObject {
@@ -58,6 +59,7 @@ private:
     std::map<SwString, Subscription> subscriptions_;
     std::map<SwString, Binding> publishers_;
     std::set<uint64_t> calls_;
+    std::set<SwBridgeJsonRpcCall*> jsonCalls_;
     std::vector<ConfigRequest> configRequests_;
 };
 

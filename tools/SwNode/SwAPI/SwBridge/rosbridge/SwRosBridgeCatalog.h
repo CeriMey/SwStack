@@ -10,6 +10,9 @@ struct Binding {
     std::vector<SwString> fields;
     std::vector<std::string> types;
     bool json{false}; // One SwString carrying a complete JSON message/request.
+    bool jsonTransfer{false}; // SwJsonRpcTransfer envelope, upload and readResult.
+    bool namedRequest{false};
+    std::vector<SwString> requestFields;
 };
 
 // The selected IPC domain is exposed as a ROS namespace rooted at '/'.

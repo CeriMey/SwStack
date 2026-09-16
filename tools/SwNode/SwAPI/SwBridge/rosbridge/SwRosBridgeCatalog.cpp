@@ -37,6 +37,7 @@ void Catalog::load(const SwString& file) {
 
 void Catalog::refresh() {
     services_.clear(); topics_.clear(); parameters_.clear(); nodes_.clear();
+    std::map<SwString, SwJsonObject> serviceContracts;
     for (const auto& value : sw::ipc::shmRegistrySnapshot(domain_)) {
         const auto entry = value.toObject();
         const SwString object = entry["object"].toString(), signal = entry["signal"].toString();
@@ -54,6 +55,12 @@ void Catalog::refresh() {
             b.name = "/" + object + "/" + method; b.channel = method; b.type = "swstack/srv/Rpc";
             b.json = b.types.size() == 1 && b.types[0] == "SwString";
             services_[b.name] = b;
+        } else if (signal == "__ros_services__") {
+            sw::ipc::Registry registry(domain_, object);
+            sw::ipc::SwIpcSignal<SwString> contracts(registry, signal, 1u, 4096u, sw::ipc::DeliveryMode::LatestOnly);
+            SwString text, error; SwJsonDocument document;
+            if (contracts.readLatest(text) && document.loadFromJson(text.toStdString(), error) && document.isObject())
+                serviceContracts[object] = document.object();
         } else if (signal == "__config_schema__") {
             sw::ipc::Registry registry(domain_, object);
             sw::ipc::SwIpcSignal<SwString> schema(registry, signal, 1u, 4096u, sw::ipc::DeliveryMode::LatestOnly);
@@ -81,6 +88,27 @@ void Catalog::refresh() {
                 else if (type == "float") b.type = "std_msgs/msg/Float32";
             }
             topics_[b.name] = b;
+        }
+    }
+    // Objects may publish their own external service contract. Only annotate
+    // actual RPCs on that object; metadata cannot redirect to another target.
+    for (const auto& object : serviceContracts) {
+        for (const auto& contract : object.second.data()) {
+            const auto found = services_.find("/" + object.first + "/" + contract.first);
+            if (found == services_.end() || !contract.second.isObject()) continue;
+            auto& binding = found->second;
+            const auto row = contract.second.toObject();
+            if (row["type"].isString()) binding.type = row["type"].toString();
+            binding.jsonTransfer = binding.json && row["json_transfer"].isBool() && row["json_transfer"].toBool();
+            if (binding.json && row["request_fields"].isArray()) {
+                binding.namedRequest = true;
+                for (const auto& field : row["request_fields"].toArray()) {
+                    if (!field.isString() || field.toString().isEmpty() ||
+                        std::find(binding.requestFields.begin(), binding.requestFields.end(), field.toString()) != binding.requestFields.end())
+                        throw std::runtime_error("invalid native service request_fields");
+                    binding.requestFields.push_back(field.toString());
+                }
+            }
         }
     }
     auto overlay = [&](const char* section, std::map<SwString, Binding>& bindings, const char* channelKey) {
@@ -144,6 +172,21 @@ Binding Catalog::parameter(const SwString& raw) {
 }
 
 SwJsonArray Catalog::arguments(const Binding& b, const SwJsonValue& value) {
+    if (b.namedRequest) {
+        SwJsonObject object;
+        if (value.isArray()) {
+            const auto args = value.toArray();
+            if (args.size() != b.requestFields.size()) throw std::runtime_error("service argument count mismatch");
+            for (size_t i = 0; i < args.size(); ++i) object[b.requestFields[i]] = args[i];
+        } else if (value.isObject()) object = value.toObject();
+        else throw std::runtime_error("service args must be an object or array");
+        if (object.size() != b.requestFields.size()) throw std::runtime_error("service request field count mismatch");
+        for (const auto& field : b.requestFields)
+            if (!object.contains(field)) throw std::runtime_error(("missing request field: " + field).toStdString());
+        SwJsonArray args;
+        args.append(SwJsonDocument(object).toJson(SwJsonDocument::JsonFormat::Compact));
+        return args;
+    }
     if (value.isArray()) return value.toArray();
     if (!value.isObject()) throw std::runtime_error("args/msg must be an object or an argument array");
     const auto object = value.toObject();

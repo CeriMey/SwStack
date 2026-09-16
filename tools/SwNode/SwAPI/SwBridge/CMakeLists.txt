@@ -9,6 +9,7 @@ add_executable(SwBridge
     SwBridgeApp.cpp
     SwBridgeHttpServer.cpp
     SwBridgeRpcClient.cpp
+    SwBridgeJsonRpcCall.cpp
     rosbridge/SwRosBridgeCatalog.cpp
     rosbridge/SwRosBridgeSignal.cpp
     rosbridge/SwRosBridgeSession.cpp
