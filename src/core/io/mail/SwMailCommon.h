@@ -63,6 +63,12 @@ struct SwMailConfig {
         SwString trustedCaFile;
         bool implicitTls = false;
         bool startTls = false;
+        // Expéditeurs d'enveloppe qui empruntent le relais : adresse complète ou
+        // « @domaine ». Vide : tout le courrier sortant. Un relais transactionnel
+        // n'accepte que les domaines authentifiés chez lui ; le reste (domaines
+        // des clients, transferts SRS, avis de non-remise) part en direct vers
+        // les MX du destinataire.
+        SwList<SwString> senderAddresses;
     };
 
     SwString domain;
@@ -239,6 +245,26 @@ struct SwMailEvent {
         }
         return "unknown";
     }
+};
+
+// Contenu d'un message sortant, en UTF-8 brut. L'encodage des en-têtes
+// (RFC 2047) et des corps (quoted-printable) appartient à
+// swMailDetail::composeMessage : un appelant ne pré-encode jamais rien.
+struct SwMailComposeRequest {
+    SwString fromName;
+    SwString fromAddress;
+    SwList<SwString> to;
+    SwList<SwString> cc;
+    SwList<SwString> bcc;
+    // L'en-tête Bcc n'existe que dans la copie « Envoyés » de l'expéditeur.
+    bool includeBccHeader = false;
+    SwString subject;
+    SwString textBody;
+    SwString htmlBody;
+    // Vide : généré depuis la configuration mail.
+    SwString messageId;
+    // RFC 3834 : message émis par un automate, auquel aucun répondeur ne répond.
+    bool autoSubmitted = false;
 };
 
 namespace swMailDetail {
@@ -673,6 +699,329 @@ inline SwByteArray ensureMessageEnvelopeHeaders(const SwMailConfig& config,
         raw += "\r\n";
     }
     return SwByteArray(raw.toStdString());
+}
+
+// RFC 5322 §2.2 : un en-tête ne transporte que de l'US-ASCII imprimable. Un
+// texte libre y perd ses retours chariot et caractères de contrôle, pour
+// qu'aucune valeur ne puisse ouvrir un second en-tête.
+inline std::string headerTextSingleLine(const SwString& value) {
+    const std::string input = value.toStdString();
+    std::string out;
+    out.reserve(input.size());
+    for (std::size_t i = 0; i < input.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(input[i]);
+        out.push_back((c < 32 || c == 127) ? ' ' : static_cast<char>(c));
+    }
+    std::size_t begin = 0;
+    while (begin < out.size() && out[begin] == ' ') {
+        ++begin;
+    }
+    std::size_t end = out.size();
+    while (end > begin && out[end - 1] == ' ') {
+        --end;
+    }
+    return out.substr(begin, end - begin);
+}
+
+inline bool isPrintableAscii(const std::string& text) {
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(text[i]);
+        if (c < 32 || c > 126) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// RFC 2047 : texte non ASCII d'un en-tête en encoded-words « B » UTF-8. Un
+// encoded-word fait au plus 75 caractères et ne coupe jamais une séquence
+// UTF-8. 39 octets donnent 52 caractères base64 + 12 d'enveloppe : la première
+// ligne tient sous 76 caractères même derrière « Subject: ». Les mots sont
+// repliés un par ligne ; le blanc entre deux encoded-words disparaît au décodage.
+inline SwString encodeHeaderText(const SwString& value) {
+    const std::string text = headerTextSingleLine(value);
+    if (isPrintableAscii(text)) {
+        return SwString(text);
+    }
+    static const std::size_t kChunkBytes = 39;
+    std::string out;
+    std::size_t pos = 0;
+    while (pos < text.size()) {
+        std::size_t end = std::min(text.size(), pos + kChunkBytes);
+        while (end > pos && end < text.size() &&
+               (static_cast<unsigned char>(text[end]) & 0xC0) == 0x80) {
+            --end;
+        }
+        if (end == pos) {
+            // UTF-8 invalide : aucune frontière de caractère dans la fenêtre.
+            end = std::min(text.size(), pos + kChunkBytes);
+        }
+        if (!out.empty()) {
+            out += "\r\n ";
+        }
+        out += "=?UTF-8?B?" + SwCrypto::base64Encode(text.substr(pos, end - pos)) + "?=";
+        pos = end;
+    }
+    return SwString(out);
+}
+
+// Décode un encoded-word RFC 2047 débutant à `start`. Seuls les jeux convertibles
+// sans table (UTF-8, US-ASCII, Latin-1 et ses proches) sont décodés ; tout autre
+// reste tel quel dans l'en-tête plutôt que d'être affiché faux.
+inline bool decodeEncodedWord(const std::string& input,
+                              std::size_t start,
+                              std::string& outDecoded,
+                              std::size_t& outConsumed) {
+    const std::size_t charsetEnd = input.find('?', start + 2);
+    if (charsetEnd == std::string::npos || charsetEnd + 2 >= input.size() || input[charsetEnd + 2] != '?') {
+        return false;
+    }
+    const char encoding = static_cast<char>(std::toupper(static_cast<unsigned char>(input[charsetEnd + 1])));
+    const std::size_t payloadStart = charsetEnd + 3;
+    const std::size_t payloadEnd = input.find("?=", payloadStart);
+    if (payloadEnd == std::string::npos) {
+        return false;
+    }
+    std::string charset = input.substr(start + 2, charsetEnd - start - 2);
+    for (std::size_t i = 0; i < charset.size(); ++i) {
+        charset[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(charset[i])));
+    }
+    const std::size_t languageTag = charset.find('*');  // RFC 2231 : « charset*langue »
+    if (languageTag != std::string::npos) {
+        charset.erase(languageTag);
+    }
+    const std::string payload = input.substr(payloadStart, payloadEnd - payloadStart);
+    if (payload.find(' ') != std::string::npos || payload.find('\t') != std::string::npos) {
+        return false;
+    }
+
+    std::string bytes;
+    if (encoding == 'B') {
+        const std::vector<unsigned char> raw = SwCrypto::base64Decode(payload);
+        bytes.assign(raw.begin(), raw.end());
+    } else if (encoding == 'Q') {
+        for (std::size_t i = 0; i < payload.size(); ++i) {
+            const char c = payload[i];
+            if (c == '_') {
+                bytes.push_back(' ');
+            } else if (c == '=' && i + 2 < payload.size() &&
+                       std::isxdigit(static_cast<unsigned char>(payload[i + 1])) &&
+                       std::isxdigit(static_cast<unsigned char>(payload[i + 2]))) {
+                bytes.push_back(static_cast<char>(std::strtol(payload.substr(i + 1, 2).c_str(), nullptr, 16)));
+                i += 2;
+            } else {
+                bytes.push_back(c);
+            }
+        }
+    } else {
+        return false;
+    }
+
+    std::string decoded;
+    if (charset == "utf-8" || charset == "utf8" || charset == "us-ascii" || charset == "ascii") {
+        decoded = bytes;
+    } else if (charset == "iso-8859-1" || charset == "latin1" || charset == "iso-8859-15" ||
+               charset == "windows-1252" || charset == "cp1252") {
+        for (std::size_t i = 0; i < bytes.size(); ++i) {
+            const unsigned char c = static_cast<unsigned char>(bytes[i]);
+            if (c < 0x80) {
+                decoded.push_back(static_cast<char>(c));
+            } else {
+                decoded.push_back(static_cast<char>(0xC0 | (c >> 6)));
+                decoded.push_back(static_cast<char>(0x80 | (c & 0x3F)));
+            }
+        }
+    } else {
+        return false;
+    }
+    for (std::size_t i = 0; i < decoded.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(decoded[i]);
+        if (c < 32 || c == 127) {
+            decoded[i] = ' ';
+        }
+    }
+    outDecoded = decoded;
+    outConsumed = payloadEnd + 2 - start;
+    return true;
+}
+
+// Inverse d'encodeHeaderText pour l'affichage d'un en-tête déjà déplié
+// (parseHeaders). RFC 2047 §6.2 : le blanc qui sépare deux encoded-words
+// n'appartient pas au texte.
+inline SwString decodeHeaderText(const SwString& value) {
+    const std::string input = value.toStdString();
+    std::string out;
+    std::string gap;
+    bool afterEncodedWord = false;
+    std::size_t i = 0;
+    while (i < input.size()) {
+        if (input.compare(i, 2, "=?") == 0) {
+            std::string decoded;
+            std::size_t consumed = 0;
+            if (decodeEncodedWord(input, i, decoded, consumed)) {
+                gap.clear();
+                out += decoded;
+                i += consumed;
+                afterEncodedWord = true;
+                continue;
+            }
+        }
+        const char c = input[i];
+        if (afterEncodedWord && (c == ' ' || c == '\t')) {
+            gap.push_back(c);
+        } else {
+            out += gap;
+            gap.clear();
+            out.push_back(c);
+            afterEncodedWord = false;
+        }
+        ++i;
+    }
+    out += gap;
+    return SwString(out);
+}
+
+// RFC 5322 §3.4 : « nom affiché <adresse> ». Un nom ASCII voyage en
+// quoted-string, un nom accentué en encoded-words suivis de l'adresse repliée.
+inline SwString formatMailboxHeader(const SwString& displayName, const SwString& address) {
+    const std::string angleAddress = "<" + canonicalAddress(address).toStdString() + ">";
+    const std::string name = headerTextSingleLine(displayName);
+    if (name.empty()) {
+        return SwString(angleAddress);
+    }
+    if (!isPrintableAscii(name)) {
+        return SwString(encodeHeaderText(SwString(name)).toStdString() + "\r\n " + angleAddress);
+    }
+    std::string quoted = "\"";
+    for (std::size_t i = 0; i < name.size(); ++i) {
+        if (name[i] == '"' || name[i] == '\\') {
+            quoted.push_back('\\');
+        }
+        quoted.push_back(name[i]);
+    }
+    quoted.push_back('"');
+    return SwString(quoted + " " + angleAddress);
+}
+
+// Liste d'adresses repliée avant 76 caractères : RFC 5322 §2.1.1 borne une
+// ligne à 998 octets, qu'une longue liste de destinataires dépasse.
+inline SwString formatAddressListHeader(const SwList<SwString>& addresses) {
+    std::string out;
+    std::size_t lineLength = 5;  // « Bcc: », le plus long des noms d'en-tête concernés
+    for (std::size_t i = 0; i < addresses.size(); ++i) {
+        const std::string entry = "<" + canonicalAddress(addresses[i]).toStdString() + ">";
+        if (i > 0) {
+            if (lineLength + 2 + entry.size() > 76) {
+                out += ",\r\n ";
+                lineLength = 1;
+            } else {
+                out += ", ";
+                lineLength += 2;
+            }
+        }
+        out += entry;
+        lineLength += entry.size();
+    }
+    return SwString(out);
+}
+
+// RFC 2045 §6.7. Le corps sort en ASCII pur et en lignes de 76 caractères au
+// plus : ni l'extension SMTP 8BITMIME ni la borne de 998 octets par ligne
+// (qu'un HTML d'éditeur riche, écrit sur une seule ligne, dépasse) ne sont
+// alors requises du serveur destinataire.
+inline SwString encodeQuotedPrintable(const SwString& text) {
+    static const char* kHex = "0123456789ABCDEF";
+    const std::string input = toLineEndingCrlf(text).toStdString();
+    std::string out;
+    out.reserve(input.size() + input.size() / 8);
+    std::size_t lineLength = 0;
+    for (std::size_t i = 0; i < input.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(input[i]);
+        if (c == '\r' && i + 1 < input.size() && input[i + 1] == '\n') {
+            out += "\r\n";
+            lineLength = 0;
+            ++i;
+            continue;
+        }
+        const bool endOfLine = (i + 1 == input.size()) || input[i + 1] == '\r';
+        const bool literal = (c >= 33 && c <= 126 && c != '=') ||
+                             ((c == ' ' || c == '\t') && !endOfLine);
+        const std::size_t width = literal ? 1 : 3;
+        if (lineLength + width > 75) {
+            out += "=\r\n";
+            lineLength = 0;
+        }
+        if (literal) {
+            out.push_back(static_cast<char>(c));
+        } else {
+            out.push_back('=');
+            out.push_back(kHex[c >> 4]);
+            out.push_back(kHex[c & 0x0F]);
+        }
+        lineLength += width;
+    }
+    return SwString(out);
+}
+
+// Un fragment (« <p>…</p> ») devient un document complet : une partie
+// text/html sans balise <html> est un marqueur classique des filtres antispam.
+inline SwString htmlDocumentFromFragment(const SwString& html) {
+    if (html.toLower().indexOf("<html") >= 0) {
+        return html;
+    }
+    return SwString("<!DOCTYPE html>\r\n<html>\r\n<head>\r\n<meta charset=\"utf-8\">\r\n"
+                    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\r\n"
+                    "</head>\r\n<body>\r\n") +
+           html + SwString("\r\n</body>\r\n</html>\r\n");
+}
+
+inline std::string mimeTextPart(const std::string& contentType, const SwString& body) {
+    std::string part = "Content-Type: " + contentType + "; charset=utf-8\r\n"
+                       "Content-Transfer-Encoding: quoted-printable\r\n\r\n";
+    part += encodeQuotedPrintable(body).toStdString();
+    if (part.size() < 2 || part.compare(part.size() - 2, 2, "\r\n") != 0) {
+        part += "\r\n";
+    }
+    return part;
+}
+
+// Unique fabricant des messages sortants. La frontière « =_ » ne peut pas
+// apparaître dans un corps quoted-printable, où « = » précède toujours deux
+// chiffres hexadécimaux ou une fin de ligne.
+inline SwByteArray composeMessage(const SwMailConfig& config, const SwMailComposeRequest& request) {
+    std::string message;
+    message += "From: " + formatMailboxHeader(request.fromName, request.fromAddress).toStdString() + "\r\n";
+    message += "To: " +
+               (request.to.isEmpty() ? std::string("undisclosed-recipients:;")
+                                     : formatAddressListHeader(request.to).toStdString()) +
+               "\r\n";
+    if (!request.cc.isEmpty()) {
+        message += "Cc: " + formatAddressListHeader(request.cc).toStdString() + "\r\n";
+    }
+    if (request.includeBccHeader && !request.bcc.isEmpty()) {
+        message += "Bcc: " + formatAddressListHeader(request.bcc).toStdString() + "\r\n";
+    }
+    message += "Subject: " + encodeHeaderText(request.subject).toStdString() + "\r\n";
+    message += "Date: " + smtpDateNow().toStdString() + "\r\n";
+    const SwString messageId =
+        request.messageId.trimmed().isEmpty() ? generateMessageId(config) : request.messageId.trimmed();
+    message += "Message-ID: " + messageId.toStdString() + "\r\n";
+    if (request.autoSubmitted) {
+        message += "Auto-Submitted: auto-generated\r\n";
+    }
+    message += "MIME-Version: 1.0\r\n";
+
+    if (request.htmlBody.trimmed().isEmpty()) {
+        message += mimeTextPart("text/plain", request.textBody);
+    } else {
+        const std::string boundary =
+            "=_sw_" + SwString(SwCrypto::hashSHA256(generateId("boundary").toStdString())).left(24).toStdString();
+        message += "Content-Type: multipart/alternative; boundary=\"" + boundary + "\"\r\n\r\n";
+        message += "--" + boundary + "\r\n" + mimeTextPart("text/plain", request.textBody);
+        message += "--" + boundary + "\r\n" + mimeTextPart("text/html", htmlDocumentFromFragment(request.htmlBody));
+        message += "--" + boundary + "--\r\n";
+    }
+    return SwByteArray(message);
 }
 
 inline SwMap<SwString, SwString> parseHeaders(const SwByteArray& rawMessage) {

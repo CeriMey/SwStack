@@ -40,8 +40,12 @@ struct SwHttpAuthMailTemplate {
 
 struct SwHttpAuthMailConfig {
     SwString fromAddress;
+    // Nom affiché de l'expéditeur (« Produit <noreply@…> »). Vide : adresse nue.
+    SwString fromName;
     SwHttpAuthMailTemplate verificationTemplate;
     SwHttpAuthMailTemplate resetPasswordTemplate;
+    // Vide : gabarit intégré du service.
+    SwHttpAuthMailTemplate changeEmailTemplate;
     SwString verificationUrlTemplate;
     SwString resetPasswordUrlTemplate;
 };
@@ -111,6 +115,7 @@ struct SwHttpAuthOutgoingMail {
     SwString accountId;
     SwString email;
     SwString fromAddress;
+    SwString fromName;
     SwList<SwString> to;
     SwString subject;
     SwString textBody;

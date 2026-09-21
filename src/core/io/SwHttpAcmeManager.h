@@ -43,7 +43,15 @@ struct SwAcmeConfig {
     uint16_t httpPort = 80;
     uint16_t httpsPort = 443;
     int renewBeforeDays = 30;
+    // First retry only: absorbs transient start-up races (network not up yet).
     int retryDelayMs = 15 * 1000;
+    // Later retries back off exponentially from this base up to the cap. A
+    // flat short retry turns one persistent failure (port 80 closed, DNS
+    // broken) into hundreds of orders per hour, which trips the CA's
+    // failed-validation rate limit and turns a recoverable fault into a
+    // multi-hour lockout. 5/10/20/40/60 min stays under 5 attempts per hour.
+    int retryBackoffBaseMs = 5 * 60 * 1000;
+    int maxRetryDelayMs = 60 * 60 * 1000;
     int pollIntervalMs = 1000;
     int maxPollAttempts = 60;
     int requestTimeoutMs = 30 * 1000;
@@ -247,6 +255,7 @@ private:
     SwString m_challengeUrl;
     SwString m_challengeToken;
     int m_pollAttempts = 0;
+    int m_retryAttempt = 0;
 
     SwString m_accountKeyPem;
     SwString m_certificateKeyPem;
@@ -500,9 +509,21 @@ inline void SwHttpAcmeManager::scheduleRetry_() {
         return;
     }
 
-    const int delayMs = (m_config.retryDelayMs > 0) ? m_config.retryDelayMs : 1000;
+    long long delayMs = (m_config.retryDelayMs > 0) ? m_config.retryDelayMs : 1000;
+    if (m_retryAttempt > 0) {
+        const long long base = (m_config.retryBackoffBaseMs > 0) ? m_config.retryBackoffBaseMs : delayMs;
+        const long long cap = (m_config.maxRetryDelayMs > 0) ? m_config.maxRetryDelayMs : base;
+        const int shift = (m_retryAttempt - 1 < 20) ? (m_retryAttempt - 1) : 20;
+        delayMs = base << shift;
+        if (delayMs > cap) {
+            delayMs = cap;
+        }
+    }
+    if (m_retryAttempt < 1000) {
+        ++m_retryAttempt;
+    }
     SwHttpAcmeManager* self = this;
-    SwTimer::singleShot(delayMs, [self]() {
+    SwTimer::singleShot(static_cast<int>(delayMs), [self]() {
         if (SwObject::isLive(self) && self->m_started) {
             self->renewNow();
         }
@@ -1086,6 +1107,7 @@ inline void SwHttpAcmeManager::downloadCertificate_(uint64_t serial) {
                       return;
                   }
 
+                  m_retryAttempt = 0;
                   emit certificateUpdated(certificateFilePath_(), certificateKeyFilePath_());
                   completeOperationSuccess_(serial);
               });
@@ -1128,6 +1150,7 @@ inline bool SwHttpAcmeManager::enableHttpsFromStorage_() {
                 return;
             }
             if (self->m_certificateActivationHandler(certPath, keyPath)) {
+                self->m_retryAttempt = 0;
                 self->certificateUpdated(certPath, keyPath);
                 return;
             }

@@ -192,13 +192,23 @@ public:
     }
 
 private:
+    // RFC 6376 §5.4.1 : tout en-tête qui change le sens du message pour son
+    // lecteur est couvert, sinon un relais peut le réécrire sans casser la
+    // signature. Bcc, Received et Return-Path n'y figurent jamais.
     static SwList<SwString> signedHeaderNames_() {
         SwList<SwString> names;
         names.append("from");
         names.append("to");
+        names.append("cc");
+        names.append("reply-to");
         names.append("subject");
         names.append("date");
         names.append("message-id");
+        names.append("in-reply-to");
+        names.append("references");
+        names.append("mime-version");
+        names.append("content-type");
+        names.append("auto-submitted");
         return names;
     }
 

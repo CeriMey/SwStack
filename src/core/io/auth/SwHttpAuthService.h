@@ -189,16 +189,6 @@ private:
 
 namespace swHttpAuthServiceDetail {
 
-inline SwString safeHeaderText_(const SwString& value) {
-    std::string text = value.toStdString();
-    for (std::size_t i = 0; i < text.size(); ++i) {
-        if (text[i] == '\r' || text[i] == '\n') {
-            text[i] = ' ';
-        }
-    }
-    return SwString(text);
-}
-
 inline SwJsonObject accountToJson_(const SwHttpAuthAccount& account) {
     SwJsonObject object;
     object["accountId"] = account.accountId;
@@ -1507,14 +1497,16 @@ inline SwDbStatus SwHttpAuthService::requestEmailChange(const SwString& rawToken
                              ? SwString()
                              : (baseUrl + "/app/settings?emailChangeToken=" + rawChallengeToken);
 
-    SwHttpAuthMailTemplate mailTemplate;
-    mailTemplate.subject = "Validation de votre nouvelle adresse email VIGIL";
-    mailTemplate.textBody =
-        "Une demande de changement d adresse email a ete effectuee.\n\nCode: {{code}}\nLien direct: {{url}}\n";
-    mailTemplate.htmlBody =
-        "<p>Une demande de changement d adresse email a ete effectuee.</p>"
-        "<p><strong>Code:</strong> {{code}}</p>"
-        "<p><a href=\"{{url}}\">Valider cette adresse email</a></p>";
+    SwHttpAuthMailTemplate mailTemplate = m_config.mail.changeEmailTemplate;
+    if (mailTemplate.isEmpty()) {
+        mailTemplate.subject = "Validation de votre nouvelle adresse email VIGIL";
+        mailTemplate.textBody =
+            "Une demande de changement d adresse email a ete effectuee.\n\nCode: {{code}}\nLien direct: {{url}}\n";
+        mailTemplate.htmlBody =
+            "<p>Une demande de changement d adresse email a ete effectuee.</p>"
+            "<p><strong>Code:</strong> {{code}}</p>"
+            "<p><a href=\"{{url}}\">Valider cette adresse email</a></p>";
+    }
     const SwHttpAuthRenderedTemplate rendered =
         SwHttpAuthTemplateRenderer::render(mailTemplate, challenge.code, url);
 
@@ -1523,6 +1515,7 @@ inline SwDbStatus SwHttpAuthService::requestEmailChange(const SwString& rawToken
     mail.accountId = identity.account.accountId;
     mail.email = normalizedEmail;
     mail.fromAddress = m_config.mail.fromAddress.trimmed();
+    mail.fromName = m_config.mail.fromName.trimmed();
     mail.to.append(normalizedEmail);
     mail.subject = rendered.subject;
     mail.textBody = rendered.textBody;
@@ -1867,6 +1860,7 @@ inline SwDbStatus SwHttpAuthService::sendChallengeForAccount_(const SwHttpAuthAc
     mail.accountId = account.accountId;
     mail.email = account.email;
     mail.fromAddress = m_config.mail.fromAddress.trimmed();
+    mail.fromName = m_config.mail.fromName.trimmed();
     mail.to.append(account.email);
     mail.subject = rendered.subject;
     mail.textBody = rendered.textBody;
@@ -2003,40 +1997,13 @@ inline bool SwHttpAuthService::sendViaMailService_(const SwHttpAuthOutgoingMail&
 
 inline SwByteArray SwHttpAuthService::buildMimeMessage_(const SwMailConfig& mailConfig,
                                                         const SwHttpAuthOutgoingMail& mail) {
-    const SwString boundary = "swauth-" + swHttpAuthDetail::randomHexToken(12);
-    const SwString subject = swHttpAuthServiceDetail::safeHeaderText_(mail.subject);
-
-    SwString raw;
-    raw += "Subject: " + subject + "\r\n";
-    raw += "MIME-Version: 1.0\r\n";
-    if (mail.htmlBody.trimmed().isEmpty()) {
-        raw += "Content-Type: text/plain; charset=utf-8\r\n";
-        raw += "Content-Transfer-Encoding: 8bit\r\n\r\n";
-        raw += mail.textBody;
-        if (!mail.textBody.endsWith("\r\n")) {
-            raw += "\r\n";
-        }
-    } else {
-        raw += "Content-Type: multipart/alternative; boundary=\"" + boundary + "\"\r\n\r\n";
-        raw += "--" + boundary + "\r\n";
-        raw += "Content-Type: text/plain; charset=utf-8\r\n";
-        raw += "Content-Transfer-Encoding: 8bit\r\n\r\n";
-        raw += mail.textBody;
-        if (!mail.textBody.endsWith("\r\n")) {
-            raw += "\r\n";
-        }
-        raw += "--" + boundary + "\r\n";
-        raw += "Content-Type: text/html; charset=utf-8\r\n";
-        raw += "Content-Transfer-Encoding: 8bit\r\n\r\n";
-        raw += mail.htmlBody;
-        if (!mail.htmlBody.endsWith("\r\n")) {
-            raw += "\r\n";
-        }
-        raw += "--" + boundary + "--\r\n";
-    }
-
-    return swMailDetail::ensureMessageEnvelopeHeaders(mailConfig,
-                                                      SwByteArray(raw.toStdString()),
-                                                      mail.fromAddress,
-                                                      mail.to);
+    SwMailComposeRequest request;
+    request.fromName = mail.fromName;
+    request.fromAddress = mail.fromAddress;
+    request.to = mail.to;
+    request.subject = mail.subject;
+    request.textBody = mail.textBody;
+    request.htmlBody = mail.htmlBody;
+    request.autoSubmitted = true;
+    return swMailDetail::composeMessage(mailConfig, request);
 }

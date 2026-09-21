@@ -719,6 +719,28 @@ inline uint16_t outboundRelayPort_(const SwMailConfig::OutboundRelay& relay) {
     return 25;
 }
 
+inline bool outboundRelayAppliesTo_(const SwMailConfig::OutboundRelay& relay, const SwString& envelopeFrom) {
+    if (relay.host.trimmed().isEmpty()) {
+        return false;
+    }
+    if (relay.senderAddresses.isEmpty()) {
+        return true;
+    }
+    const SwString sender = swMailDetail::canonicalAddress(envelopeFrom);
+    const int atPos = sender.indexOf("@");
+    const SwString senderDomain = atPos >= 0 ? sender.mid(atPos) : SwString();
+    for (std::size_t i = 0; i < relay.senderAddresses.size(); ++i) {
+        const SwString pattern = relay.senderAddresses[i].trimmed().toLower();
+        if (pattern.isEmpty()) {
+            continue;
+        }
+        if (pattern.startsWith("@") ? pattern == senderDomain : pattern == sender) {
+            return true;
+        }
+    }
+    return false;
+}
+
 inline bool smtpReadResponse_(BlockingSmtpSocket_& socket,
                               int timeoutMs,
                               int expectedClass,
@@ -2936,7 +2958,7 @@ inline bool SwMailService::deliverQueueItem_(SwMailQueueItem item, SwString& out
         return false;
     }
 
-    if (!m_config.outboundRelay.host.trimmed().isEmpty()) {
+    if (swMailServiceDetail::outboundRelayAppliesTo_(m_config.outboundRelay, item.envelope.mailFrom)) {
         const uint16_t relayPort = swMailServiceDetail::outboundRelayPort_(m_config.outboundRelay);
         if (relayPort == 0) {
             outError = "Invalid outbound relay port";

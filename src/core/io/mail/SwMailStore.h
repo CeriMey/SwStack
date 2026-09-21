@@ -436,7 +436,9 @@ public:
         entry.rawMessage = rawMessage;
         entry.sizeBytes = static_cast<unsigned long long>(rawMessage.size());
         const SwMap<SwString, SwString> headers = swMailDetail::parseHeaders(rawMessage);
-        entry.subject = headers.value("subject");
+        // L'index sert l'affichage : le sujet y est lisible, les encoded-words
+        // RFC 2047 restant dans rawMessage pour IMAP.
+        entry.subject = swMailDetail::decodeHeaderText(headers.value("subject"));
         entry.from = swMailDetail::canonicalAddress(headers.value("from"));
         entry.to = swMailDetail::normalizeRecipients(swMailDetail::parseAddressListHeader(headers.value("to")));
         entry.cc = swMailDetail::normalizeRecipients(swMailDetail::parseAddressListHeader(headers.value("cc")));
